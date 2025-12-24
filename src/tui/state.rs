@@ -1,6 +1,5 @@
 //! TUI application state.
 
-use std::fs::File;
 use std::io::BufWriter;
 
 use ratatui::text::Line;
@@ -15,6 +14,7 @@ use crate::export::{
 use crate::model::{ContentBlock, LogEntry};
 use crate::parser::JsonlParser;
 use crate::reconstruction::Conversation;
+use crate::util::AtomicFile;
 
 use super::components::{format_message_header, MessageType};
 use super::highlight::SyntaxHighlighter;
@@ -760,9 +760,18 @@ impl AppState {
             .unwrap_or_default()
             .join(format!("session_{}.{}", &session_id[..8.min(session_id.len())], extension));
 
-        // Create output file
-        let file = File::create(&output_path)?;
-        let mut writer = BufWriter::new(file);
+        // Handle SQLite separately as it manages its own file
+        if matches!(format, ExportFormat::Sqlite) {
+            let exporter = SqliteExporter::new();
+            exporter.export_to_file(&conversation, &output_path, &options)?;
+            self.export_dialog.exporting = false;
+            self.export_dialog.status_message = Some(format!("Exported to: {}", output_path.display()));
+            return Ok(());
+        }
+
+        // Use atomic file writing for other formats
+        let mut atomic = AtomicFile::create(&output_path)?;
+        let mut writer = BufWriter::new(atomic.writer());
 
         // Export based on format
         match format {
@@ -793,13 +802,17 @@ impl AppState {
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
             ExportFormat::Sqlite => {
-                // SQLite requires direct file access
-                drop(writer);
-                std::fs::remove_file(&output_path).ok();
-                let exporter = SqliteExporter::new();
-                exporter.export_to_file(&conversation, &output_path, &options)?;
+                unreachable!("SQLite handled above");
             }
         }
+
+        // Flush BufWriter before finishing atomic write
+        use std::io::Write;
+        writer.flush()?;
+        drop(writer);
+
+        // Complete the atomic write
+        atomic.finish()?;
 
         self.export_dialog.exporting = false;
         self.export_dialog.status_message = Some(format!("Exported to: {}", output_path.display()));

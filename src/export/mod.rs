@@ -33,6 +33,7 @@ use std::path::Path;
 use crate::error::{Result, SnatchError};
 use crate::model::LogEntry;
 use crate::reconstruction::Conversation;
+use crate::util::AtomicFile;
 
 /// Common export options shared across formats.
 #[derive(Debug, Clone)]
@@ -230,6 +231,10 @@ pub trait Exporter {
 }
 
 /// Export a conversation to a file.
+///
+/// This function uses atomic file writes to ensure data integrity.
+/// Content is written to a temporary file first, then atomically
+/// renamed to the target path.
 pub fn export_to_file(
     conversation: &Conversation,
     path: impl AsRef<Path>,
@@ -238,11 +243,15 @@ pub fn export_to_file(
 ) -> Result<()> {
     let path = path.as_ref();
 
-    let file = std::fs::File::create(path).map_err(|e| {
-        SnatchError::io(format!("Failed to create output file: {}", path.display()), e)
-    })?;
+    // SQLite handles its own file creation
+    if matches!(format, ExportFormat::Sqlite) {
+        let exporter = SqliteExporter::new();
+        return exporter.export_to_file(conversation, path, options);
+    }
 
-    let mut writer = std::io::BufWriter::new(file);
+    // Use atomic file writing for all other formats
+    let mut atomic = AtomicFile::create(path)?;
+    let mut writer = std::io::BufWriter::new(atomic.writer());
 
     match format {
         ExportFormat::Markdown => {
@@ -274,17 +283,20 @@ pub fn export_to_file(
             exporter.export_conversation(conversation, &mut writer, options)?;
         }
         ExportFormat::Sqlite => {
-            // SQLite requires direct file access, not a writer
-            drop(writer); // Close the file we opened
-            std::fs::remove_file(path).ok(); // Remove the empty file
-            let exporter = SqliteExporter::new();
-            return exporter.export_to_file(conversation, path, options);
+            unreachable!("SQLite handled above");
         }
     }
 
+    // Flush the BufWriter before finishing atomic write
     writer.flush().map_err(|e| {
         SnatchError::io(format!("Failed to flush output file: {}", path.display()), e)
     })?;
+
+    // Drop the BufWriter to release the borrow on atomic.writer()
+    drop(writer);
+
+    // Complete the atomic write
+    atomic.finish()?;
 
     Ok(())
 }

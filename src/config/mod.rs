@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, SnatchError};
+use crate::util::atomic_write;
 
 /// Application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,23 +72,19 @@ impl Config {
     }
 
     /// Save configuration to a specific path.
+    ///
+    /// Uses atomic file writes to ensure configuration integrity.
+    /// The config is written to a temporary file first, then atomically
+    /// renamed to the target path.
     pub fn save_to(&self, path: &Path) -> Result<()> {
-        // Ensure parent directory exists
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                SnatchError::io(format!("Failed to create config directory: {}", parent.display()), e)
-            })?;
-        }
-
         let content = toml::to_string_pretty(self).map_err(|e| {
             SnatchError::InvalidConfig {
                 message: format!("Failed to serialize config: {e}"),
             }
         })?;
 
-        std::fs::write(path, content).map_err(|e| {
-            SnatchError::io(format!("Failed to write config file: {}", path.display()), e)
-        })?;
+        // Use atomic write - it handles parent directory creation
+        atomic_write(path, content.as_bytes())?;
 
         Ok(())
     }

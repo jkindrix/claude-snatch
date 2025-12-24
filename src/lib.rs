@@ -62,6 +62,7 @@ pub mod model;
 pub mod parser;
 pub mod reconstruction;
 pub mod tui;
+pub mod util;
 
 // Re-export commonly used types at the crate root
 pub use error::{Result, SnatchError};

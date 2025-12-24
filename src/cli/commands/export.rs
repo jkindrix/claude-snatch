@@ -17,6 +17,7 @@ use crate::export::{
     MarkdownExporter, SqliteExporter, TextExporter, XmlExporter,
 };
 use crate::reconstruction::Conversation;
+use crate::util::AtomicFile;
 
 use super::get_claude_dir;
 
@@ -127,67 +128,125 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
         }
     };
 
-    // Get output writer
-    let mut output: Box<dyn Write> = if let Some(output_path) = &args.output {
-        Box::new(std::fs::File::create(output_path)?)
-    } else {
-        Box::new(io::stdout())
-    };
+    // Handle SQLite separately as it manages its own file
+    if matches!(args.format, ExportFormatArg::Sqlite) {
+        if let Some(output_path) = &args.output {
+            let exporter = SqliteExporter::new();
+            exporter.export_to_file(&conversation, output_path, &options)?;
+            if !cli.quiet {
+                let total_sessions = node.total_sessions();
+                eprintln!(
+                    "Exported combined session {} ({} sessions) to {}",
+                    session.session_id(),
+                    total_sessions,
+                    output_path.display()
+                );
+            }
+            return Ok(());
+        } else {
+            return Err(SnatchError::ConfigError {
+                message: "SQLite export requires an output file path".to_string(),
+            });
+        }
+    }
 
-    // Export based on format
-    match args.format {
-        ExportFormatArg::Markdown | ExportFormatArg::Md => {
-            let exporter = MarkdownExporter::new();
-            exporter.export_conversation(&conversation, &mut output, &options)?;
+    // For file output, use atomic writes
+    if let Some(output_path) = &args.output {
+        let mut atomic = AtomicFile::create(output_path)?;
+        let mut output = std::io::BufWriter::new(atomic.writer());
+
+        match args.format {
+            ExportFormatArg::Markdown | ExportFormatArg::Md => {
+                let exporter = MarkdownExporter::new();
+                exporter.export_conversation(&conversation, &mut output, &options)?;
+            }
+            ExportFormatArg::Json => {
+                let exporter = JsonExporter::new();
+                exporter.export_conversation(&conversation, &mut output, &options)?;
+            }
+            ExportFormatArg::JsonPretty => {
+                let exporter = JsonExporter::new().pretty(true);
+                exporter.export_conversation(&conversation, &mut output, &options)?;
+            }
+            ExportFormatArg::Jsonl => {
+                conversation_to_jsonl(&conversation, &mut output, args.main_thread)?;
+            }
+            ExportFormatArg::Html => {
+                let exporter = HtmlExporter::new();
+                exporter.export_conversation(&conversation, &mut output, &options)?;
+            }
+            ExportFormatArg::Text => {
+                let exporter = TextExporter::new();
+                exporter.export_conversation(&conversation, &mut output, &options)?;
+            }
+            ExportFormatArg::Csv => {
+                let exporter = CsvExporter::new();
+                exporter.export_conversation(&conversation, &mut output, &options)?;
+            }
+            ExportFormatArg::Xml => {
+                let exporter = XmlExporter::new();
+                exporter.export_conversation(&conversation, &mut output, &options)?;
+            }
+            ExportFormatArg::Sqlite => {
+                unreachable!("SQLite handled above");
+            }
         }
-        ExportFormatArg::Json => {
-            let exporter = JsonExporter::new();
-            exporter.export_conversation(&conversation, &mut output, &options)?;
+
+        output.flush()?;
+        drop(output);
+        atomic.finish()?;
+
+        if !cli.quiet {
+            let total_sessions = node.total_sessions();
+            eprintln!(
+                "Exported combined session {} ({} sessions) to {}",
+                session.session_id(),
+                total_sessions,
+                output_path.display()
+            );
         }
-        ExportFormatArg::JsonPretty => {
-            let exporter = JsonExporter::new().pretty(true);
-            exporter.export_conversation(&conversation, &mut output, &options)?;
-        }
-        ExportFormatArg::Jsonl => {
-            conversation_to_jsonl(&conversation, &mut output, args.main_thread)?;
-        }
-        ExportFormatArg::Html => {
-            let exporter = HtmlExporter::new();
-            exporter.export_conversation(&conversation, &mut output, &options)?;
-        }
-        ExportFormatArg::Text => {
-            let exporter = TextExporter::new();
-            exporter.export_conversation(&conversation, &mut output, &options)?;
-        }
-        ExportFormatArg::Csv => {
-            let exporter = CsvExporter::new();
-            exporter.export_conversation(&conversation, &mut output, &options)?;
-        }
-        ExportFormatArg::Xml => {
-            let exporter = XmlExporter::new();
-            exporter.export_conversation(&conversation, &mut output, &options)?;
-        }
-        ExportFormatArg::Sqlite => {
-            if let Some(output_path) = &args.output {
-                let exporter = SqliteExporter::new();
-                exporter.export_to_file(&conversation, output_path, &options)?;
-            } else {
+    } else {
+        // Write to stdout (no atomic write needed)
+        let mut output: Box<dyn Write> = Box::new(io::stdout());
+
+        match args.format {
+            ExportFormatArg::Markdown | ExportFormatArg::Md => {
+                let exporter = MarkdownExporter::new();
+                exporter.export_conversation(&conversation, &mut output, &options)?;
+            }
+            ExportFormatArg::Json => {
+                let exporter = JsonExporter::new();
+                exporter.export_conversation(&conversation, &mut output, &options)?;
+            }
+            ExportFormatArg::JsonPretty => {
+                let exporter = JsonExporter::new().pretty(true);
+                exporter.export_conversation(&conversation, &mut output, &options)?;
+            }
+            ExportFormatArg::Jsonl => {
+                conversation_to_jsonl(&conversation, &mut output, args.main_thread)?;
+            }
+            ExportFormatArg::Html => {
+                let exporter = HtmlExporter::new();
+                exporter.export_conversation(&conversation, &mut output, &options)?;
+            }
+            ExportFormatArg::Text => {
+                let exporter = TextExporter::new();
+                exporter.export_conversation(&conversation, &mut output, &options)?;
+            }
+            ExportFormatArg::Csv => {
+                let exporter = CsvExporter::new();
+                exporter.export_conversation(&conversation, &mut output, &options)?;
+            }
+            ExportFormatArg::Xml => {
+                let exporter = XmlExporter::new();
+                exporter.export_conversation(&conversation, &mut output, &options)?;
+            }
+            ExportFormatArg::Sqlite => {
                 return Err(SnatchError::ConfigError {
                     message: "SQLite export requires an output file path".to_string(),
                 });
             }
         }
-    }
-
-    // Print success message
-    if args.output.is_some() && !cli.quiet {
-        let total_sessions = node.total_sessions();
-        eprintln!(
-            "Exported combined session {} ({} sessions) to {}",
-            session.session_id(),
-            total_sessions,
-            args.output.as_ref().unwrap().display()
-        );
     }
 
     Ok(())
@@ -389,6 +448,8 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
 }
 
 /// Export a single session to the specified output.
+///
+/// Uses atomic file writes for file output to ensure data integrity.
 fn export_session(
     cli: &Cli,
     args: &ExportArgs,
@@ -425,81 +486,115 @@ fn export_session(
         }
     };
 
-    // Get output writer
-    let mut writer: Box<dyn Write> = match output_path {
-        Some(path) => {
-            let file = std::fs::File::create(path).map_err(|e| {
-                SnatchError::io(format!("Failed to create output file: {}", path.display()), e)
-            })?;
-            Box::new(std::io::BufWriter::new(file))
+    // Handle SQLite separately as it manages its own file
+    if matches!(args.format, ExportFormatArg::Sqlite) {
+        if let Some(path) = output_path {
+            let exporter = SqliteExporter::new();
+            exporter.export_to_file(&conversation, path, &options)?;
+            if args.session.is_some() && !cli.quiet {
+                eprintln!("Exported {} entries to {}", conversation.len(), path.display());
+            }
+            return Ok(true);
+        } else {
+            return Err(SnatchError::export(
+                "SQLite export requires an output file (--output <path.db>)",
+            ));
         }
-        None => Box::new(io::stdout().lock()),
-    };
+    }
 
-    // Export based on format
-    match args.format {
-        ExportFormatArg::Markdown | ExportFormatArg::Md => {
-            let exporter = MarkdownExporter::new();
-            exporter.export_conversation(&conversation, &mut writer, &options)?;
-        }
-        ExportFormatArg::Json => {
-            let exporter = JsonExporter::new().pretty(args.pretty);
-            exporter.export_conversation(&conversation, &mut writer, &options)?;
-        }
-        ExportFormatArg::JsonPretty => {
-            let exporter = JsonExporter::new().pretty(true);
-            exporter.export_conversation(&conversation, &mut writer, &options)?;
-        }
-        ExportFormatArg::Text => {
-            let exporter = TextExporter::new();
-            exporter.export_conversation(&conversation, &mut writer, &options)?;
-        }
-        ExportFormatArg::Jsonl => {
-            // Export in original JSONL format
-            conversation_to_jsonl(&conversation, &mut writer, options.main_thread_only)?;
-        }
-        ExportFormatArg::Csv => {
-            let exporter = CsvExporter::new();
-            exporter.export_conversation(&conversation, &mut writer, &options)?;
-        }
-        ExportFormatArg::Xml => {
-            let exporter = XmlExporter::new();
-            exporter.export_conversation(&conversation, &mut writer, &options)?;
-        }
-        ExportFormatArg::Html => {
-            let exporter = HtmlExporter::new();
-            exporter.export_conversation(&conversation, &mut writer, &options)?;
-        }
-        ExportFormatArg::Sqlite => {
-            // SQLite requires a file path
-            if let Some(path) = output_path {
-                drop(writer); // Close the file we opened
-                std::fs::remove_file(path).ok(); // Remove empty file
-                let exporter = SqliteExporter::new();
-                exporter.export_to_file(&conversation, path, &options)?;
+    // For file output, use atomic writes
+    if let Some(path) = output_path {
+        let mut atomic = AtomicFile::create(path)?;
+        let mut writer = std::io::BufWriter::new(atomic.writer());
 
-                // Print success message for SQLite
-                if args.session.is_some() && !cli.quiet {
-                    eprintln!("Exported {} entries to {}", conversation.len(), path.display());
-                }
-                return Ok(true);
-            } else {
+        match args.format {
+            ExportFormatArg::Markdown | ExportFormatArg::Md => {
+                let exporter = MarkdownExporter::new();
+                exporter.export_conversation(&conversation, &mut writer, &options)?;
+            }
+            ExportFormatArg::Json => {
+                let exporter = JsonExporter::new().pretty(args.pretty);
+                exporter.export_conversation(&conversation, &mut writer, &options)?;
+            }
+            ExportFormatArg::JsonPretty => {
+                let exporter = JsonExporter::new().pretty(true);
+                exporter.export_conversation(&conversation, &mut writer, &options)?;
+            }
+            ExportFormatArg::Text => {
+                let exporter = TextExporter::new();
+                exporter.export_conversation(&conversation, &mut writer, &options)?;
+            }
+            ExportFormatArg::Jsonl => {
+                conversation_to_jsonl(&conversation, &mut writer, options.main_thread_only)?;
+            }
+            ExportFormatArg::Csv => {
+                let exporter = CsvExporter::new();
+                exporter.export_conversation(&conversation, &mut writer, &options)?;
+            }
+            ExportFormatArg::Xml => {
+                let exporter = XmlExporter::new();
+                exporter.export_conversation(&conversation, &mut writer, &options)?;
+            }
+            ExportFormatArg::Html => {
+                let exporter = HtmlExporter::new();
+                exporter.export_conversation(&conversation, &mut writer, &options)?;
+            }
+            ExportFormatArg::Sqlite => {
+                unreachable!("SQLite handled above");
+            }
+        }
+
+        writer.flush()?;
+        drop(writer);
+        atomic.finish()?;
+
+        if args.session.is_some() && !cli.quiet {
+            eprintln!("Exported {} entries to {}", conversation.len(), path.display());
+        }
+    } else {
+        // Write to stdout (no atomic write needed)
+        let mut writer: Box<dyn Write> = Box::new(io::stdout().lock());
+
+        match args.format {
+            ExportFormatArg::Markdown | ExportFormatArg::Md => {
+                let exporter = MarkdownExporter::new();
+                exporter.export_conversation(&conversation, &mut writer, &options)?;
+            }
+            ExportFormatArg::Json => {
+                let exporter = JsonExporter::new().pretty(args.pretty);
+                exporter.export_conversation(&conversation, &mut writer, &options)?;
+            }
+            ExportFormatArg::JsonPretty => {
+                let exporter = JsonExporter::new().pretty(true);
+                exporter.export_conversation(&conversation, &mut writer, &options)?;
+            }
+            ExportFormatArg::Text => {
+                let exporter = TextExporter::new();
+                exporter.export_conversation(&conversation, &mut writer, &options)?;
+            }
+            ExportFormatArg::Jsonl => {
+                conversation_to_jsonl(&conversation, &mut writer, options.main_thread_only)?;
+            }
+            ExportFormatArg::Csv => {
+                let exporter = CsvExporter::new();
+                exporter.export_conversation(&conversation, &mut writer, &options)?;
+            }
+            ExportFormatArg::Xml => {
+                let exporter = XmlExporter::new();
+                exporter.export_conversation(&conversation, &mut writer, &options)?;
+            }
+            ExportFormatArg::Html => {
+                let exporter = HtmlExporter::new();
+                exporter.export_conversation(&conversation, &mut writer, &options)?;
+            }
+            ExportFormatArg::Sqlite => {
                 return Err(SnatchError::export(
                     "SQLite export requires an output file (--output <path.db>)",
                 ));
             }
         }
-    }
 
-    writer.flush()?;
-
-    // Print success message to stderr if writing to file (single session mode only)
-    if output_path.is_some() && args.session.is_some() && !cli.quiet {
-        eprintln!(
-            "Exported {} entries to {}",
-            conversation.len(),
-            output_path.unwrap().display()
-        );
+        writer.flush()?;
     }
 
     Ok(true)
