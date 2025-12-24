@@ -15,6 +15,7 @@ mod csv;
 mod html;
 mod json;
 mod markdown;
+pub mod schema;
 mod sqlite;
 mod text;
 mod xml;
@@ -23,6 +24,10 @@ pub use csv::*;
 pub use html::*;
 pub use json::*;
 pub use markdown::*;
+pub use schema::{
+    entry_schema, entry_schema_string, export_schema, export_schema_string,
+    validate_entries, validate_export, SchemaValidator, ValidationResult,
+};
 pub use sqlite::*;
 pub use text::*;
 pub use xml::*;

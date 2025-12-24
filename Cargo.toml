@@ -57,6 +57,9 @@ regex = "1.11"
 globset = "0.4"
 tantivy = "0.22"
 
+# JSON Schema
+jsonschema = "0.29"
+
 # Terminal utilities
 console = "0.15"
 indicatif = { version = "0.17", features = ["tokio"] }
@@ -81,6 +84,9 @@ percent-encoding = "2.3"
 
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Memory-mapped files (for zero-copy parsing)
+memmap2 = { version = "0.9", optional = true }
 
 [dev-dependencies]
 # Testing
@@ -117,10 +123,11 @@ path = "src/main.rs"
 default = []
 tui = []
 tracing = []
-mmap = []  # Memory-mapped file parsing for very large JSONL files
+mmap = ["dep:memmap2"]  # Memory-mapped file parsing for very large JSONL files
 
 [lints.rust]
-unsafe_code = "forbid"
+# Use deny instead of forbid to allow targeted unsafe in mmap feature
+unsafe_code = "deny"
 
 [lints.clippy]
 all = "warn"

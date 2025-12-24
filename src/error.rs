@@ -230,6 +230,13 @@ pub enum SnatchError {
         /// Human-readable error message.
         String,
     ),
+
+    /// Schema validation error.
+    #[error("Validation error: {message}")]
+    ValidationError {
+        /// Human-readable error message.
+        message: String,
+    },
 }
 
 impl SnatchError {
@@ -276,6 +283,14 @@ impl SnatchError {
     pub fn unsupported(feature: impl Into<String>) -> Self {
         Self::Unsupported {
             feature: feature.into(),
+        }
+    }
+
+    /// Create a new validation error.
+    #[must_use]
+    pub fn validation(message: impl Into<String>) -> Self {
+        Self::ValidationError {
+            message: message.into(),
         }
     }
 
