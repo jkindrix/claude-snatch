@@ -1043,7 +1043,7 @@ Given versions A (file) and B (schema):
 |----|-------------|----------|--------|
 | [x] REL-001 | Handle corrupted input gracefully | P0 | ✓ |
 | [x] REL-002 | No panics on user input | P0 | ✓ |
-| [ ] REL-003 | Atomic file writes | P1 | |
+| [x] REL-003 | Atomic file writes | P1 | ✓ (`src/util/mod.rs`) |
 | [x] REL-004 | Interrupt handling (Ctrl+C) | P0 | ✓ |
 | [x] REL-005 | Idempotent operations | P1 | ✓ |
 | [ ] REL-006 | Transactional exports | P2 | |
@@ -1095,8 +1095,8 @@ Given versions A (file) and B (schema):
 |----|-------------|----------|--------|
 | [ ] LEGAL-001 | GDPR-compliant export options | P2 | |
 | [ ] LEGAL-002 | Data minimization option for shared exports | P2 | |
-| [ ] LEGAL-003 | Dependency license audit (cargo-deny) | P1 | |
-| [ ] LEGAL-004 | License compatibility verification | P1 | |
+| [x] LEGAL-003 | Dependency license audit (cargo-deny) | P1 | ✓ (`deny.toml` configured) |
+| [x] LEGAL-004 | License compatibility verification | P1 | ✓ (allowed licenses defined) |
 | [ ] LEGAL-005 | SPDX license identifiers in output | P2 | |
 | [ ] LEGAL-006 | Third-party attribution generation | P2 | |
 
@@ -1187,7 +1187,7 @@ The migration guide must document:
 | [x] INT-001 | End-to-end CLI tests | P0 | ✓ |
 | [x] INT-002 | Export round-trip tests | P0 | ✓ |
 | [x] INT-003 | Real JSONL file tests | P0 | ✓ |
-| [ ] INT-004 | Large file handling tests | P1 | |
+| [x] INT-004 | Large file handling tests | P1 | ✓ (`large_file_handling` test module) |
 | [x] INT-005 | Cross-platform CI | P1 | ✓ |
 
 ### 14.3 Test Data
