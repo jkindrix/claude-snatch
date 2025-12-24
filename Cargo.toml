@@ -49,6 +49,9 @@ notify = { version = "7.0", features = ["serde"] }
 directories = "5.0"
 tempfile = "3.14"
 
+# Clipboard
+arboard = "3.4"
+
 # Search/Filtering
 regex = "1.11"
 globset = "0.4"
@@ -74,6 +77,9 @@ rayon = "1.10"
 bytes = "1.8"
 base64 = "0.22"
 percent-encoding = "2.3"
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 # Testing
