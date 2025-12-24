@@ -1,5 +1,6 @@
 //! TUI application state.
 
+use std::collections::HashSet;
 use std::io::BufWriter;
 
 use ratatui::text::Line;
@@ -437,6 +438,8 @@ pub struct AppState {
     pub status_message: Option<String>,
     /// Mapping from tree item index to session ID (for session view).
     tree_session_ids: Vec<String>,
+    /// Set of selected session IDs (for multi-select export).
+    pub selected_sessions: HashSet<String>,
 }
 
 impl AppState {
@@ -487,6 +490,7 @@ impl AppState {
             highlighter: SyntaxHighlighter::new(),
             status_message: None,
             tree_session_ids: Vec::new(),
+            selected_sessions: HashSet::new(),
         })
     }
 
@@ -526,6 +530,58 @@ impl AppState {
                 self.tree_selected = Some(selected + 1);
             }
         }
+    }
+
+    /// Toggle selection of the current session (for multi-select).
+    ///
+    /// Returns true if selection was toggled, false if no session is selected.
+    pub fn toggle_session_selection(&mut self) -> bool {
+        if let Some(selected) = self.tree_selected {
+            if let Some(session_id) = self.tree_session_ids.get(selected).cloned() {
+                if self.selected_sessions.contains(&session_id) {
+                    self.selected_sessions.remove(&session_id);
+                } else {
+                    self.selected_sessions.insert(session_id);
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if a session is selected (for multi-select).
+    #[must_use]
+    pub fn is_session_selected(&self, session_id: &str) -> bool {
+        self.selected_sessions.contains(session_id)
+    }
+
+    /// Check if the currently highlighted tree item is selected.
+    #[must_use]
+    pub fn is_current_selected(&self) -> bool {
+        if let Some(selected) = self.tree_selected {
+            if let Some(session_id) = self.tree_session_ids.get(selected) {
+                return self.selected_sessions.contains(session_id);
+            }
+        }
+        false
+    }
+
+    /// Clear all selected sessions.
+    pub fn clear_selection(&mut self) {
+        self.selected_sessions.clear();
+    }
+
+    /// Select all sessions in the current view.
+    pub fn select_all_sessions(&mut self) {
+        for session_id in &self.tree_session_ids {
+            self.selected_sessions.insert(session_id.clone());
+        }
+    }
+
+    /// Get the count of selected sessions.
+    #[must_use]
+    pub fn selected_session_count(&self) -> usize {
+        self.selected_sessions.len()
     }
 
     /// Focus left panel.
@@ -731,11 +787,98 @@ impl AppState {
 
     /// Perform the actual export.
     pub fn confirm_export(&mut self) -> Result<()> {
+        // If there are selected sessions (multi-select), export all of them
+        if !self.selected_sessions.is_empty() {
+            return self.export_selected_sessions();
+        }
+
+        // Otherwise, fall back to exporting the current session
         let Some(session_id) = &self.current_session.clone() else {
             self.export_dialog.status_message = Some("No session selected".to_string());
             return Ok(());
         };
 
+        self.export_single_session(session_id)
+    }
+
+    /// Export all selected sessions.
+    fn export_selected_sessions(&mut self) -> Result<()> {
+        let session_ids: Vec<String> = self.selected_sessions.iter().cloned().collect();
+        let count = session_ids.len();
+
+        self.export_dialog.exporting = true;
+
+        let format = self.export_dialog.selected_format();
+        let extension = format.extension();
+        let options = ExportOptions::default()
+            .with_thinking(self.export_dialog.include_thinking)
+            .with_tool_use(self.export_dialog.include_tools);
+
+        let output_dir = std::env::current_dir().unwrap_or_default();
+        let mut exported = 0;
+        let mut errors = Vec::new();
+
+        for session_id in &session_ids {
+            let Some(session) = self.claude_dir.find_session(session_id)? else {
+                errors.push(format!("Session not found: {}", &session_id[..8.min(session_id.len())]));
+                continue;
+            };
+
+            // Parse the session
+            let mut parser = JsonlParser::new();
+            let entries = match parser.parse_file(session.path()) {
+                Ok(e) => e,
+                Err(e) => {
+                    errors.push(format!("Parse error: {e}"));
+                    continue;
+                }
+            };
+
+            let conversation = match Conversation::from_entries(entries) {
+                Ok(c) => c,
+                Err(e) => {
+                    errors.push(format!("Reconstruction error: {e}"));
+                    continue;
+                }
+            };
+
+            // Determine output path
+            let output_path = output_dir
+                .join(format!("session_{}.{}", &session_id[..8.min(session_id.len())], extension));
+
+            // Export the session
+            match self.export_conversation_to_file(&conversation, &output_path, &format, &options) {
+                Ok(_) => exported += 1,
+                Err(e) => errors.push(format!("Export error: {e}")),
+            }
+        }
+
+        self.export_dialog.exporting = false;
+
+        // Clear selection after export
+        self.selected_sessions.clear();
+
+        // Build status message
+        if errors.is_empty() {
+            self.export_dialog.status_message = Some(format!(
+                "Exported {} session{} to current directory",
+                exported,
+                if exported == 1 { "" } else { "s" }
+            ));
+        } else {
+            self.export_dialog.status_message = Some(format!(
+                "Exported {}/{} sessions. Errors: {}",
+                exported,
+                count,
+                errors.len()
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Export a single session by ID.
+    fn export_single_session(&mut self, session_id: &str) -> Result<()> {
         let Some(session) = self.claude_dir.find_session(session_id)? else {
             self.export_dialog.status_message = Some("Session not found".to_string());
             return Ok(());
@@ -760,46 +903,60 @@ impl AppState {
             .unwrap_or_default()
             .join(format!("session_{}.{}", &session_id[..8.min(session_id.len())], extension));
 
+        self.export_conversation_to_file(&conversation, &output_path, &format, &options)?;
+
+        self.export_dialog.exporting = false;
+        self.export_dialog.status_message = Some(format!("Exported to: {}", output_path.display()));
+
+        Ok(())
+    }
+
+    /// Export a conversation to a file.
+    fn export_conversation_to_file(
+        &self,
+        conversation: &Conversation,
+        output_path: &std::path::Path,
+        format: &ExportFormat,
+        options: &ExportOptions,
+    ) -> Result<()> {
         // Handle SQLite separately as it manages its own file
         if matches!(format, ExportFormat::Sqlite) {
             let exporter = SqliteExporter::new();
-            exporter.export_to_file(&conversation, &output_path, &options)?;
-            self.export_dialog.exporting = false;
-            self.export_dialog.status_message = Some(format!("Exported to: {}", output_path.display()));
+            exporter.export_to_file(conversation, output_path, options)?;
             return Ok(());
         }
 
         // Use atomic file writing for other formats
-        let mut atomic = AtomicFile::create(&output_path)?;
+        let mut atomic = AtomicFile::create(output_path)?;
         let mut writer = BufWriter::new(atomic.writer());
 
         // Export based on format
         match format {
             ExportFormat::Markdown => {
                 let exporter = MarkdownExporter::new();
-                exporter.export_conversation(&conversation, &mut writer, &options)?;
+                exporter.export_conversation(conversation, &mut writer, options)?;
             }
             ExportFormat::Json | ExportFormat::JsonPretty => {
                 let exporter = JsonExporter::new()
                     .pretty(matches!(format, ExportFormat::JsonPretty));
-                exporter.export_conversation(&conversation, &mut writer, &options)?;
+                exporter.export_conversation(conversation, &mut writer, options)?;
             }
             ExportFormat::Html => {
                 let exporter = HtmlExporter::new()
                     .dark_theme(true);
-                exporter.export_conversation(&conversation, &mut writer, &options)?;
+                exporter.export_conversation(conversation, &mut writer, options)?;
             }
             ExportFormat::Text => {
                 let exporter = TextExporter::new();
-                exporter.export_conversation(&conversation, &mut writer, &options)?;
+                exporter.export_conversation(conversation, &mut writer, options)?;
             }
             ExportFormat::Csv => {
                 let exporter = CsvExporter::new();
-                exporter.export_conversation(&conversation, &mut writer, &options)?;
+                exporter.export_conversation(conversation, &mut writer, options)?;
             }
             ExportFormat::Xml => {
                 let exporter = XmlExporter::new();
-                exporter.export_conversation(&conversation, &mut writer, &options)?;
+                exporter.export_conversation(conversation, &mut writer, options)?;
             }
             ExportFormat::Sqlite => {
                 unreachable!("SQLite handled above");
@@ -813,9 +970,6 @@ impl AppState {
 
         // Complete the atomic write
         atomic.finish()?;
-
-        self.export_dialog.exporting = false;
-        self.export_dialog.status_message = Some(format!("Exported to: {}", output_path.display()));
 
         Ok(())
     }

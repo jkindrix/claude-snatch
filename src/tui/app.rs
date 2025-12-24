@@ -333,6 +333,38 @@ fn run_loop<B: ratatui::backend::Backend>(
                         app.toggle_help();
                     }
 
+                    // Toggle session selection (space)
+                    (KeyModifiers::NONE, KeyCode::Char(' ')) => {
+                        if app.focus == 0 && app.current_project.is_some() {
+                            // In session list, toggle selection
+                            if app.toggle_session_selection() {
+                                let count = app.selected_session_count();
+                                if count > 0 {
+                                    app.status_message = Some(format!("{} session{} selected", count, if count == 1 { "" } else { "s" }));
+                                } else {
+                                    app.status_message = None;
+                                }
+                            }
+                        }
+                    }
+
+                    // Select all sessions (Ctrl+A)
+                    (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
+                        if app.focus == 0 && app.current_project.is_some() {
+                            app.select_all_sessions();
+                            let count = app.selected_session_count();
+                            app.status_message = Some(format!("{} session{} selected", count, if count == 1 { "" } else { "s" }));
+                        }
+                    }
+
+                    // Clear selection (Escape when not in modal)
+                    (KeyModifiers::NONE, KeyCode::Esc) => {
+                        if app.selected_session_count() > 0 {
+                            app.clear_selection();
+                            app.status_message = Some("Selection cleared".to_string());
+                        }
+                    }
+
                     _ => {}
                 }
             }
