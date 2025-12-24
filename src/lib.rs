@@ -51,6 +51,7 @@
 #![warn(rustdoc::missing_crate_level_docs)]
 
 pub mod analytics;
+pub mod async_io;
 pub mod cache;
 pub mod cli;
 pub mod config;
