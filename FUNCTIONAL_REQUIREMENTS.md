@@ -350,7 +350,7 @@ Based on analysis of 49+ existing tools, the following elements are **not extrac
 | [ ] BJ-016 | Telemetry OTEL data | OTEL endpoint (if enabled) | No | P3 |
 | [x] BJ-017 | Global rules directory | `~/.claude/rules/*.md` | Yes | P1 | ✓ |
 | [x] BJ-018 | Project rules directory | `.claude/rules/*.md` | Yes | P1 | ✓ |
-| [ ] BJ-019 | Checkpoint data | Checkpoint system (v2.0.64+) | Yes | P1 |
+| [x] BJ-019 | Checkpoint data | Checkpoint system (v2.0.64+) | Yes | P1 | ✓ (SystemSubtype::Checkpoint)
 | [ ] BJ-020 | Chrome MCP integration | Chrome extension state (Beta) | No | P2 |
 | [x] BJ-021 | Output styles directory | `~/.claude/output-styles/` | Yes | P2 | ✓ |
 
@@ -361,8 +361,8 @@ Based on analysis of 49+ existing tools, the following elements are **not extrac
 | ID | Element | JSONL Path / Source | Required | Priority |
 |----|---------|---------------------|----------|----------|
 | [x] NF-001 | Named session slug | `slug` field | Yes | P1 | ✓ |
-| [ ] NF-002 | Session rename events | `/rename` command logs | Yes | P1 |
-| [ ] NF-003 | Checkpoint restore events | `/rewind` command logs | Yes | P1 |
+| [x] NF-002 | Session rename events | `/rename` command logs | Yes | P1 | ✓ (SystemSubtype::Rename)
+| [x] NF-003 | Checkpoint restore events | `/rewind` command logs | Yes | P1 | ✓ (SystemSubtype::Rewind)
 | [ ] NF-004 | Chrome MCP tool calls | `mcp__chrome__*` patterns | No | P2 |
 | [x] NF-005 | Rules directory content | Path-scoped rule loading | Yes | P1 | ✓ |
 

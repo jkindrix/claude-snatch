@@ -537,6 +537,32 @@ pub struct SystemMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_use_id: Option<String>,
 
+    // Checkpoint/Rewind fields
+    /// Checkpoint identifier for rewind operations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
+
+    /// Target UUID for rewind operations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_uuid: Option<String>,
+
+    /// Rewind mode: "conversation", "code", or "both".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rewind_mode: Option<String>,
+
+    /// Files affected by checkpoint/rewind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affected_files: Vec<String>,
+
+    // Session rename fields
+    /// New session name after rename.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_name: Option<String>,
+
+    /// Old session name before rename.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_name: Option<String>,
+
     /// Unknown fields for forward compatibility.
     #[serde(flatten)]
     pub extra: IndexMap<String, Value>,
@@ -554,6 +580,20 @@ pub enum SystemSubtype {
     ApiError,
     /// CLI slash command execution.
     LocalCommand,
+    /// Checkpoint creation event.
+    Checkpoint,
+    /// Rewind/restore event.
+    Rewind,
+    /// Session rename event.
+    Rename,
+    /// Init event at session start.
+    Init,
+    /// Session resume event.
+    Resume,
+    /// Permission request/grant event.
+    Permission,
+    /// Tool execution event.
+    Tool,
     /// Unknown subtype for forward compatibility.
     #[serde(other)]
     Unknown,
