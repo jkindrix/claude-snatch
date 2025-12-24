@@ -504,7 +504,7 @@ When Claude Code is actively writing to a JSONL file while claude-snatch reads i
 | [ ] STAT-011 | Calculate average response times | P2 | |
 | [ ] STAT-012 | Track file modification patterns | P2 | |
 | [x] STAT-013 | Real-time burn rate calculation | P1 | ✓ |
-| [ ] STAT-014 | Usage predictions (time to limit) | P1 | |
+| [x] STAT-014 | Usage predictions (time to limit) | P1 | ✓ (`UsagePrediction`) |
 | [x] STAT-015 | Cost per session/project | P1 | ✓ (SessionAnalytics) |
 | [ ] STAT-016 | Cross-session efficiency metrics | P2 | |
 
@@ -559,7 +559,7 @@ When Claude Code is actively writing to a JSONL file while claude-snatch reads i
 |----|-------------|----------|--------|
 | [x] MD-001 | Export human-readable markdown | P0 | ✓ |
 | [x] MD-002 | Proper syntax highlighting for code blocks | P0 | ✓ |
-| [ ] MD-003 | Collapsible sections for long content | P1 | |
+| [x] MD-003 | Collapsible sections for long content | P1 | ✓ |
 | [x] MD-004 | Include metadata header | P0 | ✓ |
 | [x] MD-005 | Include token usage summary | P1 | ✓ |
 | [x] MD-006 | Preserve timestamps | P0 | ✓ |
@@ -578,7 +578,7 @@ When Claude Code is actively writing to a JSONL file while claude-snatch reads i
 | [x] JSON-004 | Minified option | P1 | ✓ |
 | [x] JSON-005 | JSON Lines output option | P1 | ✓ (JSONL format) |
 | [x] JSON-006 | Include all 64 JSONL elements | P0 | ✓ |
-| [ ] JSON-007 | Schema-compliant output | P1 | |
+| [x] JSON-007 | Schema-compliant output | P1 | ✓ |
 | [ ] JSON-008 | Streaming JSON output for large files | P2 | |
 
 ### 6.3 HTML Export
@@ -814,7 +814,7 @@ esac
 | ID | Requirement | Priority | Status |
 |----|-------------|----------|--------|
 | [x] ACT-001 | Export current session | P0 | ✓ (e key) |
-| [ ] ACT-002 | Export selected sessions | P1 | |
+| [x] ACT-002 | Export selected sessions | P1 | ✓ (Space=toggle, Ctrl+A=all, e=export) |
 | [x] ACT-003 | Copy message to clipboard | P1 | ✓ (c key) |
 | [x] ACT-004 | Copy code block to clipboard | P1 | ✓ (C key) |
 | [ ] ACT-005 | Open in external editor | P2 | |
@@ -871,7 +871,7 @@ esac
 | ID | Requirement | Priority | Status |
 |----|-------------|----------|--------|
 | [x] CONC-001 | Parallel file parsing | P1 | ✓ (`rayon` parallel iterators in stats) |
-| [ ] CONC-002 | Async I/O operations | P1 | |
+| [x] CONC-002 | Async I/O operations | P1 | ✓ (tokio-based async_io module) |
 | [ ] CONC-003 | Background indexing | P2 | |
 | [x] CONC-004 | Non-blocking TUI updates | P0 | ✓ (event handler) |
 | [ ] CONC-005 | Configurable thread count | P2 | |
@@ -904,7 +904,7 @@ esac
 | [x] DATA-004 | Session/Project hierarchy | P0 | ✓ |
 | [x] DATA-005 | Conversation tree structure | P0 | ✓ |
 | [x] DATA-006 | Serialization/deserialization traits | P0 | ✓ |
-| [ ] DATA-007 | Zero-copy parsing where possible | P1 | |
+| [x] DATA-007 | Zero-copy parsing where possible | P1 | ✓ (ZeroCopyLines, MmapParser w/ feature) |
 | [x] DATA-008 | Unknown field preservation (forward-compat) | P0 | ✓ (via IndexMap) |
 | [x] DATA-009 | Optional field handling for version differences | P0 | ✓ |
 

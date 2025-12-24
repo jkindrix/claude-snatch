@@ -645,4 +645,65 @@ mod tests {
         assert!(exporter.include_toc);
         assert!(!exporter.include_header);
     }
+
+    #[test]
+    fn test_collapsible_thinking() {
+        let exporter = MarkdownExporter::new();
+        let mut output = Vec::new();
+
+        // Short thinking - should not collapse
+        let short_thinking = ThinkingBlock {
+            thinking: "Short thought".to_string(),
+            signature: "sig".to_string(),
+            extra: indexmap::IndexMap::new(),
+        };
+        exporter.write_thinking(&mut output, &short_thinking).unwrap();
+        let short_result = String::from_utf8(output.clone()).unwrap();
+        assert!(!short_result.contains("<details>"));
+        assert!(short_result.contains("### 💭 Thinking"));
+
+        // Long thinking - should collapse
+        output.clear();
+        let long_thinking = ThinkingBlock {
+            thinking: "x".repeat(3000), // > 2000 chars
+            signature: "sig".to_string(),
+            extra: indexmap::IndexMap::new(),
+        };
+        exporter.write_thinking(&mut output, &long_thinking).unwrap();
+        let long_result = String::from_utf8(output).unwrap();
+        assert!(long_result.contains("<details>"));
+        assert!(long_result.contains("<summary>💭 Thinking"));
+        assert!(long_result.contains("</details>"));
+    }
+
+    #[test]
+    fn test_collapsible_tool_result() {
+        let exporter = MarkdownExporter::new();
+        let mut output = Vec::new();
+        let options = ExportOptions::default();
+
+        // Short result - should not collapse
+        let short_result = ToolResult {
+            tool_use_id: "test_id".to_string(),
+            content: Some(crate::model::content::ToolResultContent::String("Short result".to_string())),
+            is_error: None,
+            extra: indexmap::IndexMap::new(),
+        };
+        exporter.write_tool_result(&mut output, &short_result, &options).unwrap();
+        let short_output = String::from_utf8(output.clone()).unwrap();
+        assert!(!short_output.contains("<details>"));
+
+        // Long result - should collapse
+        output.clear();
+        let long_result = ToolResult {
+            tool_use_id: "test_id".to_string(),
+            content: Some(crate::model::content::ToolResultContent::String("x".repeat(6000))),
+            is_error: None,
+            extra: indexmap::IndexMap::new(),
+        };
+        exporter.write_tool_result(&mut output, &long_result, &options).unwrap();
+        let long_output = String::from_utf8(output).unwrap();
+        assert!(long_output.contains("<details>"));
+        assert!(long_output.contains("</details>"));
+    }
 }

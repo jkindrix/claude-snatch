@@ -228,6 +228,18 @@ impl SessionAnalytics {
             primary_model: self.primary_model().map(String::from),
         }
     }
+
+    /// Get usage predictions based on current session.
+    #[must_use]
+    pub fn predictions(&self, monthly_limit: Option<u64>) -> UsagePrediction {
+        UsagePrediction::calculate(self, monthly_limit)
+    }
+
+    /// Get usage predictions with default Pro limit.
+    #[must_use]
+    pub fn predictions_pro(&self) -> UsagePrediction {
+        self.predictions(Some(limits::CLAUDE_PRO_MONTHLY))
+    }
 }
 
 /// Message counts by type.
@@ -365,6 +377,139 @@ impl AnalyticsSummary {
     }
 }
 
+/// Usage rate calculation and predictions.
+#[derive(Debug, Clone, Default)]
+pub struct UsagePrediction {
+    /// Average tokens per hour.
+    pub tokens_per_hour: f64,
+    /// Average messages per hour.
+    pub messages_per_hour: f64,
+    /// Average cost per hour.
+    pub cost_per_hour: Option<f64>,
+    /// Estimated hours until monthly token limit.
+    pub hours_to_limit: Option<f64>,
+    /// Estimated messages until limit.
+    pub messages_to_limit: Option<u64>,
+    /// Current usage as percentage of limit.
+    pub usage_percentage: Option<f64>,
+    /// Daily projection (tokens).
+    pub daily_projection: f64,
+    /// Monthly projection (tokens).
+    pub monthly_projection: f64,
+    /// Monthly cost projection.
+    pub monthly_cost_projection: Option<f64>,
+}
+
+impl UsagePrediction {
+    /// Calculate usage predictions from analytics and duration.
+    pub fn calculate(analytics: &SessionAnalytics, monthly_limit: Option<u64>) -> Self {
+        let duration_hours = analytics
+            .duration()
+            .map(|d| d.num_seconds() as f64 / 3600.0)
+            .unwrap_or(1.0)
+            .max(0.1); // Minimum 6 minutes to avoid division issues
+
+        let total_tokens = analytics.usage.usage.total_tokens() as f64;
+        let tokens_per_hour = total_tokens / duration_hours;
+
+        let total_messages = analytics.message_counts.conversation() as f64;
+        let messages_per_hour = total_messages / duration_hours;
+
+        let cost_per_hour = analytics.usage.estimated_cost.map(|c| c / duration_hours);
+
+        // Daily and monthly projections (assuming 8 hour work days, 22 work days/month)
+        let daily_projection = tokens_per_hour * 8.0;
+        let monthly_projection = daily_projection * 22.0;
+        let monthly_cost_projection = cost_per_hour.map(|c| c * 8.0 * 22.0);
+
+        // Calculate time to limit
+        let (hours_to_limit, messages_to_limit, usage_percentage) = if let Some(limit) = monthly_limit {
+            let remaining = limit.saturating_sub(analytics.usage.usage.total_tokens());
+            let hours = if tokens_per_hour > 0.0 {
+                Some(remaining as f64 / tokens_per_hour)
+            } else {
+                None
+            };
+            let messages = if messages_per_hour > 0.0 {
+                Some((remaining as f64 / (total_tokens / total_messages.max(1.0))) as u64)
+            } else {
+                None
+            };
+            let percentage = Some(analytics.usage.usage.total_tokens() as f64 / limit as f64 * 100.0);
+            (hours, messages, percentage)
+        } else {
+            (None, None, None)
+        };
+
+        Self {
+            tokens_per_hour,
+            messages_per_hour,
+            cost_per_hour,
+            hours_to_limit,
+            messages_to_limit,
+            usage_percentage,
+            daily_projection,
+            monthly_projection,
+            monthly_cost_projection,
+        }
+    }
+
+    /// Format hours to limit as human-readable string.
+    #[must_use]
+    pub fn time_to_limit_string(&self) -> String {
+        match self.hours_to_limit {
+            Some(hours) if hours < 1.0 => format!("{:.0}m", hours * 60.0),
+            Some(hours) if hours < 24.0 => format!("{:.1}h", hours),
+            Some(hours) if hours < 168.0 => format!("{:.1} days", hours / 24.0),
+            Some(hours) => format!("{:.1} weeks", hours / 168.0),
+            None => "N/A".to_string(),
+        }
+    }
+
+    /// Format usage percentage as string.
+    #[must_use]
+    pub fn usage_percentage_string(&self) -> String {
+        match self.usage_percentage {
+            Some(pct) => format!("{:.1}%", pct),
+            None => "N/A".to_string(),
+        }
+    }
+
+    /// Format tokens per hour as string.
+    #[must_use]
+    pub fn rate_string(&self) -> String {
+        if self.tokens_per_hour < 1000.0 {
+            format!("{:.0} tokens/hr", self.tokens_per_hour)
+        } else if self.tokens_per_hour < 1_000_000.0 {
+            format!("{:.1}K tokens/hr", self.tokens_per_hour / 1000.0)
+        } else {
+            format!("{:.2}M tokens/hr", self.tokens_per_hour / 1_000_000.0)
+        }
+    }
+
+    /// Format monthly projection as string.
+    #[must_use]
+    pub fn monthly_projection_string(&self) -> String {
+        if self.monthly_projection < 1_000_000.0 {
+            format!("{:.0}K tokens/month", self.monthly_projection / 1000.0)
+        } else {
+            format!("{:.1}M tokens/month", self.monthly_projection / 1_000_000.0)
+        }
+    }
+}
+
+/// Known model token limits (monthly).
+pub mod limits {
+    /// Default monthly token limit for Claude Pro.
+    pub const CLAUDE_PRO_MONTHLY: u64 = 100_000_000; // 100M tokens (estimated)
+
+    /// Default monthly token limit for Claude Teams.
+    pub const CLAUDE_TEAMS_MONTHLY: u64 = 500_000_000; // 500M tokens (estimated)
+
+    /// Default monthly token limit for Claude Enterprise.
+    pub const CLAUDE_ENTERPRISE_MONTHLY: u64 = 1_000_000_000; // 1B tokens (estimated)
+}
+
 /// Aggregate analytics across multiple sessions.
 #[derive(Debug, Default)]
 pub struct ProjectAnalytics {
@@ -468,5 +613,51 @@ mod tests {
         };
 
         assert_eq!(summary.cost_string(), "$0.0042");
+    }
+
+    #[test]
+    fn test_usage_prediction() {
+        let mut analytics = SessionAnalytics::default();
+        // Simulate 1 hour session with 100K tokens, 50 messages
+        analytics.start_time = Some(Utc::now() - Duration::hours(1));
+        analytics.end_time = Some(Utc::now());
+        analytics.usage.usage.output_tokens = 50_000;
+        analytics.usage.usage.cache_read_input_tokens = Some(50_000);
+        analytics.message_counts.user = 25;
+        analytics.message_counts.assistant = 25;
+
+        let prediction = analytics.predictions(Some(1_000_000)); // 1M limit
+
+        // Should calculate approximately 100K tokens/hour
+        assert!(prediction.tokens_per_hour > 90_000.0);
+        assert!(prediction.tokens_per_hour < 110_000.0);
+
+        // Should have hours_to_limit set
+        assert!(prediction.hours_to_limit.is_some());
+
+        // Format strings should work
+        assert!(!prediction.rate_string().is_empty());
+        assert!(!prediction.time_to_limit_string().is_empty());
+        assert!(!prediction.usage_percentage_string().is_empty());
+    }
+
+    #[test]
+    fn test_usage_prediction_formatting() {
+        let prediction = UsagePrediction {
+            tokens_per_hour: 50_000.0,
+            messages_per_hour: 10.0,
+            cost_per_hour: Some(0.50),
+            hours_to_limit: Some(2.5),
+            messages_to_limit: Some(25),
+            usage_percentage: Some(75.0),
+            daily_projection: 400_000.0,
+            monthly_projection: 8_800_000.0,
+            monthly_cost_projection: Some(88.0),
+        };
+
+        assert_eq!(prediction.rate_string(), "50.0K tokens/hr");
+        assert_eq!(prediction.time_to_limit_string(), "2.5h");
+        assert_eq!(prediction.usage_percentage_string(), "75.0%");
+        assert_eq!(prediction.monthly_projection_string(), "8.8M tokens/month");
     }
 }
