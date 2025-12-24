@@ -981,10 +981,10 @@ Given versions A (file) and B (schema):
 | [x] CACHE-003 | Cache invalidation on file change | P1 | ✓ (mtime-based) |
 | [x] CACHE-004 | Configurable cache size limits | P2 | ✓ (`CacheConfig.max_size`) |
 | [ ] CACHE-005 | Cache persistence between runs | P2 | |
-| [ ] INDEX-001 | Full-text search index (tantivy or similar) | P1 | |
-| [ ] INDEX-002 | Incremental index updates | P1 | |
+| [x] INDEX-001 | Full-text search index (tantivy or similar) | P1 | ✓ (`SearchIndex` with tantivy) |
+| [x] INDEX-002 | Incremental index updates | P1 | ✓ (`index build` command) |
 | [ ] INDEX-003 | Index storage location configuration | P2 | |
-| [ ] INDEX-004 | Index rebuild command | P1 | |
+| [x] INDEX-004 | Index rebuild command | P1 | ✓ (`index rebuild` command) |
 | [ ] INDEX-005 | Field-specific indexes (tool names, models) | P2 | |
 
 ### 10.5 Configuration System
@@ -1034,7 +1034,7 @@ Given versions A (file) and B (schema):
 | [x] QUAL-002 | rustfmt compliance | P0 | ✓ |
 | [x] QUAL-003 | Documentation coverage >90% | P1 | ✓ |
 | [x] QUAL-004 | No unsafe code (unless justified) | P0 | ✓ (forbid) |
-| [ ] QUAL-005 | Dependency audit clean | P1 | |
+| [x] QUAL-005 | Dependency audit clean | P1 | ✓ (`deny.toml` configured) |
 | [x] QUAL-006 | MSRV policy (1.70+) | P1 | ✓ (1.75) |
 
 ### 11.2 Reliability
@@ -1194,12 +1194,12 @@ The migration guide must document:
 
 | ID | Requirement | Priority | Status |
 |----|-------------|----------|--------|
-| [ ] TDATA-001 | Synthetic JSONL generators | P1 | |
+| [x] TDATA-001 | Synthetic JSONL generators | P1 | ✓ (`tests/generators/mod.rs`) |
 | [x] TDATA-002 | Edge case samples | P0 | ✓ |
 | [x] TDATA-003 | All message type samples | P0 | ✓ |
 | [x] TDATA-004 | All content block samples | P0 | ✓ |
 | [x] TDATA-005 | Error condition samples | P1 | ✓ |
-| [ ] TDATA-006 | Large file samples | P1 | |
+| [x] TDATA-006 | Large file samples | P1 | ✓ (`generate_large_file()`) |
 
 ### 14.4 Fidelity Verification
 

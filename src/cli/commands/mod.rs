@@ -8,6 +8,7 @@ pub mod config;
 pub mod diff;
 pub mod export;
 pub mod extract;
+pub mod index;
 pub mod info;
 pub mod list;
 pub mod search;

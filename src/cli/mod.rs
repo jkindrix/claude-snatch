@@ -155,6 +155,10 @@ pub enum Commands {
     /// Manage the session cache.
     Cache(CacheArgs),
 
+    /// Manage the full-text search index.
+    #[command(alias = "idx")]
+    Index(IndexArgs),
+
     /// Generate shell completions.
     Completions(CompletionsArgs),
 }
@@ -722,6 +726,80 @@ pub struct ExtractArgs {
     pub file_history: bool,
 }
 
+/// Arguments for the index command.
+#[derive(Debug, Parser)]
+pub struct IndexArgs {
+    /// Index subcommand to run.
+    #[command(subcommand)]
+    pub command: IndexSubcommand,
+}
+
+/// Index subcommand actions.
+#[derive(Debug, Subcommand)]
+pub enum IndexSubcommand {
+    /// Build or update the search index.
+    Build(IndexBuildArgs),
+
+    /// Rebuild the index from scratch.
+    Rebuild(IndexRebuildArgs),
+
+    /// Show index status.
+    Status,
+
+    /// Clear the search index.
+    Clear,
+
+    /// Search the index (faster than regex search).
+    Search(IndexSearchArgs),
+}
+
+/// Arguments for index build command.
+#[derive(Debug, Parser)]
+pub struct IndexBuildArgs {
+    /// Only index sessions from specific project.
+    #[arg(short = 'p', long)]
+    pub project: Option<String>,
+}
+
+/// Arguments for index rebuild command.
+#[derive(Debug, Parser)]
+pub struct IndexRebuildArgs {
+    /// Only rebuild sessions from specific project.
+    #[arg(short = 'p', long)]
+    pub project: Option<String>,
+}
+
+/// Arguments for index search command.
+#[derive(Debug, Parser)]
+pub struct IndexSearchArgs {
+    /// Search query.
+    pub query: String,
+
+    /// Filter by message type.
+    #[arg(short = 't', long = "type")]
+    pub message_type: Option<String>,
+
+    /// Filter by model.
+    #[arg(short = 'm', long)]
+    pub model: Option<String>,
+
+    /// Filter by session ID.
+    #[arg(short = 's', long)]
+    pub session: Option<String>,
+
+    /// Filter by tool name.
+    #[arg(long = "tool-name")]
+    pub tool_name: Option<String>,
+
+    /// Include thinking blocks.
+    #[arg(long)]
+    pub thinking: bool,
+
+    /// Maximum number of results.
+    #[arg(short = 'n', long)]
+    pub limit: Option<usize>,
+}
+
 /// Initialize tracing/logging based on CLI options.
 fn init_logging(cli: &Cli) {
     use tracing_subscriber::{fmt, EnvFilter};
@@ -765,6 +843,7 @@ pub fn run() -> Result<()> {
         Commands::Config(args) => commands::config::run(&cli, args),
         Commands::Extract(args) => commands::extract::run(&cli, args),
         Commands::Cache(args) => commands::cache::run(&cli, args),
+        Commands::Index(args) => commands::index::run(&cli, args),
         Commands::Completions(args) => {
             generate_completions(args.shell);
             Ok(())

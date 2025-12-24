@@ -223,6 +223,13 @@ pub enum SnatchError {
         /// Human-readable error message.
         message: String,
     },
+
+    /// Search index error.
+    #[error("Index error: {0}")]
+    IndexError(
+        /// Human-readable error message.
+        String,
+    ),
 }
 
 impl SnatchError {

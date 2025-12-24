@@ -58,6 +58,7 @@ pub mod discovery;
 pub mod error;
 pub mod export;
 pub mod extraction;
+pub mod index;
 pub mod model;
 pub mod parser;
 pub mod reconstruction;

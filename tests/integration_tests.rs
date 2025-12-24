@@ -1,12 +1,14 @@
 //! Integration tests for claude-snatch.
 //!
 //! These tests verify the full parsing and export pipeline using
-//! sample JSONL fixtures.
+//! sample JSONL fixtures and synthetic test data generators.
 
 use claude_snatch::model::{ContentBlock, LogEntry};
 use claude_snatch::parser::JsonlParser;
 use claude_snatch::reconstruction::Conversation;
 use std::path::PathBuf;
+
+mod generators;
 
 /// Get the path to a fixture file.
 fn fixture_path(name: &str) -> PathBuf {
@@ -481,5 +483,318 @@ not valid json here
         let result = parser.parse_str(input);
         // Should handle unknown types gracefully
         assert!(result.is_ok());
+    }
+}
+
+mod generated_data {
+    use super::generators::{generate_session, SessionConfig};
+    use claude_snatch::parser::JsonlParser;
+    use claude_snatch::reconstruction::Conversation;
+    use claude_snatch::analytics::SessionAnalytics;
+    use claude_snatch::export::{ExportOptions, JsonExporter, MarkdownExporter, Exporter};
+
+    #[test]
+    fn test_parse_generated_minimal_session() {
+        let config = SessionConfig::minimal();
+        let mut buffer = Vec::new();
+        generate_session(&config, &mut buffer).unwrap();
+
+        let content = String::from_utf8(buffer).unwrap();
+        let mut parser = JsonlParser::new();
+        let entries = parser.parse_str(&content).unwrap();
+
+        // 3 exchanges = 6 messages
+        assert_eq!(entries.len(), 6);
+    }
+
+    #[test]
+    fn test_parse_generated_with_thinking() {
+        let config = SessionConfig {
+            exchanges: 5,
+            include_thinking: true,
+            include_tools: false,
+            avg_text_length: 100,
+            avg_thinking_length: 200,
+            ..Default::default()
+        };
+        let mut buffer = Vec::new();
+        generate_session(&config, &mut buffer).unwrap();
+
+        let content = String::from_utf8(buffer).unwrap();
+        let mut parser = JsonlParser::new();
+        let entries = parser.parse_str(&content).unwrap();
+
+        let conversation = Conversation::from_entries(entries).unwrap();
+        let stats = conversation.statistics();
+
+        assert!(stats.thinking_blocks > 0, "Expected thinking blocks");
+    }
+
+    #[test]
+    fn test_parse_generated_with_tools() {
+        let config = SessionConfig {
+            exchanges: 10,
+            include_thinking: false,
+            include_tools: true,
+            ..Default::default()
+        };
+        let mut buffer = Vec::new();
+        generate_session(&config, &mut buffer).unwrap();
+
+        let content = String::from_utf8(buffer).unwrap();
+        let mut parser = JsonlParser::new();
+        let entries = parser.parse_str(&content).unwrap();
+
+        let conversation = Conversation::from_entries(entries).unwrap();
+        let stats = conversation.statistics();
+
+        assert!(stats.tool_uses > 0, "Expected tool uses");
+    }
+
+    #[test]
+    fn test_export_generated_session_json() {
+        let config = SessionConfig::default();
+        let mut buffer = Vec::new();
+        generate_session(&config, &mut buffer).unwrap();
+
+        let content = String::from_utf8(buffer).unwrap();
+        let mut parser = JsonlParser::new();
+        let entries = parser.parse_str(&content).unwrap();
+
+        let conversation = Conversation::from_entries(entries).unwrap();
+
+        let exporter = JsonExporter::new().pretty(true).with_envelope(false);
+        let options = ExportOptions::default();
+        let mut output = Vec::new();
+
+        exporter.export_conversation(&conversation, &mut output, &options).unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        let _: serde_json::Value = serde_json::from_str(&output_str).unwrap();
+    }
+
+    #[test]
+    fn test_export_generated_session_markdown() {
+        let config = SessionConfig::default();
+        let mut buffer = Vec::new();
+        generate_session(&config, &mut buffer).unwrap();
+
+        let content = String::from_utf8(buffer).unwrap();
+        let mut parser = JsonlParser::new();
+        let entries = parser.parse_str(&content).unwrap();
+
+        let conversation = Conversation::from_entries(entries).unwrap();
+
+        let exporter = MarkdownExporter::new();
+        let options = ExportOptions::default().with_thinking(true);
+        let mut output = Vec::new();
+
+        exporter.export_conversation(&conversation, &mut output, &options).unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(!output_str.is_empty());
+    }
+
+    #[test]
+    fn test_analytics_on_generated_session() {
+        let config = SessionConfig {
+            exchanges: 20,
+            include_thinking: true,
+            include_tools: true,
+            ..Default::default()
+        };
+        let mut buffer = Vec::new();
+        generate_session(&config, &mut buffer).unwrap();
+
+        let content = String::from_utf8(buffer).unwrap();
+        let mut parser = JsonlParser::new();
+        let entries = parser.parse_str(&content).unwrap();
+
+        let conversation = Conversation::from_entries(entries).unwrap();
+        let analytics = SessionAnalytics::from_conversation(&conversation);
+        let summary = analytics.summary_report();
+
+        assert_eq!(summary.user_messages, 20);
+        assert_eq!(summary.assistant_messages, 20);
+        assert!(summary.input_tokens > 0);
+        assert!(summary.output_tokens > 0);
+    }
+}
+
+mod large_file_handling {
+    use super::generators::{generate_session, generate_large_file, SessionConfig};
+    use claude_snatch::parser::JsonlParser;
+    use claude_snatch::reconstruction::Conversation;
+    use claude_snatch::export::{ExportOptions, JsonExporter, Exporter};
+    use std::time::Instant;
+
+    #[test]
+    fn test_parse_large_session() {
+        // Generate a large session with 100 exchanges
+        let config = SessionConfig::large();
+        let mut buffer = Vec::new();
+        generate_session(&config, &mut buffer).unwrap();
+
+        let content = String::from_utf8(buffer).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Parse first assistant line manually for debug
+        if let Some(assistant_line) = lines.iter().find(|l| l.contains("\"type\":\"assistant\"")) {
+            eprintln!("Sample assistant line:");
+            eprintln!("{}", &assistant_line[..200.min(assistant_line.len())]);
+
+            // Try parsing it directly
+            match claude_snatch::parser::JsonlParser::parse_entry(assistant_line) {
+                Ok(_) => eprintln!("Direct parse: SUCCESS"),
+                Err(e) => eprintln!("Direct parse: FAILED - {}", e),
+            }
+        }
+
+        let start = Instant::now();
+
+        let mut parser = JsonlParser::new();
+        let entries = parser.parse_str(&content).unwrap();
+
+        let parse_time = start.elapsed();
+
+        // Show parse stats
+        let stats = parser.stats();
+        eprintln!("Parsed {} entries, skipped {}, errors: {}",
+            stats.entries_parsed, stats.lines_skipped, stats.errors.len());
+        for (i, err) in stats.errors.iter().take(3).enumerate() {
+            eprintln!("Error {}: line {} - {}", i, err.line, err.message);
+        }
+
+        // 100 exchanges = 200 messages
+        assert_eq!(entries.len(), 200, "Expected 200 entries from 100 exchanges");
+
+        // Parsing should be fast (under 1 second for 200 messages)
+        assert!(parse_time.as_secs() < 1, "Parsing took too long: {:?}", parse_time);
+    }
+
+    #[test]
+    fn test_parse_huge_session() {
+        // Generate a huge session with 500 exchanges
+        let config = SessionConfig {
+            exchanges: 500,
+            include_thinking: true,
+            include_tools: true,
+            avg_text_length: 300,
+            avg_thinking_length: 1000,
+            ..Default::default()
+        };
+        let mut buffer = Vec::new();
+        generate_session(&config, &mut buffer).unwrap();
+
+        let content = String::from_utf8(buffer).unwrap();
+        let size_mb = content.len() as f64 / 1_000_000.0;
+        eprintln!("Generated session size: {:.2} MB", size_mb);
+
+        let start = Instant::now();
+
+        let mut parser = JsonlParser::new();
+        let entries = parser.parse_str(&content).unwrap();
+
+        let parse_time = start.elapsed();
+
+        assert_eq!(entries.len(), 1000);
+
+        // Parsing should complete in reasonable time
+        assert!(parse_time.as_secs() < 5, "Parsing took too long: {:?}", parse_time);
+
+        eprintln!("Parsed {} entries in {:?}", entries.len(), parse_time);
+    }
+
+    #[test]
+    fn test_reconstruct_large_conversation() {
+        let config = SessionConfig::large();
+        let mut buffer = Vec::new();
+        generate_session(&config, &mut buffer).unwrap();
+
+        let content = String::from_utf8(buffer).unwrap();
+        let mut parser = JsonlParser::new();
+        let entries = parser.parse_str(&content).unwrap();
+
+        let start = Instant::now();
+        let conversation = Conversation::from_entries(entries).unwrap();
+        let reconstruct_time = start.elapsed();
+
+        assert_eq!(conversation.len(), 200);
+        assert!(reconstruct_time.as_secs() < 1, "Reconstruction took too long: {:?}", reconstruct_time);
+    }
+
+    #[test]
+    fn test_export_large_session_json() {
+        let config = SessionConfig::large();
+        let mut buffer = Vec::new();
+        generate_session(&config, &mut buffer).unwrap();
+
+        let content = String::from_utf8(buffer).unwrap();
+        let mut parser = JsonlParser::new();
+        let entries = parser.parse_str(&content).unwrap();
+
+        let conversation = Conversation::from_entries(entries).unwrap();
+
+        let exporter = JsonExporter::new().with_envelope(false);
+        let options = ExportOptions::default();
+        let mut output = Vec::new();
+
+        let start = Instant::now();
+        exporter.export_conversation(&conversation, &mut output, &options).unwrap();
+        let export_time = start.elapsed();
+
+        assert!(export_time.as_secs() < 2, "Export took too long: {:?}", export_time);
+
+        let output_size = output.len();
+        eprintln!("Exported {} bytes in {:?}", output_size, export_time);
+    }
+
+    #[test]
+    fn test_multi_session_file() {
+        // Generate multiple sessions in one file
+        let mut buffer = Vec::new();
+        generate_large_file(10, 10, &mut buffer).unwrap();
+
+        let content = String::from_utf8(buffer).unwrap();
+        let size_kb = content.len() as f64 / 1000.0;
+        eprintln!("Multi-session file size: {:.2} KB", size_kb);
+
+        let mut parser = JsonlParser::new();
+        let entries = parser.parse_str(&content).unwrap();
+
+        // 10 sessions * 10 exchanges * 2 messages = 200
+        assert_eq!(entries.len(), 200);
+    }
+
+    #[test]
+    #[ignore] // Run with --ignored for stress testing
+    fn stress_test_very_large_file() {
+        // Generate a very large file for stress testing
+        let config = SessionConfig::huge();
+        let mut buffer = Vec::new();
+        generate_session(&config, &mut buffer).unwrap();
+
+        let content = String::from_utf8(buffer).unwrap();
+        let size_mb = content.len() as f64 / 1_000_000.0;
+        eprintln!("Very large session size: {:.2} MB", size_mb);
+
+        let start = Instant::now();
+
+        let mut parser = JsonlParser::new();
+        let entries = parser.parse_str(&content).unwrap();
+
+        let conversation = Conversation::from_entries(entries.clone()).unwrap();
+
+        let total_time = start.elapsed();
+
+        eprintln!(
+            "Processed {} entries ({:.2} MB) in {:?}",
+            entries.len(),
+            size_mb,
+            total_time
+        );
+
+        assert_eq!(entries.len(), 2000);
+        assert_eq!(conversation.len(), 2000);
     }
 }

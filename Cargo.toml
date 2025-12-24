@@ -55,6 +55,7 @@ arboard = "3.4"
 # Search/Filtering
 regex = "1.11"
 globset = "0.4"
+tantivy = "0.22"
 
 # Terminal utilities
 console = "0.15"
