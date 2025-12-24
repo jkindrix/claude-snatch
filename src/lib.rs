@@ -21,6 +21,7 @@
 //! - [`reconstruction`]: Conversation tree building and linking
 //! - [`analytics`]: Statistics calculation and usage tracking
 //! - [`export`]: Output format generation (Markdown, JSON, etc.)
+//! - [`extraction`]: Beyond-JSONL data extraction (settings, CLAUDE.md, MCP, etc.)
 //! - [`cli`]: Command-line interface
 //! - [`tui`]: Terminal user interface
 //! - [`config`]: Configuration management
@@ -50,11 +51,13 @@
 #![warn(rustdoc::missing_crate_level_docs)]
 
 pub mod analytics;
+pub mod cache;
 pub mod cli;
 pub mod config;
 pub mod discovery;
 pub mod error;
 pub mod export;
+pub mod extraction;
 pub mod model;
 pub mod parser;
 pub mod reconstruction;

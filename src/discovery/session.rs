@@ -8,6 +8,7 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 
+use crate::cache::global_cache;
 use crate::error::{Result, SnatchError};
 use crate::model::{LogEntry, SchemaVersion};
 use crate::parser::{JsonlParser, StreamingParser};
@@ -147,6 +148,13 @@ impl Session {
         parser.parse_file(&self.path)
     }
 
+    /// Parse all entries with caching support.
+    ///
+    /// Uses the global cache to avoid re-parsing unchanged files.
+    pub fn parse_cached(&self) -> Result<std::sync::Arc<Vec<LogEntry>>> {
+        global_cache().get_or_parse(&self.path, || self.parse())
+    }
+
     /// Create a streaming parser for this session.
     pub fn stream(&self) -> Result<StreamingParser<std::io::BufReader<std::fs::File>>> {
         super::streaming::open_stream(&self.path)
@@ -154,6 +162,24 @@ impl Session {
 
     /// Get quick metadata without parsing the entire file.
     pub fn quick_metadata(&self) -> Result<QuickSessionMetadata> {
+        self.compute_metadata()
+    }
+
+    /// Get quick metadata with caching support.
+    pub fn quick_metadata_cached(&self) -> Result<QuickSessionMetadata> {
+        // Try cache first
+        if let Some(cached) = global_cache().get_metadata(&self.path) {
+            return Ok(cached);
+        }
+
+        // Compute and cache
+        let metadata = self.compute_metadata()?;
+        global_cache().cache_metadata(&self.path, metadata.clone());
+        Ok(metadata)
+    }
+
+    /// Compute metadata from parsed entries.
+    fn compute_metadata(&self) -> Result<QuickSessionMetadata> {
         // Read just the first and last few lines
         let mut parser = JsonlParser::new().with_lenient(true);
         let entries = parser.parse_file(&self.path)?;

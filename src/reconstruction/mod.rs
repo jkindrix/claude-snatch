@@ -251,6 +251,12 @@ impl Conversation {
         !self.branch_points.is_empty()
     }
 
+    /// Get the number of branch points in the conversation.
+    #[must_use]
+    pub fn branch_count(&self) -> usize {
+        self.branch_points.len()
+    }
+
     /// Get the tool result UUID for a tool use ID.
     #[must_use]
     pub fn tool_result_for(&self, tool_use_id: &str) -> Option<&str> {
