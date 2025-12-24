@@ -1232,7 +1232,7 @@ The migration guide must document:
 | ID | Requirement | Priority | Status |
 |----|-------------|----------|--------|
 | [x] PKG-001 | crates.io publication | P0 | Ready for publish |
-| [ ] PKG-002 | Homebrew formula | P1 | |
+| [x] PKG-002 | Homebrew formula | P1 | ✓ homebrew/claude-snatch.rb |
 | [ ] PKG-003 | AUR package | P2 | |
 | [ ] PKG-004 | Nix package | P2 | |
 | [ ] PKG-005 | Scoop manifest (Windows) | P2 | |
@@ -1245,7 +1245,7 @@ The migration guide must document:
 |----|-------------|----------|--------|
 | [x] INST-001 | `cargo install claude-snatch` | P0 | Ready for publish |
 | [x] INST-002 | Direct binary download | P0 | Via GitHub releases |
-| [ ] INST-003 | Install script (curl \| sh) | P1 | |
+| [x] INST-003 | Install script (curl \| sh) | P1 | ✓ install.sh |
 | [ ] INST-004 | Version management | P2 | |
 | [ ] INST-005 | Self-update capability | P3 | |
 
