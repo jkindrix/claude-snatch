@@ -1111,11 +1111,11 @@ Given versions A (file) and B (schema):
 | [x] DOC-001 | README.md with quick start | P0 | ✓ |
 | [x] DOC-002 | Installation guide | P0 | ✓ |
 | [x] DOC-003 | CLI reference manual | P0 | ✓ (--help) |
-| [ ] DOC-004 | TUI user guide | P1 | |
-| [ ] DOC-005 | Export format documentation | P1 | |
-| [ ] DOC-006 | Configuration reference | P1 | |
+| [x] DOC-004 | TUI user guide | P1 | ✓ (docs/tui-guide.md) |
+| [x] DOC-005 | Export format documentation | P1 | ✓ (docs/export-formats.md) |
+| [x] DOC-006 | Configuration reference | P1 | ✓ (docs/configuration.md) |
 | [ ] DOC-007 | FAQ and troubleshooting | P2 | |
-| [ ] DOC-008 | Examples and recipes | P1 | |
+| [x] DOC-008 | Examples and recipes | P1 | ✓ (docs/examples.md) |
 | [ ] DOC-009 | Migration guide for version upgrades | P2 | |
 
 #### 13.1.1 Migration Guide Requirements (DOC-009)
@@ -1149,9 +1149,9 @@ The migration guide must document:
 
 | ID | Requirement | Priority | Status |
 |----|-------------|----------|--------|
-| [ ] DEVDOC-001 | Architecture overview | P1 | |
+| [x] DEVDOC-001 | Architecture overview | P1 | ✓ (docs/architecture.md) |
 | [x] DEVDOC-002 | API documentation (rustdoc) | P0 | ✓ |
-| [ ] DEVDOC-003 | Contributing guide | P1 | |
+| [x] DEVDOC-003 | Contributing guide | P1 | ✓ (docs/CONTRIBUTING.md) |
 | [x] DEVDOC-004 | Data format specification | P1 | ✓ |
 | [x] DEVDOC-005 | Build instructions | P0 | ✓ |
 | [ ] DEVDOC-006 | Release process | P2 | |
