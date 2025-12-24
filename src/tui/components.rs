@@ -184,3 +184,144 @@ pub fn format_message_header(msg_type: MessageType, timestamp: Option<&str>) -> 
 
     Line::from(spans)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod message_type_tests {
+        use super::*;
+
+        #[test]
+        fn test_user_icon() {
+            assert_eq!(MessageType::User.icon(), "👤");
+        }
+
+        #[test]
+        fn test_assistant_icon() {
+            assert_eq!(MessageType::Assistant.icon(), "🤖");
+        }
+
+        #[test]
+        fn test_system_icon() {
+            assert_eq!(MessageType::System.icon(), "⚙️");
+        }
+
+        #[test]
+        fn test_summary_icon() {
+            assert_eq!(MessageType::Summary.icon(), "📋");
+        }
+
+        #[test]
+        fn test_tool_icon() {
+            assert_eq!(MessageType::Tool.icon(), "🔧");
+        }
+
+        #[test]
+        fn test_user_color() {
+            assert_eq!(MessageType::User.color(), Color::Green);
+        }
+
+        #[test]
+        fn test_assistant_color() {
+            assert_eq!(MessageType::Assistant.color(), Color::Blue);
+        }
+
+        #[test]
+        fn test_system_color() {
+            assert_eq!(MessageType::System.color(), Color::Yellow);
+        }
+
+        #[test]
+        fn test_summary_color() {
+            assert_eq!(MessageType::Summary.color(), Color::Magenta);
+        }
+
+        #[test]
+        fn test_tool_color() {
+            assert_eq!(MessageType::Tool.color(), Color::Cyan);
+        }
+    }
+
+    mod format_message_header_tests {
+        use super::*;
+
+        #[test]
+        fn test_format_without_timestamp() {
+            let header = format_message_header(MessageType::User, None);
+            assert!(!header.spans.is_empty());
+            // Should have icon, space, and styled type name
+            assert_eq!(header.spans.len(), 3);
+        }
+
+        #[test]
+        fn test_format_with_timestamp() {
+            let header = format_message_header(MessageType::Assistant, Some("2025-01-01 12:00:00"));
+            // Should have icon, space, styled type name, space, and timestamp
+            assert_eq!(header.spans.len(), 5);
+        }
+
+        #[test]
+        fn test_all_message_types_format() {
+            // Ensure all message types can be formatted without panic
+            let types = [
+                MessageType::User,
+                MessageType::Assistant,
+                MessageType::System,
+                MessageType::Summary,
+                MessageType::Tool,
+            ];
+
+            for msg_type in types {
+                let _ = format_message_header(msg_type, None);
+                let _ = format_message_header(msg_type, Some("timestamp"));
+            }
+        }
+    }
+
+    mod scrollable_text_tests {
+        use super::*;
+
+        #[test]
+        fn test_scrollable_text_builder() {
+            let text = ScrollableText::new("Test")
+                .content(vec![Line::from("Hello")])
+                .scroll(5)
+                .focused(true);
+
+            assert_eq!(text.title, "Test");
+            assert_eq!(text.scroll, 5);
+            assert!(text.focused);
+        }
+
+        #[test]
+        fn test_scrollable_text_default_values() {
+            let text = ScrollableText::new("Default");
+
+            assert_eq!(text.scroll, 0);
+            assert!(!text.focused);
+            assert!(text.content.is_empty());
+        }
+    }
+
+    mod status_bar_tests {
+        use super::*;
+
+        #[test]
+        fn test_status_bar_default() {
+            let bar = StatusBar::default();
+            assert!(bar.left.is_empty());
+            assert!(bar.right.is_empty());
+        }
+
+        #[test]
+        fn test_status_bar_builder() {
+            let bar = StatusBar::new()
+                .left(vec![Span::raw("Left")])
+                .right(vec![Span::raw("Right")]);
+
+            assert_eq!(bar.left.len(), 1);
+            assert_eq!(bar.right.len(), 1);
+        }
+    }
+}

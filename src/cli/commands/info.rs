@@ -373,3 +373,96 @@ struct DirectoryInfoOutput {
     has_file_history: bool,
     backup_file_count: usize,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_session_info_output_serialization() {
+        let output = SessionInfoOutput {
+            session_id: "abc123".to_string(),
+            project_path: "/home/user/project".to_string(),
+            is_subagent: false,
+            file_size: 1024,
+            file_size_human: "1 KB".to_string(),
+            entry_count: 50,
+            message_count: 25,
+            start_time: Some("2025-01-01T00:00:00Z".to_string()),
+            end_time: Some("2025-01-01T01:00:00Z".to_string()),
+            duration_human: Some("1 hour".to_string()),
+            state: "Complete".to_string(),
+            version: Some("2.0.74".to_string()),
+            path: "/home/user/.claude/projects/abc123.jsonl".to_string(),
+        };
+
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("\"session_id\":\"abc123\""));
+        assert!(json.contains("\"is_subagent\":false"));
+        assert!(json.contains("\"entry_count\":50"));
+        assert!(json.contains("\"version\":\"2.0.74\""));
+    }
+
+    #[test]
+    fn test_project_info_output_serialization() {
+        let output = ProjectInfoOutput {
+            path: "/home/user/project".to_string(),
+            encoded_name: "encoded_project".to_string(),
+            session_count: 10,
+            main_sessions: 8,
+            subagent_sessions: 2,
+            total_size: 1024 * 1024,
+            total_size_human: "1 MB".to_string(),
+        };
+
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("\"path\":\"/home/user/project\""));
+        assert!(json.contains("\"session_count\":10"));
+        assert!(json.contains("\"main_sessions\":8"));
+        assert!(json.contains("\"subagent_sessions\":2"));
+    }
+
+    #[test]
+    fn test_directory_info_output_serialization() {
+        let output = DirectoryInfoOutput {
+            root_path: "/home/user/.claude".to_string(),
+            project_count: 5,
+            session_count: 20,
+            subagent_count: 10,
+            total_size: 10 * 1024 * 1024,
+            total_size_human: "10 MB".to_string(),
+            has_file_history: true,
+            backup_file_count: 100,
+        };
+
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("\"root_path\":\"/home/user/.claude\""));
+        assert!(json.contains("\"project_count\":5"));
+        assert!(json.contains("\"has_file_history\":true"));
+        assert!(json.contains("\"backup_file_count\":100"));
+    }
+
+    #[test]
+    fn test_session_info_output_with_nulls() {
+        let output = SessionInfoOutput {
+            session_id: "test".to_string(),
+            project_path: "project".to_string(),
+            is_subagent: true,
+            file_size: 0,
+            file_size_human: "0 B".to_string(),
+            entry_count: 0,
+            message_count: 0,
+            start_time: None,
+            end_time: None,
+            duration_human: None,
+            state: "Unknown".to_string(),
+            version: None,
+            path: "/test".to_string(),
+        };
+
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("\"is_subagent\":true"));
+        assert!(json.contains("\"start_time\":null"));
+        assert!(json.contains("\"version\":null"));
+    }
+}

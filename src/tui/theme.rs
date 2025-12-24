@@ -193,3 +193,135 @@ impl Theme {
 pub fn available_themes() -> Vec<&'static str> {
     vec!["dark", "light", "high-contrast"]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dark_theme() {
+        let theme = Theme::dark();
+        assert_eq!(theme.name, "dark");
+        assert_eq!(theme.primary, Color::Cyan);
+        assert_eq!(theme.foreground, Color::White);
+    }
+
+    #[test]
+    fn test_light_theme() {
+        let theme = Theme::light();
+        assert_eq!(theme.name, "light");
+        assert_eq!(theme.background, Color::White);
+        assert_eq!(theme.foreground, Color::Black);
+    }
+
+    #[test]
+    fn test_high_contrast_theme() {
+        let theme = Theme::high_contrast();
+        assert_eq!(theme.name, "high-contrast");
+        assert_eq!(theme.background, Color::Black);
+        assert_eq!(theme.foreground, Color::White);
+        assert_eq!(theme.primary, Color::Yellow);
+    }
+
+    #[test]
+    fn test_default_theme_is_dark() {
+        let default = Theme::default();
+        let dark = Theme::dark();
+        assert_eq!(default.name, dark.name);
+        assert_eq!(default.primary, dark.primary);
+    }
+
+    #[test]
+    fn test_from_name() {
+        assert!(Theme::from_name("dark").is_some());
+        assert!(Theme::from_name("light").is_some());
+        assert!(Theme::from_name("high-contrast").is_some());
+        assert!(Theme::from_name("highcontrast").is_some());
+        assert!(Theme::from_name("DARK").is_some()); // case insensitive
+        assert!(Theme::from_name("unknown").is_none());
+    }
+
+    #[test]
+    fn test_border_style() {
+        let theme = Theme::dark();
+        let style = theme.border_style();
+        assert_eq!(style.fg, Some(theme.border));
+    }
+
+    #[test]
+    fn test_border_focused_style() {
+        let theme = Theme::dark();
+        let style = theme.border_focused_style();
+        assert_eq!(style.fg, Some(theme.border_focused));
+    }
+
+    #[test]
+    fn test_selection_style() {
+        let theme = Theme::dark();
+        let style = theme.selection_style();
+        assert_eq!(style.bg, Some(theme.selection));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn test_user_style() {
+        let theme = Theme::dark();
+        let style = theme.user_style();
+        assert_eq!(style.fg, Some(theme.user));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn test_assistant_style() {
+        let theme = Theme::dark();
+        let style = theme.assistant_style();
+        assert_eq!(style.fg, Some(theme.assistant));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn test_thinking_style() {
+        let theme = Theme::dark();
+        let style = theme.thinking_style();
+        assert_eq!(style.fg, Some(theme.thinking));
+        assert!(style.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn test_error_style() {
+        let theme = Theme::dark();
+        let style = theme.error_style();
+        assert_eq!(style.fg, Some(theme.error));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn test_available_themes() {
+        let themes = available_themes();
+        assert_eq!(themes.len(), 3);
+        assert!(themes.contains(&"dark"));
+        assert!(themes.contains(&"light"));
+        assert!(themes.contains(&"high-contrast"));
+    }
+
+    #[test]
+    fn test_tool_style() {
+        let theme = Theme::dark();
+        let style = theme.tool_style();
+        assert_eq!(style.fg, Some(theme.tool));
+    }
+
+    #[test]
+    fn test_warning_style() {
+        let theme = Theme::dark();
+        let style = theme.warning_style();
+        assert_eq!(style.fg, Some(theme.warning));
+    }
+
+    #[test]
+    fn test_success_style() {
+        let theme = Theme::dark();
+        let style = theme.success_style();
+        assert_eq!(style.fg, Some(theme.success));
+    }
+}

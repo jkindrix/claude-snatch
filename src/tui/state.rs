@@ -1486,3 +1486,199 @@ impl AppState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod search_state {
+        use super::*;
+
+        #[test]
+        fn test_default_search_state() {
+            let state = SearchState::default();
+            assert!(!state.active);
+            assert!(state.query.is_empty());
+            assert_eq!(state.cursor, 0);
+            assert!(state.results.is_empty());
+            assert_eq!(state.current_result, 0);
+            // case_insensitive defaults to false via Default derive
+            assert!(!state.case_insensitive);
+        }
+
+        #[test]
+        fn test_push_char() {
+            let mut state = SearchState::default();
+            state.push_char('h');
+            state.push_char('e');
+            state.push_char('l');
+            state.push_char('l');
+            state.push_char('o');
+            assert_eq!(state.query, "hello");
+            assert_eq!(state.cursor, 5);
+        }
+
+        #[test]
+        fn test_backspace() {
+            let mut state = SearchState::default();
+            state.query = "hello".to_string();
+            state.cursor = 5;
+
+            state.backspace();
+            assert_eq!(state.query, "hell");
+            assert_eq!(state.cursor, 4);
+
+            state.backspace();
+            assert_eq!(state.query, "hel");
+            assert_eq!(state.cursor, 3);
+        }
+
+        #[test]
+        fn test_backspace_at_start() {
+            let mut state = SearchState::default();
+            state.query = "hello".to_string();
+            state.cursor = 0;
+
+            state.backspace();
+            assert_eq!(state.query, "hello");
+            assert_eq!(state.cursor, 0);
+        }
+
+        #[test]
+        fn test_next_result() {
+            let mut state = SearchState::default();
+            state.results = vec![10, 20, 30];
+            state.current_result = 0;
+
+            state.next_result();
+            assert_eq!(state.current_result, 1);
+
+            state.next_result();
+            assert_eq!(state.current_result, 2);
+
+            state.next_result();
+            assert_eq!(state.current_result, 0); // wraps around
+        }
+
+        #[test]
+        fn test_prev_result() {
+            let mut state = SearchState::default();
+            state.results = vec![10, 20, 30];
+            state.current_result = 2;
+
+            state.prev_result();
+            assert_eq!(state.current_result, 1);
+
+            state.prev_result();
+            assert_eq!(state.current_result, 0);
+
+            state.prev_result();
+            assert_eq!(state.current_result, 2); // wraps around
+        }
+
+        #[test]
+        fn test_next_result_empty() {
+            let mut state = SearchState::default();
+            state.next_result();
+            assert_eq!(state.current_result, 0);
+        }
+
+        #[test]
+        fn test_current_line() {
+            let mut state = SearchState::default();
+            assert_eq!(state.current_line(), None);
+
+            state.results = vec![10, 20, 30];
+            state.current_result = 1;
+            assert_eq!(state.current_line(), Some(20));
+        }
+
+        #[test]
+        fn test_result_count_str() {
+            let mut state = SearchState::default();
+            assert_eq!(state.result_count_str(), "No matches");
+
+            state.results = vec![10, 20, 30];
+            state.current_result = 1;
+            assert_eq!(state.result_count_str(), "2/3");
+        }
+
+        #[test]
+        fn test_clear() {
+            let mut state = SearchState {
+                active: true,
+                query: "test".to_string(),
+                cursor: 4,
+                results: vec![1, 2, 3],
+                current_result: 2,
+                case_insensitive: false,
+            };
+
+            state.clear();
+            assert!(!state.active);
+            assert!(state.query.is_empty());
+            assert_eq!(state.cursor, 0);
+            assert!(state.results.is_empty());
+            assert_eq!(state.current_result, 0);
+        }
+    }
+
+    mod message_type_filter {
+        use super::*;
+
+        #[test]
+        fn test_default_filter() {
+            let filter = MessageTypeFilter::default();
+            assert_eq!(filter, MessageTypeFilter::All);
+        }
+
+        #[test]
+        fn test_display_name() {
+            assert_eq!(MessageTypeFilter::All.display_name(), "All");
+            assert_eq!(MessageTypeFilter::User.display_name(), "User");
+            assert_eq!(MessageTypeFilter::Assistant.display_name(), "Assistant");
+            assert_eq!(MessageTypeFilter::System.display_name(), "System");
+            assert_eq!(MessageTypeFilter::Tools.display_name(), "Tools");
+        }
+
+        #[test]
+        fn test_next_cycle() {
+            let mut filter = MessageTypeFilter::All;
+
+            filter.next();
+            assert_eq!(filter, MessageTypeFilter::User);
+
+            filter.next();
+            assert_eq!(filter, MessageTypeFilter::Assistant);
+
+            filter.next();
+            assert_eq!(filter, MessageTypeFilter::System);
+
+            filter.next();
+            assert_eq!(filter, MessageTypeFilter::Tools);
+
+            filter.next();
+            assert_eq!(filter, MessageTypeFilter::All); // wraps around
+        }
+
+        #[test]
+        fn test_prev_cycle() {
+            let mut filter = MessageTypeFilter::All;
+
+            filter.prev();
+            assert_eq!(filter, MessageTypeFilter::Tools);
+
+            filter.prev();
+            assert_eq!(filter, MessageTypeFilter::System);
+
+            filter.prev();
+            assert_eq!(filter, MessageTypeFilter::Assistant);
+
+            filter.prev();
+            assert_eq!(filter, MessageTypeFilter::User);
+
+            filter.prev();
+            assert_eq!(filter, MessageTypeFilter::All); // wraps around
+        }
+    }
+}

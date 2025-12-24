@@ -452,3 +452,73 @@ struct OverviewOutput {
     total_size_bytes: u64,
     total_size_human: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analytics::SessionAnalytics;
+
+    #[test]
+    fn test_stats_output_from_session() {
+        let analytics = SessionAnalytics::default();
+        let output = StatsOutput::from_session(&analytics);
+
+        assert_eq!(output.scope, "session");
+        assert_eq!(output.sessions, Some(1));
+        assert_eq!(output.total_tokens, 0);
+        assert_eq!(output.input_tokens, 0);
+        assert_eq!(output.output_tokens, 0);
+        assert_eq!(output.messages, 0);
+        assert_eq!(output.tool_invocations, 0);
+        assert!(output.cache_hit_rate.is_some());
+    }
+
+    #[test]
+    fn test_stats_output_from_project() {
+        let analytics = ProjectAnalytics::default();
+        let output = StatsOutput::from_project(&analytics, "test-project");
+
+        assert_eq!(output.scope, "test-project");
+        assert_eq!(output.sessions, Some(0));
+        assert_eq!(output.total_tokens, 0);
+        assert_eq!(output.messages, 0);
+        assert_eq!(output.tool_invocations, 0);
+        assert!(output.cache_hit_rate.is_none());
+    }
+
+    #[test]
+    fn test_stats_output_serialization() {
+        let output = StatsOutput {
+            scope: "session".to_string(),
+            sessions: Some(5),
+            total_tokens: 1000,
+            input_tokens: 600,
+            output_tokens: 400,
+            messages: 10,
+            tool_invocations: 3,
+            cache_hit_rate: Some(0.75),
+            estimated_cost: Some(0.05),
+        };
+
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("\"scope\":\"session\""));
+        assert!(json.contains("\"total_tokens\":1000"));
+        assert!(json.contains("\"cache_hit_rate\":0.75"));
+    }
+
+    #[test]
+    fn test_overview_output_serialization() {
+        let output = OverviewOutput {
+            project_count: 5,
+            session_count: 20,
+            subagent_count: 10,
+            total_size_bytes: 1024 * 1024,
+            total_size_human: "1 MB".to_string(),
+        };
+
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("\"project_count\":5"));
+        assert!(json.contains("\"session_count\":20"));
+        assert!(json.contains("\"total_size_human\":\"1 MB\""));
+    }
+}
