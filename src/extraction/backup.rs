@@ -252,6 +252,128 @@ fn format_system_time(time: SystemTime) -> String {
     )
 }
 
+/// File version history for a specific source file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileVersionHistory {
+    /// Original source file path.
+    pub source_path: String,
+
+    /// All versions of this file in chronological order.
+    pub versions: Vec<FileVersion>,
+}
+
+/// A single version of a file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileVersion {
+    /// Backup file path.
+    pub backup_path: PathBuf,
+
+    /// Version number (1 = oldest).
+    pub version: usize,
+
+    /// File size in bytes.
+    pub size_bytes: u64,
+
+    /// Modification timestamp (Unix epoch seconds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified_time: Option<u64>,
+
+    /// ISO 8601 timestamp string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+}
+
+impl FileVersion {
+    /// Read the version's content.
+    pub fn read_contents(&self) -> Result<String> {
+        std::fs::read_to_string(&self.backup_path).map_err(|e| {
+            crate::error::SnatchError::io(
+                format!("Failed to read backup: {}", self.backup_path.display()),
+                e,
+            )
+        })
+    }
+
+    /// Get human-readable file size.
+    #[must_use]
+    pub fn size_human(&self) -> String {
+        format_size(self.size_bytes)
+    }
+}
+
+impl FileVersionHistory {
+    /// Build version history for a file from the file history directory.
+    pub fn from_dir(file_history_dir: &Path, source_path: &str) -> Result<Self> {
+        let mut versions = Vec::new();
+
+        if !file_history_dir.exists() {
+            return Ok(Self {
+                source_path: source_path.to_string(),
+                versions,
+            });
+        }
+
+        // Scan for backup files matching this source path
+        for entry in std::fs::read_dir(file_history_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if path.is_file() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if let Some(decoded) = decode_backup_filename(name) {
+                        // Check if this backup matches our source path
+                        if decoded == source_path || decoded.ends_with(source_path) {
+                            let metadata = std::fs::metadata(&path)?;
+                            let modified = metadata.modified().ok();
+
+                            versions.push(FileVersion {
+                                backup_path: path,
+                                version: 0, // Will be set after sorting
+                                size_bytes: metadata.len(),
+                                modified_time: modified.and_then(|t| {
+                                    t.duration_since(SystemTime::UNIX_EPOCH)
+                                        .ok()
+                                        .map(|d| d.as_secs())
+                                }),
+                                timestamp: modified.map(format_system_time),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by modification time (oldest first) and assign version numbers
+        versions.sort_by_key(|v| v.modified_time.unwrap_or(0));
+        for (idx, version) in versions.iter_mut().enumerate() {
+            version.version = idx + 1;
+        }
+
+        Ok(Self {
+            source_path: source_path.to_string(),
+            versions,
+        })
+    }
+
+    /// Get the latest version.
+    #[must_use]
+    pub fn latest(&self) -> Option<&FileVersion> {
+        self.versions.last()
+    }
+
+    /// Get a specific version by number.
+    #[must_use]
+    pub fn get_version(&self, version: usize) -> Option<&FileVersion> {
+        self.versions.iter().find(|v| v.version == version)
+    }
+
+    /// Get number of versions.
+    #[must_use]
+    pub fn version_count(&self) -> usize {
+        self.versions.len()
+    }
+}
+
 /// Format size in bytes as human-readable string.
 fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
