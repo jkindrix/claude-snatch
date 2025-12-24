@@ -38,14 +38,14 @@
 
 ### 1.1 Key Differentiators
 
-- [ ] **Maximum JSONL Fidelity**: Extract all 77+ documented data elements (vs. current best: 62%)
-- [ ] **Beyond-JSONL Extraction**: Capture all 21+ supplementary data elements
-- [ ] **Rust Performance**: Native speed, 10-100x faster than Python/Node alternatives
-- [ ] **Production-Grade Reliability**: Comprehensive error handling, graceful degradation, schema versioning
-- [ ] **Lossless Round-Trip**: JSONL → Export → Reconstruct (within same Claude Code version)
-- [ ] **Dual Interface**: Both CLI (scriptable) and TUI (interactive) modes
-- [ ] **Forward-Compatible**: Unknown field preservation for future Claude Code versions
-- [ ] **Cross-Platform**: Linux, macOS, Windows (including WSL) with proper path handling
+- [x] **Maximum JSONL Fidelity**: Extract all 77+ documented data elements ✓ (model module)
+- [x] **Beyond-JSONL Extraction**: Capture all 21+ supplementary data elements ✓ (extraction module)
+- [x] **Rust Performance**: Native speed, 10-100x faster than Python/Node alternatives ✓
+- [x] **Production-Grade Reliability**: Comprehensive error handling, graceful degradation, schema versioning ✓
+- [x] **Lossless Round-Trip**: JSONL → Export → Reconstruct (within same Claude Code version) ✓
+- [x] **Dual Interface**: Both CLI (scriptable) and TUI (interactive) modes ✓
+- [x] **Forward-Compatible**: Unknown field preservation for future Claude Code versions ✓ (#[serde(flatten)])
+- [x] **Cross-Platform**: Linux, macOS, Windows (including WSL) with proper path handling ✓
 
 ### 1.2 MVP Scope Definition
 
@@ -135,16 +135,16 @@ To create the most comprehensive, performant, and reliable tool for extracting a
 
 ### 2.2 Primary Objectives
 
-- [ ] **OBJ-001**: Achieve maximum extraction fidelity for all documented JSONL elements (64+ elements)
-- [ ] **OBJ-002**: Support extraction from all Claude Code data sources (not just JSONL)
-- [ ] **OBJ-003**: Provide sub-second performance for typical session files (<10MB)
-- [ ] **OBJ-004**: Offer both interactive (TUI) and scriptable (CLI) interfaces
-- [ ] **OBJ-005**: Support all major output formats with format-specific optimizations
-- [ ] **OBJ-006**: Enable lossless round-trip within same Claude Code version; best-effort across versions
-- [ ] **OBJ-007**: Provide comprehensive analytics and reporting capabilities
-- [ ] **OBJ-008**: Maintain cross-platform compatibility (Linux, macOS, Windows, WSL)
-- [ ] **OBJ-009**: Implement schema versioning for forward/backward compatibility
-- [ ] **OBJ-010**: Preserve unknown fields for future Claude Code version support
+- [x] **OBJ-001**: Achieve maximum extraction fidelity for all documented JSONL elements (64+ elements) ✓
+- [x] **OBJ-002**: Support extraction from all Claude Code data sources (not just JSONL) ✓
+- [x] **OBJ-003**: Provide sub-second performance for typical session files (<10MB) ✓
+- [x] **OBJ-004**: Offer both interactive (TUI) and scriptable (CLI) interfaces ✓
+- [x] **OBJ-005**: Support all major output formats with format-specific optimizations ✓
+- [x] **OBJ-006**: Enable lossless round-trip within same Claude Code version; best-effort across versions ✓
+- [x] **OBJ-007**: Provide comprehensive analytics and reporting capabilities ✓
+- [x] **OBJ-008**: Maintain cross-platform compatibility (Linux, macOS, Windows, WSL) ✓
+- [x] **OBJ-009**: Implement schema versioning for forward/backward compatibility ✓
+- [x] **OBJ-010**: Preserve unknown fields for future Claude Code version support ✓
 
 ### 2.3 Success Metrics
 
@@ -177,13 +177,13 @@ Based on analysis of 49+ existing tools, the following elements are **not extrac
 #### Error & Recovery (5 elements)
 - [x] `error.status` — HTTP status code from api_error ✓ (`ApiErrorDetails.status`)
 - [x] `retryAttempt` — Current retry number ✓ (`retry_attempt` in SystemMessage)
-- [ ] `maxRetries` — Maximum retry attempts
+- [x] `maxRetries` — Maximum retry attempts ✓ (`max_retries` in ApiErrorDetails)
 - [x] `retryInMs` — Milliseconds until retry ✓ (`retry_in_ms` in SystemMessage)
-- [ ] `cause` — Error cause chain
+- [x] `cause` — Error cause chain ✓ (`cause` in ApiErrorDetails)
 
 #### System & Metadata (5 elements)
-- [ ] `message.container` — Code execution container info
-- [ ] `message.context_management` — Context editing info (beta)
+- [x] `message.container` — Code execution container info ✓ (`Container` struct)
+- [x] `message.context_management` — Context editing info (beta) ✓ (`ContextManagement` struct)
 - [x] `thinkingMetadata.level` — Thinking budget level ✓ (`ThinkingMetadata.level`)
 - [x] `thinkingMetadata.disabled` — Whether thinking is disabled ✓ (`ThinkingMetadata.disabled`)
 - [x] `thinkingMetadata.triggers` — Trigger conditions array ✓ (`ThinkingMetadata.triggers`)
@@ -531,8 +531,8 @@ When Claude Code is actively writing to a JSONL file while claude-snatch reads i
 |----|-------------|----------|--------|
 | [x] BKUP-001 | Parse file-history-snapshot events | P0 | ✓ |
 | [x] BKUP-002 | Locate backup files in ~/.claude/filehistory/ | P1 | ✓ |
-| [ ] BKUP-003 | Retrieve backup content by reference | P1 | |
-| [ ] BKUP-004 | Show file version history | P1 | |
+| [x] BKUP-003 | Retrieve backup content by reference | P1 | ✓ (BackupFileInfo.read_contents) |
+| [x] BKUP-004 | Show file version history | P1 | ✓ (FileVersionHistory) |
 | [ ] BKUP-005 | Diff between file versions | P2 | |
 | [ ] BKUP-006 | Export file at specific version | P2 | |
 | [ ] BKUP-007 | Reconstruct file state at any point | P2 | |
@@ -790,8 +790,8 @@ esac
 |----|-------------|----------|--------|
 | [x] TSRCH-001 | Real-time search as you type | P0 | ✓ |
 | [x] TSRCH-002 | Highlight search matches | P0 | ✓ |
-| [ ] TSRCH-003 | Filter panel for message types | P1 | |
-| [ ] TSRCH-004 | Filter by date range | P1 | |
+| [x] TSRCH-003 | Filter panel for message types | P1 | ✓ (f/F/E keys) |
+| [ ] TSRCH-004 | Filter by date range | P1 | Partial (structure ready) |
 | [ ] TSRCH-005 | Filter by model | P2 | |
 | [ ] TSRCH-006 | Save/load filter presets | P3 | |
 
