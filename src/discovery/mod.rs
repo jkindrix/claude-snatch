@@ -7,11 +7,13 @@
 //! - Project path encoding/decoding
 //! - Session enumeration and metadata extraction
 
+mod hierarchy;
 mod paths;
 mod project;
 mod session;
 pub mod streaming;
 
+pub use hierarchy::*;
 pub use paths::*;
 pub use project::*;
 pub use session::*;
