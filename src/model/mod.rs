@@ -8,12 +8,14 @@
 pub mod content;
 pub mod message;
 pub mod metadata;
+pub mod schema;
 pub mod tools;
 pub mod usage;
 
 pub use content::*;
 pub use message::*;
 pub use metadata::*;
+pub use schema::*;
 pub use tools::*;
 pub use usage::*;
 

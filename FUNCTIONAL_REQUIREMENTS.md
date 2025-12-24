@@ -916,10 +916,10 @@ esac
 | [x] SCHEMA-002 | Maintain schema definitions per major version | P0 | ✓ |
 | [x] SCHEMA-003 | Graceful handling of unknown fields | P0 | ✓ |
 | [x] SCHEMA-004 | Preserve unknown fields in lossless mode | P0 | ✓ |
-| [ ] SCHEMA-005 | Version-specific parsing strategies | P1 | |
-| [ ] SCHEMA-006 | Schema migration for export formats | P1 | |
+| [x] SCHEMA-005 | Version-specific parsing strategies | P1 | ✓ ParsingStrategy |
+| [x] SCHEMA-006 | Schema migration for export formats | P1 | ✓ SchemaMigration |
 | [ ] SCHEMA-007 | Backward compatibility with v1.x logs | P2 | |
-| [ ] SCHEMA-008 | Schema change detection and warnings | P1 | |
+| [x] SCHEMA-008 | Schema change detection and warnings | P1 | ✓ detect_schema_change |
 | [x] SCHEMA-009 | Document known schema versions | P1 | ✓ |
 | [ ] SCHEMA-010 | Automated schema diff on CI | P2 | |
 
