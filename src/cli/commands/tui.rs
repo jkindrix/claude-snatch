@@ -6,17 +6,21 @@ use crate::cli::{Cli, TuiArgs};
 use crate::error::{Result, SnatchError};
 
 /// Run the TUI command.
-pub fn run(_cli: &Cli, _args: &TuiArgs) -> Result<()> {
-    // For now, just indicate that TUI will be launched
-    // The actual TUI implementation is in the tui module
-
+pub fn run(_cli: &Cli, args: &TuiArgs) -> Result<()> {
+    // Launch the TUI with optional project, session, and theme
     #[cfg(feature = "tui")]
     {
-        crate::tui::run(_args.project.as_deref(), _args.session.as_deref())
+        crate::tui::run_with_theme(
+            args.project.as_deref(),
+            args.session.as_deref(),
+            args.theme.as_deref(),
+        )
     }
 
     #[cfg(not(feature = "tui"))]
     {
+        // Suppress unused variable warnings
+        let _ = args;
         Err(SnatchError::unsupported(
             "TUI feature not enabled. Rebuild with --features tui",
         ))

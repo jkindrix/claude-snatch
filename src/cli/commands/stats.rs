@@ -2,12 +2,38 @@
 //!
 //! Displays usage statistics for sessions and projects.
 
+use rayon::prelude::*;
+
 use crate::analytics::{ProjectAnalytics, SessionAnalytics};
 use crate::cli::{Cli, OutputFormat, StatsArgs};
+use crate::discovery::Session;
 use crate::error::{Result, SnatchError};
 use crate::reconstruction::Conversation;
 
 use super::get_claude_dir;
+
+/// Compute statistics in parallel across multiple sessions.
+fn compute_stats_parallel(sessions: &[Session]) -> ProjectAnalytics {
+    // Process sessions in parallel and collect individual analytics
+    let session_analytics: Vec<SessionAnalytics> = sessions
+        .par_iter()
+        .filter_map(|session| {
+            session.parse().ok().and_then(|entries| {
+                Conversation::from_entries(entries)
+                    .ok()
+                    .map(|conv| SessionAnalytics::from_conversation(&conv))
+            })
+        })
+        .collect();
+
+    // Merge all analytics into a single ProjectAnalytics
+    let mut combined = ProjectAnalytics::default();
+    for analytics in session_analytics {
+        combined.add_session(&analytics);
+    }
+    combined.calculate_cost();
+    combined
+}
 
 /// Run the stats command.
 pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
@@ -36,35 +62,15 @@ pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
                 project_path: project_filter.clone(),
             })?;
 
-        let mut project_analytics = ProjectAnalytics::default();
+        let sessions = project.sessions()?;
+        let project_analytics = compute_stats_parallel(&sessions);
 
-        for session in project.sessions()? {
-            if let Ok(entries) = session.parse() {
-                if let Ok(conversation) = Conversation::from_entries(entries) {
-                    let session_analytics = SessionAnalytics::from_conversation(&conversation);
-                    project_analytics.add_session(&session_analytics);
-                }
-            }
-        }
-
-        project_analytics.calculate_cost();
         output_project_stats(cli, args, &project_analytics, project.decoded_path())?;
     } else if args.global {
-        // Global stats across all sessions
-        let mut global_analytics = ProjectAnalytics::default();
+        // Global stats across all sessions - parallel processing
+        let all_sessions = claude_dir.all_sessions()?;
+        let global_analytics = compute_stats_parallel(&all_sessions);
 
-        for project in claude_dir.projects()? {
-            for session in project.sessions()? {
-                if let Ok(entries) = session.parse() {
-                    if let Ok(conversation) = Conversation::from_entries(entries) {
-                        let session_analytics = SessionAnalytics::from_conversation(&conversation);
-                        global_analytics.add_session(&session_analytics);
-                    }
-                }
-            }
-        }
-
-        global_analytics.calculate_cost();
         output_global_stats(cli, args, &global_analytics)?;
     } else {
         // Default: show summary of all projects

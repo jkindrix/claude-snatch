@@ -17,6 +17,8 @@ use clap_complete::{generate, Shell};
 use std::io;
 use std::path::PathBuf;
 
+use crate::cache::init_global_cache;
+use crate::config::Config;
 use crate::error::Result;
 use crate::export::ExportFormat;
 
@@ -31,28 +33,66 @@ pub struct Cli {
     pub command: Commands,
 
     /// Path to Claude directory (default: ~/.claude).
-    #[arg(short = 'd', long, global = true)]
+    #[arg(short = 'd', long, global = true, env = "SNATCH_CLAUDE_DIR")]
     pub claude_dir: Option<PathBuf>,
 
     /// Output format for structured data.
-    #[arg(short = 'o', long, global = true, default_value = "text")]
+    #[arg(short = 'o', long, global = true, default_value = "text", env = "SNATCH_OUTPUT")]
     pub output: OutputFormat,
 
     /// Enable verbose output.
-    #[arg(short = 'v', long, global = true)]
+    #[arg(short = 'v', long, global = true, env = "SNATCH_VERBOSE")]
     pub verbose: bool,
 
     /// Suppress non-essential output.
-    #[arg(short = 'q', long, global = true)]
+    #[arg(short = 'q', long, global = true, env = "SNATCH_QUIET")]
     pub quiet: bool,
 
     /// Enable colored output (auto-detected by default).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "SNATCH_COLOR")]
     pub color: Option<bool>,
 
     /// Output as JSON (shorthand for -o json).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "SNATCH_JSON")]
     pub json: bool,
+
+    /// Log level (error, warn, info, debug, trace).
+    #[arg(long, global = true, default_value = "warn", env = "SNATCH_LOG_LEVEL")]
+    pub log_level: LogLevel,
+
+    /// Log output file (default: stderr).
+    #[arg(long, global = true, env = "SNATCH_LOG_FILE")]
+    pub log_file: Option<std::path::PathBuf>,
+}
+
+/// Log level options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum LogLevel {
+    /// Only errors.
+    Error,
+    /// Errors and warnings.
+    #[default]
+    Warn,
+    /// Errors, warnings, and informational messages.
+    Info,
+    /// All of the above plus debug messages.
+    Debug,
+    /// All messages including trace-level details.
+    Trace,
+}
+
+impl LogLevel {
+    /// Convert to tracing filter level.
+    #[must_use]
+    pub fn to_filter_string(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+        }
+    }
 }
 
 impl Cli {
@@ -99,6 +139,21 @@ pub enum Commands {
 
     /// Watch for session changes.
     Watch(WatchArgs),
+
+    /// Compare two sessions or files.
+    #[command(alias = "d")]
+    Diff(DiffArgs),
+
+    /// View and modify configuration.
+    #[command(alias = "cfg")]
+    Config(ConfigArgs),
+
+    /// Extract Beyond-JSONL data (settings, CLAUDE.md, MCP, etc.).
+    #[command(alias = "ext")]
+    Extract(ExtractArgs),
+
+    /// Manage the session cache.
+    Cache(CacheArgs),
 
     /// Generate shell completions.
     Completions(CompletionsArgs),
@@ -225,16 +280,40 @@ pub enum SortOrder {
 /// Arguments for the export command.
 #[derive(Debug, Parser)]
 pub struct ExportArgs {
-    /// Session ID or path to export.
-    pub session: String,
+    /// Session ID or path to export (optional with --all).
+    pub session: Option<String>,
 
     /// Output file path (stdout if not specified).
     #[arg(short = 'o', long)]
     pub output: Option<PathBuf>,
 
     /// Export format.
-    #[arg(short = 'f', long, default_value = "markdown")]
+    #[arg(short = 'f', long, default_value = "markdown", env = "SNATCH_EXPORT_FORMAT")]
     pub format: ExportFormatArg,
+
+    /// Export all sessions.
+    #[arg(short = 'a', long)]
+    pub all: bool,
+
+    /// Filter by project path (substring match).
+    #[arg(short = 'p', long)]
+    pub project: Option<String>,
+
+    /// Export sessions modified since this date (YYYY-MM-DD or relative like "1week").
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Export sessions modified until this date (YYYY-MM-DD or relative like "1week").
+    #[arg(long)]
+    pub until: Option<String>,
+
+    /// Include subagent sessions.
+    #[arg(long)]
+    pub include_agents: bool,
+
+    /// Combine parent session with its subagent transcripts (interleaved by time).
+    #[arg(long)]
+    pub combine_agents: bool,
 
     /// Include thinking blocks.
     #[arg(long, default_value = "true")]
@@ -271,6 +350,19 @@ pub struct ExportArgs {
     /// Pretty-print JSON output.
     #[arg(long)]
     pub pretty: bool,
+
+    /// Lossless export: preserve all data including unknown fields.
+    /// Implies --metadata, --system, --thinking, --tool-use, --tool-results.
+    #[arg(long)]
+    pub lossless: bool,
+
+    /// Show progress bar for long operations.
+    #[arg(long)]
+    pub progress: bool,
+
+    /// Overwrite existing output files without prompting.
+    #[arg(long)]
+    pub overwrite: bool,
 }
 
 /// Export format argument.
@@ -289,6 +381,14 @@ pub enum ExportFormatArg {
     Text,
     /// JSONL (original format).
     Jsonl,
+    /// CSV tabular format.
+    Csv,
+    /// XML structured markup.
+    Xml,
+    /// HTML formatted output.
+    Html,
+    /// SQLite database.
+    Sqlite,
 }
 
 impl From<ExportFormatArg> for ExportFormat {
@@ -298,6 +398,10 @@ impl From<ExportFormatArg> for ExportFormat {
             ExportFormatArg::Json => ExportFormat::Json,
             ExportFormatArg::JsonPretty => ExportFormat::JsonPretty,
             ExportFormatArg::Text | ExportFormatArg::Jsonl => ExportFormat::Text,
+            ExportFormatArg::Csv => ExportFormat::Csv,
+            ExportFormatArg::Xml => ExportFormat::Xml,
+            ExportFormatArg::Html => ExportFormat::Html,
+            ExportFormatArg::Sqlite => ExportFormat::Sqlite,
         }
     }
 }
@@ -339,6 +443,30 @@ pub struct SearchArgs {
     /// Maximum results.
     #[arg(short = 'n', long)]
     pub limit: Option<usize>,
+
+    /// Only show session IDs containing matches (like grep -l).
+    #[arg(short = 'l', long)]
+    pub files_only: bool,
+
+    /// Show count of matches only (like grep -c).
+    #[arg(short = 'c', long)]
+    pub count: bool,
+
+    /// Filter by message type (user, assistant, system, summary).
+    #[arg(short = 't', long = "type")]
+    pub message_type: Option<String>,
+
+    /// Filter by model used (e.g., "claude-sonnet", "opus").
+    #[arg(short = 'm', long)]
+    pub model: Option<String>,
+
+    /// Filter by specific tool name (e.g., "Read", "Bash").
+    #[arg(long = "tool-name")]
+    pub tool_name: Option<String>,
+
+    /// Only show messages with errors.
+    #[arg(long)]
+    pub errors: bool,
 }
 
 /// Arguments for the stats command.
@@ -408,7 +536,7 @@ pub struct TuiArgs {
     pub session: Option<String>,
 
     /// Theme to use.
-    #[arg(long)]
+    #[arg(long, env = "SNATCH_TUI_THEME")]
     pub theme: Option<String>,
 }
 
@@ -454,9 +582,175 @@ pub struct WatchArgs {
     pub interval: u64,
 }
 
+/// Arguments for the diff command.
+#[derive(Debug, Parser)]
+pub struct DiffArgs {
+    /// First session ID or file path.
+    pub first: String,
+
+    /// Second session ID or file path.
+    pub second: String,
+
+    /// Only show summary, not details.
+    #[arg(short = 's', long)]
+    pub summary_only: bool,
+
+    /// Don't show content of differing lines.
+    #[arg(long)]
+    pub no_content: bool,
+
+    /// Exit with code 1 if files differ.
+    #[arg(short = 'e', long)]
+    pub exit_code: bool,
+
+    /// Show semantic diff (compare by message structure).
+    #[arg(long)]
+    pub semantic: bool,
+}
+
+/// Arguments for the config command.
+#[derive(Debug, Parser)]
+pub struct ConfigArgs {
+    /// Config action to perform.
+    #[command(subcommand)]
+    pub action: ConfigAction,
+}
+
+/// Config subcommand actions.
+#[derive(Debug, Subcommand)]
+pub enum ConfigAction {
+    /// Show all configuration values.
+    Show,
+
+    /// Get a specific configuration value.
+    Get {
+        /// Configuration key (e.g., "theme.color").
+        key: String,
+    },
+
+    /// Set a configuration value.
+    Set {
+        /// Configuration key (e.g., "theme.color").
+        key: String,
+        /// Value to set.
+        value: String,
+    },
+
+    /// Show configuration file path.
+    Path,
+
+    /// Initialize configuration file with defaults.
+    Init,
+
+    /// Reset configuration to defaults.
+    Reset,
+}
+
+/// Arguments for the cache command.
+#[derive(Debug, Parser)]
+pub struct CacheArgs {
+    /// Cache action to perform.
+    #[command(subcommand)]
+    pub action: CacheAction,
+}
+
+/// Cache subcommand actions.
+#[derive(Debug, Subcommand)]
+pub enum CacheAction {
+    /// Show cache statistics.
+    Stats,
+
+    /// Clear all cached data.
+    Clear,
+
+    /// Invalidate stale cache entries.
+    Invalidate,
+
+    /// Enable or disable caching.
+    Status {
+        /// Enable caching.
+        #[arg(long, conflicts_with = "disable")]
+        enable: bool,
+
+        /// Disable caching.
+        #[arg(long, conflicts_with = "enable")]
+        disable: bool,
+    },
+}
+
+/// Arguments for the extract command.
+#[derive(Debug, Parser)]
+pub struct ExtractArgs {
+    /// Extract data for a specific project path.
+    #[arg(short = 'p', long)]
+    pub project: Option<String>,
+
+    /// Output as pretty-printed JSON.
+    #[arg(long)]
+    pub pretty: bool,
+
+    /// Show all data sources.
+    #[arg(short = 'a', long)]
+    pub all: bool,
+
+    /// Include settings data.
+    #[arg(long)]
+    pub settings: bool,
+
+    /// Include CLAUDE.md content.
+    #[arg(long)]
+    pub claude_md: bool,
+
+    /// Include MCP configuration.
+    #[arg(long)]
+    pub mcp: bool,
+
+    /// Include custom commands.
+    #[arg(long)]
+    pub commands: bool,
+
+    /// Include rules.
+    #[arg(long)]
+    pub rules: bool,
+
+    /// Include hooks configuration.
+    #[arg(long)]
+    pub hooks: bool,
+
+    /// Include file history.
+    #[arg(long)]
+    pub file_history: bool,
+}
+
+/// Initialize tracing/logging based on CLI options.
+fn init_logging(cli: &Cli) {
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(cli.log_level.to_filter_string()));
+
+    let subscriber = fmt::Subscriber::builder()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr);
+
+    // If a log file is specified, we'd need more complex setup
+    // For now, just use stderr
+    if let Err(e) = subscriber.try_init() {
+        // Logging already initialized or other error, that's ok
+        eprintln!("Warning: Could not initialize logging: {e}");
+    }
+}
+
 /// Run the CLI application.
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+
+    // Initialize logging
+    init_logging(&cli);
+
+    // Initialize the cache from configuration
+    let config = Config::load().unwrap_or_default();
+    init_global_cache(&config.cache);
 
     match &cli.command {
         Commands::List(args) => commands::list::run(&cli, args),
@@ -467,6 +761,10 @@ pub fn run() -> Result<()> {
         Commands::Tui(args) => commands::tui::run(&cli, args),
         Commands::Validate(args) => commands::validate::run(&cli, args),
         Commands::Watch(args) => commands::watch::run(&cli, args),
+        Commands::Diff(args) => commands::diff::run(&cli, args),
+        Commands::Config(args) => commands::config::run(&cli, args),
+        Commands::Extract(args) => commands::extract::run(&cli, args),
+        Commands::Cache(args) => commands::cache::run(&cli, args),
         Commands::Completions(args) => {
             generate_completions(args.shell);
             Ok(())

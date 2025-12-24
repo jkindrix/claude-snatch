@@ -3,7 +3,11 @@
 //! Each command is implemented in its own module with a `run` function
 //! that handles the command logic.
 
+pub mod cache;
+pub mod config;
+pub mod diff;
 pub mod export;
+pub mod extract;
 pub mod info;
 pub mod list;
 pub mod search;
