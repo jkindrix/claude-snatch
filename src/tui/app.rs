@@ -3,7 +3,7 @@
 use std::io;
 
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyModifiers},
+    event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyModifiers, MouseButton, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -25,6 +25,11 @@ use super::theme::available_themes;
 
 /// Run the TUI application.
 pub fn run(project: Option<&str>, session: Option<&str>) -> Result<()> {
+    run_with_theme(project, session, None)
+}
+
+/// Run the TUI application with a specific theme.
+pub fn run_with_theme(project: Option<&str>, session: Option<&str>, theme: Option<&str>) -> Result<()> {
     // Setup terminal
     enable_raw_mode().map_err(|e| SnatchError::io("Failed to enable raw mode", e))?;
 
@@ -36,8 +41,8 @@ pub fn run(project: Option<&str>, session: Option<&str>) -> Result<()> {
     let mut terminal = Terminal::new(backend)
         .map_err(|e| SnatchError::io("Failed to create terminal", e))?;
 
-    // Create app state
-    let mut app = AppState::new()?;
+    // Create app state with optional theme
+    let mut app = AppState::with_theme(theme)?;
 
     // Load initial data
     if let Some(session_id) = session {
@@ -78,6 +83,83 @@ fn run_loop<B: ratatui::backend::Backend>(
         // Handle events from the event handler
         match events.next() {
             Ok(Event::Key(key)) => {
+                // Clear status message on any key press
+                app.status_message = None;
+
+                // Handle search mode input first
+                if app.is_searching() {
+                    match (key.modifiers, key.code) {
+                        // Exit search mode
+                        (KeyModifiers::NONE, KeyCode::Esc) => {
+                            app.cancel_search();
+                            continue;
+                        }
+                        // Confirm search (exit but keep results)
+                        (KeyModifiers::NONE, KeyCode::Enter) => {
+                            app.search_state.active = false;
+                            continue;
+                        }
+                        // Navigate results
+                        (KeyModifiers::NONE, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
+                            app.search_next();
+                            continue;
+                        }
+                        (KeyModifiers::NONE, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
+                            app.search_prev();
+                            continue;
+                        }
+                        // Backspace
+                        (KeyModifiers::NONE, KeyCode::Backspace) => {
+                            app.search_backspace();
+                            continue;
+                        }
+                        // Character input
+                        (KeyModifiers::NONE, KeyCode::Char(c)) | (KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+                            app.search_input(c);
+                            continue;
+                        }
+                        _ => continue,
+                    }
+                }
+
+                // Handle export dialog input
+                if app.is_exporting() {
+                    match (key.modifiers, key.code) {
+                        // Cancel export
+                        (KeyModifiers::NONE, KeyCode::Esc) | (_, KeyCode::Char('q')) => {
+                            app.cancel_export();
+                            continue;
+                        }
+                        // Confirm export
+                        (KeyModifiers::NONE, KeyCode::Enter) => {
+                            if let Err(e) = app.confirm_export() {
+                                app.export_dialog.status_message = Some(format!("Error: {e}"));
+                            }
+                            continue;
+                        }
+                        // Navigate format (left/right or h/l)
+                        (KeyModifiers::NONE, KeyCode::Left) | (KeyModifiers::NONE, KeyCode::Char('h')) => {
+                            app.export_dialog.prev_format();
+                            continue;
+                        }
+                        (KeyModifiers::NONE, KeyCode::Right) | (KeyModifiers::NONE, KeyCode::Char('l')) => {
+                            app.export_dialog.next_format();
+                            continue;
+                        }
+                        // Toggle thinking (t)
+                        (KeyModifiers::NONE, KeyCode::Char('t')) => {
+                            app.export_dialog.include_thinking = !app.export_dialog.include_thinking;
+                            continue;
+                        }
+                        // Toggle tools (o)
+                        (KeyModifiers::NONE, KeyCode::Char('o')) => {
+                            app.export_dialog.include_tools = !app.export_dialog.include_tools;
+                            continue;
+                        }
+                        _ => continue,
+                    }
+                }
+
                 // Check configurable key bindings first
                 if bindings.is_quit(&key) {
                     return Ok(());
@@ -145,6 +227,18 @@ fn run_loop<B: ratatui::backend::Backend>(
                     (KeyModifiers::NONE, KeyCode::Char('/')) => {
                         app.start_search();
                     }
+                    // Next search result (n)
+                    (KeyModifiers::NONE, KeyCode::Char('n')) => {
+                        if !app.search_state.results.is_empty() {
+                            app.search_next();
+                        }
+                    }
+                    // Previous search result (N)
+                    (KeyModifiers::SHIFT, KeyCode::Char('N')) => {
+                        if !app.search_state.results.is_empty() {
+                            app.search_prev();
+                        }
+                    }
 
                     // Refresh
                     (KeyModifiers::NONE, KeyCode::Char('r')) => {
@@ -156,6 +250,16 @@ fn run_loop<B: ratatui::backend::Backend>(
                         app.export()?;
                     }
 
+                    // Copy message to clipboard
+                    (KeyModifiers::NONE, KeyCode::Char('c')) => {
+                        app.copy_message()?;
+                    }
+
+                    // Copy code block to clipboard
+                    (KeyModifiers::SHIFT, KeyCode::Char('C')) => {
+                        app.copy_code_block()?;
+                    }
+
                     // Toggle thinking
                     (KeyModifiers::NONE, KeyCode::Char('t')) => {
                         app.toggle_thinking();
@@ -164,6 +268,11 @@ fn run_loop<B: ratatui::backend::Backend>(
                     // Toggle tools
                     (KeyModifiers::NONE, KeyCode::Char('o')) => {
                         app.toggle_tools();
+                    }
+
+                    // Toggle word wrap
+                    (KeyModifiers::NONE, KeyCode::Char('w')) => {
+                        app.toggle_word_wrap();
                     }
 
                     // Cycle theme
@@ -185,8 +294,30 @@ fn run_loop<B: ratatui::backend::Backend>(
             Ok(Event::Resize(_, _)) => {
                 // Terminal resize is handled automatically by ratatui
             }
-            Ok(Event::Mouse(_)) => {
-                // Mouse events - could add mouse support later
+            Ok(Event::Mouse(mouse)) => {
+                // Handle mouse events
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        app.scroll_up(3);
+                    }
+                    MouseEventKind::ScrollDown => {
+                        app.scroll_down(3);
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        // Determine which panel was clicked based on x position
+                        let terminal_width = terminal.size().map(|s| s.width).unwrap_or(120);
+                        let panel_width = terminal_width / 4;
+
+                        if mouse.column < panel_width {
+                            app.set_focus(0); // Projects panel
+                        } else if mouse.column < panel_width * 2 {
+                            app.set_focus(1); // Sessions panel
+                        } else {
+                            app.set_focus(2); // Conversation panel
+                        }
+                    }
+                    _ => {}
+                }
             }
             Err(_) => {
                 // Channel closed, exit
@@ -198,11 +329,13 @@ fn run_loop<B: ratatui::backend::Backend>(
 
 /// Draw the UI.
 fn draw_ui(f: &mut Frame, app: &AppState) {
-    // Main layout: content area + status bar
+    // Main layout: content area + search bar (if active) + status bar
+    let search_height = if app.is_searching() { 3 } else { 0 };
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
+            Constraint::Length(search_height),
             Constraint::Length(1),
         ])
         .split(f.area());
@@ -226,13 +359,48 @@ fn draw_ui(f: &mut Frame, app: &AppState) {
     // Right panel: Details
     draw_details_panel(f, app, chunks[2]);
 
+    // Search bar (if active)
+    if app.is_searching() {
+        draw_search_bar(f, app, main_chunks[1]);
+    }
+
     // Status bar at bottom
-    draw_status_bar(f, app, main_chunks[1]);
+    draw_status_bar(f, app, main_chunks[2]);
 
     // Help overlay if active
     if app.show_help {
         draw_help_overlay(f);
     }
+
+    // Export dialog overlay if active
+    if app.is_exporting() {
+        draw_export_dialog(f, app);
+    }
+}
+
+/// Draw the search bar.
+fn draw_search_bar(f: &mut Frame, app: &AppState, area: Rect) {
+    let search_text = format!(
+        "/{}{} [{}]",
+        &app.search_state.query,
+        if app.is_searching() { "█" } else { "" },
+        app.search_state.result_count_str()
+    );
+
+    let style = Style::default()
+        .fg(app.theme.primary)
+        .add_modifier(Modifier::BOLD);
+
+    let paragraph = Paragraph::new(search_text)
+        .style(style)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(app.theme.warning))
+                .title(" Search (Enter to confirm, Esc to cancel) "),
+        );
+
+    f.render_widget(paragraph, area);
 }
 
 /// Draw the tree panel (projects and sessions).
@@ -293,14 +461,18 @@ fn draw_conversation_panel(f: &mut Frame, app: &AppState, area: Rect) {
             .collect()
     };
 
-    let paragraph = Paragraph::new(content)
+    let mut paragraph = Paragraph::new(content)
         .block(
             Block::default()
                 .title(title)
                 .borders(Borders::ALL)
                 .border_style(border_style),
-        )
-        .wrap(Wrap { trim: false });
+        );
+
+    // Apply word wrap if enabled
+    if app.word_wrap {
+        paragraph = paragraph.wrap(Wrap { trim: false });
+    }
 
     f.render_widget(paragraph, area);
 }
@@ -322,7 +494,11 @@ fn draw_details_panel(f: &mut Frame, app: &AppState, area: Rect) {
 
 /// Draw the status bar.
 fn draw_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
-    let mode = if app.show_help {
+    let mode = if app.is_exporting() {
+        "EXPORT"
+    } else if app.is_searching() {
+        "SEARCH"
+    } else if app.show_help {
         "HELP"
     } else {
         match app.focus {
@@ -333,13 +509,22 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
         }
     };
 
-    let left_content = vec![
-        Span::styled(" snatch ", Style::default().fg(app.theme.primary).add_modifier(Modifier::BOLD)),
-        Span::raw("│ "),
-        Span::styled(mode, Style::default().fg(app.theme.warning)),
-        Span::raw(" │ "),
-        Span::styled(&app.theme.name, Style::default().fg(app.theme.secondary)),
-    ];
+    let left_content = if let Some(ref msg) = app.status_message {
+        // Show status message if present
+        vec![
+            Span::styled(" snatch ", Style::default().fg(app.theme.primary).add_modifier(Modifier::BOLD)),
+            Span::raw("│ "),
+            Span::styled(msg.as_str(), Style::default().fg(app.theme.success)),
+        ]
+    } else {
+        vec![
+            Span::styled(" snatch ", Style::default().fg(app.theme.primary).add_modifier(Modifier::BOLD)),
+            Span::raw("│ "),
+            Span::styled(mode, Style::default().fg(app.theme.warning)),
+            Span::raw(" │ "),
+            Span::styled(&app.theme.name, Style::default().fg(app.theme.secondary)),
+        ]
+    };
 
     let right_content = if let Some(session_id) = &app.current_session {
         let short_id = &session_id[..8.min(session_id.len())];
@@ -364,7 +549,7 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
 
 /// Draw help overlay.
 fn draw_help_overlay(f: &mut Frame) {
-    let area = centered_rect(60, 60, f.area());
+    let area = centered_rect(60, 70, f.area());
 
     let help_text = vec![
         Line::from(Span::styled("Keyboard Shortcuts", Style::default().add_modifier(Modifier::BOLD))),
@@ -382,13 +567,22 @@ fn draw_help_overlay(f: &mut Frame) {
         Line::from("  2         Focus conversation panel"),
         Line::from("  3         Focus details panel"),
         Line::from(""),
+        Line::from("Search:"),
+        Line::from("  /         Start search"),
+        Line::from("  n         Next search result"),
+        Line::from("  N         Previous search result"),
+        Line::from("  Enter     Confirm search"),
+        Line::from("  Esc       Cancel search"),
+        Line::from(""),
         Line::from("Actions:"),
         Line::from("  r         Refresh"),
         Line::from("  e         Export session"),
+        Line::from("  c         Copy message to clipboard"),
+        Line::from("  C         Copy code block to clipboard"),
         Line::from("  t         Toggle thinking blocks"),
         Line::from("  o         Toggle tool outputs"),
+        Line::from("  w         Toggle word wrap"),
         Line::from(format!("  T         Cycle theme ({})", available_themes().join("/"))),
-        Line::from("  /         Search"),
         Line::from(""),
         Line::from("  q         Quit"),
         Line::from("  ?         Toggle help"),
@@ -401,6 +595,76 @@ fn draw_help_overlay(f: &mut Frame) {
                 .borders(Borders::ALL)
                 .style(Style::default().bg(Color::Black)),
         );
+
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(paragraph, area);
+}
+
+/// Draw export dialog overlay.
+fn draw_export_dialog(f: &mut Frame, app: &AppState) {
+    let area = centered_rect(50, 40, f.area());
+
+    // Build dialog content
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Export Session",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+
+    // Format selection with arrows
+    let format_line = Line::from(vec![
+        Span::raw("Format: "),
+        Span::raw("◀ "),
+        Span::styled(
+            app.export_dialog.format_name(),
+            Style::default().fg(app.theme.primary).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" ▶"),
+    ]);
+    lines.push(format_line);
+    lines.push(Line::from(""));
+
+    // Toggles
+    let thinking_checkbox = if app.export_dialog.include_thinking { "[x]" } else { "[ ]" };
+    let tools_checkbox = if app.export_dialog.include_tools { "[x]" } else { "[ ]" };
+
+    lines.push(Line::from(format!(
+        "{} Include thinking blocks (t)",
+        thinking_checkbox
+    )));
+    lines.push(Line::from(format!(
+        "{} Include tool outputs (o)",
+        tools_checkbox
+    )));
+    lines.push(Line::from(""));
+
+    // Status message
+    if let Some(msg) = &app.export_dialog.status_message {
+        let style = if msg.starts_with("Error") {
+            Style::default().fg(app.theme.error)
+        } else {
+            Style::default().fg(app.theme.success)
+        };
+        lines.push(Line::from(Span::styled(msg.clone(), style)));
+        lines.push(Line::from(""));
+    }
+
+    // Instructions
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Enter: Export  |  h/l: Change format  |  Esc: Cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .title(" Export ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(app.theme.primary))
+            .style(Style::default().bg(Color::Black)),
+    );
 
     f.render_widget(ratatui::widgets::Clear, area);
     f.render_widget(paragraph, area);
