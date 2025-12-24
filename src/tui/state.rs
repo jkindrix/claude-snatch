@@ -156,15 +156,31 @@ pub struct FilterState {
     /// Message type filter.
     pub message_type: MessageTypeFilter,
     /// Date range filter - start date (ISO format).
-    pub date_from: Option<String>,
+    pub date_from: Option<chrono::NaiveDate>,
     /// Date range filter - end date (ISO format).
-    pub date_to: Option<String>,
+    pub date_to: Option<chrono::NaiveDate>,
     /// Only show messages with errors.
     pub errors_only: bool,
     /// Only show messages with thinking blocks.
     pub thinking_only: bool,
     /// Only show messages with tool use.
     pub tools_only: bool,
+    /// Current date input mode (for TUI).
+    pub date_input_mode: DateInputMode,
+    /// Buffer for date input.
+    pub date_input_buffer: String,
+}
+
+/// Date input mode for filter UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DateInputMode {
+    /// Not entering a date.
+    #[default]
+    None,
+    /// Entering start date.
+    From,
+    /// Entering end date.
+    To,
 }
 
 impl FilterState {
@@ -187,6 +203,78 @@ impl FilterState {
         self.errors_only = false;
         self.thinking_only = false;
         self.tools_only = false;
+        self.date_input_mode = DateInputMode::None;
+        self.date_input_buffer.clear();
+    }
+
+    /// Check if currently entering a date.
+    #[must_use]
+    pub fn is_entering_date(&self) -> bool {
+        self.date_input_mode != DateInputMode::None
+    }
+
+    /// Start entering a date.
+    pub fn start_date_input(&mut self, mode: DateInputMode) {
+        self.date_input_mode = mode;
+        self.date_input_buffer.clear();
+    }
+
+    /// Cancel date input.
+    pub fn cancel_date_input(&mut self) {
+        self.date_input_mode = DateInputMode::None;
+        self.date_input_buffer.clear();
+    }
+
+    /// Add character to date input buffer.
+    pub fn push_date_char(&mut self, c: char) {
+        // Only allow valid date characters
+        if c.is_ascii_digit() || c == '-' {
+            self.date_input_buffer.push(c);
+        }
+    }
+
+    /// Remove character from date input buffer.
+    pub fn pop_date_char(&mut self) {
+        self.date_input_buffer.pop();
+    }
+
+    /// Confirm date input and apply filter.
+    pub fn confirm_date_input(&mut self) -> bool {
+        use chrono::NaiveDate;
+
+        // Try to parse the date
+        if let Ok(date) = NaiveDate::parse_from_str(&self.date_input_buffer, "%Y-%m-%d") {
+            match self.date_input_mode {
+                DateInputMode::From => self.date_from = Some(date),
+                DateInputMode::To => self.date_to = Some(date),
+                DateInputMode::None => {}
+            }
+            self.date_input_mode = DateInputMode::None;
+            self.date_input_buffer.clear();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if a timestamp falls within the date range.
+    #[must_use]
+    pub fn is_in_date_range(&self, timestamp: &chrono::DateTime<chrono::Utc>) -> bool {
+        let date = timestamp.date_naive();
+
+        if let Some(from) = self.date_from {
+            if date < from {
+                return false;
+            }
+        }
+
+        if let Some(to) = self.date_to {
+            if date > to {
+                return false;
+            }
+        }
+
+        true
     }
 
     /// Get filter summary for status bar.
@@ -194,16 +282,21 @@ impl FilterState {
     pub fn summary(&self) -> String {
         let mut parts = Vec::new();
         if self.message_type != MessageTypeFilter::All {
-            parts.push(self.message_type.display_name());
+            parts.push(self.message_type.display_name().to_string());
+        }
+        if self.date_from.is_some() || self.date_to.is_some() {
+            let from = self.date_from.map_or("*".to_string(), |d| d.format("%m/%d").to_string());
+            let to = self.date_to.map_or("*".to_string(), |d| d.format("%m/%d").to_string());
+            parts.push(format!("{from}-{to}"));
         }
         if self.errors_only {
-            parts.push("Errors");
+            parts.push("Errors".to_string());
         }
         if self.thinking_only {
-            parts.push("Thinking");
+            parts.push("Thinking".to_string());
         }
         if self.tools_only {
-            parts.push("Tools");
+            parts.push("Tools".to_string());
         }
         if parts.is_empty() {
             "No filters".to_string()
@@ -775,6 +868,62 @@ impl AppState {
         self.update_conversation_display();
     }
 
+    /// Start entering date-from filter.
+    pub fn start_date_from_input(&mut self) {
+        self.filter_state.start_date_input(DateInputMode::From);
+        self.status_message = Some("Enter start date (YYYY-MM-DD):".to_string());
+    }
+
+    /// Start entering date-to filter.
+    pub fn start_date_to_input(&mut self) {
+        self.filter_state.start_date_input(DateInputMode::To);
+        self.status_message = Some("Enter end date (YYYY-MM-DD):".to_string());
+    }
+
+    /// Handle character input during date entry.
+    pub fn date_input(&mut self, c: char) {
+        self.filter_state.push_date_char(c);
+    }
+
+    /// Handle backspace during date entry.
+    pub fn date_backspace(&mut self) {
+        self.filter_state.pop_date_char();
+    }
+
+    /// Confirm date input.
+    pub fn confirm_date_input(&mut self) {
+        if self.filter_state.confirm_date_input() {
+            self.status_message = Some(format!("Filter: {}", self.filter_state.summary()));
+            self.update_conversation_display();
+        } else {
+            self.status_message = Some("Invalid date format. Use YYYY-MM-DD".to_string());
+        }
+    }
+
+    /// Cancel date input.
+    pub fn cancel_date_input(&mut self) {
+        self.filter_state.cancel_date_input();
+        self.status_message = Some("Date input cancelled".to_string());
+    }
+
+    /// Check if currently entering a date.
+    #[must_use]
+    pub fn is_entering_date(&self) -> bool {
+        self.filter_state.is_entering_date()
+    }
+
+    /// Get the current date input buffer for display.
+    #[must_use]
+    pub fn date_input_buffer(&self) -> &str {
+        &self.filter_state.date_input_buffer
+    }
+
+    /// Get the current date input mode.
+    #[must_use]
+    pub fn date_input_mode(&self) -> DateInputMode {
+        self.filter_state.date_input_mode
+    }
+
     /// Check if filter panel is active.
     #[must_use]
     pub fn is_filter_active(&self) -> bool {
@@ -1031,6 +1180,25 @@ impl AppState {
             };
             if !has_tools {
                 return false;
+            }
+        }
+
+        // Check date range filter
+        if self.filter_state.date_from.is_some() || self.filter_state.date_to.is_some() {
+            // Get timestamp if available - entries without timestamps pass through
+            let timestamp = match entry {
+                LogEntry::User(u) => Some(&u.timestamp),
+                LogEntry::Assistant(a) => Some(&a.timestamp),
+                LogEntry::System(s) => Some(&s.timestamp),
+                LogEntry::QueueOperation(q) => Some(&q.timestamp),
+                LogEntry::TurnEnd(t) => Some(&t.timestamp),
+                // Summary and FileHistorySnapshot don't have timestamps, include them by default
+                LogEntry::Summary(_) | LogEntry::FileHistorySnapshot(_) => None,
+            };
+            if let Some(ts) = timestamp {
+                if !self.filter_state.is_in_date_range(ts) {
+                    return false;
+                }
             }
         }
 

@@ -791,7 +791,7 @@ esac
 | [x] TSRCH-001 | Real-time search as you type | P0 | ✓ |
 | [x] TSRCH-002 | Highlight search matches | P0 | ✓ |
 | [x] TSRCH-003 | Filter panel for message types | P1 | ✓ (f/F/E keys) |
-| [ ] TSRCH-004 | Filter by date range | P1 | Partial (structure ready) |
+| [x] TSRCH-004 | Filter by date range | P1 | ✓ ([ and ] keys) |
 | [ ] TSRCH-005 | Filter by model | P2 | |
 | [ ] TSRCH-006 | Save/load filter presets | P3 | |
 

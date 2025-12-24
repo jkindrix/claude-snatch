@@ -160,6 +160,33 @@ fn run_loop<B: ratatui::backend::Backend>(
                     }
                 }
 
+                // Handle date input mode
+                if app.is_entering_date() {
+                    match (key.modifiers, key.code) {
+                        // Cancel date input
+                        (KeyModifiers::NONE, KeyCode::Esc) => {
+                            app.cancel_date_input();
+                            continue;
+                        }
+                        // Confirm date input
+                        (KeyModifiers::NONE, KeyCode::Enter) => {
+                            app.confirm_date_input();
+                            continue;
+                        }
+                        // Backspace
+                        (KeyModifiers::NONE, KeyCode::Backspace) => {
+                            app.date_backspace();
+                            continue;
+                        }
+                        // Character input (digits and dash)
+                        (KeyModifiers::NONE, KeyCode::Char(c)) if c.is_ascii_digit() || c == '-' => {
+                            app.date_input(c);
+                            continue;
+                        }
+                        _ => continue,
+                    }
+                }
+
                 // Check configurable key bindings first
                 if bindings.is_quit(&key) {
                     return Ok(());
@@ -287,6 +314,13 @@ fn run_loop<B: ratatui::backend::Backend>(
                     }
                     (KeyModifiers::SHIFT, KeyCode::Char('X')) => {
                         app.clear_filters();
+                    }
+                    // Date range filters
+                    (KeyModifiers::NONE, KeyCode::Char('[')) => {
+                        app.start_date_from_input();
+                    }
+                    (KeyModifiers::NONE, KeyCode::Char(']')) => {
+                        app.start_date_to_input();
                     }
 
                     // Cycle theme
@@ -512,6 +546,8 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
         "EXPORT"
     } else if app.is_searching() {
         "SEARCH"
+    } else if app.is_entering_date() {
+        "DATE INPUT"
     } else if app.show_help {
         "HELP"
     } else {
@@ -523,7 +559,23 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
         }
     };
 
-    let left_content = if let Some(ref msg) = app.status_message {
+    let left_content = if app.is_entering_date() {
+        // Show date input prompt with current buffer
+        use super::state::DateInputMode;
+        let label = match app.date_input_mode() {
+            DateInputMode::From => "From",
+            DateInputMode::To => "To",
+            DateInputMode::None => "Date",
+        };
+        vec![
+            Span::styled(" snatch ", Style::default().fg(app.theme.primary).add_modifier(Modifier::BOLD)),
+            Span::raw("│ "),
+            Span::styled(format!("{}: ", label), Style::default().fg(app.theme.warning)),
+            Span::styled(app.date_input_buffer().to_string(), Style::default().fg(app.theme.primary).add_modifier(Modifier::BOLD)),
+            Span::styled("█", Style::default().fg(app.theme.primary)),
+            Span::raw(" (YYYY-MM-DD, Enter to confirm, Esc to cancel)"),
+        ]
+    } else if let Some(ref msg) = app.status_message {
         // Show status message if present
         vec![
             Span::styled(" snatch ", Style::default().fg(app.theme.primary).add_modifier(Modifier::BOLD)),
@@ -613,6 +665,8 @@ fn draw_help_overlay(f: &mut Frame) {
         Line::from("  f         Toggle filter panel"),
         Line::from("  F         Cycle message type filter"),
         Line::from("  E         Toggle errors-only filter"),
+        Line::from("  [         Set date-from filter (YYYY-MM-DD)"),
+        Line::from("  ]         Set date-to filter (YYYY-MM-DD)"),
         Line::from("  X         Clear all filters"),
         Line::from(""),
         Line::from("  q         Quit"),
