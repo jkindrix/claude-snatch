@@ -3,19 +3,29 @@
 //! This module provides various export formats:
 //! - Markdown: Human-readable conversation transcripts
 //! - JSON: Lossless structured data export
-//! - HTML: Rich formatted output (future)
-//! - Plain text: Simple unformatted output (future)
+//! - HTML: Rich formatted output
+//! - Plain text: Simple formatted output with word wrapping
+//! - CSV: Spreadsheet-compatible tabular data
+//! - XML: Structured markup for integration
 //!
 //! All exporters support streaming output for large conversations
 //! and configurable formatting options.
 
+mod csv;
 mod html;
 mod json;
 mod markdown;
+mod sqlite;
+mod text;
+mod xml;
 
+pub use csv::*;
 pub use html::*;
 pub use json::*;
 pub use markdown::*;
+pub use sqlite::*;
+pub use text::*;
+pub use xml::*;
 
 use std::io::Write;
 use std::path::Path;
@@ -150,10 +160,16 @@ pub enum ExportFormat {
     Json,
     /// Pretty-printed JSON.
     JsonPretty,
-    /// Plain text.
+    /// Plain text with word wrapping.
     Text,
-    /// HTML (future).
+    /// HTML formatted output.
     Html,
+    /// CSV tabular data.
+    Csv,
+    /// XML structured markup.
+    Xml,
+    /// SQLite database.
+    Sqlite,
 }
 
 impl ExportFormat {
@@ -165,6 +181,9 @@ impl ExportFormat {
             Self::Json | Self::JsonPretty => "json",
             Self::Text => "txt",
             Self::Html => "html",
+            Self::Csv => "csv",
+            Self::Xml => "xml",
+            Self::Sqlite => "db",
         }
     }
 
@@ -177,8 +196,17 @@ impl ExportFormat {
             "json-pretty" | "jsonpretty" => Some(Self::JsonPretty),
             "text" | "txt" => Some(Self::Text),
             "html" => Some(Self::Html),
+            "csv" => Some(Self::Csv),
+            "xml" => Some(Self::Xml),
+            "sqlite" | "db" | "sql" => Some(Self::Sqlite),
             _ => None,
         }
+    }
+
+    /// Check if this format requires a file (cannot write to stdout).
+    #[must_use]
+    pub const fn requires_file(&self) -> bool {
+        matches!(self, Self::Sqlite)
     }
 }
 
@@ -230,13 +258,27 @@ pub fn export_to_file(
             exporter.export_conversation(conversation, &mut writer, options)?;
         }
         ExportFormat::Text => {
-            // Use markdown exporter with plain output for now
-            let exporter = MarkdownExporter::new().plain_text(true);
+            let exporter = TextExporter::new();
             exporter.export_conversation(conversation, &mut writer, options)?;
         }
         ExportFormat::Html => {
             let exporter = HtmlExporter::new();
             exporter.export_conversation(conversation, &mut writer, options)?;
+        }
+        ExportFormat::Csv => {
+            let exporter = CsvExporter::new();
+            exporter.export_conversation(conversation, &mut writer, options)?;
+        }
+        ExportFormat::Xml => {
+            let exporter = XmlExporter::new();
+            exporter.export_conversation(conversation, &mut writer, options)?;
+        }
+        ExportFormat::Sqlite => {
+            // SQLite requires direct file access, not a writer
+            drop(writer); // Close the file we opened
+            std::fs::remove_file(path).ok(); // Remove the empty file
+            let exporter = SqliteExporter::new();
+            return exporter.export_to_file(conversation, path, options);
         }
     }
 
@@ -269,12 +311,25 @@ pub fn export_to_string(
             exporter.export_conversation(conversation, &mut buffer, options)?;
         }
         ExportFormat::Text => {
-            let exporter = MarkdownExporter::new().plain_text(true);
+            let exporter = TextExporter::new();
             exporter.export_conversation(conversation, &mut buffer, options)?;
         }
         ExportFormat::Html => {
             let exporter = HtmlExporter::new();
             exporter.export_conversation(conversation, &mut buffer, options)?;
+        }
+        ExportFormat::Csv => {
+            let exporter = CsvExporter::new();
+            exporter.export_conversation(conversation, &mut buffer, options)?;
+        }
+        ExportFormat::Xml => {
+            let exporter = XmlExporter::new();
+            exporter.export_conversation(conversation, &mut buffer, options)?;
+        }
+        ExportFormat::Sqlite => {
+            return Err(SnatchError::export(
+                "SQLite export requires a file path, not a string buffer",
+            ));
         }
     }
 
