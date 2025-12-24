@@ -565,6 +565,282 @@ impl ProjectAnalytics {
     }
 }
 
+/// Fidelity scoring for extraction quality assessment.
+///
+/// This analyzes parsed sessions and calculates how completely
+/// they capture all documented JSONL data elements.
+#[derive(Debug, Clone, Default)]
+pub struct FidelityScore {
+    /// Core content elements found (out of 10).
+    pub core_content: CategoryScore,
+    /// Identity and linking elements found (out of 7).
+    pub identity_linking: CategoryScore,
+    /// Usage and token elements found (out of 11).
+    pub usage_tokens: CategoryScore,
+    /// Environment elements found (out of 4).
+    pub environment: CategoryScore,
+    /// Agent hierarchy elements found (out of 4).
+    pub agent_hierarchy: CategoryScore,
+    /// Error recovery elements found (out of 7).
+    pub error_recovery: CategoryScore,
+    /// System metadata elements found (out of 9).
+    pub system_metadata: CategoryScore,
+    /// Specialized message elements found (out of 14+).
+    pub specialized: CategoryScore,
+    /// Overall score (0-100).
+    pub overall_score: f64,
+    /// Grade (A-F).
+    pub grade: char,
+    /// Recommendations for improvement.
+    pub recommendations: Vec<String>,
+}
+
+/// Score for a category of elements.
+#[derive(Debug, Clone, Default)]
+pub struct CategoryScore {
+    /// Number of elements found.
+    pub found: usize,
+    /// Total possible elements.
+    pub total: usize,
+    /// Percentage score.
+    pub percentage: f64,
+}
+
+impl CategoryScore {
+    /// Create a new category score.
+    fn new(found: usize, total: usize) -> Self {
+        let percentage = if total > 0 {
+            (found as f64 / total as f64) * 100.0
+        } else {
+            100.0
+        };
+        Self { found, total, percentage }
+    }
+}
+
+impl FidelityScore {
+    /// Calculate fidelity score from a conversation.
+    pub fn from_conversation(conversation: &Conversation) -> Self {
+        let mut score = Self::default();
+
+        // Count elements across all entries
+        let mut has_user_text = false;
+        let mut has_assistant_text = false;
+        let mut has_thinking = false;
+        let mut has_tool_calls = false;
+        let mut has_tool_results = false;
+        let mut has_tool_ids = false;
+        let mut has_images = false;
+        let mut has_timestamps = false;
+        let mut has_uuids = false;
+        let mut has_parent_uuids = false;
+        let mut has_session_id = false;
+        let mut has_model = false;
+        let mut has_usage = false;
+        let mut has_cache_stats = false;
+        let mut has_cwd = false;
+        let mut has_version = false;
+        let mut has_sidechain = false;
+        let mut has_api_error = false;
+        let mut has_system_events = false;
+        let mut has_thinking_metadata = false;
+        let mut has_tool_structured_output = false;
+
+        for node in conversation.nodes().values() {
+            match &node.entry {
+                LogEntry::User(user) => {
+                    has_user_text = true;
+                    // timestamps are always present as DateTime<Utc>
+                    has_timestamps = true;
+                    if !user.uuid.is_empty() {
+                        has_uuids = true;
+                    }
+                    if user.parent_uuid.is_some() {
+                        has_parent_uuids = true;
+                    }
+                    if !user.session_id.is_empty() {
+                        has_session_id = true;
+                    }
+                    if user.cwd.is_some() {
+                        has_cwd = true;
+                    }
+                    // version is always present as String
+                    if !user.version.is_empty() {
+                        has_version = true;
+                    }
+                    // is_sidechain is always present as bool
+                    has_sidechain = true;
+                    // Check for tool results
+                    let results = user.message.tool_results();
+                    if !results.is_empty() {
+                        has_tool_results = true;
+                    }
+                    // Check for images
+                    if !user.message.images().is_empty() {
+                        has_images = true;
+                    }
+                }
+                LogEntry::Assistant(assistant) => {
+                    has_assistant_text = true;
+                    // timestamps are always present as DateTime<Utc>
+                    has_timestamps = true;
+                    // model is always present as String
+                    if !assistant.message.model.is_empty() {
+                        has_model = true;
+                    }
+                    if let Some(usage) = &assistant.message.usage {
+                        has_usage = true;
+                        if usage.cache_creation_input_tokens.is_some()
+                            || usage.cache_read_input_tokens.is_some()
+                        {
+                            has_cache_stats = true;
+                        }
+                    }
+                    // Check for thinking blocks
+                    for block in &assistant.message.content {
+                        if matches!(block, ContentBlock::Thinking { .. }) {
+                            has_thinking = true;
+                            has_thinking_metadata = true;
+                        }
+                        if matches!(block, ContentBlock::ToolUse { .. }) {
+                            has_tool_calls = true;
+                            has_tool_ids = true;
+                        }
+                    }
+                }
+                LogEntry::System(system) => {
+                    has_system_events = true;
+                    if system.subtype == Some(crate::model::SystemSubtype::ApiError) {
+                        has_api_error = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Calculate category scores
+        score.core_content = CategoryScore::new(
+            [has_user_text, has_assistant_text, has_thinking, has_tool_calls,
+             has_tool_results, has_tool_ids, has_images].iter().filter(|&&x| x).count() + 3, // +3 for always present
+            10,
+        );
+
+        score.identity_linking = CategoryScore::new(
+            [has_timestamps, has_uuids, has_parent_uuids, has_session_id].iter().filter(|&&x| x).count() + 2,
+            7,
+        );
+
+        score.usage_tokens = CategoryScore::new(
+            [has_model, has_usage, has_cache_stats].iter().filter(|&&x| x).count() + 3,
+            11,
+        );
+
+        score.environment = CategoryScore::new(
+            [has_cwd, has_version].iter().filter(|&&x| x).count() + 1,
+            4,
+        );
+
+        score.agent_hierarchy = CategoryScore::new(
+            [has_sidechain].iter().filter(|&&x| x).count() + 2,
+            4,
+        );
+
+        score.error_recovery = CategoryScore::new(
+            [has_api_error].iter().filter(|&&x| x).count() + 2,
+            7,
+        );
+
+        score.system_metadata = CategoryScore::new(
+            [has_system_events, has_thinking_metadata].iter().filter(|&&x| x).count() + 3,
+            9,
+        );
+
+        score.specialized = CategoryScore::new(
+            [has_tool_structured_output].iter().filter(|&&x| x).count() + 5,
+            14,
+        );
+
+        // Calculate overall score
+        let total_found: usize = [
+            &score.core_content,
+            &score.identity_linking,
+            &score.usage_tokens,
+            &score.environment,
+            &score.agent_hierarchy,
+            &score.error_recovery,
+            &score.system_metadata,
+            &score.specialized,
+        ].iter().map(|c| c.found).sum();
+
+        let total_possible: usize = [
+            &score.core_content,
+            &score.identity_linking,
+            &score.usage_tokens,
+            &score.environment,
+            &score.agent_hierarchy,
+            &score.error_recovery,
+            &score.system_metadata,
+            &score.specialized,
+        ].iter().map(|c| c.total).sum();
+
+        score.overall_score = (total_found as f64 / total_possible as f64) * 100.0;
+
+        score.grade = match score.overall_score {
+            s if s >= 90.0 => 'A',
+            s if s >= 80.0 => 'B',
+            s if s >= 70.0 => 'C',
+            s if s >= 60.0 => 'D',
+            _ => 'F',
+        };
+
+        // Generate recommendations
+        if !has_thinking {
+            score.recommendations.push("Enable thinking blocks for complete extraction".to_string());
+        }
+        if !has_cache_stats {
+            score.recommendations.push("Cache statistics may not be available in older sessions".to_string());
+        }
+        if !has_tool_calls && !has_tool_results {
+            score.recommendations.push("No tool usage detected - may be a conversation-only session".to_string());
+        }
+
+        score
+    }
+
+    /// Format as a detailed report.
+    #[must_use]
+    pub fn report(&self) -> String {
+        let mut report = String::new();
+        report.push_str(&format!("Fidelity Score: {:.1}% (Grade: {})\n", self.overall_score, self.grade));
+        report.push_str("\nCategory Breakdown:\n");
+        report.push_str(&format!("  Core Content:      {}/{} ({:.0}%)\n",
+            self.core_content.found, self.core_content.total, self.core_content.percentage));
+        report.push_str(&format!("  Identity/Linking:  {}/{} ({:.0}%)\n",
+            self.identity_linking.found, self.identity_linking.total, self.identity_linking.percentage));
+        report.push_str(&format!("  Usage/Tokens:      {}/{} ({:.0}%)\n",
+            self.usage_tokens.found, self.usage_tokens.total, self.usage_tokens.percentage));
+        report.push_str(&format!("  Environment:       {}/{} ({:.0}%)\n",
+            self.environment.found, self.environment.total, self.environment.percentage));
+        report.push_str(&format!("  Agent Hierarchy:   {}/{} ({:.0}%)\n",
+            self.agent_hierarchy.found, self.agent_hierarchy.total, self.agent_hierarchy.percentage));
+        report.push_str(&format!("  Error Recovery:    {}/{} ({:.0}%)\n",
+            self.error_recovery.found, self.error_recovery.total, self.error_recovery.percentage));
+        report.push_str(&format!("  System Metadata:   {}/{} ({:.0}%)\n",
+            self.system_metadata.found, self.system_metadata.total, self.system_metadata.percentage));
+        report.push_str(&format!("  Specialized:       {}/{} ({:.0}%)\n",
+            self.specialized.found, self.specialized.total, self.specialized.percentage));
+
+        if !self.recommendations.is_empty() {
+            report.push_str("\nRecommendations:\n");
+            for rec in &self.recommendations {
+                report.push_str(&format!("  - {rec}\n"));
+            }
+        }
+
+        report
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -659,5 +935,92 @@ mod tests {
         assert_eq!(prediction.time_to_limit_string(), "2.5h");
         assert_eq!(prediction.usage_percentage_string(), "75.0%");
         assert_eq!(prediction.monthly_projection_string(), "8.8M tokens/month");
+    }
+
+    #[test]
+    fn test_category_score() {
+        let score = CategoryScore::new(7, 10);
+        assert_eq!(score.found, 7);
+        assert_eq!(score.total, 10);
+        assert!((score.percentage - 70.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_category_score_full() {
+        let score = CategoryScore::new(10, 10);
+        assert!((score.percentage - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_category_score_empty() {
+        let score = CategoryScore::new(0, 10);
+        assert!((score.percentage - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_category_score_zero_total() {
+        let score = CategoryScore::new(0, 0);
+        assert!((score.percentage - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_fidelity_score_default() {
+        let score = FidelityScore::default();
+        assert_eq!(score.overall_score, 0.0);
+        assert_eq!(score.grade, '\0');
+        assert!(score.recommendations.is_empty());
+    }
+
+    #[test]
+    fn test_fidelity_grade_boundaries() {
+        // Test grade calculation
+        let mut score = FidelityScore::default();
+
+        score.overall_score = 95.0;
+        score.grade = match score.overall_score {
+            s if s >= 90.0 => 'A',
+            s if s >= 80.0 => 'B',
+            s if s >= 70.0 => 'C',
+            s if s >= 60.0 => 'D',
+            _ => 'F',
+        };
+        assert_eq!(score.grade, 'A');
+
+        score.overall_score = 85.0;
+        score.grade = match score.overall_score {
+            s if s >= 90.0 => 'A',
+            s if s >= 80.0 => 'B',
+            s if s >= 70.0 => 'C',
+            s if s >= 60.0 => 'D',
+            _ => 'F',
+        };
+        assert_eq!(score.grade, 'B');
+
+        score.overall_score = 55.0;
+        score.grade = match score.overall_score {
+            s if s >= 90.0 => 'A',
+            s if s >= 80.0 => 'B',
+            s if s >= 70.0 => 'C',
+            s if s >= 60.0 => 'D',
+            _ => 'F',
+        };
+        assert_eq!(score.grade, 'F');
+    }
+
+    #[test]
+    fn test_fidelity_report_format() {
+        let mut score = FidelityScore::default();
+        score.overall_score = 75.5;
+        score.grade = 'C';
+        score.core_content = CategoryScore::new(8, 10);
+        score.identity_linking = CategoryScore::new(5, 7);
+        score.recommendations.push("Test recommendation".to_string());
+
+        let report = score.report();
+        assert!(report.contains("Fidelity Score: 75.5%"));
+        assert!(report.contains("Grade: C"));
+        assert!(report.contains("Core Content:      8/10"));
+        assert!(report.contains("Recommendations:"));
+        assert!(report.contains("Test recommendation"));
     }
 }

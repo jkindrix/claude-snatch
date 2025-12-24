@@ -1206,7 +1206,7 @@ The migration guide must document:
 | ID | Requirement | Priority | Status |
 |----|-------------|----------|--------|
 | [x] FID-001 | 64-element extraction test suite | P0 | ✓ |
-| [ ] FID-002 | Automated fidelity scoring | P1 | |
+| [x] FID-002 | Automated fidelity scoring | P1 | ✓ FidelityScore |
 | [x] FID-003 | Regression tests for each element | P0 | ✓ |
 | [ ] FID-004 | Comparison against reference tool | P2 | |
 
