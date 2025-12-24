@@ -96,6 +96,123 @@ impl SearchState {
     }
 }
 
+/// Message type filter options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MessageTypeFilter {
+    /// Show all messages.
+    #[default]
+    All,
+    /// Show only user messages.
+    User,
+    /// Show only assistant messages.
+    Assistant,
+    /// Show only system messages.
+    System,
+    /// Show only tool use/results.
+    Tools,
+}
+
+impl MessageTypeFilter {
+    /// Get display name for the filter.
+    #[must_use]
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::User => "User",
+            Self::Assistant => "Assistant",
+            Self::System => "System",
+            Self::Tools => "Tools",
+        }
+    }
+
+    /// Cycle to next filter.
+    pub fn next(&mut self) {
+        *self = match self {
+            Self::All => Self::User,
+            Self::User => Self::Assistant,
+            Self::Assistant => Self::System,
+            Self::System => Self::Tools,
+            Self::Tools => Self::All,
+        };
+    }
+
+    /// Cycle to previous filter.
+    pub fn prev(&mut self) {
+        *self = match self {
+            Self::All => Self::Tools,
+            Self::User => Self::All,
+            Self::Assistant => Self::User,
+            Self::System => Self::Assistant,
+            Self::Tools => Self::System,
+        };
+    }
+}
+
+/// Filter state for conversation display.
+#[derive(Debug, Clone, Default)]
+pub struct FilterState {
+    /// Whether filter panel is active.
+    pub active: bool,
+    /// Message type filter.
+    pub message_type: MessageTypeFilter,
+    /// Date range filter - start date (ISO format).
+    pub date_from: Option<String>,
+    /// Date range filter - end date (ISO format).
+    pub date_to: Option<String>,
+    /// Only show messages with errors.
+    pub errors_only: bool,
+    /// Only show messages with thinking blocks.
+    pub thinking_only: bool,
+    /// Only show messages with tool use.
+    pub tools_only: bool,
+}
+
+impl FilterState {
+    /// Check if any filters are active.
+    #[must_use]
+    pub fn is_filtering(&self) -> bool {
+        self.message_type != MessageTypeFilter::All
+            || self.date_from.is_some()
+            || self.date_to.is_some()
+            || self.errors_only
+            || self.thinking_only
+            || self.tools_only
+    }
+
+    /// Clear all filters.
+    pub fn clear(&mut self) {
+        self.message_type = MessageTypeFilter::All;
+        self.date_from = None;
+        self.date_to = None;
+        self.errors_only = false;
+        self.thinking_only = false;
+        self.tools_only = false;
+    }
+
+    /// Get filter summary for status bar.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if self.message_type != MessageTypeFilter::All {
+            parts.push(self.message_type.display_name());
+        }
+        if self.errors_only {
+            parts.push("Errors");
+        }
+        if self.thinking_only {
+            parts.push("Thinking");
+        }
+        if self.tools_only {
+            parts.push("Tools");
+        }
+        if parts.is_empty() {
+            "No filters".to_string()
+        } else {
+            parts.join("+")
+        }
+    }
+}
+
 /// Export dialog state.
 #[derive(Debug, Clone)]
 pub struct ExportDialogState {
@@ -219,6 +336,8 @@ pub struct AppState {
     pub search_state: SearchState,
     /// Export dialog state.
     pub export_dialog: ExportDialogState,
+    /// Filter state for conversation.
+    pub filter_state: FilterState,
     /// Syntax highlighter for code blocks.
     highlighter: SyntaxHighlighter,
     /// Status message to display.
@@ -271,6 +390,7 @@ impl AppState {
             entries: Vec::new(),
             search_state: SearchState::default(),
             export_dialog: ExportDialogState::default(),
+            filter_state: FilterState::default(),
             highlighter: SyntaxHighlighter::new(),
             status_message: None,
             tree_session_ids: Vec::new(),
@@ -621,6 +741,46 @@ impl AppState {
         }
     }
 
+    /// Toggle filter panel.
+    pub fn toggle_filter(&mut self) {
+        self.filter_state.active = !self.filter_state.active;
+        if self.filter_state.active {
+            self.status_message = Some(format!("Filter: {}", self.filter_state.summary()));
+        } else {
+            self.status_message = Some("Filter panel closed".to_string());
+        }
+    }
+
+    /// Cycle through message type filters.
+    pub fn cycle_message_filter(&mut self) {
+        self.filter_state.message_type.next();
+        self.status_message = Some(format!("Filter: {}", self.filter_state.message_type.display_name()));
+        self.update_conversation_display();
+    }
+
+    /// Toggle errors-only filter.
+    pub fn toggle_errors_filter(&mut self) {
+        self.filter_state.errors_only = !self.filter_state.errors_only;
+        self.status_message = Some(format!(
+            "Errors only: {}",
+            if self.filter_state.errors_only { "ON" } else { "OFF" }
+        ));
+        self.update_conversation_display();
+    }
+
+    /// Clear all filters.
+    pub fn clear_filters(&mut self) {
+        self.filter_state.clear();
+        self.status_message = Some("Filters cleared".to_string());
+        self.update_conversation_display();
+    }
+
+    /// Check if filter panel is active.
+    #[must_use]
+    pub fn is_filter_active(&self) -> bool {
+        self.filter_state.active
+    }
+
     /// Cycle through available themes.
     pub fn cycle_theme(&mut self) {
         self.theme = match self.theme.name.as_str() {
@@ -815,11 +975,78 @@ impl AppState {
         Ok(())
     }
 
+    /// Check if an entry should be shown based on current filters.
+    fn should_show_entry(&self, entry: &LogEntry) -> bool {
+        // Check message type filter
+        match (&self.filter_state.message_type, entry) {
+            (MessageTypeFilter::All, _) => {}
+            (MessageTypeFilter::User, LogEntry::User(_)) => {}
+            (MessageTypeFilter::Assistant, LogEntry::Assistant(_)) => {}
+            (MessageTypeFilter::System, LogEntry::System(_)) => {}
+            (MessageTypeFilter::Tools, LogEntry::Assistant(a)) => {
+                // Only show if entry has tool use/result blocks
+                let has_tools = a.message.content.iter().any(|b| {
+                    matches!(b, ContentBlock::ToolUse(_) | ContentBlock::ToolResult(_))
+                });
+                if !has_tools {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+
+        // Check errors-only filter
+        if self.filter_state.errors_only {
+            let has_error = match entry {
+                LogEntry::Assistant(a) => a.message.content.iter().any(|b| {
+                    matches!(b, ContentBlock::ToolResult(r) if r.is_explicit_error())
+                }),
+                _ => false,
+            };
+            if !has_error {
+                return false;
+            }
+        }
+
+        // Check thinking-only filter
+        if self.filter_state.thinking_only {
+            let has_thinking = match entry {
+                LogEntry::Assistant(a) => a.message.content.iter().any(|b| {
+                    matches!(b, ContentBlock::Thinking(_))
+                }),
+                _ => false,
+            };
+            if !has_thinking {
+                return false;
+            }
+        }
+
+        // Check tools-only filter
+        if self.filter_state.tools_only {
+            let has_tools = match entry {
+                LogEntry::Assistant(a) => a.message.content.iter().any(|b| {
+                    matches!(b, ContentBlock::ToolUse(_) | ContentBlock::ToolResult(_))
+                }),
+                _ => false,
+            };
+            if !has_tools {
+                return false;
+            }
+        }
+
+        true
+    }
+
     /// Update conversation display based on current settings.
     fn update_conversation_display(&mut self) {
         self.conversation_lines.clear();
 
         for entry in &self.entries {
+            // Apply message type filter
+            if !self.should_show_entry(entry) {
+                continue;
+            }
+
             match entry {
                 LogEntry::User(user) => {
                     // Use formatted message header with timestamp

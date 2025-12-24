@@ -275,6 +275,20 @@ fn run_loop<B: ratatui::backend::Backend>(
                         app.toggle_word_wrap();
                     }
 
+                    // Filter controls
+                    (KeyModifiers::NONE, KeyCode::Char('f')) => {
+                        app.toggle_filter();
+                    }
+                    (KeyModifiers::SHIFT, KeyCode::Char('F')) => {
+                        app.cycle_message_filter();
+                    }
+                    (KeyModifiers::SHIFT, KeyCode::Char('E')) => {
+                        app.toggle_errors_filter();
+                    }
+                    (KeyModifiers::SHIFT, KeyCode::Char('X')) => {
+                        app.clear_filters();
+                    }
+
                     // Cycle theme
                     (KeyModifiers::NONE, KeyCode::Char('T')) => {
                         app.cycle_theme();
@@ -528,11 +542,22 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
 
     let right_content = if let Some(session_id) = &app.current_session {
         let short_id = &session_id[..8.min(session_id.len())];
-        vec![
+        let mut content = vec![
             Span::raw(format!("{} msgs ", app.conversation_lines.len())),
-            Span::raw("│ "),
-            Span::raw(format!("Session: {short_id} ")),
-        ]
+        ];
+
+        // Show active filter indicator
+        if app.filter_state.is_filtering() {
+            content.push(Span::raw("│ "));
+            content.push(Span::styled(
+                format!("[{}]", app.filter_state.summary()),
+                Style::default().fg(app.theme.warning),
+            ));
+        }
+
+        content.push(Span::raw(" │ "));
+        content.push(Span::raw(format!("Session: {short_id} ")));
+        content
     } else {
         vec![
             Span::raw(format!("{} projects ", app.projects.len())),
@@ -583,6 +608,12 @@ fn draw_help_overlay(f: &mut Frame) {
         Line::from("  o         Toggle tool outputs"),
         Line::from("  w         Toggle word wrap"),
         Line::from(format!("  T         Cycle theme ({})", available_themes().join("/"))),
+        Line::from(""),
+        Line::from("Filters:"),
+        Line::from("  f         Toggle filter panel"),
+        Line::from("  F         Cycle message type filter"),
+        Line::from("  E         Toggle errors-only filter"),
+        Line::from("  X         Clear all filters"),
         Line::from(""),
         Line::from("  q         Quit"),
         Line::from("  ?         Toggle help"),
