@@ -388,6 +388,230 @@ pub struct TreeInfo {
     pub branch_points: Vec<String>,
 }
 
+/// Streaming JSON exporter for memory-efficient large file export.
+///
+/// Writes JSON entries one at a time without loading the entire
+/// dataset into memory. Suitable for sessions with thousands of entries.
+#[derive(Debug, Clone)]
+pub struct StreamingJsonExporter {
+    /// Pretty-print the JSON output.
+    pretty: bool,
+    /// Current indentation level (for pretty printing).
+    indent_level: usize,
+    /// Whether we've written the first entry.
+    first_entry: bool,
+}
+
+impl Default for StreamingJsonExporter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StreamingJsonExporter {
+    /// Create a new streaming JSON exporter.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            pretty: false,
+            indent_level: 0,
+            first_entry: true,
+        }
+    }
+
+    /// Enable pretty-printing.
+    #[must_use]
+    pub fn pretty(mut self, pretty: bool) -> Self {
+        self.pretty = pretty;
+        self
+    }
+
+    /// Write the opening of a JSON array.
+    pub fn begin_array<W: Write>(&mut self, writer: &mut W) -> Result<()> {
+        write!(writer, "[")?;
+        if self.pretty {
+            writeln!(writer)?;
+        }
+        self.indent_level += 1;
+        self.first_entry = true;
+        Ok(())
+    }
+
+    /// Write the closing of a JSON array.
+    pub fn end_array<W: Write>(&mut self, writer: &mut W) -> Result<()> {
+        self.indent_level = self.indent_level.saturating_sub(1);
+        if self.pretty {
+            writeln!(writer)?;
+        }
+        write!(writer, "]")?;
+        Ok(())
+    }
+
+    /// Write a single entry to the JSON array.
+    pub fn write_entry<W: Write>(&mut self, writer: &mut W, entry: &LogEntry) -> Result<()> {
+        // Handle comma separation
+        if !self.first_entry {
+            write!(writer, ",")?;
+            if self.pretty {
+                writeln!(writer)?;
+            }
+        }
+        self.first_entry = false;
+
+        // Serialize entry
+        let json = if self.pretty {
+            let value = serde_json::to_value(entry)?;
+            let mut json_str = serde_json::to_string_pretty(&value)?;
+            // Indent each line
+            let indent = "  ".repeat(self.indent_level);
+            json_str = json_str
+                .lines()
+                .map(|line| format!("{}{}", indent, line))
+                .collect::<Vec<_>>()
+                .join("\n");
+            json_str
+        } else {
+            serde_json::to_string(entry)?
+        };
+
+        write!(writer, "{}", json)?;
+        Ok(())
+    }
+
+    /// Write a filtered entry to the JSON array.
+    pub fn write_filtered_entry<W: Write>(
+        &mut self,
+        writer: &mut W,
+        entry: &FilteredEntry,
+    ) -> Result<()> {
+        // Handle comma separation
+        if !self.first_entry {
+            write!(writer, ",")?;
+            if self.pretty {
+                writeln!(writer)?;
+            }
+        }
+        self.first_entry = false;
+
+        // Serialize entry
+        let json = if self.pretty {
+            let mut json_str = serde_json::to_string_pretty(entry)?;
+            // Indent each line
+            let indent = "  ".repeat(self.indent_level);
+            json_str = json_str
+                .lines()
+                .map(|line| format!("{}{}", indent, line))
+                .collect::<Vec<_>>()
+                .join("\n");
+            json_str
+        } else {
+            serde_json::to_string(entry)?
+        };
+
+        write!(writer, "{}", json)?;
+        Ok(())
+    }
+
+    /// Stream a conversation to JSON format.
+    ///
+    /// This method writes entries one at a time, keeping memory usage
+    /// constant regardless of conversation size.
+    pub fn stream_conversation<W: Write>(
+        &mut self,
+        conversation: &Conversation,
+        writer: &mut W,
+        options: &ExportOptions,
+    ) -> Result<()> {
+        let entries = if options.main_thread_only {
+            conversation.main_thread_entries()
+        } else {
+            conversation.chronological_entries()
+        };
+
+        self.begin_array(writer)?;
+
+        for entry in entries {
+            // Apply filtering
+            if !options.include_system {
+                if let LogEntry::System(_) = entry {
+                    continue;
+                }
+            }
+
+            let filtered = FilteredEntry::from_entry(entry, options);
+            self.write_filtered_entry(writer, &filtered)?;
+        }
+
+        self.end_array(writer)?;
+        Ok(())
+    }
+
+    /// Stream entries to JSON format.
+    ///
+    /// This method writes entries one at a time, keeping memory usage
+    /// constant regardless of the number of entries.
+    pub fn stream_entries<W: Write>(
+        &mut self,
+        entries: &[LogEntry],
+        writer: &mut W,
+        options: &ExportOptions,
+    ) -> Result<()> {
+        self.begin_array(writer)?;
+
+        for entry in entries {
+            // Apply filtering
+            if !options.include_system {
+                if let LogEntry::System(_) = entry {
+                    continue;
+                }
+            }
+
+            let filtered = FilteredEntry::from_entry(entry, options);
+            self.write_filtered_entry(writer, &filtered)?;
+        }
+
+        self.end_array(writer)?;
+        Ok(())
+    }
+
+    /// Stream entries from an iterator (for truly lazy evaluation).
+    ///
+    /// This is the most memory-efficient method as it can process
+    /// entries from a lazy iterator without collecting them first.
+    pub fn stream_from_iter<'a, W: Write, I>(
+        &mut self,
+        iter: I,
+        writer: &mut W,
+        options: &ExportOptions,
+    ) -> Result<()>
+    where
+        I: Iterator<Item = &'a LogEntry>,
+    {
+        self.begin_array(writer)?;
+
+        for entry in iter {
+            // Apply filtering
+            if !options.include_system {
+                if let LogEntry::System(_) = entry {
+                    continue;
+                }
+            }
+
+            let filtered = FilteredEntry::from_entry(entry, options);
+            self.write_filtered_entry(writer, &filtered)?;
+        }
+
+        self.end_array(writer)?;
+        Ok(())
+    }
+
+    /// Reset the exporter state for reuse.
+    pub fn reset(&mut self) {
+        self.indent_level = 0;
+        self.first_entry = true;
+    }
+}
+
 /// Export a single entry to JSON line (for JSONL output).
 pub fn entry_to_jsonl(entry: &LogEntry) -> Result<String> {
     Ok(serde_json::to_string(entry)?)
@@ -516,6 +740,57 @@ mod tests {
         assert!(exporter.pretty);
         assert!(!exporter.include_analytics);
         assert!(!exporter.use_envelope);
+    }
+
+    #[test]
+    fn test_streaming_exporter_compact() {
+        let mut exporter = StreamingJsonExporter::new();
+        let mut output = Vec::new();
+
+        exporter.begin_array(&mut output).unwrap();
+        exporter.end_array(&mut output).unwrap();
+
+        let result = String::from_utf8(output).unwrap();
+        assert_eq!(result, "[]");
+    }
+
+    #[test]
+    fn test_streaming_exporter_pretty() {
+        let mut exporter = StreamingJsonExporter::new().pretty(true);
+        let mut output = Vec::new();
+
+        exporter.begin_array(&mut output).unwrap();
+        exporter.end_array(&mut output).unwrap();
+
+        let result = String::from_utf8(output).unwrap();
+        assert!(result.contains("[\n"));
+        assert!(result.contains("\n]"));
+    }
+
+    #[test]
+    fn test_streaming_exporter_reset() {
+        let mut exporter = StreamingJsonExporter::new();
+        let mut output = Vec::new();
+
+        // First array
+        exporter.begin_array(&mut output).unwrap();
+        exporter.end_array(&mut output).unwrap();
+
+        // Reset and write second array
+        exporter.reset();
+        exporter.begin_array(&mut output).unwrap();
+        exporter.end_array(&mut output).unwrap();
+
+        let result = String::from_utf8(output).unwrap();
+        assert_eq!(result, "[][]");
+    }
+
+    #[test]
+    fn test_streaming_exporter_default() {
+        let exporter = StreamingJsonExporter::default();
+        assert!(!exporter.pretty);
+        assert!(exporter.first_entry);
+        assert_eq!(exporter.indent_level, 0);
     }
 
     #[test]

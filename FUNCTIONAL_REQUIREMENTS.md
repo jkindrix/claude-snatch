@@ -579,7 +579,7 @@ When Claude Code is actively writing to a JSONL file while claude-snatch reads i
 | [x] JSON-005 | JSON Lines output option | P1 | ✓ (JSONL format) |
 | [x] JSON-006 | Include all 64 JSONL elements | P0 | ✓ |
 | [x] JSON-007 | Schema-compliant output | P1 | ✓ |
-| [ ] JSON-008 | Streaming JSON output for large files | P2 | |
+| [x] JSON-008 | Streaming JSON output for large files | P2 | ✓ (StreamingJsonExporter) |
 
 ### 6.3 HTML Export
 
