@@ -161,6 +161,10 @@ pub enum Commands {
 
     /// Generate shell completions.
     Completions(CompletionsArgs),
+
+    /// Generate dynamic completions (used by shell completion scripts).
+    #[command(hide = true, name = "_complete")]
+    DynamicCompletions(DynamicCompletionsArgs),
 }
 
 /// Arguments for the completions command.
@@ -196,6 +200,37 @@ impl From<CompletionShell> for Shell {
             CompletionShell::Elvish => Shell::Elvish,
         }
     }
+}
+
+/// Supported completion types.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum DynamicCompletionType {
+    /// Session IDs.
+    Sessions,
+    /// Project paths.
+    Projects,
+    /// Tool names.
+    Tools,
+    /// Output formats.
+    Formats,
+    /// Model names.
+    Models,
+}
+
+/// Arguments for dynamic completions (hidden command).
+#[derive(Debug, Clone, clap::Args)]
+pub struct DynamicCompletionsArgs {
+    /// Type of completion to generate.
+    #[arg(value_enum)]
+    pub completion_type: DynamicCompletionType,
+
+    /// Optional prefix to filter completions.
+    #[arg(short = 'p', long)]
+    pub prefix: Option<String>,
+
+    /// Maximum number of completions to return.
+    #[arg(short = 'l', long, default_value = "50")]
+    pub limit: usize,
 }
 
 /// Generate shell completions and print to stdout.
@@ -855,6 +890,22 @@ pub fn run() -> Result<()> {
         Commands::Completions(args) => {
             generate_completions(args.shell);
             Ok(())
+        }
+        Commands::DynamicCompletions(args) => {
+            // Convert to internal types
+            let comp_type = match args.completion_type {
+                DynamicCompletionType::Sessions => commands::completions::CompletionType::Sessions,
+                DynamicCompletionType::Projects => commands::completions::CompletionType::Projects,
+                DynamicCompletionType::Tools => commands::completions::CompletionType::Tools,
+                DynamicCompletionType::Formats => commands::completions::CompletionType::Formats,
+                DynamicCompletionType::Models => commands::completions::CompletionType::Models,
+            };
+            let internal_args = commands::completions::DynamicCompletionsArgs {
+                completion_type: comp_type,
+                prefix: args.prefix.clone(),
+                limit: Some(args.limit),
+            };
+            commands::completions::run(&cli, &internal_args)
         }
     }
 }

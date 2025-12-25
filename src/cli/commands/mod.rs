@@ -4,6 +4,7 @@
 //! that handles the command logic.
 
 pub mod cache;
+pub mod completions;
 pub mod config;
 pub mod diff;
 pub mod export;
