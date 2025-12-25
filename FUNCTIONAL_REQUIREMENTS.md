@@ -696,7 +696,7 @@ esac
 | [x] OPT-004 | `--quiet` / `-q` - Suppress output | P1 | ✓ |
 | [x] OPT-005 | `--json` - JSON output mode | P0 | ✓ |
 | [x] OPT-006 | `--no-color` - Disable colors | P1 | ✓ (as `--color`) |
-| [ ] OPT-007 | `--config` - Custom config file | P2 | |
+| [x] OPT-007 | `--config` - Custom config file | P2 | ✓ |
 | [x] OPT-008 | `--claude-dir` - Custom Claude directory | P1 | ✓ |
 
 ### 7.3 Export Command Options

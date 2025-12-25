@@ -71,6 +71,10 @@ pub struct Cli {
     /// Number of threads for parallel processing (default: number of CPUs).
     #[arg(short = 'j', long, global = true, env = "SNATCH_THREADS")]
     pub threads: Option<usize>,
+
+    /// Path to custom configuration file.
+    #[arg(long, global = true, env = "SNATCH_CONFIG")]
+    pub config: Option<PathBuf>,
 }
 
 /// Log level options.
@@ -997,7 +1001,13 @@ pub fn run() -> Result<()> {
     init_logging(&cli);
 
     // Initialize the cache from configuration
-    let config = Config::load().unwrap_or_default();
+    let config = match &cli.config {
+        Some(path) => Config::load_from(path).unwrap_or_else(|e| {
+            eprintln!("Warning: Failed to load config from {}: {}", path.display(), e);
+            Config::default()
+        }),
+        None => Config::load().unwrap_or_default(),
+    };
     init_global_cache(&config.cache);
 
     match &cli.command {
