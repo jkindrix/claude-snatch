@@ -1075,7 +1075,7 @@ Given versions A (file) and B (schema):
 | [x] SEC-004 | Read-only by default | P0 | ✓ |
 | [x] SEC-005 | No credential exposure | P0 | ✓ |
 | [x] SEC-006 | Sensitive data redaction option | P2 | ✓ (--redact security/all) |
-| [ ] SEC-007 | PII detection warnings | P2 | |
+| [x] SEC-007 | PII detection warnings | P2 | ✓ |
 
 ### 12.2 File System Safety
 

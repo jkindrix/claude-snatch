@@ -645,7 +645,7 @@ pub fn detect_sensitive(text: &str, config: &RedactionConfig) -> Vec<SensitiveDa
 }
 
 /// Types of sensitive data that can be detected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SensitiveDataType {
     /// API keys and tokens.
     ApiKey,

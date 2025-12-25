@@ -425,6 +425,11 @@ pub struct ExportArgs {
     /// Accepts: "security" (API keys, passwords, credentials) or "all" (includes emails, IPs, phones).
     #[arg(long, value_name = "LEVEL")]
     pub redact: Option<RedactionLevel>,
+
+    /// Warn about PII (personally identifiable information) in exported content.
+    /// Does not modify output, only displays warnings.
+    #[arg(long)]
+    pub warn_pii: bool,
 }
 
 /// Export format argument.

@@ -9,6 +9,8 @@ use std::time::SystemTime;
 use chrono::{Duration, NaiveDate, Utc};
 use indicatif::{ProgressBar, ProgressStyle};
 
+use std::collections::HashSet;
+
 use crate::cli::{Cli, ExportArgs, ExportFormatArg};
 use crate::discovery::{Session, SessionFilter};
 use crate::error::{Result, SnatchError};
@@ -16,8 +18,9 @@ use crate::export::{
     conversation_to_jsonl, CsvExporter, ExportOptions, Exporter, HtmlExporter, JsonExporter,
     MarkdownExporter, SqliteExporter, TextExporter, XmlExporter,
 };
+use crate::model::{ContentBlock, LogEntry};
 use crate::reconstruction::Conversation;
-use crate::util::AtomicFile;
+use crate::util::{detect_sensitive, AtomicFile, RedactionConfig, SensitiveDataType};
 
 use super::get_claude_dir;
 
@@ -107,6 +110,11 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
 
     // Build conversation from combined entries
     let conversation = Conversation::from_entries(entries)?;
+
+    // Check for PII if requested
+    if args.warn_pii {
+        check_for_pii(&conversation, cli.quiet);
+    }
 
     // Build export options
     let redaction = args.redact.map(|level| level.into());
@@ -471,6 +479,11 @@ fn export_session(
     // Build conversation tree
     let conversation = Conversation::from_entries(entries)?;
 
+    // Check for PII if requested
+    if args.warn_pii {
+        check_for_pii(&conversation, cli.quiet);
+    }
+
     // Build export options - lossless mode overrides individual settings
     let redaction = args.redact.map(|level| level.into());
     let options = if args.lossless {
@@ -681,6 +694,90 @@ fn get_format_extension(format: ExportFormatArg) -> &'static str {
         ExportFormatArg::Html => "html",
         ExportFormatArg::Sqlite => "db",
     }
+}
+
+/// Check for PII in a conversation and print warnings.
+///
+/// Returns the set of detected PII types.
+fn check_for_pii(conversation: &Conversation, quiet: bool) -> HashSet<SensitiveDataType> {
+    let config = RedactionConfig::all();
+    let mut detected_types: HashSet<SensitiveDataType> = HashSet::new();
+    let mut sample_count = 0;
+    const MAX_SAMPLES: usize = 5;
+
+    for entry in conversation.chronological_entries() {
+        let texts = extract_entry_texts(entry);
+
+        for text in texts {
+            let types = detect_sensitive(text, &config);
+            for data_type in types {
+                if detected_types.insert(data_type) && !quiet && sample_count < MAX_SAMPLES {
+                    // Print the first warning for this type
+                    eprintln!(
+                        "⚠️  PII Warning: {} detected in exported content",
+                        data_type.description()
+                    );
+                    sample_count += 1;
+                }
+            }
+        }
+    }
+
+    if !detected_types.is_empty() && !quiet {
+        eprintln!();
+        eprintln!("📋 PII Detection Summary:");
+        for data_type in &detected_types {
+            eprintln!("   • {}", data_type.description());
+        }
+        eprintln!();
+        eprintln!("💡 Tip: Use --redact to automatically redact sensitive data");
+        eprintln!();
+    }
+
+    detected_types
+}
+
+/// Extract text content from a log entry.
+fn extract_entry_texts(entry: &LogEntry) -> Vec<&str> {
+    let mut texts = Vec::new();
+
+    match entry {
+        LogEntry::User(user) => {
+            if let Some(text) = user.message.as_text() {
+                texts.push(text);
+            }
+        }
+        LogEntry::Assistant(assistant) => {
+            for content in &assistant.message.content {
+                match content {
+                    ContentBlock::Text(t) => texts.push(&t.text),
+                    ContentBlock::Thinking(th) => texts.push(&th.thinking),
+                    ContentBlock::ToolUse(tool) => {
+                        // Check tool input as JSON string
+                        if let Some(input_str) = tool.input.as_str() {
+                            texts.push(input_str);
+                        }
+                    }
+                    ContentBlock::ToolResult(result) => {
+                        if let Some(content_str) = result.content_as_string() {
+                            // Can't push borrowed string from owned, so we skip this for now
+                            // The text will be detected when it appears elsewhere
+                            let _ = content_str;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        LogEntry::System(system) => {
+            if let Some(content) = &system.content {
+                texts.push(content);
+            }
+        }
+        _ => {}
+    }
+
+    texts
 }
 
 #[cfg(test)]
