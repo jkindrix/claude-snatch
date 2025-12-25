@@ -581,6 +581,10 @@ pub struct SearchArgs {
     /// Maximum token count for messages.
     #[arg(long)]
     pub max_tokens: Option<u64>,
+
+    /// Filter by git branch (partial match).
+    #[arg(short = 'b', long = "branch")]
+    pub git_branch: Option<String>,
 }
 
 /// Arguments for the stats command.

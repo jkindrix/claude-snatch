@@ -519,8 +519,8 @@ When Claude Code is actively writing to a JSONL file while claude-snatch reads i
 | [x] SRCH-005 | Filter by model used | P1 | ✓ (`--model` flag) |
 | [x] SRCH-006 | Filter by tool names | P1 | ✓ (`--tool-name` flag) |
 | [x] SRCH-007 | Filter by error status | P1 | ✓ (`--errors` flag) |
-| [ ] SRCH-008 | Filter by token usage thresholds | P2 | |
-| [ ] SRCH-009 | Filter by git branch | P2 | |
+| [x] SRCH-008 | Filter by token usage thresholds | P2 | ✓ (`--min-tokens`, `--max-tokens`) |
+| [x] SRCH-009 | Filter by git branch | P2 | ✓ (`--branch` flag) |
 | [x] SRCH-010 | Search within tool inputs/outputs | P1 | ✓ |
 | [x] SRCH-011 | Fuzzy search support | P2 | |
 | [ ] SRCH-012 | Search result ranking/relevance | P2 | |

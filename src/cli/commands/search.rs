@@ -194,7 +194,33 @@ fn matches_filters(entry: &LogEntry, args: &SearchArgs) -> bool {
         }
     }
 
+    // Check git branch filter
+    if let Some(ref branch_filter) = args.git_branch {
+        if !matches_git_branch(entry, branch_filter) {
+            return false;
+        }
+    }
+
     true
+}
+
+/// Check if an entry matches the git branch filter.
+fn matches_git_branch(entry: &LogEntry, branch_filter: &str) -> bool {
+    let filter_lower = branch_filter.to_lowercase();
+
+    let branch: Option<&str> = match entry {
+        LogEntry::User(msg) => msg.git_branch.as_deref(),
+        LogEntry::Assistant(msg) => msg.git_branch.as_deref(),
+        LogEntry::System(msg) => msg.git_branch.as_deref(),
+        // SummaryMessage doesn't have git_branch
+        LogEntry::Summary(_) => None,
+        _ => None,
+    };
+
+    match branch {
+        Some(b) => b.to_lowercase().contains(&filter_lower),
+        None => false, // No branch info means no match
+    }
 }
 
 /// Get token count from an entry (assistant messages have usage info).
@@ -849,6 +875,85 @@ mod tests {
         let score_scattered = result_scattered.unwrap().score;
 
         assert!(score_consecutive > score_scattered);
+    }
+
+    #[test]
+    fn test_matches_git_branch_exact() {
+        use crate::model::{UserMessage, UserContent, UserSimpleContent};
+        use chrono::Utc;
+        use indexmap::IndexMap;
+
+        let msg = UserMessage {
+            uuid: "test".to_string(),
+            parent_uuid: None,
+            timestamp: Utc::now(),
+            session_id: "test-session".to_string(),
+            version: "2.0.74".to_string(),
+            cwd: None,
+            git_branch: Some("feature/user-auth".to_string()),
+            user_type: None,
+            is_sidechain: false,
+            is_teammate: None,
+            agent_id: None,
+            slug: None,
+            is_meta: None,
+            is_visible_in_transcript_only: None,
+            thinking_metadata: None,
+            todos: Vec::new(),
+            tool_use_result: None,
+            message: UserContent::Simple(UserSimpleContent {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+            }),
+            extra: IndexMap::new(),
+        };
+        let entry = LogEntry::User(msg);
+
+        // Exact match
+        assert!(matches_git_branch(&entry, "feature/user-auth"));
+        // Partial match
+        assert!(matches_git_branch(&entry, "user-auth"));
+        assert!(matches_git_branch(&entry, "feature"));
+        // Case insensitive
+        assert!(matches_git_branch(&entry, "FEATURE"));
+        // No match
+        assert!(!matches_git_branch(&entry, "develop"));
+    }
+
+    #[test]
+    fn test_matches_git_branch_none() {
+        use crate::model::{UserMessage, UserContent, UserSimpleContent};
+        use chrono::Utc;
+        use indexmap::IndexMap;
+
+        let msg = UserMessage {
+            uuid: "test".to_string(),
+            parent_uuid: None,
+            timestamp: Utc::now(),
+            session_id: "test-session".to_string(),
+            version: "2.0.74".to_string(),
+            cwd: None,
+            git_branch: None, // No branch
+            user_type: None,
+            is_sidechain: false,
+            is_teammate: None,
+            agent_id: None,
+            slug: None,
+            is_meta: None,
+            is_visible_in_transcript_only: None,
+            thinking_metadata: None,
+            todos: Vec::new(),
+            tool_use_result: None,
+            message: UserContent::Simple(UserSimpleContent {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+            }),
+            extra: IndexMap::new(),
+        };
+        let entry = LogEntry::User(msg);
+
+        // Should not match when no branch is present
+        assert!(!matches_git_branch(&entry, "main"));
     }
 
 }

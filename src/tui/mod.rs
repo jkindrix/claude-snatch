@@ -14,7 +14,7 @@ mod highlight;
 mod state;
 mod theme;
 
-pub use app::{run, run_with_theme};
+pub use app::{run, run_with_options, run_with_theme};
 pub use theme::{available_themes, Theme};
 
 use crate::error::Result;
