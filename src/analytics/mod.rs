@@ -38,6 +38,8 @@ pub struct SessionAnalytics {
     pub branch_count: usize,
     /// Thinking usage.
     pub thinking_stats: ThinkingStats,
+    /// File modification tracking.
+    pub file_stats: FileModificationStats,
 }
 
 impl SessionAnalytics {
@@ -125,6 +127,8 @@ impl SessionAnalytics {
             self.usage.add_usage(model, usage);
         }
 
+        let timestamp = Some(assistant.timestamp);
+
         // Process content blocks
         for content in &assistant.message.content {
             match content {
@@ -132,6 +136,9 @@ impl SessionAnalytics {
                     self.message_counts.tool_uses += 1;
                     *self.tool_counts.entry(tool_use.name.clone()).or_insert(0) += 1;
                     self.usage.record_tool(&tool_use.name);
+
+                    // Track file modifications for Edit and Write tools
+                    self.track_file_modification(tool_use, timestamp);
                 }
                 ContentBlock::Thinking(thinking) => {
                     self.message_counts.thinking_blocks += 1;
@@ -146,6 +153,30 @@ impl SessionAnalytics {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Track file modification from a tool use.
+    fn track_file_modification(&mut self, tool_use: &crate::model::content::ToolUse, timestamp: Option<DateTime<Utc>>) {
+        match tool_use.name.as_str() {
+            "Edit" => {
+                if let (Some(file_path), Some(old_string), Some(new_string)) = (
+                    tool_use.input.get("file_path").and_then(|v| v.as_str()),
+                    tool_use.input.get("old_string").and_then(|v| v.as_str()),
+                    tool_use.input.get("new_string").and_then(|v| v.as_str()),
+                ) {
+                    self.file_stats.record_edit(file_path, old_string, new_string, timestamp);
+                }
+            }
+            "Write" => {
+                if let (Some(file_path), Some(content)) = (
+                    tool_use.input.get("file_path").and_then(|v| v.as_str()),
+                    tool_use.input.get("content").and_then(|v| v.as_str()),
+                ) {
+                    self.file_stats.record_write(file_path, content, timestamp);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -309,6 +340,134 @@ impl ThinkingStats {
         } else {
             self.total_chars / self.block_count
         }
+    }
+}
+
+/// File modification statistics.
+#[derive(Debug, Clone, Default)]
+pub struct FileModificationStats {
+    /// Files modified with modification count.
+    pub files: IndexMap<String, FileModificationEntry>,
+    /// File extensions modified with count.
+    pub extensions: IndexMap<String, usize>,
+    /// Total lines added.
+    pub total_lines_added: usize,
+    /// Total lines removed.
+    pub total_lines_removed: usize,
+    /// Total modifications.
+    pub total_modifications: usize,
+    /// Files created (Write tool).
+    pub files_created: usize,
+    /// Files edited (Edit tool).
+    pub files_edited: usize,
+}
+
+/// Entry for a single file's modification history.
+#[derive(Debug, Clone, Default)]
+pub struct FileModificationEntry {
+    /// Number of modifications.
+    pub modification_count: usize,
+    /// Lines added across all modifications.
+    pub lines_added: usize,
+    /// Lines removed across all modifications.
+    pub lines_removed: usize,
+    /// First modification timestamp.
+    pub first_modified: Option<DateTime<Utc>>,
+    /// Last modification timestamp.
+    pub last_modified: Option<DateTime<Utc>>,
+}
+
+impl FileModificationStats {
+    /// Record a file modification from an Edit tool call.
+    pub fn record_edit(&mut self, file_path: &str, old_string: &str, new_string: &str, timestamp: Option<DateTime<Utc>>) {
+        let entry = self.files.entry(file_path.to_string()).or_default();
+        entry.modification_count += 1;
+
+        // Calculate line changes
+        let old_lines = old_string.lines().count();
+        let new_lines = new_string.lines().count();
+        if new_lines > old_lines {
+            let added = new_lines - old_lines;
+            entry.lines_added += added;
+            self.total_lines_added += added;
+        } else {
+            let removed = old_lines - new_lines;
+            entry.lines_removed += removed;
+            self.total_lines_removed += removed;
+        }
+
+        // Update timestamps
+        if let Some(ts) = timestamp {
+            if entry.first_modified.is_none() || Some(ts) < entry.first_modified {
+                entry.first_modified = Some(ts);
+            }
+            if entry.last_modified.is_none() || Some(ts) > entry.last_modified {
+                entry.last_modified = Some(ts);
+            }
+        }
+
+        // Track extension
+        if let Some(ext) = std::path::Path::new(file_path).extension().and_then(|e| e.to_str()) {
+            *self.extensions.entry(ext.to_string()).or_insert(0) += 1;
+        }
+
+        self.total_modifications += 1;
+        self.files_edited += 1;
+    }
+
+    /// Record a file creation from a Write tool call.
+    pub fn record_write(&mut self, file_path: &str, content: &str, timestamp: Option<DateTime<Utc>>) {
+        let entry = self.files.entry(file_path.to_string()).or_default();
+        entry.modification_count += 1;
+
+        let lines = content.lines().count();
+        entry.lines_added += lines;
+        self.total_lines_added += lines;
+
+        if let Some(ts) = timestamp {
+            if entry.first_modified.is_none() || Some(ts) < entry.first_modified {
+                entry.first_modified = Some(ts);
+            }
+            if entry.last_modified.is_none() || Some(ts) > entry.last_modified {
+                entry.last_modified = Some(ts);
+            }
+        }
+
+        // Track extension
+        if let Some(ext) = std::path::Path::new(file_path).extension().and_then(|e| e.to_str()) {
+            *self.extensions.entry(ext.to_string()).or_insert(0) += 1;
+        }
+
+        self.total_modifications += 1;
+        self.files_created += 1;
+    }
+
+    /// Get top N most modified files.
+    #[must_use]
+    pub fn top_files(&self, n: usize) -> Vec<(&str, &FileModificationEntry)> {
+        let mut files: Vec<_> = self.files.iter().collect();
+        files.sort_by(|a, b| b.1.modification_count.cmp(&a.1.modification_count));
+        files.into_iter().take(n).map(|(k, v)| (k.as_str(), v)).collect()
+    }
+
+    /// Get most common file extensions.
+    #[must_use]
+    pub fn top_extensions(&self, n: usize) -> Vec<(&str, usize)> {
+        let mut exts: Vec<_> = self.extensions.iter().collect();
+        exts.sort_by(|a, b| b.1.cmp(a.1));
+        exts.into_iter().take(n).map(|(k, v)| (k.as_str(), *v)).collect()
+    }
+
+    /// Get total unique files modified.
+    #[must_use]
+    pub fn unique_files(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Get net line change (added - removed).
+    #[must_use]
+    pub fn net_lines(&self) -> i64 {
+        self.total_lines_added as i64 - self.total_lines_removed as i64
     }
 }
 
@@ -1541,5 +1700,103 @@ mod tests {
         assert!(report.contains("Tokens per message:     500"));
         assert!(report.contains("Tool uses per session:  5.0"));
         assert!(report.contains("Cache hit rate:         75.0%"));
+    }
+
+    #[test]
+    fn test_file_modification_stats_default() {
+        let stats = FileModificationStats::default();
+        assert_eq!(stats.unique_files(), 0);
+        assert_eq!(stats.total_modifications, 0);
+        assert_eq!(stats.net_lines(), 0);
+    }
+
+    #[test]
+    fn test_file_modification_stats_record_edit() {
+        let mut stats = FileModificationStats::default();
+        stats.record_edit(
+            "/src/main.rs",
+            "fn main() {\n    println!(\"hello\");\n}",
+            "fn main() {\n    println!(\"hello, world!\");\n    println!(\"extra line\");\n}",
+            None,
+        );
+
+        assert_eq!(stats.unique_files(), 1);
+        assert_eq!(stats.files_edited, 1);
+        assert_eq!(stats.total_modifications, 1);
+        assert_eq!(stats.total_lines_added, 1); // 4 lines - 3 lines = 1 added
+
+        // Check extension tracking
+        let exts = stats.top_extensions(5);
+        assert_eq!(exts.len(), 1);
+        assert_eq!(exts[0].0, "rs");
+    }
+
+    #[test]
+    fn test_file_modification_stats_record_write() {
+        let mut stats = FileModificationStats::default();
+        stats.record_write(
+            "/src/new_file.py",
+            "def hello():\n    print('hello')\n\nhello()",
+            None,
+        );
+
+        assert_eq!(stats.unique_files(), 1);
+        assert_eq!(stats.files_created, 1);
+        assert_eq!(stats.total_modifications, 1);
+        assert_eq!(stats.total_lines_added, 4);
+
+        // Check extension tracking
+        let exts = stats.top_extensions(5);
+        assert_eq!(exts.len(), 1);
+        assert_eq!(exts[0].0, "py");
+    }
+
+    #[test]
+    fn test_file_modification_stats_multiple_edits() {
+        let mut stats = FileModificationStats::default();
+
+        // Edit same file multiple times
+        stats.record_edit("/src/lib.rs", "a", "ab", None);
+        stats.record_edit("/src/lib.rs", "ab", "abc", None);
+        stats.record_edit("/src/mod.rs", "x", "y", None);
+
+        assert_eq!(stats.unique_files(), 2);
+        assert_eq!(stats.total_modifications, 3);
+
+        // lib.rs should have 2 modifications
+        let top = stats.top_files(5);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].0, "/src/lib.rs");
+        assert_eq!(top[0].1.modification_count, 2);
+    }
+
+    #[test]
+    fn test_file_modification_stats_net_lines() {
+        let mut stats = FileModificationStats::default();
+
+        // Add 5 lines
+        stats.record_write("/test.rs", "1\n2\n3\n4\n5", None);
+        // Remove 2 lines
+        stats.record_edit("/test.rs", "1\n2\n3\n4\n5", "1\n2\n3", None);
+
+        assert_eq!(stats.total_lines_added, 5);
+        assert_eq!(stats.total_lines_removed, 2);
+        assert_eq!(stats.net_lines(), 3);
+    }
+
+    #[test]
+    fn test_file_modification_entry_timestamps() {
+        use chrono::TimeZone;
+        let mut stats = FileModificationStats::default();
+
+        let ts1 = Utc.with_ymd_and_hms(2025, 1, 1, 10, 0, 0).unwrap();
+        let ts2 = Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap();
+
+        stats.record_edit("/file.rs", "a", "b", Some(ts1));
+        stats.record_edit("/file.rs", "b", "c", Some(ts2));
+
+        let entry = &stats.files["/file.rs"];
+        assert_eq!(entry.first_modified, Some(ts1));
+        assert_eq!(entry.last_modified, Some(ts2));
     }
 }

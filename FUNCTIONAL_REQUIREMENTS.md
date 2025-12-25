@@ -502,7 +502,7 @@ When Claude Code is actively writing to a JSONL file while claude-snatch reads i
 | [x] STAT-009 | Track error rates and types | P1 | ✓ |
 | [x] STAT-010 | Generate usage trends over time | P2 | ✓ UsageTrends |
 | [x] STAT-011 | Calculate average response times | P2 | ✓ ResponseTimeStats |
-| [ ] STAT-012 | Track file modification patterns | P2 | |
+| [x] STAT-012 | Track file modification patterns | P2 | ✓ (FileModificationStats, top_files, top_extensions) |
 | [x] STAT-013 | Real-time burn rate calculation | P1 | ✓ |
 | [x] STAT-014 | Usage predictions (time to limit) | P1 | ✓ (`UsagePrediction`) |
 | [x] STAT-015 | Cost per session/project | P1 | ✓ (SessionAnalytics) |
