@@ -11,10 +11,35 @@
 //! - **Lossless Round-Trip**: Preserve unknown fields for forward compatibility
 //! - **Dual Interface**: Both CLI (scriptable) and TUI (interactive) modes
 //!
+//! # Quick Start (High-Level API)
+//!
+//! For simple use cases, use the [`api`] module:
+//!
+//! ```rust,no_run
+//! use claude_snatch::api::{SnatchClient, ExportFormat};
+//!
+//! fn main() -> claude_snatch::Result<()> {
+//!     // Create a client that auto-discovers Claude Code data
+//!     let client = SnatchClient::discover()?;
+//!
+//!     // List recent sessions
+//!     for session in client.recent_sessions(10)? {
+//!         println!("Session: {} ({} messages)", session.id, session.message_count);
+//!     }
+//!
+//!     // Export a session to markdown
+//!     let markdown = client.export_session("session_id", ExportFormat::Markdown)?;
+//!     println!("{}", markdown);
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
 //! # Architecture
 //!
 //! The crate is organized into the following modules:
 //!
+//! - [`api`]: High-level programmatic API for common operations
 //! - [`model`]: Core data structures for all message types and content blocks
 //! - [`parser`]: JSONL parsing with streaming support and error recovery
 //! - [`discovery`]: Session and project discovery across platforms
@@ -27,13 +52,14 @@
 //! - [`config`]: Configuration management
 //! - [`error`]: Error types and handling
 //!
-//! # Example
+//! # Low-Level Example
+//!
+//! For more control, use the internal modules directly:
 //!
 //! ```rust,no_run
 //! use claude_snatch::{discovery::ClaudeDirectory, parser::JsonlParser};
 //!
-//! #[tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Discover Claude Code data directory
 //!     let claude_dir = ClaudeDirectory::discover()?;
 //!
@@ -51,6 +77,7 @@
 #![warn(rustdoc::missing_crate_level_docs)]
 
 pub mod analytics;
+pub mod api;
 pub mod async_io;
 pub mod cache;
 pub mod cli;
@@ -90,6 +117,7 @@ pub const FILE_HISTORY_DIR_NAME: &str = "filehistory";
 pub mod prelude {
     //! Prelude module with commonly used types.
 
+    pub use crate::api::{SnatchClient, ExportFormat, ExportOptionsBuilder};
     pub use crate::error::{Result, SnatchError};
     pub use crate::model::{
         AssistantMessage, ContentBlock, LogEntry, SchemaVersion, UserMessage,

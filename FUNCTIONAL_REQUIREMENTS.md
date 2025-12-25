@@ -1020,7 +1020,7 @@ Given versions A (file) and B (schema):
 | [ ] EXT-001 | Plugin architecture for exporters | P2 | |
 | [ ] EXT-002 | Custom output format support | P2 | |
 | [ ] EXT-003 | Hook system for processing | P3 | |
-| [ ] EXT-004 | API for programmatic use | P2 | |
+| [x] EXT-004 | API for programmatic use | P2 | ✓ (api module) |
 
 ---
 
