@@ -32,6 +32,8 @@ pub struct HtmlExporter {
     collapse_thinking: bool,
     /// Collapse tool outputs.
     collapse_tools: bool,
+    /// Include table of contents / navigation sidebar.
+    include_toc: bool,
 }
 
 impl Default for HtmlExporter {
@@ -51,6 +53,7 @@ impl HtmlExporter {
             dark_theme: false,
             collapse_thinking: true,
             collapse_tools: true,
+            include_toc: false,
         }
     }
 
@@ -96,6 +99,13 @@ impl HtmlExporter {
         self
     }
 
+    /// Include table of contents / navigation sidebar.
+    #[must_use]
+    pub fn with_toc(mut self, include: bool) -> Self {
+        self.include_toc = include;
+        self
+    }
+
     /// Write the HTML header.
     fn write_document_start<W: Write>(
         &self,
@@ -115,7 +125,20 @@ impl HtmlExporter {
         }
 
         writeln!(writer, "</head>")?;
-        writeln!(writer, "<body class=\"{}\">", if self.dark_theme { "dark" } else { "light" })?;
+        let body_class = if self.dark_theme { "dark" } else { "light" };
+        let has_toc = if self.include_toc { " has-toc" } else { "" };
+        writeln!(writer, "<body class=\"{}{}\">", body_class, has_toc)?;
+
+        if self.include_toc {
+            writeln!(writer, "<div class=\"layout-wrapper\">")?;
+            // TOC will be inserted here after we know all entries
+            writeln!(writer, "<nav class=\"toc\" id=\"toc\">")?;
+            writeln!(writer, "  <div class=\"toc-header\">Contents</div>")?;
+            writeln!(writer, "  <ul class=\"toc-list\" id=\"toc-list\">")?;
+            writeln!(writer, "  </ul>")?;
+            writeln!(writer, "</nav>")?;
+        }
+
         writeln!(writer, "<main class=\"conversation\">")?;
 
         Ok(())
@@ -343,6 +366,114 @@ impl HtmlExporter {
     .toggle-icon.collapsed {{
       transform: rotate(-90deg);
     }}
+
+    /* Table of Contents styles */
+    .has-toc {{
+      padding: 0;
+    }}
+
+    .layout-wrapper {{
+      display: flex;
+      min-height: 100vh;
+    }}
+
+    .has-toc .conversation {{
+      flex: 1;
+      max-width: 900px;
+      margin: 0;
+      padding: 20px 40px;
+    }}
+
+    .toc {{
+      position: sticky;
+      top: 0;
+      width: 280px;
+      height: 100vh;
+      overflow-y: auto;
+      background: var(--tool-bg);
+      border-right: 1px solid var(--border-color);
+      padding: 0;
+      flex-shrink: 0;
+    }}
+
+    .toc-header {{
+      font-weight: 600;
+      font-size: 1.1em;
+      padding: 20px 16px 12px;
+      border-bottom: 1px solid var(--border-color);
+      position: sticky;
+      top: 0;
+      background: var(--tool-bg);
+      z-index: 1;
+    }}
+
+    .toc-list {{
+      list-style: none;
+      margin: 0;
+      padding: 8px 0;
+    }}
+
+    .toc-item {{
+      margin: 0;
+    }}
+
+    .toc-link {{
+      display: block;
+      padding: 8px 16px;
+      color: var(--text-color);
+      text-decoration: none;
+      font-size: 0.85em;
+      border-left: 3px solid transparent;
+      transition: all 0.15s ease;
+    }}
+
+    .toc-link:hover {{
+      background: var(--border-color);
+      border-left-color: var(--accent-color);
+    }}
+
+    .toc-link.active {{
+      background: var(--border-color);
+      border-left-color: var(--accent-color);
+      font-weight: 500;
+    }}
+
+    .toc-role {{
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 0.75em;
+      letter-spacing: 0.05em;
+      opacity: 0.7;
+      display: block;
+      margin-bottom: 2px;
+    }}
+
+    .toc-preview {{
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      opacity: 0.8;
+    }}
+
+    @media (max-width: 1000px) {{
+      .layout-wrapper {{
+        flex-direction: column;
+      }}
+
+      .toc {{
+        position: relative;
+        width: 100%;
+        height: auto;
+        max-height: 200px;
+        border-right: none;
+        border-bottom: 1px solid var(--border-color);
+      }}
+
+      .has-toc .conversation {{
+        padding: 20px;
+      }}
+    }}
   "#)?;
         writeln!(writer, "  </style>")?;
         Ok(())
@@ -351,6 +482,10 @@ impl HtmlExporter {
     /// Write the HTML footer.
     fn write_document_end<W: Write>(&self, writer: &mut W) -> Result<()> {
         writeln!(writer, "</main>")?;
+
+        if self.include_toc {
+            writeln!(writer, "</div>")?; // Close layout-wrapper
+        }
 
         // Add toggle script
         writeln!(writer, r#"<script>
@@ -363,6 +498,83 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
   }});
 }});
 </script>"#)?;
+
+        // Add TOC script if enabled
+        if self.include_toc {
+            writeln!(writer, r#"<script>
+(function() {{
+  // Populate TOC from messages
+  const tocList = document.getElementById('toc-list');
+  const messages = document.querySelectorAll('.message');
+
+  messages.forEach((msg, idx) => {{
+    // Add ID to message for linking
+    const msgId = 'msg-' + idx;
+    msg.id = msgId;
+
+    // Get role and preview
+    const roleEl = msg.querySelector('.message-role');
+    const contentEl = msg.querySelector('.message-content p');
+    const role = roleEl ? roleEl.textContent : 'Message';
+    let preview = contentEl ? contentEl.textContent.trim() : '';
+    if (preview.length > 50) preview = preview.substring(0, 50) + '...';
+
+    // Create TOC item
+    const li = document.createElement('li');
+    li.className = 'toc-item';
+    const a = document.createElement('a');
+    a.className = 'toc-link';
+    a.href = '#' + msgId;
+    a.innerHTML = '<span class="toc-role">' + role + '</span>' +
+                  '<span class="toc-preview">' + preview + '</span>';
+    li.appendChild(a);
+    tocList.appendChild(li);
+  }});
+
+  // Highlight active TOC item on scroll
+  const tocLinks = document.querySelectorAll('.toc-link');
+  let ticking = false;
+
+  function updateActiveLink() {{
+    const scrollPos = window.scrollY + 100;
+    let activeIdx = 0;
+
+    messages.forEach((msg, idx) => {{
+      if (msg.offsetTop <= scrollPos) {{
+        activeIdx = idx;
+      }}
+    }});
+
+    tocLinks.forEach((link, idx) => {{
+      link.classList.toggle('active', idx === activeIdx);
+    }});
+
+    ticking = false;
+  }}
+
+  window.addEventListener('scroll', () => {{
+    if (!ticking) {{
+      window.requestAnimationFrame(updateActiveLink);
+      ticking = true;
+    }}
+  }});
+
+  // Initial update
+  updateActiveLink();
+
+  // Smooth scroll for TOC links
+  tocLinks.forEach(link => {{
+    link.addEventListener('click', (e) => {{
+      e.preventDefault();
+      const target = document.querySelector(link.getAttribute('href'));
+      if (target) {{
+        target.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+      }}
+    }});
+  }});
+}})();
+</script>"#)?;
+        }
 
         writeln!(writer, "</body>")?;
         writeln!(writer, "</html>")?;
@@ -699,5 +911,54 @@ mod tests {
         assert_eq!(exporter.title, Some("My Conversation".to_string()));
         assert!(exporter.dark_theme);
         assert!(!exporter.collapse_thinking);
+    }
+
+    #[test]
+    fn test_html_exporter_with_toc() {
+        let exporter = HtmlExporter::new()
+            .with_toc(true)
+            .dark_theme(false);
+
+        assert!(exporter.include_toc);
+        assert!(!exporter.dark_theme);
+    }
+
+    #[test]
+    fn test_html_document_with_toc() {
+        let exporter = HtmlExporter::new().with_toc(true);
+        let mut output = Vec::new();
+
+        exporter.write_document_start(&mut output, "Test").unwrap();
+
+        let html = String::from_utf8(output).unwrap();
+        assert!(html.contains("has-toc"));
+        assert!(html.contains("layout-wrapper"));
+        assert!(html.contains("toc-list"));
+    }
+
+    #[test]
+    fn test_html_toc_styles() {
+        let exporter = HtmlExporter::new().with_toc(true);
+        let mut output = Vec::new();
+
+        exporter.write_styles(&mut output).unwrap();
+
+        let css = String::from_utf8(output).unwrap();
+        assert!(css.contains(".toc"));
+        assert!(css.contains(".toc-link"));
+        assert!(css.contains(".toc-preview"));
+    }
+
+    #[test]
+    fn test_html_toc_script() {
+        let exporter = HtmlExporter::new().with_toc(true);
+        let mut output = Vec::new();
+
+        exporter.write_document_end(&mut output).unwrap();
+
+        let html = String::from_utf8(output).unwrap();
+        assert!(html.contains("tocList"));
+        assert!(html.contains("scrollIntoView"));
+        assert!(html.contains("updateActiveLink"));
     }
 }
