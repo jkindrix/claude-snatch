@@ -364,6 +364,123 @@ impl Default for DataSubjectRights {
     }
 }
 
+/// SPDX license information for export metadata.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SpdxLicenseInfo {
+    /// SPDX license identifier.
+    pub identifier: String,
+    /// Full license name.
+    pub name: String,
+    /// License URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+impl SpdxLicenseInfo {
+    /// Create SPDX info for MIT license (claude-snatch license).
+    pub fn mit() -> Self {
+        Self {
+            identifier: "MIT".to_string(),
+            name: "MIT License".to_string(),
+            url: Some("https://opensource.org/licenses/MIT".to_string()),
+        }
+    }
+
+    /// Create SPDX info for Apache 2.0 license.
+    pub fn apache_2_0() -> Self {
+        Self {
+            identifier: "Apache-2.0".to_string(),
+            name: "Apache License 2.0".to_string(),
+            url: Some("https://www.apache.org/licenses/LICENSE-2.0".to_string()),
+        }
+    }
+
+    /// Create SPDX info from an identifier.
+    pub fn from_identifier(identifier: impl Into<String>) -> Self {
+        let id = identifier.into();
+        let (name, url) = match id.as_str() {
+            "MIT" => ("MIT License".to_string(), Some("https://opensource.org/licenses/MIT".to_string())),
+            "Apache-2.0" => ("Apache License 2.0".to_string(), Some("https://www.apache.org/licenses/LICENSE-2.0".to_string())),
+            "BSD-3-Clause" => ("BSD 3-Clause License".to_string(), Some("https://opensource.org/licenses/BSD-3-Clause".to_string())),
+            "GPL-3.0" => ("GNU General Public License v3.0".to_string(), Some("https://www.gnu.org/licenses/gpl-3.0.html".to_string())),
+            "GPL-2.0" => ("GNU General Public License v2.0".to_string(), Some("https://www.gnu.org/licenses/old-licenses/gpl-2.0.html".to_string())),
+            "LGPL-3.0" => ("GNU Lesser General Public License v3.0".to_string(), Some("https://www.gnu.org/licenses/lgpl-3.0.html".to_string())),
+            "MPL-2.0" => ("Mozilla Public License 2.0".to_string(), Some("https://www.mozilla.org/en-US/MPL/2.0/".to_string())),
+            "ISC" => ("ISC License".to_string(), Some("https://opensource.org/licenses/ISC".to_string())),
+            "Unlicense" => ("The Unlicense".to_string(), Some("https://unlicense.org/".to_string())),
+            _ => (id.clone(), None),
+        };
+        Self { identifier: id, name, url }
+    }
+}
+
+/// Export license information with SPDX identifiers.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ExportLicenseInfo {
+    /// Tool license.
+    pub tool_license: SpdxLicenseInfo,
+    /// Content license (if applicable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_license: Option<SpdxLicenseInfo>,
+    /// Third-party dependencies.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub dependencies: Vec<DependencyLicense>,
+}
+
+/// Third-party dependency license information.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DependencyLicense {
+    /// Dependency name.
+    pub name: String,
+    /// Dependency version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// SPDX license identifier.
+    pub license: String,
+    /// Repository URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+}
+
+impl ExportLicenseInfo {
+    /// Create default license info for claude-snatch exports.
+    pub fn default_for_tool() -> Self {
+        Self {
+            tool_license: SpdxLicenseInfo::mit(),
+            content_license: None,
+            dependencies: Vec::new(),
+        }
+    }
+
+    /// Add a content license.
+    pub fn with_content_license(mut self, license: SpdxLicenseInfo) -> Self {
+        self.content_license = Some(license);
+        self
+    }
+
+    /// Add dependency license info.
+    pub fn add_dependency(&mut self, name: &str, version: Option<&str>, license: &str, repo: Option<&str>) {
+        self.dependencies.push(DependencyLicense {
+            name: name.to_string(),
+            version: version.map(String::from),
+            license: license.to_string(),
+            repository: repo.map(String::from),
+        });
+    }
+
+    /// Get key dependencies for attribution.
+    pub fn with_key_dependencies(mut self) -> Self {
+        // Add key dependencies used by claude-snatch
+        self.add_dependency("serde", None, "MIT OR Apache-2.0", Some("https://github.com/serde-rs/serde"));
+        self.add_dependency("tokio", None, "MIT", Some("https://github.com/tokio-rs/tokio"));
+        self.add_dependency("clap", None, "MIT OR Apache-2.0", Some("https://github.com/clap-rs/clap"));
+        self.add_dependency("ratatui", None, "MIT", Some("https://github.com/ratatui/ratatui"));
+        self.add_dependency("chrono", None, "MIT OR Apache-2.0", Some("https://github.com/chronotope/chrono"));
+        self.add_dependency("tantivy", None, "MIT", Some("https://github.com/quickwit-oss/tantivy"));
+        self
+    }
+}
+
 impl GdprEnvelope {
     /// Create a GDPR envelope from configuration.
     pub fn from_config(config: &GdprConfig, format: &str) -> Self {
@@ -1188,5 +1305,60 @@ mod tests {
         let config = GdprConfig::for_portability();
         let envelope = GdprEnvelope::from_config(&config, "json");
         assert!(envelope.processing_activities.is_empty());
+    }
+
+    #[test]
+    fn test_spdx_license_mit() {
+        let license = SpdxLicenseInfo::mit();
+        assert_eq!(license.identifier, "MIT");
+        assert_eq!(license.name, "MIT License");
+        assert!(license.url.is_some());
+    }
+
+    #[test]
+    fn test_spdx_license_apache() {
+        let license = SpdxLicenseInfo::apache_2_0();
+        assert_eq!(license.identifier, "Apache-2.0");
+        assert_eq!(license.name, "Apache License 2.0");
+    }
+
+    #[test]
+    fn test_spdx_license_from_identifier() {
+        let license = SpdxLicenseInfo::from_identifier("GPL-3.0");
+        assert_eq!(license.identifier, "GPL-3.0");
+        assert!(license.name.contains("GNU"));
+        assert!(license.url.is_some());
+
+        // Unknown license
+        let unknown = SpdxLicenseInfo::from_identifier("CUSTOM-1.0");
+        assert_eq!(unknown.identifier, "CUSTOM-1.0");
+        assert!(unknown.url.is_none());
+    }
+
+    #[test]
+    fn test_export_license_info_default() {
+        let info = ExportLicenseInfo::default_for_tool();
+        assert_eq!(info.tool_license.identifier, "MIT");
+        assert!(info.content_license.is_none());
+        assert!(info.dependencies.is_empty());
+    }
+
+    #[test]
+    fn test_export_license_info_with_dependencies() {
+        let info = ExportLicenseInfo::default_for_tool().with_key_dependencies();
+        assert!(!info.dependencies.is_empty());
+        assert!(info.dependencies.iter().any(|d| d.name == "serde"));
+        assert!(info.dependencies.iter().any(|d| d.name == "tokio"));
+    }
+
+    #[test]
+    fn test_export_license_info_add_dependency() {
+        let mut info = ExportLicenseInfo::default_for_tool();
+        info.add_dependency("test-crate", Some("1.0.0"), "MIT", Some("https://example.com"));
+
+        assert_eq!(info.dependencies.len(), 1);
+        assert_eq!(info.dependencies[0].name, "test-crate");
+        assert_eq!(info.dependencies[0].version, Some("1.0.0".to_string()));
+        assert_eq!(info.dependencies[0].license, "MIT");
     }
 }
