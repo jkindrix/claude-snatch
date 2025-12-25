@@ -67,6 +67,10 @@ pub struct Cli {
     /// Log output file (default: stderr).
     #[arg(long, global = true, env = "SNATCH_LOG_FILE")]
     pub log_file: Option<std::path::PathBuf>,
+
+    /// Number of threads for parallel processing (default: number of CPUs).
+    #[arg(short = 'j', long, global = true, env = "SNATCH_THREADS")]
+    pub threads: Option<usize>,
 }
 
 /// Log level options.
@@ -969,9 +973,25 @@ fn init_logging(cli: &Cli) {
     }
 }
 
+/// Initialize rayon thread pool with custom thread count if specified.
+fn init_thread_pool(threads: Option<usize>) {
+    if let Some(num_threads) = threads {
+        if num_threads > 0 {
+            // Configure rayon's global thread pool
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(num_threads)
+                .build_global()
+                .ok(); // Ignore error if already initialized
+        }
+    }
+}
+
 /// Run the CLI application.
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+
+    // Initialize thread pool first (before any parallel operations)
+    init_thread_pool(cli.threads);
 
     // Initialize logging
     init_logging(&cli);

@@ -738,7 +738,7 @@ esac
 | [x] OUT-003 | Table formatting for lists | P0 | ✓ |
 | [x] OUT-004 | Human-readable file sizes | P1 | ✓ |
 | [x] OUT-005 | Relative timestamps option | P2 | |
-| [ ] OUT-006 | Pager support (less/more) | P2 | |
+| [x] OUT-006 | Pager support (less/more) | P2 | ✓ |
 
 ### 7.6 Shell Completions
 
@@ -767,7 +767,7 @@ esac
 | [x] TUI-007 | Mouse support | P1 | ✓ (click, scroll) |
 | [x] TUI-008 | Resizable panels | P1 | ✓ (auto-resize) |
 | [x] TUI-009 | Status bar with stats | P0 | ✓ |
-| [ ] TUI-010 | Command palette (Ctrl+P) | P2 | |
+| [x] TUI-010 | Command palette (Ctrl+P) | P2 | ✓ |
 
 ### 8.2 Navigation
 
@@ -874,7 +874,7 @@ esac
 | [x] CONC-002 | Async I/O operations | P1 | ✓ (tokio-based async_io module) |
 | [ ] CONC-003 | Background indexing | P2 | |
 | [x] CONC-004 | Non-blocking TUI updates | P0 | ✓ (event handler) |
-| [ ] CONC-005 | Configurable thread count | P2 | |
+| [x] CONC-005 | Configurable thread count | P2 | ✓ (-j/--threads) |
 
 ---
 
