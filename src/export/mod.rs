@@ -71,6 +71,114 @@ pub struct ExportOptions {
     pub main_thread_only: bool,
     /// Configuration for sensitive data redaction.
     pub redaction: Option<crate::util::RedactionConfig>,
+    /// Data minimization settings for privacy-conscious exports.
+    pub minimization: Option<DataMinimizationConfig>,
+}
+
+/// Configuration for data minimization in shared exports.
+///
+/// This helps prepare exports for sharing by stripping or anonymizing
+/// potentially identifying or sensitive structural information.
+#[derive(Debug, Clone, Default)]
+pub struct DataMinimizationConfig {
+    /// Anonymize file paths (replace with generic paths).
+    pub anonymize_paths: bool,
+    /// Strip working directory information.
+    pub strip_cwd: bool,
+    /// Strip git branch/repository information.
+    pub strip_git_info: bool,
+    /// Anonymize session IDs (replace with sequential numbers).
+    pub anonymize_session_ids: bool,
+    /// Strip project names/paths.
+    pub strip_project_info: bool,
+    /// Strip user-identifying information from tool calls.
+    pub strip_user_info: bool,
+    /// Generalize timestamps (round to hour/day).
+    pub generalize_timestamps: bool,
+    /// Strip model names.
+    pub strip_model_names: bool,
+}
+
+impl DataMinimizationConfig {
+    /// Create config with no minimization.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Create config for maximum minimization (all options enabled).
+    pub fn full() -> Self {
+        Self {
+            anonymize_paths: true,
+            strip_cwd: true,
+            strip_git_info: true,
+            anonymize_session_ids: true,
+            strip_project_info: true,
+            strip_user_info: true,
+            generalize_timestamps: true,
+            strip_model_names: false, // Keep model names by default
+        }
+    }
+
+    /// Create config suitable for public sharing.
+    ///
+    /// Anonymizes paths and IDs, strips location info, but keeps
+    /// timestamps and model info for context.
+    pub fn for_sharing() -> Self {
+        Self {
+            anonymize_paths: true,
+            strip_cwd: true,
+            strip_git_info: true,
+            anonymize_session_ids: true,
+            strip_project_info: true,
+            strip_user_info: true,
+            generalize_timestamps: false,
+            strip_model_names: false,
+        }
+    }
+
+    /// Check if any minimization is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.anonymize_paths
+            || self.strip_cwd
+            || self.strip_git_info
+            || self.anonymize_session_ids
+            || self.strip_project_info
+            || self.strip_user_info
+            || self.generalize_timestamps
+            || self.strip_model_names
+    }
+
+    /// Anonymize a file path.
+    pub fn anonymize_path(&self, path: &str) -> String {
+        if !self.anonymize_paths {
+            return path.to_string();
+        }
+        // Replace path with just filename and generic prefix
+        let file_name = std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file");
+        format!("/project/{}", file_name)
+    }
+
+    /// Anonymize a session ID.
+    pub fn anonymize_session_id(&self, original: &str, counter: usize) -> String {
+        if !self.anonymize_session_ids {
+            return original.to_string();
+        }
+        format!("session-{:04}", counter)
+    }
+
+    /// Generalize a timestamp (round to nearest hour).
+    pub fn generalize_timestamp(&self, ts: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+        if !self.generalize_timestamps {
+            return ts;
+        }
+        use chrono::Timelike;
+        ts.with_minute(0).unwrap_or(ts)
+            .with_second(0).unwrap_or(ts)
+            .with_nanosecond(0).unwrap_or(ts)
+    }
 }
 
 impl Default for ExportOptions {
@@ -90,6 +198,7 @@ impl Default for ExportOptions {
             include_branches: false,
             main_thread_only: true,
             redaction: None,
+            minimization: None,
         }
     }
 }
@@ -113,6 +222,7 @@ impl ExportOptions {
             include_branches: true,
             main_thread_only: false,
             redaction: None,
+            minimization: None,
         }
     }
 
@@ -134,6 +244,32 @@ impl ExportOptions {
             include_branches: false,
             main_thread_only: true,
             redaction: None,
+            minimization: None,
+        }
+    }
+
+    /// Create options suitable for public sharing.
+    ///
+    /// This applies both data minimization and security redaction
+    /// to prepare the export for safe sharing.
+    #[must_use]
+    pub fn for_sharing() -> Self {
+        Self {
+            include_thinking: false,
+            include_tool_use: true,
+            include_tool_results: false,
+            include_system: false,
+            include_timestamps: true,
+            relative_timestamps: true,
+            include_usage: false,
+            include_metadata: false,
+            include_images: false,
+            max_depth: None,
+            truncate_at: None,
+            include_branches: false,
+            main_thread_only: true,
+            redaction: Some(crate::util::RedactionConfig::security()),
+            minimization: Some(DataMinimizationConfig::for_sharing()),
         }
     }
 
@@ -211,6 +347,75 @@ impl ExportOptions {
             Some(config) if config.is_enabled() => crate::util::redact_sensitive(text, config),
             _ => std::borrow::Cow::Borrowed(text),
         }
+    }
+
+    /// Builder: set data minimization configuration.
+    #[must_use]
+    pub fn with_minimization(mut self, config: DataMinimizationConfig) -> Self {
+        self.minimization = Some(config);
+        self
+    }
+
+    /// Builder: enable minimization for public sharing.
+    #[must_use]
+    pub fn with_sharing_minimization(mut self) -> Self {
+        self.minimization = Some(DataMinimizationConfig::for_sharing());
+        self
+    }
+
+    /// Builder: enable full minimization.
+    #[must_use]
+    pub fn with_full_minimization(mut self) -> Self {
+        self.minimization = Some(DataMinimizationConfig::full());
+        self
+    }
+
+    /// Check if minimization is enabled.
+    #[must_use]
+    pub fn has_minimization(&self) -> bool {
+        self.minimization.as_ref().map_or(false, |m| m.is_enabled())
+    }
+
+    /// Apply minimization to a file path if configured.
+    #[must_use]
+    pub fn minimize_path(&self, path: &str) -> String {
+        match &self.minimization {
+            Some(config) if config.anonymize_paths => config.anonymize_path(path),
+            _ => path.to_string(),
+        }
+    }
+
+    /// Apply minimization to a session ID if configured.
+    #[must_use]
+    pub fn minimize_session_id(&self, session_id: &str, counter: usize) -> String {
+        match &self.minimization {
+            Some(config) if config.anonymize_session_ids => config.anonymize_session_id(session_id, counter),
+            _ => session_id.to_string(),
+        }
+    }
+
+    /// Check if git info should be stripped.
+    #[must_use]
+    pub fn should_strip_git_info(&self) -> bool {
+        self.minimization.as_ref().map_or(false, |m| m.strip_git_info)
+    }
+
+    /// Check if project info should be stripped.
+    #[must_use]
+    pub fn should_strip_project_info(&self) -> bool {
+        self.minimization.as_ref().map_or(false, |m| m.strip_project_info)
+    }
+
+    /// Check if CWD should be stripped.
+    #[must_use]
+    pub fn should_strip_cwd(&self) -> bool {
+        self.minimization.as_ref().map_or(false, |m| m.strip_cwd)
+    }
+
+    /// Check if model names should be stripped.
+    #[must_use]
+    pub fn should_strip_model(&self) -> bool {
+        self.minimization.as_ref().map_or(false, |m| m.strip_model_names)
     }
 }
 
@@ -561,5 +766,90 @@ mod tests {
         let ts = Utc::now() - Duration::weeks(2);
         let result = format_relative_time(&ts);
         assert_eq!(result, "2 weeks ago");
+    }
+
+    #[test]
+    fn test_data_minimization_config_none() {
+        let config = DataMinimizationConfig::none();
+        assert!(!config.is_enabled());
+    }
+
+    #[test]
+    fn test_data_minimization_config_full() {
+        let config = DataMinimizationConfig::full();
+        assert!(config.is_enabled());
+        assert!(config.anonymize_paths);
+        assert!(config.strip_cwd);
+        assert!(config.strip_git_info);
+        assert!(config.anonymize_session_ids);
+    }
+
+    #[test]
+    fn test_data_minimization_config_for_sharing() {
+        let config = DataMinimizationConfig::for_sharing();
+        assert!(config.is_enabled());
+        assert!(config.anonymize_paths);
+        assert!(!config.generalize_timestamps); // Keeps timestamps for context
+        assert!(!config.strip_model_names); // Keeps model names
+    }
+
+    #[test]
+    fn test_data_minimization_anonymize_path() {
+        let config = DataMinimizationConfig::full();
+        let result = config.anonymize_path("/home/user/projects/secret-project/src/main.rs");
+        assert_eq!(result, "/project/main.rs");
+        assert!(!result.contains("user"));
+        assert!(!result.contains("secret-project"));
+    }
+
+    #[test]
+    fn test_data_minimization_anonymize_session_id() {
+        let config = DataMinimizationConfig::full();
+        let result = config.anonymize_session_id("01930a2e-3f4b-7c8d-9e0f-123456789abc", 5);
+        assert_eq!(result, "session-0005");
+        assert!(!result.contains("01930a2e"));
+    }
+
+    #[test]
+    fn test_data_minimization_generalize_timestamp() {
+        use chrono::{TimeZone, Timelike};
+        let config = DataMinimizationConfig::full();
+        let ts = Utc.with_ymd_and_hms(2025, 12, 24, 10, 45, 32).unwrap();
+        let result = config.generalize_timestamp(ts);
+        assert_eq!(result.minute(), 0);
+        assert_eq!(result.second(), 0);
+        assert_eq!(result.hour(), 10); // Hour preserved
+    }
+
+    #[test]
+    fn test_export_options_for_sharing() {
+        let opts = ExportOptions::for_sharing();
+        assert!(opts.redaction.is_some());
+        assert!(opts.minimization.is_some());
+        assert!(!opts.include_thinking);
+        assert!(opts.relative_timestamps);
+    }
+
+    #[test]
+    fn test_export_options_minimize_path() {
+        let opts = ExportOptions::default().with_sharing_minimization();
+        let result = opts.minimize_path("/home/user/code/app.py");
+        assert_eq!(result, "/project/app.py");
+    }
+
+    #[test]
+    fn test_export_options_minimize_session_id() {
+        let opts = ExportOptions::default().with_sharing_minimization();
+        let result = opts.minimize_session_id("abc123-def456", 7);
+        assert_eq!(result, "session-0007");
+    }
+
+    #[test]
+    fn test_export_options_no_minimization() {
+        let opts = ExportOptions::default();
+        assert!(!opts.has_minimization());
+        // Without minimization, paths are unchanged
+        let result = opts.minimize_path("/home/user/code/app.py");
+        assert_eq!(result, "/home/user/code/app.py");
     }
 }

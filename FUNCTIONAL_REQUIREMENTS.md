@@ -1094,7 +1094,7 @@ Given versions A (file) and B (schema):
 | ID | Requirement | Priority | Status |
 |----|-------------|----------|--------|
 | [ ] LEGAL-001 | GDPR-compliant export options | P2 | |
-| [ ] LEGAL-002 | Data minimization option for shared exports | P2 | |
+| [x] LEGAL-002 | Data minimization option for shared exports | P2 | ✓ (DataMinimizationConfig, for_sharing(), anonymize_path/session_id) |
 | [x] LEGAL-003 | Dependency license audit (cargo-deny) | P1 | ✓ (`deny.toml` configured) |
 | [x] LEGAL-004 | License compatibility verification | P1 | ✓ (allowed licenses defined) |
 | [ ] LEGAL-005 | SPDX license identifiers in output | P2 | |

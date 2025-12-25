@@ -138,6 +138,7 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
             include_branches: !args.main_thread,
             main_thread_only: args.main_thread,
             redaction,
+            minimization: None,
         }
     };
 
@@ -506,6 +507,7 @@ fn export_session(
             include_branches: !args.main_thread,
             main_thread_only: args.main_thread,
             redaction,
+            minimization: None,
         }
     };
 
