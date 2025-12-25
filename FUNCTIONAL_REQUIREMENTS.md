@@ -807,7 +807,7 @@ esac
 | [x] DISP-006 | Timestamp display toggle | P1 | ✓ |
 | [x] DISP-007 | Token usage display toggle | P1 | ✓ (details panel) |
 | [x] DISP-008 | Word wrap toggle | P1 | ✓ (w key) |
-| [ ] DISP-009 | Line numbers toggle | P2 | |
+| [x] DISP-009 | Line numbers toggle | P2 | ✓ (# key) |
 
 ### 8.5 Actions & Commands
 

@@ -500,6 +500,8 @@ pub struct AppState {
     pub show_tools: bool,
     /// Enable word wrap in conversation panel.
     pub word_wrap: bool,
+    /// Show line numbers in conversation panel.
+    pub show_line_numbers: bool,
     /// Current theme.
     pub theme: Theme,
     /// Current entries (for navigation).
@@ -560,6 +562,7 @@ impl AppState {
             show_thinking: true,
             show_tools: true,
             word_wrap: true,
+            show_line_numbers: false,
             theme,
             entries: Vec::new(),
             search_state: SearchState::default(),
@@ -1077,6 +1080,17 @@ impl AppState {
         } else {
             self.status_message = Some("Word wrap: OFF".to_string());
         }
+    }
+
+    /// Toggle line numbers display.
+    pub fn toggle_line_numbers(&mut self) {
+        self.show_line_numbers = !self.show_line_numbers;
+        if self.show_line_numbers {
+            self.status_message = Some("Line numbers: ON".to_string());
+        } else {
+            self.status_message = Some("Line numbers: OFF".to_string());
+        }
+        self.update_conversation_display();
     }
 
     /// Toggle filter panel.

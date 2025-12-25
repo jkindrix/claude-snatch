@@ -302,6 +302,11 @@ fn run_loop<B: ratatui::backend::Backend>(
                         app.toggle_word_wrap();
                     }
 
+                    // Toggle line numbers
+                    (KeyModifiers::NONE, KeyCode::Char('#')) => {
+                        app.toggle_line_numbers();
+                    }
+
                     // Filter controls
                     (KeyModifiers::NONE, KeyCode::Char('f')) => {
                         app.toggle_filter();
@@ -536,6 +541,28 @@ fn draw_conversation_panel(f: &mut Frame, app: &AppState, area: Rect) {
 
     let content = if app.conversation_lines.is_empty() {
         vec![Line::from("Select a session to view")]
+    } else if app.show_line_numbers {
+        // Add line numbers to each line
+        let total_lines = app.conversation_lines.len();
+        let line_number_width = total_lines.to_string().len();
+
+        app.conversation_lines
+            .iter()
+            .enumerate()
+            .skip(app.scroll_offset)
+            .take(area.height as usize - 2)
+            .map(|(i, line)| {
+                // Create line number span with dimmed style
+                let line_num = format!("{:>width$}│ ", i + 1, width = line_number_width);
+                let mut spans = vec![Span::styled(
+                    line_num,
+                    Style::default().fg(app.theme.secondary).add_modifier(Modifier::DIM),
+                )];
+                // Append original line content
+                spans.extend(line.spans.iter().cloned());
+                Line::from(spans)
+            })
+            .collect()
     } else {
         app.conversation_lines
             .iter()
@@ -696,6 +723,7 @@ fn draw_help_overlay(f: &mut Frame) {
         Line::from("  t         Toggle thinking blocks"),
         Line::from("  o         Toggle tool outputs"),
         Line::from("  w         Toggle word wrap"),
+        Line::from("  #         Toggle line numbers"),
         Line::from(format!("  T         Cycle theme ({})", available_themes().join("/"))),
         Line::from(""),
         Line::from("Filters:"),
