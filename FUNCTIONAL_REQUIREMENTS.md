@@ -1273,7 +1273,7 @@ The migration guide must document:
 | [ ] FUT-003 | Web UI | P3 | Browser-based interface |
 | [ ] FUT-004 | Remote session support | P3 | SSH to fetch logs |
 | [ ] FUT-005 | Cloud sync integration | P3 | S3, GCS, etc. |
-| [ ] FUT-006 | Diff between sessions | P2 | Compare conversations |
+| [x] FUT-006 | Diff between sessions | P2 | ✓ (SessionDiff) |
 | [ ] FUT-007 | Session merging | P3 | Combine sessions |
 | [ ] FUT-008 | AI-powered summarization | P3 | Use Claude to summarize |
 | [ ] FUT-009 | Conversation visualization | P3 | Graph-based view |

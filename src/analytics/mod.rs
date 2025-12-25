@@ -1042,6 +1042,315 @@ impl EfficiencyMetrics {
     }
 }
 
+/// Diff between two sessions for comparison.
+///
+/// This shows what changed between two sessions or conversations,
+/// useful for comparing before/after states or identifying patterns.
+#[derive(Debug, Clone, Default)]
+pub struct SessionDiff {
+    /// Session identifiers.
+    pub session_a_id: Option<String>,
+    pub session_b_id: Option<String>,
+    /// Duration difference.
+    pub duration_diff: DurationDiff,
+    /// Message count differences.
+    pub message_diff: MessageCountDiff,
+    /// Token usage differences.
+    pub usage_diff: UsageDiff,
+    /// Tools that appear in only one session.
+    pub tools_only_in_a: Vec<String>,
+    pub tools_only_in_b: Vec<String>,
+    /// Tools used in both sessions with count differences.
+    pub tools_diff: Vec<(String, i64)>,
+    /// Files modified in only one session.
+    pub files_only_in_a: Vec<String>,
+    pub files_only_in_b: Vec<String>,
+    /// Summary of key differences.
+    pub summary: Vec<String>,
+}
+
+/// Duration difference between sessions.
+#[derive(Debug, Clone, Default)]
+pub struct DurationDiff {
+    /// Duration of session A.
+    pub duration_a: Option<Duration>,
+    /// Duration of session B.
+    pub duration_b: Option<Duration>,
+    /// Difference in minutes (B - A).
+    pub diff_minutes: i64,
+}
+
+/// Message count differences.
+#[derive(Debug, Clone, Default)]
+pub struct MessageCountDiff {
+    /// User message difference (B - A).
+    pub user_diff: i64,
+    /// Assistant message difference (B - A).
+    pub assistant_diff: i64,
+    /// Total message difference (B - A).
+    pub total_diff: i64,
+    /// Tool use difference (B - A).
+    pub tool_use_diff: i64,
+    /// Thinking block difference (B - A).
+    pub thinking_diff: i64,
+}
+
+/// Token usage differences.
+#[derive(Debug, Clone, Default)]
+pub struct UsageDiff {
+    /// Input token difference (B - A).
+    pub input_diff: i64,
+    /// Output token difference (B - A).
+    pub output_diff: i64,
+    /// Total token difference (B - A).
+    pub total_diff: i64,
+    /// Cache read difference (B - A).
+    pub cache_read_diff: i64,
+    /// Cost difference in USD (B - A).
+    pub cost_diff: f64,
+}
+
+impl SessionDiff {
+    /// Create a diff from two session analytics.
+    pub fn from_analytics(
+        a: &SessionAnalytics,
+        b: &SessionAnalytics,
+        session_a_id: Option<&str>,
+        session_b_id: Option<&str>,
+    ) -> Self {
+        let mut diff = Self {
+            session_a_id: session_a_id.map(String::from),
+            session_b_id: session_b_id.map(String::from),
+            ..Default::default()
+        };
+
+        // Duration diff
+        diff.duration_diff = DurationDiff {
+            duration_a: a.duration(),
+            duration_b: b.duration(),
+            diff_minutes: b.duration().map(|d| d.num_minutes()).unwrap_or(0)
+                - a.duration().map(|d| d.num_minutes()).unwrap_or(0),
+        };
+
+        // Message count diff
+        diff.message_diff = MessageCountDiff {
+            user_diff: b.message_counts.user as i64 - a.message_counts.user as i64,
+            assistant_diff: b.message_counts.assistant as i64 - a.message_counts.assistant as i64,
+            total_diff: b.message_counts.total() as i64 - a.message_counts.total() as i64,
+            tool_use_diff: b.message_counts.tool_uses as i64 - a.message_counts.tool_uses as i64,
+            thinking_diff: b.message_counts.thinking_blocks as i64 - a.message_counts.thinking_blocks as i64,
+        };
+
+        // Usage diff
+        let a_usage = &a.usage.usage;
+        let b_usage = &b.usage.usage;
+        diff.usage_diff = UsageDiff {
+            input_diff: b_usage.total_input_tokens() as i64 - a_usage.total_input_tokens() as i64,
+            output_diff: b_usage.output_tokens as i64 - a_usage.output_tokens as i64,
+            total_diff: b_usage.total_tokens() as i64 - a_usage.total_tokens() as i64,
+            cache_read_diff: b_usage.cache_read_input_tokens.unwrap_or(0) as i64
+                - a_usage.cache_read_input_tokens.unwrap_or(0) as i64,
+            cost_diff: b.usage.estimated_cost.unwrap_or(0.0) - a.usage.estimated_cost.unwrap_or(0.0),
+        };
+
+        // Tool differences
+        let tools_a: std::collections::HashSet<_> = a.tool_counts.keys().collect();
+        let tools_b: std::collections::HashSet<_> = b.tool_counts.keys().collect();
+
+        diff.tools_only_in_a = tools_a.difference(&tools_b).map(|s| (*s).clone()).collect();
+        diff.tools_only_in_b = tools_b.difference(&tools_a).map(|s| (*s).clone()).collect();
+
+        for tool in tools_a.intersection(&tools_b) {
+            let count_a = a.tool_counts.get(*tool).copied().unwrap_or(0) as i64;
+            let count_b = b.tool_counts.get(*tool).copied().unwrap_or(0) as i64;
+            if count_a != count_b {
+                diff.tools_diff.push(((*tool).clone(), count_b - count_a));
+            }
+        }
+
+        // File differences
+        let files_a: std::collections::HashSet<_> = a.file_stats.files.keys().collect();
+        let files_b: std::collections::HashSet<_> = b.file_stats.files.keys().collect();
+
+        diff.files_only_in_a = files_a.difference(&files_b).map(|s| (*s).clone()).collect();
+        diff.files_only_in_b = files_b.difference(&files_a).map(|s| (*s).clone()).collect();
+
+        // Generate summary
+        diff.generate_summary();
+
+        diff
+    }
+
+    /// Compare two conversations directly.
+    pub fn from_conversations(
+        a: &Conversation,
+        b: &Conversation,
+    ) -> Self {
+        let analytics_a = SessionAnalytics::from_conversation(a);
+        let analytics_b = SessionAnalytics::from_conversation(b);
+
+        // Try to get session IDs from first entries
+        let session_a_id = a.chronological_entries().first().and_then(|e| e.session_id());
+        let session_b_id = b.chronological_entries().first().and_then(|e| e.session_id());
+
+        Self::from_analytics(&analytics_a, &analytics_b, session_a_id, session_b_id)
+    }
+
+    /// Generate a textual summary of key differences.
+    fn generate_summary(&mut self) {
+        let mut summary = Vec::new();
+
+        // Duration
+        if self.duration_diff.diff_minutes.abs() > 5 {
+            let direction = if self.duration_diff.diff_minutes > 0 { "longer" } else { "shorter" };
+            summary.push(format!(
+                "Session B is {} minutes {}",
+                self.duration_diff.diff_minutes.abs(),
+                direction
+            ));
+        }
+
+        // Messages
+        if self.message_diff.total_diff != 0 {
+            let direction = if self.message_diff.total_diff > 0 { "more" } else { "fewer" };
+            summary.push(format!(
+                "{} {} messages in session B",
+                self.message_diff.total_diff.abs(),
+                direction
+            ));
+        }
+
+        // Tokens
+        if self.usage_diff.total_diff.abs() > 1000 {
+            let direction = if self.usage_diff.total_diff > 0 { "more" } else { "fewer" };
+            summary.push(format!(
+                "{} {} tokens used in session B",
+                self.usage_diff.total_diff.abs(),
+                direction
+            ));
+        }
+
+        // Cost
+        if self.usage_diff.cost_diff.abs() > 0.01 {
+            let direction = if self.usage_diff.cost_diff > 0.0 { "more" } else { "less" };
+            summary.push(format!(
+                "${:.2} {} spent in session B",
+                self.usage_diff.cost_diff.abs(),
+                direction
+            ));
+        }
+
+        // New tools
+        if !self.tools_only_in_b.is_empty() {
+            summary.push(format!(
+                "New tools in B: {}",
+                self.tools_only_in_b.join(", ")
+            ));
+        }
+
+        // New files
+        if !self.files_only_in_b.is_empty() {
+            summary.push(format!(
+                "{} new files modified in session B",
+                self.files_only_in_b.len()
+            ));
+        }
+
+        self.summary = summary;
+    }
+
+    /// Format as a human-readable report.
+    #[must_use]
+    pub fn report(&self) -> String {
+        let mut lines = Vec::new();
+
+        lines.push("=== Session Comparison ===".to_string());
+        lines.push(String::new());
+
+        if let (Some(a), Some(b)) = (&self.session_a_id, &self.session_b_id) {
+            lines.push(format!("Session A: {}", a));
+            lines.push(format!("Session B: {}", b));
+            lines.push(String::new());
+        }
+
+        // Duration
+        lines.push("Duration:".to_string());
+        if let Some(dur_a) = self.duration_diff.duration_a {
+            lines.push(format!("  A: {} minutes", dur_a.num_minutes()));
+        }
+        if let Some(dur_b) = self.duration_diff.duration_b {
+            lines.push(format!("  B: {} minutes", dur_b.num_minutes()));
+        }
+        lines.push(format!("  Δ: {} minutes", self.duration_diff.diff_minutes));
+        lines.push(String::new());
+
+        // Messages
+        lines.push("Messages:".to_string());
+        lines.push(format!("  Total: {:+}", self.message_diff.total_diff));
+        lines.push(format!("  User: {:+}", self.message_diff.user_diff));
+        lines.push(format!("  Assistant: {:+}", self.message_diff.assistant_diff));
+        lines.push(format!("  Tool uses: {:+}", self.message_diff.tool_use_diff));
+        lines.push(String::new());
+
+        // Usage
+        lines.push("Token Usage:".to_string());
+        lines.push(format!("  Input: {:+}", self.usage_diff.input_diff));
+        lines.push(format!("  Output: {:+}", self.usage_diff.output_diff));
+        lines.push(format!("  Total: {:+}", self.usage_diff.total_diff));
+        lines.push(format!("  Cost: ${:+.4}", self.usage_diff.cost_diff));
+        lines.push(String::new());
+
+        // Tools
+        if !self.tools_only_in_a.is_empty() || !self.tools_only_in_b.is_empty() || !self.tools_diff.is_empty() {
+            lines.push("Tools:".to_string());
+            if !self.tools_only_in_a.is_empty() {
+                lines.push(format!("  Only in A: {}", self.tools_only_in_a.join(", ")));
+            }
+            if !self.tools_only_in_b.is_empty() {
+                lines.push(format!("  Only in B: {}", self.tools_only_in_b.join(", ")));
+            }
+            for (tool, diff) in &self.tools_diff {
+                lines.push(format!("  {}: {:+}", tool, diff));
+            }
+            lines.push(String::new());
+        }
+
+        // Files
+        if !self.files_only_in_a.is_empty() || !self.files_only_in_b.is_empty() {
+            lines.push("Files Modified:".to_string());
+            if !self.files_only_in_a.is_empty() {
+                lines.push(format!("  Only in A: {} files", self.files_only_in_a.len()));
+            }
+            if !self.files_only_in_b.is_empty() {
+                lines.push(format!("  Only in B: {} files", self.files_only_in_b.len()));
+            }
+            lines.push(String::new());
+        }
+
+        // Summary
+        if !self.summary.is_empty() {
+            lines.push("Summary:".to_string());
+            for item in &self.summary {
+                lines.push(format!("  • {}", item));
+            }
+        }
+
+        lines.join("\n")
+    }
+
+    /// Check if there are significant differences.
+    #[must_use]
+    pub fn has_differences(&self) -> bool {
+        self.message_diff.total_diff != 0
+            || self.usage_diff.total_diff != 0
+            || !self.tools_only_in_a.is_empty()
+            || !self.tools_only_in_b.is_empty()
+            || !self.tools_diff.is_empty()
+            || !self.files_only_in_a.is_empty()
+            || !self.files_only_in_b.is_empty()
+    }
+}
+
 impl ProjectAnalytics {
     /// Add a session's analytics.
     pub fn add_session(&mut self, session: &SessionAnalytics) {
@@ -1798,5 +2107,100 @@ mod tests {
         let entry = &stats.files["/file.rs"];
         assert_eq!(entry.first_modified, Some(ts1));
         assert_eq!(entry.last_modified, Some(ts2));
+    }
+
+    #[test]
+    fn test_session_diff_default() {
+        let diff = SessionDiff::default();
+        assert!(!diff.has_differences());
+        assert!(diff.summary.is_empty());
+    }
+
+    #[test]
+    fn test_session_diff_from_analytics() {
+        let mut a = SessionAnalytics::default();
+        a.message_counts.user = 5;
+        a.message_counts.assistant = 5;
+        a.tool_counts.insert("Read".to_string(), 3);
+
+        let mut b = SessionAnalytics::default();
+        b.message_counts.user = 10;
+        b.message_counts.assistant = 10;
+        b.tool_counts.insert("Read".to_string(), 5);
+        b.tool_counts.insert("Write".to_string(), 2);
+
+        let diff = SessionDiff::from_analytics(&a, &b, Some("session_a"), Some("session_b"));
+
+        assert!(diff.has_differences());
+        assert_eq!(diff.message_diff.user_diff, 5);
+        assert_eq!(diff.message_diff.total_diff, 10);
+        assert!(diff.tools_only_in_b.contains(&"Write".to_string()));
+        assert!(diff.tools_diff.iter().any(|(t, d)| t == "Read" && *d == 2));
+    }
+
+    #[test]
+    fn test_session_diff_report() {
+        let mut a = SessionAnalytics::default();
+        a.message_counts.user = 5;
+
+        let mut b = SessionAnalytics::default();
+        b.message_counts.user = 10;
+
+        let diff = SessionDiff::from_analytics(&a, &b, Some("a"), Some("b"));
+        let report = diff.report();
+
+        assert!(report.contains("Session A: a"));
+        assert!(report.contains("Session B: b"));
+        assert!(report.contains("User: +5"));
+    }
+
+    #[test]
+    fn test_session_diff_no_differences() {
+        let a = SessionAnalytics::default();
+        let b = SessionAnalytics::default();
+
+        let diff = SessionDiff::from_analytics(&a, &b, None, None);
+        assert!(!diff.has_differences());
+    }
+
+    #[test]
+    fn test_session_diff_files() {
+        let mut a = SessionAnalytics::default();
+        a.file_stats.record_write("/src/main.rs", "test", None);
+
+        let mut b = SessionAnalytics::default();
+        b.file_stats.record_write("/src/lib.rs", "test", None);
+        b.file_stats.record_write("/src/new.rs", "test", None);
+
+        let diff = SessionDiff::from_analytics(&a, &b, None, None);
+
+        assert!(diff.files_only_in_a.contains(&"/src/main.rs".to_string()));
+        assert!(diff.files_only_in_b.contains(&"/src/lib.rs".to_string()));
+        assert!(diff.files_only_in_b.contains(&"/src/new.rs".to_string()));
+    }
+
+    #[test]
+    fn test_duration_diff() {
+        let diff = DurationDiff {
+            duration_a: Some(Duration::minutes(30)),
+            duration_b: Some(Duration::minutes(45)),
+            diff_minutes: 15,
+        };
+
+        assert_eq!(diff.diff_minutes, 15);
+    }
+
+    #[test]
+    fn test_usage_diff() {
+        let diff = UsageDiff {
+            input_diff: 1000,
+            output_diff: 500,
+            total_diff: 1500,
+            cache_read_diff: 200,
+            cost_diff: 0.05,
+        };
+
+        assert_eq!(diff.total_diff, 1500);
+        assert!((diff.cost_diff - 0.05).abs() < 0.001);
     }
 }
