@@ -983,7 +983,7 @@ Given versions A (file) and B (schema):
 | [x] CACHE-005 | Cache persistence between runs | P2 | ✓ (`save_to_disk()`, `load_from_disk()`) |
 | [x] INDEX-001 | Full-text search index (tantivy or similar) | P1 | ✓ (`SearchIndex` with tantivy) |
 | [x] INDEX-002 | Incremental index updates | P1 | ✓ (`index build` command) |
-| [ ] INDEX-003 | Index storage location configuration | P2 | |
+| [x] INDEX-003 | Index storage location configuration | P2 | ✓ (`index.directory` config) |
 | [x] INDEX-004 | Index rebuild command | P1 | ✓ (`index rebuild` command) |
 | [ ] INDEX-005 | Field-specific indexes (tool names, models) | P2 | |
 

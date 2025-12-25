@@ -28,6 +28,9 @@ pub struct Config {
     /// Cache settings.
     #[serde(default)]
     pub cache: CacheConfig,
+    /// Index settings.
+    #[serde(default)]
+    pub index: IndexConfig,
 }
 
 impl Default for Config {
@@ -37,6 +40,7 @@ impl Default for Config {
             theme: ThemeConfig::default(),
             display: DisplayConfig::default(),
             cache: CacheConfig::default(),
+            index: IndexConfig::default(),
         }
     }
 }
@@ -124,6 +128,11 @@ impl Config {
         }
         if other.cache.ttl_seconds != 3600 {
             self.cache.ttl_seconds = other.cache.ttl_seconds;
+        }
+
+        // Merge index config
+        if other.index.directory.is_some() {
+            self.index.directory = other.index.directory.clone();
         }
     }
 
@@ -251,6 +260,14 @@ pub struct CacheConfig {
     /// Cache TTL in seconds.
     #[serde(default = "default_cache_ttl")]
     pub ttl_seconds: u64,
+}
+
+/// Index configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct IndexConfig {
+    /// Custom index directory.
+    #[serde(default)]
+    pub directory: Option<PathBuf>,
 }
 
 impl Default for CacheConfig {

@@ -152,11 +152,30 @@ impl SearchIndex {
 
     /// Open or create the default search index.
     pub fn open_default() -> Result<Self> {
-        let cache_dir = directories::ProjectDirs::from("", "", "claude-snatch")
-            .map(|d| d.cache_dir().to_path_buf())
-            .unwrap_or_else(|| PathBuf::from(".claude-snatch-cache"));
+        Self::open_with_config(None)
+    }
 
-        Self::open(cache_dir.join("search-index"))
+    /// Open or create a search index with optional config.
+    pub fn open_with_config(config: Option<&crate::config::Config>) -> Result<Self> {
+        // Check for configured index directory
+        let index_dir = config
+            .and_then(|c| c.index.directory.clone())
+            .unwrap_or_else(|| {
+                directories::ProjectDirs::from("", "", "claude-snatch")
+                    .map(|d| d.cache_dir().to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from(".claude-snatch-cache"))
+                    .join("search-index")
+            });
+
+        Self::open(index_dir)
+    }
+
+    /// Get the default index directory path.
+    pub fn default_index_dir() -> PathBuf {
+        directories::ProjectDirs::from("", "", "claude-snatch")
+            .map(|d| d.cache_dir().to_path_buf())
+            .unwrap_or_else(|| PathBuf::from(".claude-snatch-cache"))
+            .join("search-index")
     }
 
     /// Index a single log entry.
