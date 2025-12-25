@@ -306,6 +306,10 @@ pub struct ListArgs {
     /// Show file sizes.
     #[arg(long)]
     pub sizes: bool,
+
+    /// Pipe output through a pager (less/more).
+    #[arg(long)]
+    pub pager: bool,
 }
 
 /// What to list.

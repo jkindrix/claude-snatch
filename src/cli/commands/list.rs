@@ -2,9 +2,12 @@
 //!
 //! Lists projects and sessions with various filtering and sorting options.
 
+use std::io::Write;
+
 use crate::cli::{Cli, ListArgs, ListTarget, OutputFormat, SortOrder};
 use crate::discovery::{Project, Session, SessionFilter};
 use crate::error::Result;
+use crate::util::pager::PagerWriter;
 
 use super::get_claude_dir;
 
@@ -12,22 +15,30 @@ use super::get_claude_dir;
 pub fn run(cli: &Cli, args: &ListArgs) -> Result<()> {
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
 
+    // Create a writer that optionally uses a pager
+    let mut writer = PagerWriter::new(args.pager);
+
     match args.target {
-        ListTarget::Projects => list_projects(cli, args, &claude_dir),
-        ListTarget::Sessions => list_sessions(cli, args, &claude_dir),
+        ListTarget::Projects => list_projects(cli, args, &claude_dir, &mut writer)?,
+        ListTarget::Sessions => list_sessions(cli, args, &claude_dir, &mut writer)?,
         ListTarget::All => {
-            list_projects(cli, args, &claude_dir)?;
-            println!();
-            list_sessions(cli, args, &claude_dir)
+            list_projects(cli, args, &claude_dir, &mut writer)?;
+            writeln!(writer)?;
+            list_sessions(cli, args, &claude_dir, &mut writer)?;
         }
     }
+
+    // Flush through pager if needed
+    writer.finish()?;
+    Ok(())
 }
 
 /// List projects.
-fn list_projects(
+fn list_projects<W: Write>(
     cli: &Cli,
     args: &ListArgs,
     claude_dir: &crate::discovery::ClaudeDirectory,
+    writer: &mut W,
 ) -> Result<()> {
     let mut projects = claude_dir.projects()?;
 
@@ -66,39 +77,39 @@ fn list_projects(
     match cli.effective_output() {
         OutputFormat::Json => {
             let output: Vec<_> = projects.iter().map(|p| ProjectInfo::from(p)).collect();
-            println!("{}", serde_json::to_string_pretty(&output)?);
+            writeln!(writer, "{}", serde_json::to_string_pretty(&output)?)?;
         }
         OutputFormat::Tsv => {
-            println!("path\tencoded\tsession_count");
+            writeln!(writer, "path\tencoded\tsession_count")?;
             for project in &projects {
                 let session_count = project.sessions().map(|s| s.len()).unwrap_or(0);
-                println!("{}\t{}\t{}", project.decoded_path(), project.encoded_name(), session_count);
+                writeln!(writer, "{}\t{}\t{}", project.decoded_path(), project.encoded_name(), session_count)?;
             }
         }
         OutputFormat::Compact => {
             for project in &projects {
-                println!("{}", project.decoded_path());
+                writeln!(writer, "{}", project.decoded_path())?;
             }
         }
         OutputFormat::Text => {
             if projects.is_empty() {
-                println!("No projects found.");
+                writeln!(writer, "No projects found.")?;
                 return Ok(());
             }
 
-            println!("Projects ({} found):", projects.len());
-            println!();
+            writeln!(writer, "Projects ({} found):", projects.len())?;
+            writeln!(writer)?;
 
             for project in &projects {
                 let session_count = project.sessions().map(|s| s.len()).unwrap_or(0);
-                println!("  {} ({} sessions)", project.decoded_path(), session_count);
+                writeln!(writer, "  {} ({} sessions)", project.decoded_path(), session_count)?;
 
                 if args.sizes {
                     let total_size: u64 = project
                         .sessions()
                         .map(|s| s.iter().map(|ss| ss.file_size()).sum())
                         .unwrap_or(0);
-                    println!("    Size: {}", crate::discovery::format_size(total_size));
+                    writeln!(writer, "    Size: {}", crate::discovery::format_size(total_size))?;
                 }
             }
         }
@@ -108,10 +119,11 @@ fn list_projects(
 }
 
 /// List sessions.
-fn list_sessions(
+fn list_sessions<W: Write>(
     cli: &Cli,
     args: &ListArgs,
     claude_dir: &crate::discovery::ClaudeDirectory,
+    writer: &mut W,
 ) -> Result<()> {
     let mut sessions: Vec<Session> = if let Some(project_filter) = &args.project {
         // Get sessions from matching projects
@@ -169,43 +181,44 @@ fn list_sessions(
     match cli.effective_output() {
         OutputFormat::Json => {
             let output: Vec<_> = sessions.iter().map(|s| SessionInfo::from(s)).collect();
-            println!("{}", serde_json::to_string_pretty(&output)?);
+            writeln!(writer, "{}", serde_json::to_string_pretty(&output)?)?;
         }
         OutputFormat::Tsv => {
-            println!("session_id\tproject\tsize\tmodified\tsubagent");
+            writeln!(writer, "session_id\tproject\tsize\tmodified\tsubagent")?;
             for session in &sessions {
                 let id = if args.full_ids {
                     session.session_id().to_string()
                 } else {
                     short_id(session.session_id())
                 };
-                println!(
+                writeln!(
+                    writer,
                     "{}\t{}\t{}\t{}\t{}",
                     id,
                     session.project_path(),
                     session.file_size(),
                     session.modified_datetime().format("%Y-%m-%d %H:%M"),
                     session.is_subagent()
-                );
+                )?;
             }
         }
         OutputFormat::Compact => {
             for session in &sessions {
                 if args.full_ids {
-                    println!("{}", session.session_id());
+                    writeln!(writer, "{}", session.session_id())?;
                 } else {
-                    println!("{}", short_id(session.session_id()));
+                    writeln!(writer, "{}", short_id(session.session_id()))?;
                 }
             }
         }
         OutputFormat::Text => {
             if sessions.is_empty() {
-                println!("No sessions found.");
+                writeln!(writer, "No sessions found.")?;
                 return Ok(());
             }
 
-            println!("Sessions ({} found):", sessions.len());
-            println!();
+            writeln!(writer, "Sessions ({} found):", sessions.len())?;
+            writeln!(writer)?;
 
             for session in &sessions {
                 let id = if args.full_ids {
@@ -216,19 +229,19 @@ fn list_sessions(
 
                 let subagent_marker = if session.is_subagent() { " [subagent]" } else { "" };
 
-                print!("  {}{}", id, subagent_marker);
+                write!(writer, "  {}{}", id, subagent_marker)?;
 
                 if args.sizes {
-                    print!(" ({})", session.file_size_human());
+                    write!(writer, " ({})", session.file_size_human())?;
                 }
 
-                println!();
-                println!("    Project: {}", session.project_path());
-                println!("    Modified: {}", session.modified_datetime().format("%Y-%m-%d %H:%M:%S"));
+                writeln!(writer)?;
+                writeln!(writer, "    Project: {}", session.project_path())?;
+                writeln!(writer, "    Modified: {}", session.modified_datetime().format("%Y-%m-%d %H:%M:%S"))?;
 
                 if let Ok(state) = session.state() {
                     if state != crate::discovery::SessionState::Inactive {
-                        println!("    Status: {}", state.description());
+                        writeln!(writer, "    Status: {}", state.description())?;
                     }
                 }
             }

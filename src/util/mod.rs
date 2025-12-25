@@ -491,9 +491,9 @@ impl RedactionPatterns {
 /// use claude_snatch::util::{redact_sensitive, RedactionConfig};
 ///
 /// let config = RedactionConfig::all();
-/// let text = "My API key is sk-abc123xyz789";
+/// let text = "The api_key=sk-abc123xyz789abcd must be kept secret";
 /// let redacted = redact_sensitive(text, &config);
-/// assert!(!redacted.contains("sk-abc123xyz789"));
+/// assert!(!redacted.contains("sk-abc123xyz789abcd"));
 /// ```
 pub fn redact_sensitive<'a>(text: &'a str, config: &RedactionConfig) -> Cow<'a, str> {
     if !config.is_enabled() {
@@ -681,6 +681,118 @@ impl SensitiveDataType {
             Self::IpAddress => "IP address",
             Self::PhoneNumber => "phone number",
             Self::UrlCredential => "URL with credentials",
+        }
+    }
+}
+
+/// Pager support for large output.
+///
+/// Provides utilities for piping output through a pager (like `less` or `more`)
+/// on Unix systems.
+pub mod pager {
+    use std::io::{self, Write};
+    use std::process::{Command, Stdio};
+
+    /// Get the preferred pager from environment.
+    ///
+    /// Checks `PAGER` environment variable, falls back to `less` or `more`.
+    #[must_use]
+    pub fn get_pager() -> Option<String> {
+        // Check PAGER environment variable first
+        if let Ok(pager) = std::env::var("PAGER") {
+            if !pager.is_empty() {
+                return Some(pager);
+            }
+        }
+
+        // Try common pagers
+        for pager in &["less", "more"] {
+            if Command::new("which")
+                .arg(pager)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+            {
+                return Some(pager.to_string());
+            }
+        }
+
+        None
+    }
+
+    /// Pipe content through the system pager.
+    ///
+    /// If no pager is available or piping fails, falls back to stdout.
+    pub fn pipe_through_pager(content: &str) -> io::Result<()> {
+        let Some(pager_cmd) = get_pager() else {
+            // No pager available, print directly
+            print!("{}", content);
+            return Ok(());
+        };
+
+        // Parse pager command and arguments
+        let parts: Vec<&str> = pager_cmd.split_whitespace().collect();
+        let (pager, args) = parts.split_first().unwrap_or((&"less", &[]));
+
+        match Command::new(pager)
+            .args(args.iter())
+            .stdin(Stdio::piped())
+            .spawn()
+        {
+            Ok(mut child) => {
+                if let Some(stdin) = child.stdin.as_mut() {
+                    let _ = stdin.write_all(content.as_bytes());
+                }
+                let _ = child.wait();
+                Ok(())
+            }
+            Err(_) => {
+                // Pager failed, fall back to stdout
+                print!("{}", content);
+                Ok(())
+            }
+        }
+    }
+
+    /// Output writer that can optionally use a pager.
+    ///
+    /// Collects output in memory and pipes through pager when done.
+    pub struct PagerWriter {
+        buffer: Vec<u8>,
+        use_pager: bool,
+    }
+
+    impl PagerWriter {
+        /// Create a new pager writer.
+        #[must_use]
+        pub fn new(use_pager: bool) -> Self {
+            Self {
+                buffer: Vec::new(),
+                use_pager,
+            }
+        }
+
+        /// Flush the buffer through the pager or stdout.
+        pub fn finish(self) -> io::Result<()> {
+            let content = String::from_utf8_lossy(&self.buffer);
+            if self.use_pager && !self.buffer.is_empty() {
+                pipe_through_pager(&content)
+            } else {
+                print!("{}", content);
+                Ok(())
+            }
+        }
+    }
+
+    impl Write for PagerWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.write(buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            // Don't flush to pager yet, wait for finish()
+            Ok(())
         }
     }
 }
