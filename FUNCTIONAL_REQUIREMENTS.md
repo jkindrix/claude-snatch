@@ -591,7 +591,7 @@ When Claude Code is actively writing to a JSONL file while claude-snatch reads i
 | [x] HTML-004 | Collapsible sections | P1 | ✓ |
 | [x] HTML-005 | Navigation/table of contents | P2 | |
 | [x] HTML-006 | Responsive design | P2 | ✓ |
-| [ ] HTML-007 | Inline images (base64) | P2 | |
+| [x] HTML-007 | Inline images (base64) | P2 | ✓ |
 | [x] HTML-008 | Print-friendly CSS | P2 | ✓ |
 | [ ] HTML-009 | Interactive filtering (JS) | P3 | |
 

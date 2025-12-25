@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use crate::analytics::SessionAnalytics;
 use crate::error::Result;
 use crate::model::{
-    content::{ThinkingBlock, ToolResult, ToolUse},
+    content::{ImageBlock, ImageSource, ThinkingBlock, ToolResult, ToolUse},
     AssistantMessage, ContentBlock, LogEntry, SystemMessage, UserMessage,
 };
 use crate::reconstruction::Conversation;
@@ -34,6 +34,8 @@ pub struct HtmlExporter {
     collapse_tools: bool,
     /// Include table of contents / navigation sidebar.
     include_toc: bool,
+    /// Inline images as base64 data URLs.
+    inline_images: bool,
 }
 
 impl Default for HtmlExporter {
@@ -54,6 +56,7 @@ impl HtmlExporter {
             collapse_thinking: true,
             collapse_tools: true,
             include_toc: false,
+            inline_images: true,
         }
     }
 
@@ -103,6 +106,13 @@ impl HtmlExporter {
     #[must_use]
     pub fn with_toc(mut self, include: bool) -> Self {
         self.include_toc = include;
+        self
+    }
+
+    /// Inline images as base64 data URLs.
+    #[must_use]
+    pub fn inline_images(mut self, inline: bool) -> Self {
+        self.inline_images = inline;
         self
     }
 
@@ -456,6 +466,38 @@ impl HtmlExporter {
       opacity: 0.8;
     }}
 
+    /* Image styles */
+    .message-image {{
+      max-width: 100%;
+      margin: 12px 0;
+      border-radius: 6px;
+      border: 1px solid var(--border-color);
+    }}
+
+    .message-image img {{
+      display: block;
+      max-width: 100%;
+      height: auto;
+      border-radius: 5px;
+    }}
+
+    .image-caption {{
+      font-size: 0.85em;
+      opacity: 0.7;
+      margin-top: 6px;
+      text-align: center;
+    }}
+
+    .image-error {{
+      background: var(--tool-bg);
+      border: 1px dashed var(--border-color);
+      border-radius: 6px;
+      padding: 20px;
+      text-align: center;
+      color: var(--text-color);
+      opacity: 0.7;
+    }}
+
     @media (max-width: 1000px) {{
       .layout-wrapper {{
         flex-direction: column;
@@ -671,6 +713,11 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
             writeln!(writer, "    <p>{}</p>", escape_html(text))?;
         }
 
+        // Write images
+        for image in user.message.images() {
+            self.write_image(writer, image)?;
+        }
+
         // Write tool results if included
         if options.include_tool_results {
             for result in user.message.tool_results() {
@@ -808,6 +855,60 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
 
         Ok(())
     }
+
+    /// Write an image block.
+    fn write_image<W: Write>(&self, writer: &mut W, image: &ImageBlock) -> Result<()> {
+        writeln!(writer, "    <div class=\"message-image\">")?;
+
+        match &image.source {
+            ImageSource::Base64 { media_type, data } if self.inline_images => {
+                // Inline as data URL
+                writeln!(writer, "      <img src=\"data:{};base64,{}\" alt=\"User-provided image\" />",
+                    escape_html(media_type), data)?;
+                if let Some(size) = image.source.approximate_size() {
+                    let size_str = format_bytes(size);
+                    writeln!(writer, "      <div class=\"image-caption\">{} image ({})</div>",
+                        escape_html(media_type), size_str)?;
+                }
+            }
+            ImageSource::Base64 { media_type, data } => {
+                // Show placeholder with size info
+                if let Some(size) = image.source.approximate_size() {
+                    let size_str = format_bytes(size);
+                    writeln!(writer, "      <div class=\"image-error\">")?;
+                    writeln!(writer, "        [Image: {} ({}) - base64 data available]",
+                        escape_html(media_type), size_str)?;
+                    writeln!(writer, "      </div>")?;
+                } else {
+                    writeln!(writer, "      <div class=\"image-error\">")?;
+                    writeln!(writer, "        [Image: {} - base64 data {}]",
+                        escape_html(media_type), if data.is_empty() { "empty" } else { "available" })?;
+                    writeln!(writer, "      </div>")?;
+                }
+            }
+            ImageSource::Url { url } => {
+                // External URL - embed or link based on settings
+                if self.inline_images {
+                    writeln!(writer, "      <img src=\"{}\" alt=\"External image\" />", escape_html(url))?;
+                    writeln!(writer, "      <div class=\"image-caption\">Source: {}</div>", escape_html(url))?;
+                } else {
+                    writeln!(writer, "      <div class=\"image-error\">")?;
+                    writeln!(writer, "        <a href=\"{}\" target=\"_blank\">[External image: {}]</a>",
+                        escape_html(url), escape_html(url))?;
+                    writeln!(writer, "      </div>")?;
+                }
+            }
+            ImageSource::File { file_id } => {
+                // Files API reference (beta feature) - show file ID
+                writeln!(writer, "      <div class=\"image-error\">")?;
+                writeln!(writer, "        [Files API image: {}]", escape_html(file_id))?;
+                writeln!(writer, "      </div>")?;
+            }
+        }
+
+        writeln!(writer, "    </div>")?;
+        Ok(())
+    }
 }
 
 impl Exporter for HtmlExporter {
@@ -890,6 +991,20 @@ fn format_timestamp(ts: &DateTime<Utc>) -> String {
     ts.format("%Y-%m-%d %H:%M:%S UTC").to_string()
 }
 
+/// Format bytes in human-readable form.
+fn format_bytes(bytes: usize) -> String {
+    const KB: usize = 1024;
+    const MB: usize = 1024 * KB;
+
+    if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -960,5 +1075,82 @@ mod tests {
         assert!(html.contains("tocList"));
         assert!(html.contains("scrollIntoView"));
         assert!(html.contains("updateActiveLink"));
+    }
+
+    #[test]
+    fn test_html_exporter_inline_images() {
+        let exporter = HtmlExporter::new()
+            .inline_images(true);
+
+        assert!(exporter.inline_images);
+
+        let disabled = HtmlExporter::new()
+            .inline_images(false);
+
+        assert!(!disabled.inline_images);
+    }
+
+    #[test]
+    fn test_format_bytes() {
+        assert_eq!(format_bytes(500), "500 B");
+        assert_eq!(format_bytes(1024), "1.0 KB");
+        assert_eq!(format_bytes(2048), "2.0 KB");
+        assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(1048576), "1.0 MB");
+        assert_eq!(format_bytes(1572864), "1.5 MB");
+    }
+
+    #[test]
+    fn test_html_image_styles() {
+        let exporter = HtmlExporter::new();
+        let mut output = Vec::new();
+
+        exporter.write_styles(&mut output).unwrap();
+
+        let css = String::from_utf8(output).unwrap();
+        assert!(css.contains(".message-image"));
+        assert!(css.contains(".image-caption"));
+        assert!(css.contains(".image-error"));
+    }
+
+    #[test]
+    fn test_write_image_base64() {
+        use crate::model::content::{ImageBlock, ImageSource};
+
+        let exporter = HtmlExporter::new().inline_images(true);
+        let image = ImageBlock {
+            source: ImageSource::Base64 {
+                media_type: "image/png".to_string(),
+                data: "iVBORw0KGgo=".to_string(),
+            },
+            extra: indexmap::IndexMap::new(),
+        };
+
+        let mut output = Vec::new();
+        exporter.write_image(&mut output, &image).unwrap();
+
+        let html = String::from_utf8(output).unwrap();
+        assert!(html.contains("data:image/png;base64,iVBORw0KGgo="));
+        assert!(html.contains("message-image"));
+    }
+
+    #[test]
+    fn test_write_image_url() {
+        use crate::model::content::{ImageBlock, ImageSource};
+
+        let exporter = HtmlExporter::new().inline_images(true);
+        let image = ImageBlock {
+            source: ImageSource::Url {
+                url: "https://example.com/image.png".to_string(),
+            },
+            extra: indexmap::IndexMap::new(),
+        };
+
+        let mut output = Vec::new();
+        exporter.write_image(&mut output, &image).unwrap();
+
+        let html = String::from_utf8(output).unwrap();
+        assert!(html.contains("https://example.com/image.png"));
+        assert!(html.contains("<img src="));
     }
 }
