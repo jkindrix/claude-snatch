@@ -585,6 +585,10 @@ pub struct SearchArgs {
     /// Filter by git branch (partial match).
     #[arg(short = 'b', long = "branch")]
     pub git_branch: Option<String>,
+
+    /// Sort results by relevance score (descending).
+    #[arg(long)]
+    pub sort: bool,
 }
 
 /// Arguments for the stats command.

@@ -360,6 +360,7 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
                             context_before: m.context_before,
                             matched_text: m.matched_text,
                             context_after: m.context_after,
+                            score: m.score,
                         };
 
                         all_results.push(result);
@@ -383,6 +384,11 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
                 break;
             }
         }
+    }
+
+    // Sort results by relevance if requested
+    if args.sort && !all_results.is_empty() {
+        all_results.sort_by(|a, b| b.score.cmp(&a.score));
     }
 
     // Output results based on mode
@@ -548,6 +554,8 @@ struct SearchResult {
     context_before: String,
     matched_text: String,
     context_after: String,
+    /// Relevance score (0-100).
+    score: u8,
 }
 
 /// A match within an entry.
@@ -557,6 +565,8 @@ struct Match {
     context_before: String,
     matched_text: String,
     context_after: String,
+    /// Relevance score (0-100).
+    score: u8,
 }
 
 /// Matcher enum to support both regex and fuzzy matching.
@@ -690,11 +700,13 @@ fn find_matches(text: &str, regex: &Regex, location: &str, context_lines: usize)
             let context_before = lines[start..line_num].join("\n");
             let context_after = lines[(line_num + 1)..end].join("\n");
 
-            // Extract matched portion
-            let matched_text = if let Some(m) = regex.find(line) {
-                m.as_str().to_string()
+            // Extract matched portion and calculate score
+            let (matched_text, score) = if let Some(m) = regex.find(line) {
+                let matched = m.as_str().to_string();
+                let score = calculate_regex_score(line, &matched, m.start());
+                (matched, score)
             } else {
-                line.to_string()
+                (line.to_string(), 50) // Base score for full-line match
             };
 
             matches.push(Match {
@@ -703,11 +715,46 @@ fn find_matches(text: &str, regex: &Regex, location: &str, context_lines: usize)
                 context_before,
                 matched_text,
                 context_after,
+                score,
             });
         }
     }
 
     matches
+}
+
+/// Calculate relevance score for a regex match.
+fn calculate_regex_score(line: &str, matched: &str, match_start: usize) -> u8 {
+    let mut score: f64 = 50.0; // Base score
+
+    // Bonus for matches at start of line (0-15 points)
+    if match_start == 0 {
+        score += 15.0;
+    } else if match_start < 10 {
+        score += 10.0 - match_start as f64;
+    }
+
+    // Bonus for larger match coverage (0-20 points)
+    let coverage = matched.len() as f64 / line.len().max(1) as f64;
+    score += coverage * 20.0;
+
+    // Bonus for word boundary matches (0-10 points)
+    let at_word_start = match_start == 0 ||
+        !line.chars().nth(match_start.saturating_sub(1))
+            .map(|c| c.is_alphanumeric())
+            .unwrap_or(false);
+    let at_word_end = match_start + matched.len() >= line.len() ||
+        !line.chars().nth(match_start + matched.len())
+            .map(|c| c.is_alphanumeric())
+            .unwrap_or(false);
+
+    if at_word_start && at_word_end {
+        score += 10.0; // Full word match
+    } else if at_word_start || at_word_end {
+        score += 5.0; // Partial word boundary
+    }
+
+    score.clamp(0.0, 100.0) as u8
 }
 
 /// Find fuzzy matches with context in text.
@@ -736,11 +783,12 @@ fn find_fuzzy_matches(
                 let context_after = lines[(line_num + 1)..end].join("\n");
 
                 matches.push(Match {
-                    location: format!("{} (score:{})", location, fuzzy_result.score),
+                    location: location.to_string(),
                     line: (*line).to_string(),
                     context_before,
                     matched_text: fuzzy_result.matched_text,
                     context_after,
+                    score: fuzzy_result.score,
                 });
             }
         }
@@ -875,6 +923,30 @@ mod tests {
         let score_scattered = result_scattered.unwrap().score;
 
         assert!(score_consecutive > score_scattered);
+    }
+
+    #[test]
+    fn test_regex_score_word_boundary() {
+        // Full word match at start should score high
+        let score1 = calculate_regex_score("hello world", "hello", 0);
+        assert!(score1 >= 75, "Start + word boundary should score >= 75, got {}", score1);
+
+        // Match in middle without word boundary should score lower
+        let score2 = calculate_regex_score("the hello world", "ello", 5);
+        assert!(score2 < score1, "Middle match should score lower");
+
+        // Match at word boundary in middle
+        let score3 = calculate_regex_score("the hello world", "hello", 4);
+        assert!(score3 > score2, "Word boundary match should score higher than partial");
+    }
+
+    #[test]
+    fn test_regex_score_coverage() {
+        // Larger coverage should score higher
+        let score_full = calculate_regex_score("hello", "hello", 0);
+        let score_partial = calculate_regex_score("hello world", "hello", 0);
+
+        assert!(score_full > score_partial, "Full coverage should score higher");
     }
 
     #[test]
