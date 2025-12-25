@@ -524,6 +524,7 @@ pub enum CommandId {
     CopyMessage,
     CopyCodeBlock,
     OpenInEditor,
+    ResumeInClaude,
     SelectAll,
     ClearSelection,
     // Help
@@ -708,6 +709,12 @@ impl Default for CommandPalette {
                 description: "Open conversation in external editor",
                 shortcut: "O",
                 id: CommandId::OpenInEditor,
+            },
+            PaletteCommand {
+                name: "Resume in Claude Code",
+                description: "Resume this session in Claude Code",
+                shortcut: "R",
+                id: CommandId::ResumeInClaude,
             },
             PaletteCommand {
                 name: "Select All Sessions",
@@ -1325,6 +1332,9 @@ impl AppState {
             CommandId::OpenInEditor => {
                 self.open_in_editor()?;
             }
+            CommandId::ResumeInClaude => {
+                self.resume_in_claude()?;
+            }
             CommandId::SelectAll => self.select_all_sessions(),
             CommandId::ClearSelection => self.clear_selection(),
             // Help
@@ -1923,6 +1933,48 @@ impl AppState {
 
         // Clean up temp file (optional, it's in temp dir anyway)
         let _ = std::fs::remove_file(&temp_path);
+
+        Ok(())
+    }
+
+    /// Resume the current session in Claude Code.
+    ///
+    /// This launches Claude Code with the `--resume` flag pointing to the
+    /// current session ID.
+    pub fn resume_in_claude(&mut self) -> Result<()> {
+        let session_id = match &self.current_session {
+            Some(id) => id.clone(),
+            None => {
+                self.status_message = Some("No session selected".to_string());
+                return Ok(());
+            }
+        };
+
+        // Try to find the claude command
+        let claude_cmd = if cfg!(windows) {
+            "claude.exe"
+        } else {
+            "claude"
+        };
+
+        // Launch Claude Code with --resume flag
+        let result = std::process::Command::new(claude_cmd)
+            .arg("--resume")
+            .arg(&session_id)
+            .spawn();
+
+        match result {
+            Ok(mut child) => {
+                // Detach the child process
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                self.status_message = Some(format!("Launched Claude Code for session {}", &session_id[..8.min(session_id.len())]));
+            }
+            Err(e) => {
+                self.status_message = Some(format!("Failed to launch Claude Code: {}. Is it installed?", e));
+            }
+        }
 
         Ok(())
     }

@@ -342,6 +342,11 @@ fn run_loop<B: ratatui::backend::Backend>(
                         app.open_in_editor()?;
                     }
 
+                    // Resume session in Claude Code
+                    (KeyModifiers::SHIFT, KeyCode::Char('R')) => {
+                        app.resume_in_claude()?;
+                    }
+
                     // Toggle thinking
                     (KeyModifiers::NONE, KeyCode::Char('t')) => {
                         app.toggle_thinking();
