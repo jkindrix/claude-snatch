@@ -57,6 +57,9 @@ regex = "1.11"
 globset = "0.4"
 tantivy = "0.22"
 
+# Text Diff
+similar = "2.6"
+
 # JSON Schema
 jsonschema = "0.29"
 

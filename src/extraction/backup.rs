@@ -301,6 +301,94 @@ impl FileVersion {
     }
 }
 
+/// Result of comparing two file versions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileDiff {
+    /// Source file path.
+    pub source_path: String,
+
+    /// Version A (older).
+    pub version_a: usize,
+
+    /// Version B (newer).
+    pub version_b: usize,
+
+    /// Number of lines added.
+    pub lines_added: usize,
+
+    /// Number of lines removed.
+    pub lines_removed: usize,
+
+    /// Number of lines unchanged.
+    pub lines_unchanged: usize,
+
+    /// Unified diff output.
+    pub unified_diff: String,
+}
+
+impl FileDiff {
+    /// Create a diff between two file versions.
+    pub fn from_versions(
+        source_path: &str,
+        version_a: &FileVersion,
+        version_b: &FileVersion,
+    ) -> Result<Self> {
+        use similar::{ChangeTag, TextDiff};
+
+        let content_a = version_a.read_contents()?;
+        let content_b = version_b.read_contents()?;
+
+        let diff = TextDiff::from_lines(&content_a, &content_b);
+
+        let mut lines_added = 0;
+        let mut lines_removed = 0;
+        let mut lines_unchanged = 0;
+
+        for change in diff.iter_all_changes() {
+            match change.tag() {
+                ChangeTag::Insert => lines_added += 1,
+                ChangeTag::Delete => lines_removed += 1,
+                ChangeTag::Equal => lines_unchanged += 1,
+            }
+        }
+
+        // Generate unified diff
+        let unified_diff = diff
+            .unified_diff()
+            .context_radius(3)
+            .header(
+                &format!("a/{} (v{})", source_path, version_a.version),
+                &format!("b/{} (v{})", source_path, version_b.version),
+            )
+            .to_string();
+
+        Ok(Self {
+            source_path: source_path.to_string(),
+            version_a: version_a.version,
+            version_b: version_b.version,
+            lines_added,
+            lines_removed,
+            lines_unchanged,
+            unified_diff,
+        })
+    }
+
+    /// Check if there are any changes.
+    #[must_use]
+    pub fn has_changes(&self) -> bool {
+        self.lines_added > 0 || self.lines_removed > 0
+    }
+
+    /// Get a summary of changes.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        format!(
+            "+{} -{} (v{} → v{})",
+            self.lines_added, self.lines_removed, self.version_a, self.version_b
+        )
+    }
+}
+
 impl FileVersionHistory {
     /// Build version history for a file from the file history directory.
     pub fn from_dir(file_history_dir: &Path, source_path: &str) -> Result<Self> {
@@ -372,6 +460,91 @@ impl FileVersionHistory {
     pub fn version_count(&self) -> usize {
         self.versions.len()
     }
+
+    /// Diff between two versions.
+    ///
+    /// Returns a unified diff comparing version_a to version_b.
+    pub fn diff(&self, version_a: usize, version_b: usize) -> Result<FileDiff> {
+        let a = self.get_version(version_a).ok_or_else(|| {
+            crate::error::SnatchError::InvalidArgument {
+                name: "version_a".to_string(),
+                reason: format!("Version {} not found", version_a),
+            }
+        })?;
+        let b = self.get_version(version_b).ok_or_else(|| {
+            crate::error::SnatchError::InvalidArgument {
+                name: "version_b".to_string(),
+                reason: format!("Version {} not found", version_b),
+            }
+        })?;
+        FileDiff::from_versions(&self.source_path, a, b)
+    }
+
+    /// Diff between consecutive versions.
+    ///
+    /// Returns a list of diffs showing changes between each version.
+    pub fn diff_history(&self) -> Result<Vec<FileDiff>> {
+        let mut diffs = Vec::new();
+        for window in self.versions.windows(2) {
+            let diff = FileDiff::from_versions(&self.source_path, &window[0], &window[1])?;
+            diffs.push(diff);
+        }
+        Ok(diffs)
+    }
+
+    /// Export a specific version to a destination path.
+    pub fn export_version(&self, version: usize, dest: &Path) -> Result<()> {
+        let v = self.get_version(version).ok_or_else(|| {
+            crate::error::SnatchError::InvalidArgument {
+                name: "version".to_string(),
+                reason: format!("Version {} not found", version),
+            }
+        })?;
+        let contents = v.read_contents()?;
+        std::fs::write(dest, contents).map_err(|e| {
+            crate::error::SnatchError::io(
+                format!("Failed to export to {}", dest.display()),
+                e,
+            )
+        })
+    }
+
+    /// Export the latest version to a destination path.
+    pub fn export_latest(&self, dest: &Path) -> Result<()> {
+        let latest = self.latest().ok_or_else(|| {
+            crate::error::SnatchError::InvalidArgument {
+                name: "source_path".to_string(),
+                reason: "No versions available".to_string(),
+            }
+        })?;
+        let contents = latest.read_contents()?;
+        std::fs::write(dest, contents).map_err(|e| {
+            crate::error::SnatchError::io(
+                format!("Failed to export to {}", dest.display()),
+                e,
+            )
+        })
+    }
+
+    /// Get the file content at a specific version.
+    pub fn content_at_version(&self, version: usize) -> Result<String> {
+        let v = self.get_version(version).ok_or_else(|| {
+            crate::error::SnatchError::InvalidArgument {
+                name: "version".to_string(),
+                reason: format!("Version {} not found", version),
+            }
+        })?;
+        v.read_contents()
+    }
+
+    /// Reconstruct file state by applying diffs from version 1 to target.
+    ///
+    /// This is useful for verifying backup integrity.
+    pub fn reconstruct_at_version(&self, target_version: usize) -> Result<String> {
+        // For backup files, each version is a full snapshot, not a diff
+        // So reconstruction is simply reading the version content
+        self.content_at_version(target_version)
+    }
 }
 
 /// Format size in bytes as human-readable string.
@@ -440,5 +613,63 @@ mod tests {
         assert_eq!(format_size(1024), "1.00 KB");
         assert_eq!(format_size(1536), "1.50 KB");
         assert_eq!(format_size(1048576), "1.00 MB");
+    }
+
+    #[test]
+    fn test_file_diff() {
+        let dir = tempdir().unwrap();
+
+        // Create two backup versions with different content
+        let backup1 = dir.path().join("src-main.rs-aaaaaa.bak");
+        std::fs::write(&backup1, "line 1\nline 2\nline 3\n").unwrap();
+
+        let backup2 = dir.path().join("src-main.rs-bbbbbb.bak");
+        std::fs::write(&backup2, "line 1\nline 2 modified\nline 3\nline 4\n").unwrap();
+
+        // Wait a moment so modification times differ
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(&backup2, "line 1\nline 2 modified\nline 3\nline 4\n").unwrap();
+
+        let history = FileVersionHistory::from_dir(dir.path(), "src/main.rs").unwrap();
+        assert_eq!(history.version_count(), 2);
+
+        let diff = history.diff(1, 2).unwrap();
+        assert!(diff.has_changes());
+        assert!(diff.lines_added > 0 || diff.lines_removed > 0);
+        assert!(!diff.unified_diff.is_empty());
+    }
+
+    #[test]
+    fn test_file_export() {
+        let dir = tempdir().unwrap();
+        let export_dir = tempdir().unwrap();
+
+        // Create a backup
+        let backup = dir.path().join("src-lib.rs-cccccc.bak");
+        std::fs::write(&backup, "pub fn hello() {}\n").unwrap();
+
+        let history = FileVersionHistory::from_dir(dir.path(), "src/lib.rs").unwrap();
+        assert_eq!(history.version_count(), 1);
+
+        // Export to destination
+        let dest = export_dir.path().join("lib.rs");
+        history.export_version(1, &dest).unwrap();
+
+        let exported = std::fs::read_to_string(&dest).unwrap();
+        assert_eq!(exported, "pub fn hello() {}\n");
+    }
+
+    #[test]
+    fn test_file_reconstruct() {
+        let dir = tempdir().unwrap();
+
+        // Create a backup
+        let backup = dir.path().join("src-test.rs-dddddd.bak");
+        std::fs::write(&backup, "test content\n").unwrap();
+
+        let history = FileVersionHistory::from_dir(dir.path(), "src/test.rs").unwrap();
+        let content = history.reconstruct_at_version(1).unwrap();
+
+        assert_eq!(content, "test content\n");
     }
 }

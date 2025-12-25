@@ -523,7 +523,7 @@ When Claude Code is actively writing to a JSONL file while claude-snatch reads i
 | [x] SRCH-009 | Filter by git branch | P2 | ✓ (`--branch` flag) |
 | [x] SRCH-010 | Search within tool inputs/outputs | P1 | ✓ |
 | [x] SRCH-011 | Fuzzy search support | P2 | |
-| [ ] SRCH-012 | Search result ranking/relevance | P2 | |
+| [x] SRCH-012 | Search result ranking/relevance | P2 | ✓ (`--sort` flag, score field) |
 
 ### 5.6 File Backup Integration
 
@@ -533,9 +533,9 @@ When Claude Code is actively writing to a JSONL file while claude-snatch reads i
 | [x] BKUP-002 | Locate backup files in ~/.claude/filehistory/ | P1 | ✓ |
 | [x] BKUP-003 | Retrieve backup content by reference | P1 | ✓ (BackupFileInfo.read_contents) |
 | [x] BKUP-004 | Show file version history | P1 | ✓ (FileVersionHistory) |
-| [ ] BKUP-005 | Diff between file versions | P2 | |
-| [ ] BKUP-006 | Export file at specific version | P2 | |
-| [ ] BKUP-007 | Reconstruct file state at any point | P2 | |
+| [x] BKUP-005 | Diff between file versions | P2 | ✓ (FileDiff, diff(), diff_history()) |
+| [x] BKUP-006 | Export file at specific version | P2 | ✓ (export_version(), export_latest()) |
+| [x] BKUP-007 | Reconstruct file state at any point | P2 | ✓ (reconstruct_at_version()) |
 
 ### 5.7 Subagent Correlation
 

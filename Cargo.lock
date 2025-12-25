@@ -503,6 +503,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "similar",
  "syntect",
  "tantivy",
  "tempfile",
