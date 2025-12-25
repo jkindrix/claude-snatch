@@ -471,6 +471,14 @@ pub struct SearchArgs {
     /// Only show messages with errors.
     #[arg(long)]
     pub errors: bool,
+
+    /// Enable fuzzy matching (like fzf).
+    #[arg(short = 'f', long)]
+    pub fuzzy: bool,
+
+    /// Minimum fuzzy match score (0-100, default 60).
+    #[arg(long, default_value = "60")]
+    pub fuzzy_threshold: u8,
 }
 
 /// Arguments for the stats command.
