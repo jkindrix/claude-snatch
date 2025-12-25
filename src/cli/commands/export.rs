@@ -109,8 +109,11 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
     let conversation = Conversation::from_entries(entries)?;
 
     // Build export options
+    let redaction = args.redact.map(|level| level.into());
     let options = if args.lossless {
-        ExportOptions::full()
+        let mut opts = ExportOptions::full();
+        opts.redaction = redaction;
+        opts
     } else {
         ExportOptions {
             include_thinking: args.thinking,
@@ -126,6 +129,7 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
             truncate_at: None,
             include_branches: !args.main_thread,
             main_thread_only: args.main_thread,
+            redaction,
         }
     };
 
@@ -468,8 +472,11 @@ fn export_session(
     let conversation = Conversation::from_entries(entries)?;
 
     // Build export options - lossless mode overrides individual settings
+    let redaction = args.redact.map(|level| level.into());
     let options = if args.lossless {
-        ExportOptions::full()
+        let mut opts = ExportOptions::full();
+        opts.redaction = redaction;
+        opts
     } else {
         ExportOptions {
             include_thinking: args.thinking,
@@ -485,6 +492,7 @@ fn export_session(
             truncate_at: None,
             include_branches: !args.main_thread,
             main_thread_only: args.main_thread,
+            redaction,
         }
     };
 

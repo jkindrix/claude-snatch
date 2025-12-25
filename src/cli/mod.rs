@@ -402,6 +402,11 @@ pub struct ExportArgs {
     /// Overwrite existing output files without prompting.
     #[arg(long)]
     pub overwrite: bool,
+
+    /// Redact sensitive data from output.
+    /// Accepts: "security" (API keys, passwords, credentials) or "all" (includes emails, IPs, phones).
+    #[arg(long, value_name = "LEVEL")]
+    pub redact: Option<RedactionLevel>,
 }
 
 /// Export format argument.
@@ -428,6 +433,25 @@ pub enum ExportFormatArg {
     Html,
     /// SQLite database.
     Sqlite,
+}
+
+/// Redaction level for sensitive data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum RedactionLevel {
+    /// Redact security-sensitive data: API keys, passwords, credentials, SSN, credit cards.
+    #[default]
+    Security,
+    /// Redact all sensitive data: includes emails, IP addresses, phone numbers.
+    All,
+}
+
+impl From<RedactionLevel> for crate::util::RedactionConfig {
+    fn from(level: RedactionLevel) -> Self {
+        match level {
+            RedactionLevel::Security => crate::util::RedactionConfig::security(),
+            RedactionLevel::All => crate::util::RedactionConfig::all(),
+        }
+    }
 }
 
 impl From<ExportFormatArg> for ExportFormat {

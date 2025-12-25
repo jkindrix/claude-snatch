@@ -69,6 +69,8 @@ pub struct ExportOptions {
     pub include_branches: bool,
     /// Only export main thread.
     pub main_thread_only: bool,
+    /// Configuration for sensitive data redaction.
+    pub redaction: Option<crate::util::RedactionConfig>,
 }
 
 impl Default for ExportOptions {
@@ -87,6 +89,7 @@ impl Default for ExportOptions {
             truncate_at: None,
             include_branches: false,
             main_thread_only: true,
+            redaction: None,
         }
     }
 }
@@ -109,6 +112,7 @@ impl ExportOptions {
             truncate_at: None,
             include_branches: true,
             main_thread_only: false,
+            redaction: None,
         }
     }
 
@@ -129,6 +133,7 @@ impl ExportOptions {
             truncate_at: None,
             include_branches: false,
             main_thread_only: true,
+            redaction: None,
         }
     }
 
@@ -166,6 +171,46 @@ impl ExportOptions {
     pub fn with_relative_timestamps(mut self, relative: bool) -> Self {
         self.relative_timestamps = relative;
         self
+    }
+
+    /// Builder: set redaction configuration.
+    ///
+    /// When set, sensitive data (API keys, passwords, emails, etc.) will be
+    /// redacted from the exported content based on the configuration.
+    #[must_use]
+    pub fn with_redaction(mut self, config: crate::util::RedactionConfig) -> Self {
+        self.redaction = Some(config);
+        self
+    }
+
+    /// Builder: enable security-focused redaction.
+    ///
+    /// This enables redaction of API keys, passwords, credit cards, SSN,
+    /// AWS keys, and URL credentials. Emails, IP addresses, and phone
+    /// numbers are not redacted by default.
+    #[must_use]
+    pub fn with_security_redaction(mut self) -> Self {
+        self.redaction = Some(crate::util::RedactionConfig::security());
+        self
+    }
+
+    /// Builder: enable full redaction of all sensitive data types.
+    #[must_use]
+    pub fn with_full_redaction(mut self) -> Self {
+        self.redaction = Some(crate::util::RedactionConfig::all());
+        self
+    }
+
+    /// Apply redaction to text if configured.
+    ///
+    /// Returns the original text if no redaction is configured, otherwise
+    /// returns the redacted text.
+    #[must_use]
+    pub fn redact<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+        match &self.redaction {
+            Some(config) if config.is_enabled() => crate::util::redact_sensitive(text, config),
+            _ => std::borrow::Cow::Borrowed(text),
+        }
     }
 }
 
