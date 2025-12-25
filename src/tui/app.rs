@@ -122,6 +122,45 @@ fn run_loop<B: ratatui::backend::Backend>(
                     }
                 }
 
+                // Handle command palette input
+                if app.is_command_palette_active() {
+                    match (key.modifiers, key.code) {
+                        // Close palette
+                        (KeyModifiers::NONE, KeyCode::Esc) => {
+                            app.close_command_palette();
+                            continue;
+                        }
+                        // Execute selected command
+                        (KeyModifiers::NONE, KeyCode::Enter) => {
+                            if let Err(e) = app.execute_selected_command() {
+                                app.status_message = Some(format!("Error: {e}"));
+                            }
+                            continue;
+                        }
+                        // Navigate up
+                        (KeyModifiers::NONE, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
+                            app.command_palette.select_prev();
+                            continue;
+                        }
+                        // Navigate down
+                        (KeyModifiers::NONE, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
+                            app.command_palette.select_next();
+                            continue;
+                        }
+                        // Backspace
+                        (KeyModifiers::NONE, KeyCode::Backspace) => {
+                            app.command_palette.backspace();
+                            continue;
+                        }
+                        // Character input
+                        (KeyModifiers::NONE, KeyCode::Char(c)) | (KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+                            app.command_palette.push_char(c);
+                            continue;
+                        }
+                        _ => continue,
+                    }
+                }
+
                 // Handle export dialog input
                 if app.is_exporting() {
                     match (key.modifiers, key.code) {
@@ -337,6 +376,11 @@ fn run_loop<B: ratatui::backend::Backend>(
                         app.start_goto_line();
                     }
 
+                    // Command palette (Ctrl+P)
+                    (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
+                        app.open_command_palette();
+                    }
+
                     // Cycle theme
                     (KeyModifiers::NONE, KeyCode::Char('T')) => {
                         app.cycle_theme();
@@ -469,6 +513,11 @@ fn draw_ui(f: &mut Frame, app: &AppState) {
     // Export dialog overlay if active
     if app.is_exporting() {
         draw_export_dialog(f, app);
+    }
+
+    // Command palette overlay if active
+    if app.is_command_palette_active() {
+        draw_command_palette(f, app);
     }
 }
 
@@ -846,4 +895,98 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+/// Draw command palette overlay.
+fn draw_command_palette(f: &mut Frame, app: &AppState) {
+    // Use 50% width, 60% height for the palette
+    let area = centered_rect(50, 60, f.area());
+
+    // Build the search input line
+    let search_line = Line::from(vec![
+        Span::styled("> ", Style::default().fg(app.theme.primary)),
+        Span::raw(&app.command_palette.query),
+        Span::styled("█", Style::default().fg(app.theme.primary)),
+    ]);
+
+    // Build list of filtered commands
+    let mut lines: Vec<Line> = vec![search_line, Line::from("")];
+
+    // Calculate visible range (show ~10 commands max)
+    let max_visible = (area.height as usize).saturating_sub(6).min(15);
+    let filtered_count = app.command_palette.filtered.len();
+    let selected = app.command_palette.selected;
+
+    // Calculate scroll offset to keep selected item visible
+    let scroll_offset = if selected >= max_visible {
+        selected - max_visible + 1
+    } else {
+        0
+    };
+
+    for (display_idx, &cmd_idx) in app
+        .command_palette
+        .filtered
+        .iter()
+        .enumerate()
+        .skip(scroll_offset)
+        .take(max_visible)
+    {
+        let cmd = &app.command_palette.commands[cmd_idx];
+        let is_selected = display_idx == selected;
+
+        let (name_style, desc_style, shortcut_style) = if is_selected {
+            (
+                Style::default().fg(Color::Black).bg(app.theme.primary).add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Black).bg(app.theme.primary),
+                Style::default().fg(Color::DarkGray).bg(app.theme.primary),
+            )
+        } else {
+            (
+                Style::default().fg(app.theme.primary),
+                Style::default().fg(Color::Gray),
+                Style::default().fg(Color::DarkGray),
+            )
+        };
+
+        // Build the line with name, description, and shortcut
+        let prefix = if is_selected { "▶ " } else { "  " };
+        lines.push(Line::from(vec![
+            Span::styled(prefix, name_style),
+            Span::styled(cmd.name, name_style),
+            Span::styled(" - ", desc_style),
+            Span::styled(cmd.description, desc_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("    ", shortcut_style),
+            Span::styled(format!("[{}]", cmd.shortcut), shortcut_style),
+        ]));
+    }
+
+    // Show scroll indicator if needed
+    if filtered_count > max_visible {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  ... {} of {} commands", max_visible.min(filtered_count), filtered_count),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    // Add instructions at the bottom
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑/↓: Navigate  |  Enter: Execute  |  Esc: Close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .title(" Command Palette (Ctrl+P) ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(app.theme.primary))
+            .style(Style::default().bg(Color::Black)),
+    );
+
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(paragraph, area);
 }

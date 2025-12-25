@@ -477,6 +477,340 @@ impl ExportDialogState {
     }
 }
 
+/// A command available in the command palette.
+#[derive(Debug, Clone)]
+pub struct PaletteCommand {
+    /// Command name (displayed and searchable).
+    pub name: &'static str,
+    /// Short description.
+    pub description: &'static str,
+    /// Keyboard shortcut hint.
+    pub shortcut: &'static str,
+    /// Unique command ID.
+    pub id: CommandId,
+}
+
+/// Command identifiers for command palette actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandId {
+    // Navigation
+    FocusTree,
+    FocusConversation,
+    FocusDetails,
+    ScrollToTop,
+    ScrollToBottom,
+    GoToLine,
+    // Search
+    Search,
+    SearchNext,
+    SearchPrevious,
+    // Display
+    ToggleThinking,
+    ToggleTools,
+    ToggleWordWrap,
+    ToggleLineNumbers,
+    CycleTheme,
+    // Filters
+    ToggleFilter,
+    CycleMessageFilter,
+    ToggleErrorsFilter,
+    ClearFilters,
+    SetDateFrom,
+    SetDateTo,
+    SetModelFilter,
+    // Actions
+    Refresh,
+    Export,
+    CopyMessage,
+    CopyCodeBlock,
+    SelectAll,
+    ClearSelection,
+    // Help
+    ShowHelp,
+}
+
+/// Command palette state.
+#[derive(Debug, Clone)]
+pub struct CommandPalette {
+    /// Whether the palette is active.
+    pub active: bool,
+    /// Current search query.
+    pub query: String,
+    /// All available commands.
+    pub commands: Vec<PaletteCommand>,
+    /// Filtered command indices (into commands vec).
+    pub filtered: Vec<usize>,
+    /// Currently selected index in filtered list.
+    pub selected: usize,
+}
+
+impl Default for CommandPalette {
+    fn default() -> Self {
+        let commands = vec![
+            // Navigation
+            PaletteCommand {
+                name: "Focus Tree Panel",
+                description: "Switch focus to project/session tree",
+                shortcut: "1",
+                id: CommandId::FocusTree,
+            },
+            PaletteCommand {
+                name: "Focus Conversation Panel",
+                description: "Switch focus to conversation view",
+                shortcut: "2",
+                id: CommandId::FocusConversation,
+            },
+            PaletteCommand {
+                name: "Focus Details Panel",
+                description: "Switch focus to details/analytics",
+                shortcut: "3",
+                id: CommandId::FocusDetails,
+            },
+            PaletteCommand {
+                name: "Scroll to Top",
+                description: "Jump to beginning of content",
+                shortcut: "Home",
+                id: CommandId::ScrollToTop,
+            },
+            PaletteCommand {
+                name: "Scroll to Bottom",
+                description: "Jump to end of content",
+                shortcut: "End",
+                id: CommandId::ScrollToBottom,
+            },
+            PaletteCommand {
+                name: "Go to Line",
+                description: "Jump to specific line number",
+                shortcut: "Ctrl+G",
+                id: CommandId::GoToLine,
+            },
+            // Search
+            PaletteCommand {
+                name: "Search",
+                description: "Search in conversation",
+                shortcut: "/",
+                id: CommandId::Search,
+            },
+            PaletteCommand {
+                name: "Find Next",
+                description: "Go to next search result",
+                shortcut: "n",
+                id: CommandId::SearchNext,
+            },
+            PaletteCommand {
+                name: "Find Previous",
+                description: "Go to previous search result",
+                shortcut: "N",
+                id: CommandId::SearchPrevious,
+            },
+            // Display
+            PaletteCommand {
+                name: "Toggle Thinking Blocks",
+                description: "Show/hide AI thinking sections",
+                shortcut: "t",
+                id: CommandId::ToggleThinking,
+            },
+            PaletteCommand {
+                name: "Toggle Tool Outputs",
+                description: "Show/hide tool use and results",
+                shortcut: "o",
+                id: CommandId::ToggleTools,
+            },
+            PaletteCommand {
+                name: "Toggle Word Wrap",
+                description: "Enable/disable text wrapping",
+                shortcut: "w",
+                id: CommandId::ToggleWordWrap,
+            },
+            PaletteCommand {
+                name: "Toggle Line Numbers",
+                description: "Show/hide line numbers",
+                shortcut: "#",
+                id: CommandId::ToggleLineNumbers,
+            },
+            PaletteCommand {
+                name: "Cycle Theme",
+                description: "Switch to next color theme",
+                shortcut: "T",
+                id: CommandId::CycleTheme,
+            },
+            // Filters
+            PaletteCommand {
+                name: "Toggle Filter Panel",
+                description: "Show/hide filter options",
+                shortcut: "f",
+                id: CommandId::ToggleFilter,
+            },
+            PaletteCommand {
+                name: "Cycle Message Filter",
+                description: "Filter by message type (All/Human/AI)",
+                shortcut: "F",
+                id: CommandId::CycleMessageFilter,
+            },
+            PaletteCommand {
+                name: "Toggle Errors Only",
+                description: "Show only error messages",
+                shortcut: "E",
+                id: CommandId::ToggleErrorsFilter,
+            },
+            PaletteCommand {
+                name: "Clear All Filters",
+                description: "Reset all active filters",
+                shortcut: "X",
+                id: CommandId::ClearFilters,
+            },
+            PaletteCommand {
+                name: "Set Date From",
+                description: "Filter sessions from date",
+                shortcut: "[",
+                id: CommandId::SetDateFrom,
+            },
+            PaletteCommand {
+                name: "Set Date To",
+                description: "Filter sessions until date",
+                shortcut: "]",
+                id: CommandId::SetDateTo,
+            },
+            PaletteCommand {
+                name: "Set Model Filter",
+                description: "Filter by AI model name",
+                shortcut: "M",
+                id: CommandId::SetModelFilter,
+            },
+            // Actions
+            PaletteCommand {
+                name: "Refresh",
+                description: "Reload data from disk",
+                shortcut: "r",
+                id: CommandId::Refresh,
+            },
+            PaletteCommand {
+                name: "Export",
+                description: "Export current session",
+                shortcut: "e",
+                id: CommandId::Export,
+            },
+            PaletteCommand {
+                name: "Copy Message",
+                description: "Copy current message to clipboard",
+                shortcut: "c",
+                id: CommandId::CopyMessage,
+            },
+            PaletteCommand {
+                name: "Copy Code Block",
+                description: "Copy code block to clipboard",
+                shortcut: "C",
+                id: CommandId::CopyCodeBlock,
+            },
+            PaletteCommand {
+                name: "Select All Sessions",
+                description: "Select all sessions in current project",
+                shortcut: "Ctrl+A",
+                id: CommandId::SelectAll,
+            },
+            PaletteCommand {
+                name: "Clear Selection",
+                description: "Deselect all sessions",
+                shortcut: "Esc",
+                id: CommandId::ClearSelection,
+            },
+            // Help
+            PaletteCommand {
+                name: "Show Help",
+                description: "Display keyboard shortcuts",
+                shortcut: "?",
+                id: CommandId::ShowHelp,
+            },
+        ];
+
+        let filtered: Vec<usize> = (0..commands.len()).collect();
+
+        Self {
+            active: false,
+            query: String::new(),
+            commands,
+            filtered,
+            selected: 0,
+        }
+    }
+}
+
+impl CommandPalette {
+    /// Open the command palette.
+    pub fn open(&mut self) {
+        self.active = true;
+        self.query.clear();
+        self.filtered = (0..self.commands.len()).collect();
+        self.selected = 0;
+    }
+
+    /// Close the command palette.
+    pub fn close(&mut self) {
+        self.active = false;
+        self.query.clear();
+    }
+
+    /// Add a character to the search query.
+    pub fn push_char(&mut self, c: char) {
+        self.query.push(c);
+        self.update_filter();
+    }
+
+    /// Remove the last character from the query.
+    pub fn backspace(&mut self) {
+        self.query.pop();
+        self.update_filter();
+    }
+
+    /// Update filtered commands based on query.
+    fn update_filter(&mut self) {
+        let query_lower = self.query.to_lowercase();
+        self.filtered = self
+            .commands
+            .iter()
+            .enumerate()
+            .filter(|(_, cmd)| {
+                if query_lower.is_empty() {
+                    return true;
+                }
+                cmd.name.to_lowercase().contains(&query_lower)
+                    || cmd.description.to_lowercase().contains(&query_lower)
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        // Ensure selected is valid
+        if self.selected >= self.filtered.len() {
+            self.selected = self.filtered.len().saturating_sub(1);
+        }
+    }
+
+    /// Move selection up.
+    pub fn select_prev(&mut self) {
+        if !self.filtered.is_empty() {
+            self.selected = if self.selected == 0 {
+                self.filtered.len() - 1
+            } else {
+                self.selected - 1
+            };
+        }
+    }
+
+    /// Move selection down.
+    pub fn select_next(&mut self) {
+        if !self.filtered.is_empty() {
+            self.selected = (self.selected + 1) % self.filtered.len();
+        }
+    }
+
+    /// Get the currently selected command.
+    pub fn selected_command(&self) -> Option<&PaletteCommand> {
+        self.filtered
+            .get(self.selected)
+            .and_then(|&idx| self.commands.get(idx))
+    }
+}
+
 /// Application state.
 pub struct AppState {
     /// Claude directory.
@@ -529,6 +863,8 @@ pub struct AppState {
     tree_session_ids: Vec<String>,
     /// Set of selected session IDs (for multi-select export).
     pub selected_sessions: HashSet<String>,
+    /// Command palette state.
+    pub command_palette: CommandPalette,
 }
 
 impl AppState {
@@ -581,6 +917,7 @@ impl AppState {
             status_message: None,
             tree_session_ids: Vec::new(),
             selected_sessions: HashSet::new(),
+            command_palette: CommandPalette::default(),
         })
     }
 
@@ -905,6 +1242,82 @@ impl AppState {
     #[must_use]
     pub fn is_exporting(&self) -> bool {
         self.export_dialog.active
+    }
+
+    /// Check if command palette is active.
+    #[must_use]
+    pub fn is_command_palette_active(&self) -> bool {
+        self.command_palette.active
+    }
+
+    /// Open the command palette.
+    pub fn open_command_palette(&mut self) {
+        self.command_palette.open();
+    }
+
+    /// Close the command palette.
+    pub fn close_command_palette(&mut self) {
+        self.command_palette.close();
+    }
+
+    /// Execute the currently selected command in the palette.
+    pub fn execute_selected_command(&mut self) -> Result<Option<CommandId>> {
+        let cmd_id = self.command_palette.selected_command().map(|c| c.id);
+        self.command_palette.close();
+
+        if let Some(id) = cmd_id {
+            self.execute_command(id)?;
+        }
+        Ok(cmd_id)
+    }
+
+    /// Execute a command by ID.
+    pub fn execute_command(&mut self, id: CommandId) -> Result<()> {
+        match id {
+            // Navigation
+            CommandId::FocusTree => self.set_focus(0),
+            CommandId::FocusConversation => self.set_focus(1),
+            CommandId::FocusDetails => self.set_focus(2),
+            CommandId::ScrollToTop => self.scroll_to_top(),
+            CommandId::ScrollToBottom => self.scroll_to_bottom(),
+            CommandId::GoToLine => self.start_goto_line(),
+            // Search
+            CommandId::Search => self.start_search(),
+            CommandId::SearchNext => self.search_next(),
+            CommandId::SearchPrevious => self.search_prev(),
+            // Display
+            CommandId::ToggleThinking => self.toggle_thinking(),
+            CommandId::ToggleTools => self.toggle_tools(),
+            CommandId::ToggleWordWrap => self.toggle_word_wrap(),
+            CommandId::ToggleLineNumbers => self.toggle_line_numbers(),
+            CommandId::CycleTheme => self.cycle_theme(),
+            // Filters
+            CommandId::ToggleFilter => self.toggle_filter(),
+            CommandId::CycleMessageFilter => self.cycle_message_filter(),
+            CommandId::ToggleErrorsFilter => self.toggle_errors_filter(),
+            CommandId::ClearFilters => self.clear_filters(),
+            CommandId::SetDateFrom => self.start_date_from_input(),
+            CommandId::SetDateTo => self.start_date_to_input(),
+            CommandId::SetModelFilter => self.toggle_model_filter(),
+            // Actions
+            CommandId::Refresh => {
+                self.refresh()?;
+            }
+            CommandId::Export => {
+                self.export()?;
+            }
+            CommandId::CopyMessage => {
+                self.copy_message()?;
+            }
+            CommandId::CopyCodeBlock => {
+                self.copy_code_block()?;
+            }
+            CommandId::SelectAll => self.select_all_sessions(),
+            CommandId::ClearSelection => self.clear_selection(),
+            // Help
+            CommandId::ShowHelp => self.toggle_help(),
+        }
+        Ok(())
     }
 
     /// Open the export dialog.
@@ -2099,6 +2512,111 @@ mod tests {
             // Backspace works
             state.pop_input_char();
             assert_eq!(state.input_buffer, "12");
+        }
+    }
+
+    mod command_palette {
+        use super::*;
+
+        #[test]
+        fn test_default_command_palette() {
+            let palette = CommandPalette::default();
+            assert!(!palette.active);
+            assert!(palette.query.is_empty());
+            assert!(!palette.commands.is_empty());
+            assert_eq!(palette.selected, 0);
+            // All commands should be in filtered initially
+            assert_eq!(palette.filtered.len(), palette.commands.len());
+        }
+
+        #[test]
+        fn test_open_and_close() {
+            let mut palette = CommandPalette::default();
+            palette.query = "test".to_string();
+            palette.selected = 5;
+
+            palette.open();
+            assert!(palette.active);
+            assert!(palette.query.is_empty());
+            assert_eq!(palette.selected, 0);
+
+            palette.close();
+            assert!(!palette.active);
+        }
+
+        #[test]
+        fn test_filter_commands() {
+            let mut palette = CommandPalette::default();
+
+            // Type "toggle" to filter
+            palette.push_char('t');
+            palette.push_char('o');
+            palette.push_char('g');
+            palette.push_char('g');
+            palette.push_char('l');
+            palette.push_char('e');
+
+            // Should only show commands with "toggle" in name or description
+            assert!(palette.filtered.len() < palette.commands.len());
+            for &idx in &palette.filtered {
+                let cmd = &palette.commands[idx];
+                assert!(
+                    cmd.name.to_lowercase().contains("toggle")
+                        || cmd.description.to_lowercase().contains("toggle")
+                );
+            }
+        }
+
+        #[test]
+        fn test_navigation() {
+            let mut palette = CommandPalette::default();
+            assert_eq!(palette.selected, 0);
+
+            palette.select_next();
+            assert_eq!(palette.selected, 1);
+
+            palette.select_next();
+            assert_eq!(palette.selected, 2);
+
+            palette.select_prev();
+            assert_eq!(palette.selected, 1);
+
+            palette.select_prev();
+            assert_eq!(palette.selected, 0);
+
+            // Should wrap to end
+            palette.select_prev();
+            assert_eq!(palette.selected, palette.filtered.len() - 1);
+        }
+
+        #[test]
+        fn test_selected_command() {
+            let palette = CommandPalette::default();
+            let cmd = palette.selected_command();
+            assert!(cmd.is_some());
+            assert_eq!(cmd.unwrap().name, palette.commands[0].name);
+        }
+
+        #[test]
+        fn test_backspace() {
+            let mut palette = CommandPalette::default();
+            palette.push_char('t');
+            palette.push_char('e');
+            palette.push_char('s');
+            palette.push_char('t');
+            assert_eq!(palette.query, "test");
+
+            palette.backspace();
+            assert_eq!(palette.query, "tes");
+
+            palette.backspace();
+            palette.backspace();
+            palette.backspace();
+            assert!(palette.query.is_empty());
+
+            // Backspace on empty should be fine
+            palette.backspace();
+            assert!(palette.query.is_empty());
         }
     }
 }
