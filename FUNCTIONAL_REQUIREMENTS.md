@@ -818,7 +818,7 @@ esac
 | [x] ACT-003 | Copy message to clipboard | P1 | ✓ (c key) |
 | [x] ACT-004 | Copy code block to clipboard | P1 | ✓ (C key) |
 | [x] ACT-005 | Open in external editor | P2 | ✓ (O key) |
-| [ ] ACT-006 | Resume session in Claude Code | P2 | |
+| [x] ACT-006 | Resume session in Claude Code | P2 | ✓ (R key, command palette) |
 | [x] ACT-007 | Show session statistics | P0 | ✓ (details panel) |
 | [x] ACT-008 | Refresh session list | P1 | ✓ (r key) |
 
@@ -985,7 +985,7 @@ Given versions A (file) and B (schema):
 | [x] INDEX-002 | Incremental index updates | P1 | ✓ (`index build` command) |
 | [x] INDEX-003 | Index storage location configuration | P2 | ✓ (`index.directory` config) |
 | [x] INDEX-004 | Index rebuild command | P1 | ✓ (`index rebuild` command) |
-| [ ] INDEX-005 | Field-specific indexes (tool names, models) | P2 | |
+| [x] INDEX-005 | Field-specific indexes (tool names, models) | P2 | ✓ (list_tool_names, list_models, search_by_tool, search_by_model, suggest_*) |
 
 ### 10.5 Configuration System
 

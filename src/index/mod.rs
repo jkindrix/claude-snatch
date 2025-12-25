@@ -528,6 +528,113 @@ impl SearchIndex {
     pub fn path(&self) -> &Path {
         &self.index_path
     }
+
+    /// List all unique tool names in the index with occurrence counts.
+    pub fn list_tool_names(&self) -> Result<FieldAggregation> {
+        self.aggregate_field(fields::TOOL_NAME)
+    }
+
+    /// List all unique models in the index with occurrence counts.
+    pub fn list_models(&self) -> Result<FieldAggregation> {
+        self.aggregate_field(fields::MODEL)
+    }
+
+    /// List all unique message types in the index with occurrence counts.
+    pub fn list_message_types(&self) -> Result<FieldAggregation> {
+        self.aggregate_field(fields::MESSAGE_TYPE)
+    }
+
+    /// List all unique projects in the index with occurrence counts.
+    pub fn list_projects(&self) -> Result<FieldAggregation> {
+        self.aggregate_field(fields::PROJECT)
+    }
+
+    /// Aggregate values for a specific field.
+    fn aggregate_field(&self, field_name: &str) -> Result<FieldAggregation> {
+        use std::collections::HashMap;
+        use tantivy::collector::DocSetCollector;
+        use tantivy::query::AllQuery;
+
+        let searcher = self.reader.searcher();
+        let field = self.schema.get_field(field_name).map_err(|_| {
+            SnatchError::IndexError(format!("Field not found: {}", field_name))
+        })?;
+
+        // Collect all documents
+        let doc_addresses = searcher
+            .search(&AllQuery, &DocSetCollector)
+            .map_err(|e| SnatchError::IndexError(format!("Search failed: {}", e)))?;
+
+        // Count field values
+        let mut counts: HashMap<String, usize> = HashMap::new();
+
+        for doc_address in doc_addresses {
+            let doc: TantivyDocument = searcher.doc(doc_address).map_err(|e| {
+                SnatchError::IndexError(format!("Failed to retrieve document: {}", e))
+            })?;
+
+            // Get all values for this field (multi-valued fields like tool_name)
+            for value in doc.get_all(field) {
+                if let Some(text) = value.as_str() {
+                    if !text.is_empty() {
+                        *counts.entry(text.to_string()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
+        // Sort by count descending
+        let mut values: Vec<(String, usize)> = counts.into_iter().collect();
+        values.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+        let unique_count = values.len();
+
+        Ok(FieldAggregation {
+            field: field_name.to_string(),
+            values,
+            unique_count,
+        })
+    }
+
+    /// Search by a specific field value only.
+    pub fn search_by_field(&self, field_name: &str, value: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        let query_str = format!("{}:{}", field_name, value);
+        self.search(&query_str, limit)
+    }
+
+    /// Search for messages using a specific tool.
+    pub fn search_by_tool(&self, tool_name: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        self.search_by_field(fields::TOOL_NAME, tool_name, limit)
+    }
+
+    /// Search for messages from a specific model.
+    pub fn search_by_model(&self, model: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        self.search_by_field(fields::MODEL, model, limit)
+    }
+
+    /// Get all tool names that match a prefix (for autocomplete).
+    pub fn suggest_tool_names(&self, prefix: &str) -> Result<Vec<String>> {
+        let aggregation = self.list_tool_names()?;
+        let prefix_lower = prefix.to_lowercase();
+        Ok(aggregation
+            .values
+            .into_iter()
+            .filter(|(name, _)| name.to_lowercase().starts_with(&prefix_lower))
+            .map(|(name, _)| name)
+            .collect())
+    }
+
+    /// Get all models that match a prefix (for autocomplete).
+    pub fn suggest_models(&self, prefix: &str) -> Result<Vec<String>> {
+        let aggregation = self.list_models()?;
+        let prefix_lower = prefix.to_lowercase();
+        Ok(aggregation
+            .values
+            .into_iter()
+            .filter(|(name, _)| name.to_lowercase().starts_with(&prefix_lower))
+            .map(|(name, _)| name)
+            .collect())
+    }
 }
 
 /// Options for advanced search.
@@ -547,6 +654,17 @@ pub struct SearchOptions {
     pub include_thinking: bool,
     /// Maximum number of results.
     pub limit: Option<usize>,
+}
+
+/// Aggregation of field values with counts.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FieldAggregation {
+    /// Field name.
+    pub field: String,
+    /// Values with their occurrence counts, sorted by count descending.
+    pub values: Vec<(String, usize)>,
+    /// Total unique values.
+    pub unique_count: usize,
 }
 
 /// Result of an indexing operation.
@@ -594,5 +712,92 @@ mod tests {
         let index = SearchIndex::open(dir.path().join("test-index")).unwrap();
         index.clear().unwrap();
         assert!(index.is_empty());
+    }
+
+    #[test]
+    fn test_list_tool_names_empty() {
+        let dir = tempdir().unwrap();
+        let index = SearchIndex::open(dir.path().join("test-index")).unwrap();
+        let aggregation = index.list_tool_names().unwrap();
+        assert_eq!(aggregation.field, "tool_name");
+        assert!(aggregation.values.is_empty());
+        assert_eq!(aggregation.unique_count, 0);
+    }
+
+    #[test]
+    fn test_list_models_empty() {
+        let dir = tempdir().unwrap();
+        let index = SearchIndex::open(dir.path().join("test-index")).unwrap();
+        let aggregation = index.list_models().unwrap();
+        assert_eq!(aggregation.field, "model");
+        assert!(aggregation.values.is_empty());
+        assert_eq!(aggregation.unique_count, 0);
+    }
+
+    #[test]
+    fn test_list_message_types_empty() {
+        let dir = tempdir().unwrap();
+        let index = SearchIndex::open(dir.path().join("test-index")).unwrap();
+        let aggregation = index.list_message_types().unwrap();
+        assert_eq!(aggregation.field, "message_type");
+        assert!(aggregation.values.is_empty());
+    }
+
+    #[test]
+    fn test_list_projects_empty() {
+        let dir = tempdir().unwrap();
+        let index = SearchIndex::open(dir.path().join("test-index")).unwrap();
+        let aggregation = index.list_projects().unwrap();
+        assert_eq!(aggregation.field, "project");
+        assert!(aggregation.values.is_empty());
+    }
+
+    #[test]
+    fn test_search_by_tool_empty() {
+        let dir = tempdir().unwrap();
+        let index = SearchIndex::open(dir.path().join("test-index")).unwrap();
+        let results = index.search_by_tool("Read", 10).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_search_by_model_empty() {
+        let dir = tempdir().unwrap();
+        let index = SearchIndex::open(dir.path().join("test-index")).unwrap();
+        let results = index.search_by_model("claude-3", 10).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_suggest_tool_names_empty() {
+        let dir = tempdir().unwrap();
+        let index = SearchIndex::open(dir.path().join("test-index")).unwrap();
+        let suggestions = index.suggest_tool_names("Re").unwrap();
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn test_suggest_models_empty() {
+        let dir = tempdir().unwrap();
+        let index = SearchIndex::open(dir.path().join("test-index")).unwrap();
+        let suggestions = index.suggest_models("claude").unwrap();
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn test_field_aggregation_serialization() {
+        let aggregation = FieldAggregation {
+            field: "tool_name".to_string(),
+            values: vec![
+                ("Read".to_string(), 50),
+                ("Write".to_string(), 30),
+                ("Bash".to_string(), 20),
+            ],
+            unique_count: 3,
+        };
+        let json = serde_json::to_string(&aggregation).unwrap();
+        assert!(json.contains("tool_name"));
+        assert!(json.contains("Read"));
+        assert!(json.contains("50"));
     }
 }
