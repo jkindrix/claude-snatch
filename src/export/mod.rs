@@ -181,6 +181,243 @@ impl DataMinimizationConfig {
     }
 }
 
+/// GDPR-compliant export configuration.
+///
+/// Provides Article 15 (Right of access) and Article 20 (Data portability)
+/// compliant metadata and formatting for personal data exports.
+#[derive(Debug, Clone, Default)]
+pub struct GdprConfig {
+    /// Include GDPR metadata envelope.
+    pub include_envelope: bool,
+    /// Data controller information.
+    pub data_controller: Option<String>,
+    /// Processing purpose description.
+    pub processing_purpose: Option<String>,
+    /// Legal basis for processing (e.g., "consent", "legitimate_interest").
+    pub legal_basis: Option<String>,
+    /// Data retention period description.
+    pub retention_period: Option<String>,
+    /// Data subject identifier (optional, for multi-user scenarios).
+    pub data_subject_id: Option<String>,
+    /// Export reason (e.g., "access_request", "portability_request").
+    pub export_reason: Option<GdprExportReason>,
+    /// Include data processing history.
+    pub include_processing_history: bool,
+    /// Include source information.
+    pub include_source_info: bool,
+}
+
+/// Reason for GDPR data export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GdprExportReason {
+    /// Article 15: Right of access by the data subject.
+    AccessRequest,
+    /// Article 20: Right to data portability.
+    PortabilityRequest,
+    /// Article 17: Right to erasure (export before deletion).
+    ErasurePreExport,
+    /// Internal record keeping.
+    InternalAudit,
+    /// Backup/archival purpose.
+    Archival,
+}
+
+impl GdprConfig {
+    /// Create a new GDPR config for access requests (Article 15).
+    pub fn for_access_request() -> Self {
+        Self {
+            include_envelope: true,
+            export_reason: Some(GdprExportReason::AccessRequest),
+            include_processing_history: true,
+            include_source_info: true,
+            ..Default::default()
+        }
+    }
+
+    /// Create a new GDPR config for data portability (Article 20).
+    pub fn for_portability() -> Self {
+        Self {
+            include_envelope: true,
+            export_reason: Some(GdprExportReason::PortabilityRequest),
+            include_processing_history: false,
+            include_source_info: true,
+            ..Default::default()
+        }
+    }
+
+    /// Create a new GDPR config for pre-erasure export (Article 17).
+    pub fn for_erasure() -> Self {
+        Self {
+            include_envelope: true,
+            export_reason: Some(GdprExportReason::ErasurePreExport),
+            include_processing_history: true,
+            include_source_info: true,
+            ..Default::default()
+        }
+    }
+
+    /// Set the data controller information.
+    pub fn with_controller(mut self, controller: impl Into<String>) -> Self {
+        self.data_controller = Some(controller.into());
+        self
+    }
+
+    /// Set the processing purpose.
+    pub fn with_purpose(mut self, purpose: impl Into<String>) -> Self {
+        self.processing_purpose = Some(purpose.into());
+        self
+    }
+
+    /// Set the legal basis.
+    pub fn with_legal_basis(mut self, basis: impl Into<String>) -> Self {
+        self.legal_basis = Some(basis.into());
+        self
+    }
+
+    /// Set the retention period.
+    pub fn with_retention(mut self, retention: impl Into<String>) -> Self {
+        self.retention_period = Some(retention.into());
+        self
+    }
+
+    /// Set the data subject ID.
+    pub fn with_subject(mut self, subject_id: impl Into<String>) -> Self {
+        self.data_subject_id = Some(subject_id.into());
+        self
+    }
+}
+
+/// GDPR-compliant metadata envelope for exports.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GdprEnvelope {
+    /// GDPR compliance version.
+    pub gdpr_version: String,
+    /// Export timestamp.
+    pub exported_at: String,
+    /// Exporter tool information.
+    pub exporter: GdprExporterInfo,
+    /// Data controller details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_controller: Option<String>,
+    /// Processing purpose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processing_purpose: Option<String>,
+    /// Legal basis for processing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legal_basis: Option<String>,
+    /// Data retention policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention_policy: Option<String>,
+    /// Data subject identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_subject_id: Option<String>,
+    /// Reason for export.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub export_reason: Option<String>,
+    /// Rights information.
+    pub data_subject_rights: DataSubjectRights,
+    /// Data categories present in export.
+    pub data_categories: Vec<String>,
+    /// Processing activities.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub processing_activities: Vec<String>,
+}
+
+/// Exporter information for GDPR envelope.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GdprExporterInfo {
+    /// Tool name.
+    pub name: String,
+    /// Tool version.
+    pub version: String,
+    /// Export format.
+    pub format: String,
+}
+
+/// Data subject rights information.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DataSubjectRights {
+    /// Article 15: Right of access.
+    pub access: bool,
+    /// Article 16: Right to rectification.
+    pub rectification: bool,
+    /// Article 17: Right to erasure.
+    pub erasure: bool,
+    /// Article 18: Right to restriction of processing.
+    pub restriction: bool,
+    /// Article 20: Right to data portability.
+    pub portability: bool,
+    /// Article 21: Right to object.
+    pub objection: bool,
+}
+
+impl Default for DataSubjectRights {
+    fn default() -> Self {
+        Self {
+            access: true,
+            rectification: true,
+            erasure: true,
+            restriction: true,
+            portability: true,
+            objection: true,
+        }
+    }
+}
+
+impl GdprEnvelope {
+    /// Create a GDPR envelope from configuration.
+    pub fn from_config(config: &GdprConfig, format: &str) -> Self {
+        let export_reason = config.export_reason.map(|r| match r {
+            GdprExportReason::AccessRequest => "access_request_article_15".to_string(),
+            GdprExportReason::PortabilityRequest => "portability_request_article_20".to_string(),
+            GdprExportReason::ErasurePreExport => "pre_erasure_article_17".to_string(),
+            GdprExportReason::InternalAudit => "internal_audit".to_string(),
+            GdprExportReason::Archival => "archival".to_string(),
+        });
+
+        let mut data_categories = vec![
+            "conversation_content".to_string(),
+            "timestamps".to_string(),
+            "usage_statistics".to_string(),
+        ];
+        if config.include_processing_history {
+            data_categories.push("processing_history".to_string());
+        }
+        if config.include_source_info {
+            data_categories.push("source_information".to_string());
+        }
+
+        let processing_activities = if config.include_processing_history {
+            vec![
+                "data_collection".to_string(),
+                "data_storage".to_string(),
+                "data_export".to_string(),
+            ]
+        } else {
+            Vec::new()
+        };
+
+        Self {
+            gdpr_version: "GDPR_2016/679".to_string(),
+            exported_at: chrono::Utc::now().to_rfc3339(),
+            exporter: GdprExporterInfo {
+                name: crate::NAME.to_string(),
+                version: crate::VERSION.to_string(),
+                format: format.to_string(),
+            },
+            data_controller: config.data_controller.clone(),
+            processing_purpose: config.processing_purpose.clone(),
+            legal_basis: config.legal_basis.clone(),
+            retention_policy: config.retention_period.clone(),
+            data_subject_id: config.data_subject_id.clone(),
+            export_reason,
+            data_subject_rights: DataSubjectRights::default(),
+            data_categories,
+            processing_activities,
+        }
+    }
+}
+
 impl Default for ExportOptions {
     fn default() -> Self {
         Self {
@@ -851,5 +1088,105 @@ mod tests {
         // Without minimization, paths are unchanged
         let result = opts.minimize_path("/home/user/code/app.py");
         assert_eq!(result, "/home/user/code/app.py");
+    }
+
+    #[test]
+    fn test_gdpr_config_default() {
+        let config = GdprConfig::default();
+        assert!(!config.include_envelope);
+        assert!(config.data_controller.is_none());
+        assert!(config.export_reason.is_none());
+    }
+
+    #[test]
+    fn test_gdpr_config_access_request() {
+        let config = GdprConfig::for_access_request();
+        assert!(config.include_envelope);
+        assert_eq!(config.export_reason, Some(GdprExportReason::AccessRequest));
+        assert!(config.include_processing_history);
+        assert!(config.include_source_info);
+    }
+
+    #[test]
+    fn test_gdpr_config_portability() {
+        let config = GdprConfig::for_portability();
+        assert!(config.include_envelope);
+        assert_eq!(config.export_reason, Some(GdprExportReason::PortabilityRequest));
+        assert!(!config.include_processing_history);
+    }
+
+    #[test]
+    fn test_gdpr_config_erasure() {
+        let config = GdprConfig::for_erasure();
+        assert!(config.include_envelope);
+        assert_eq!(config.export_reason, Some(GdprExportReason::ErasurePreExport));
+        assert!(config.include_processing_history);
+    }
+
+    #[test]
+    fn test_gdpr_config_builders() {
+        let config = GdprConfig::for_access_request()
+            .with_controller("ACME Corp")
+            .with_purpose("AI conversation assistance")
+            .with_legal_basis("consent")
+            .with_retention("30 days")
+            .with_subject("user@example.com");
+
+        assert_eq!(config.data_controller, Some("ACME Corp".to_string()));
+        assert_eq!(config.processing_purpose, Some("AI conversation assistance".to_string()));
+        assert_eq!(config.legal_basis, Some("consent".to_string()));
+        assert_eq!(config.retention_period, Some("30 days".to_string()));
+        assert_eq!(config.data_subject_id, Some("user@example.com".to_string()));
+    }
+
+    #[test]
+    fn test_gdpr_envelope_from_config() {
+        let config = GdprConfig::for_access_request()
+            .with_controller("Test Corp")
+            .with_purpose("Testing");
+
+        let envelope = GdprEnvelope::from_config(&config, "json");
+
+        assert_eq!(envelope.gdpr_version, "GDPR_2016/679");
+        assert_eq!(envelope.data_controller, Some("Test Corp".to_string()));
+        assert_eq!(envelope.processing_purpose, Some("Testing".to_string()));
+        assert_eq!(envelope.export_reason, Some("access_request_article_15".to_string()));
+        assert!(envelope.data_categories.contains(&"conversation_content".to_string()));
+        assert!(envelope.data_categories.contains(&"processing_history".to_string()));
+    }
+
+    #[test]
+    fn test_data_subject_rights_default() {
+        let rights = DataSubjectRights::default();
+        assert!(rights.access);
+        assert!(rights.rectification);
+        assert!(rights.erasure);
+        assert!(rights.restriction);
+        assert!(rights.portability);
+        assert!(rights.objection);
+    }
+
+    #[test]
+    fn test_gdpr_export_reasons() {
+        let config = GdprConfig::for_portability();
+        let envelope = GdprEnvelope::from_config(&config, "json");
+        assert_eq!(envelope.export_reason, Some("portability_request_article_20".to_string()));
+
+        let config = GdprConfig::for_erasure();
+        let envelope = GdprEnvelope::from_config(&config, "json");
+        assert_eq!(envelope.export_reason, Some("pre_erasure_article_17".to_string()));
+    }
+
+    #[test]
+    fn test_gdpr_envelope_processing_activities() {
+        // With processing history
+        let config = GdprConfig::for_access_request();
+        let envelope = GdprEnvelope::from_config(&config, "json");
+        assert!(!envelope.processing_activities.is_empty());
+
+        // Without processing history
+        let config = GdprConfig::for_portability();
+        let envelope = GdprEnvelope::from_config(&config, "json");
+        assert!(envelope.processing_activities.is_empty());
     }
 }
