@@ -737,7 +737,7 @@ esac
 | [x] OUT-002 | Progress bars for long operations | P0 | ✓ |
 | [x] OUT-003 | Table formatting for lists | P0 | ✓ |
 | [x] OUT-004 | Human-readable file sizes | P1 | ✓ |
-| [ ] OUT-005 | Relative timestamps option | P2 | |
+| [x] OUT-005 | Relative timestamps option | P2 | |
 | [ ] OUT-006 | Pager support (less/more) | P2 | |
 
 ### 7.6 Shell Completions

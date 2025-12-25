@@ -175,7 +175,39 @@ fn matches_filters(entry: &LogEntry, args: &SearchArgs) -> bool {
         return false;
     }
 
+    // Check token usage filters
+    if args.min_tokens.is_some() || args.max_tokens.is_some() {
+        if let Some(tokens) = get_entry_tokens(entry) {
+            if let Some(min) = args.min_tokens {
+                if tokens < min {
+                    return false;
+                }
+            }
+            if let Some(max) = args.max_tokens {
+                if tokens > max {
+                    return false;
+                }
+            }
+        } else {
+            // No token info available - skip if filter is active
+            return false;
+        }
+    }
+
     true
+}
+
+/// Get token count from an entry (assistant messages have usage info).
+fn get_entry_tokens(entry: &LogEntry) -> Option<u64> {
+    match entry {
+        LogEntry::Assistant(msg) => {
+            // Get total tokens from usage info
+            msg.message.usage.as_ref().map(|u| {
+                u.input_tokens + u.output_tokens
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Check if an entry matches the model filter.
@@ -818,4 +850,5 @@ mod tests {
 
         assert!(score_consecutive > score_scattered);
     }
+
 }

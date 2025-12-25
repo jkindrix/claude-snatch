@@ -514,6 +514,14 @@ pub struct SearchArgs {
     /// Minimum fuzzy match score (0-100, default 60).
     #[arg(long, default_value = "60")]
     pub fuzzy_threshold: u8,
+
+    /// Minimum token count for messages.
+    #[arg(long)]
+    pub min_tokens: Option<u64>,
+
+    /// Maximum token count for messages.
+    #[arg(long)]
+    pub max_tokens: Option<u64>,
 }
 
 /// Arguments for the stats command.
