@@ -186,6 +186,8 @@ pub enum InputMode {
     DateTo,
     /// Entering model filter.
     Model,
+    /// Entering line number for navigation.
+    LineNumber,
 }
 
 impl FilterState {
@@ -266,6 +268,12 @@ impl FilterState {
                     self.input_buffer.push(c);
                 }
             }
+            InputMode::LineNumber => {
+                // Only allow digits
+                if c.is_ascii_digit() {
+                    self.input_buffer.push(c);
+                }
+            }
             InputMode::None => {}
         }
     }
@@ -280,7 +288,8 @@ impl FilterState {
         match self.input_mode {
             InputMode::DateFrom | InputMode::DateTo => self.confirm_date_input(),
             InputMode::Model => self.confirm_model_input(),
-            InputMode::None => false,
+            // LineNumber is handled by AppState.confirm_goto_line()
+            InputMode::LineNumber | InputMode::None => false,
         }
     }
 
@@ -743,6 +752,62 @@ impl AppState {
         self.scroll_offset = self.conversation_lines.len().saturating_sub(10);
     }
 
+    /// Scroll to a specific line number.
+    pub fn scroll_to_line(&mut self, line: usize) {
+        if self.conversation_lines.is_empty() {
+            return;
+        }
+        // Line numbers are 1-based for users, but 0-based internally
+        let target = line.saturating_sub(1);
+        let max = self.conversation_lines.len().saturating_sub(1);
+        self.scroll_offset = target.min(max);
+        self.status_message = Some(format!("Jumped to line {}", line));
+    }
+
+    /// Start go-to-line input mode.
+    pub fn start_goto_line(&mut self) {
+        self.filter_state.input_mode = InputMode::LineNumber;
+        self.filter_state.input_buffer.clear();
+    }
+
+    /// Cancel go-to-line input.
+    pub fn cancel_goto_line(&mut self) {
+        self.filter_state.input_mode = InputMode::None;
+        self.filter_state.input_buffer.clear();
+    }
+
+    /// Handle character input during go-to-line.
+    pub fn goto_line_input(&mut self, c: char) {
+        // Only accept digits
+        if c.is_ascii_digit() {
+            self.filter_state.input_buffer.push(c);
+        }
+    }
+
+    /// Handle backspace during go-to-line.
+    pub fn goto_line_backspace(&mut self) {
+        self.filter_state.input_buffer.pop();
+    }
+
+    /// Confirm go-to-line and jump.
+    pub fn confirm_goto_line(&mut self) {
+        if let Ok(line) = self.filter_state.input_buffer.parse::<usize>() {
+            if line > 0 {
+                self.scroll_to_line(line);
+            } else {
+                self.status_message = Some("Invalid line number".to_string());
+            }
+        }
+        self.filter_state.input_mode = InputMode::None;
+        self.filter_state.input_buffer.clear();
+    }
+
+    /// Check if in go-to-line input mode.
+    #[must_use]
+    pub fn is_entering_line_number(&self) -> bool {
+        self.filter_state.input_mode == InputMode::LineNumber
+    }
+
     /// Start search mode.
     pub fn start_search(&mut self) {
         self.search_state.active = true;
@@ -817,12 +882,6 @@ impl AppState {
         if let Some(line) = self.search_state.current_line() {
             self.scroll_to_line(line);
         }
-    }
-
-    /// Scroll to a specific line.
-    fn scroll_to_line(&mut self, line: usize) {
-        // Center the line in the viewport (approximately)
-        self.scroll_offset = line.saturating_sub(10);
     }
 
     /// Check if search mode is active.
@@ -1158,6 +1217,13 @@ impl AppState {
     /// Confirm filter input.
     pub fn confirm_filter_input(&mut self) {
         let mode = self.filter_state.input_mode;
+
+        // Handle line number input separately
+        if mode == InputMode::LineNumber {
+            self.confirm_goto_line();
+            return;
+        }
+
         if self.filter_state.confirm_input() {
             self.status_message = Some(format!("Filter: {}", self.filter_state.summary()));
             self.update_conversation_display();
@@ -2007,6 +2073,32 @@ mod tests {
 
             state.input_mode = InputMode::DateFrom;
             assert!(!state.is_entering_model());
+        }
+
+        #[test]
+        fn test_line_number_input_mode() {
+            let mut state = FilterState::default();
+            assert_eq!(state.input_mode, InputMode::None);
+
+            state.input_mode = InputMode::LineNumber;
+            assert!(state.is_entering_input());
+            assert!(!state.is_entering_date());
+            assert!(!state.is_entering_model());
+
+            // Test that only digits are accepted
+            state.push_input_char('1');
+            state.push_input_char('2');
+            state.push_input_char('3');
+            assert_eq!(state.input_buffer, "123");
+
+            // Non-digit should be ignored
+            state.push_input_char('a');
+            state.push_input_char('-');
+            assert_eq!(state.input_buffer, "123");
+
+            // Backspace works
+            state.pop_input_char();
+            assert_eq!(state.input_buffer, "12");
         }
     }
 }

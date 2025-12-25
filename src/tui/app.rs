@@ -332,6 +332,11 @@ fn run_loop<B: ratatui::backend::Backend>(
                         app.toggle_model_filter();
                     }
 
+                    // Go to line number (Ctrl+G or G)
+                    (KeyModifiers::CONTROL, KeyCode::Char('g')) | (KeyModifiers::SHIFT, KeyCode::Char('G')) => {
+                        app.start_goto_line();
+                    }
+
                     // Cycle theme
                     (KeyModifiers::NONE, KeyCode::Char('T')) => {
                         app.cycle_theme();
@@ -629,6 +634,7 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
             InputMode::DateFrom => ("From", "YYYY-MM-DD"),
             InputMode::DateTo => ("To", "YYYY-MM-DD"),
             InputMode::Model => ("Model", "e.g., sonnet, opus"),
+            InputMode::LineNumber => ("Go to line", "line number"),
             InputMode::None => ("Input", ""),
         };
         vec![

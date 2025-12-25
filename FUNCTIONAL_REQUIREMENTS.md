@@ -782,7 +782,7 @@ esac
 | [x] NAV-007 | Escape to cancel/close | P0 | ✓ |
 | [x] NAV-008 | q to quit | P0 | ✓ |
 | [x] NAV-009 | Vim-style navigation (j/k/h/l) | P1 | ✓ |
-| [ ] NAV-010 | Go to line number | P2 | |
+| [x] NAV-010 | Go to line number | P2 | ✓ |
 
 ### 8.3 Search & Filter
 
