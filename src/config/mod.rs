@@ -41,6 +41,9 @@ impl Default for Config {
     }
 }
 
+/// Project-specific configuration filename.
+pub const PROJECT_CONFIG_FILENAME: &str = ".claude-snatch.toml";
+
 impl Config {
     /// Load configuration from default locations.
     pub fn load() -> Result<Self> {
@@ -50,6 +53,24 @@ impl Config {
         } else {
             Ok(Self::default())
         }
+    }
+
+    /// Load configuration with project-specific overrides.
+    ///
+    /// Searches for `.claude-snatch.toml` in the given project directory
+    /// and merges it with the global configuration.
+    pub fn load_for_project(project_dir: &Path) -> Result<Self> {
+        // Start with global config
+        let mut config = Self::load().unwrap_or_default();
+
+        // Look for project config
+        let project_config_path = project_dir.join(PROJECT_CONFIG_FILENAME);
+        if project_config_path.exists() {
+            let project_config = Self::load_from(&project_config_path)?;
+            config.merge_from(&project_config);
+        }
+
+        Ok(config)
     }
 
     /// Load configuration from a specific path.
@@ -63,6 +84,47 @@ impl Config {
                 message: e.to_string(),
             }
         })
+    }
+
+    /// Merge another config into this one (other takes precedence).
+    pub fn merge_from(&mut self, other: &Config) {
+        // Merge export format config
+        if other.default_format.format != "markdown" {
+            self.default_format.format = other.default_format.format.clone();
+        }
+        self.default_format.include_thinking = other.default_format.include_thinking;
+        self.default_format.include_tool_use = other.default_format.include_tool_use;
+        self.default_format.include_timestamps = other.default_format.include_timestamps;
+        self.default_format.pretty_json = other.default_format.pretty_json;
+
+        // Merge theme config
+        if other.theme.name != "default" {
+            self.theme.name = other.theme.name.clone();
+        }
+        self.theme.color = other.theme.color;
+        self.theme.unicode = other.theme.unicode;
+
+        // Merge display config
+        self.display.full_ids = other.display.full_ids;
+        self.display.show_sizes = other.display.show_sizes;
+        if other.display.truncate_at != 10000 {
+            self.display.truncate_at = other.display.truncate_at;
+        }
+        if other.display.context_lines != 2 {
+            self.display.context_lines = other.display.context_lines;
+        }
+
+        // Merge cache config
+        self.cache.enabled = other.cache.enabled;
+        if other.cache.directory.is_some() {
+            self.cache.directory = other.cache.directory.clone();
+        }
+        if other.cache.max_size != 100 * 1024 * 1024 {
+            self.cache.max_size = other.cache.max_size;
+        }
+        if other.cache.ttl_seconds != 3600 {
+            self.cache.ttl_seconds = other.cache.ttl_seconds;
+        }
     }
 
     /// Save configuration to the default location.
@@ -271,5 +333,62 @@ mod tests {
         let toml = toml::to_string(&config).unwrap();
         let parsed: Config = toml::from_str(&toml).unwrap();
         assert_eq!(parsed.default_format.format, config.default_format.format);
+    }
+
+    #[test]
+    fn test_config_merge() {
+        let mut base = Config::default();
+        let mut override_config = Config::default();
+
+        // Set some overrides
+        override_config.default_format.format = "json".to_string();
+        override_config.theme.name = "dark".to_string();
+        override_config.display.truncate_at = 5000;
+
+        base.merge_from(&override_config);
+
+        assert_eq!(base.default_format.format, "json");
+        assert_eq!(base.theme.name, "dark");
+        assert_eq!(base.display.truncate_at, 5000);
+    }
+
+    #[test]
+    fn test_load_for_project() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Create project config
+        let project_config = r#"
+[default_format]
+format = "text"
+include_thinking = false
+
+[display]
+truncate_at = 3000
+"#;
+
+        std::fs::write(
+            temp_dir.path().join(PROJECT_CONFIG_FILENAME),
+            project_config
+        ).unwrap();
+
+        let config = Config::load_for_project(temp_dir.path()).unwrap();
+
+        assert_eq!(config.default_format.format, "text");
+        assert!(!config.default_format.include_thinking);
+        assert_eq!(config.display.truncate_at, 3000);
+        // Defaults should be preserved where not overridden
+        assert!(config.theme.color);
+    }
+
+    #[test]
+    fn test_load_for_project_no_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // No project config file
+        let config = Config::load_for_project(temp_dir.path()).unwrap();
+
+        // Should return defaults
+        assert_eq!(config.default_format.format, "markdown");
+        assert!(config.cache.enabled);
     }
 }

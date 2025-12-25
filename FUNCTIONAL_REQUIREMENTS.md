@@ -997,7 +997,7 @@ Given versions A (file) and B (schema):
 | [x] CFG-004 | Command-line argument overrides | P0 | ✓ |
 | [x] CFG-005 | Default configuration generation | P1 | ✓ (`config init`) |
 | [x] CFG-006 | Configuration validation | P1 | ✓ |
-| [ ] CFG-007 | Per-project configuration (`.claude-snatch.toml`) | P2 | |
+| [x] CFG-007 | Per-project configuration (`.claude-snatch.toml`) | P2 | ✓ (`load_for_project()`, merge) |
 | [x] CFG-008 | Log output location (stderr default, file optional) | P1 | ✓ (`--log-file`, default stderr) |
 | [x] CFG-009 | Log level configuration (error/warn/info/debug/trace) | P1 | ✓ (`--log-level`, `SNATCH_LOG_LEVEL`) |
 | [x] CFG-010 | Structured logging format option (JSON for machines) | P2 | ✓ |
