@@ -53,6 +53,8 @@ pub struct ExportOptions {
     pub include_system: bool,
     /// Include timestamps.
     pub include_timestamps: bool,
+    /// Use relative timestamps (e.g., "2 hours ago").
+    pub relative_timestamps: bool,
     /// Include usage statistics.
     pub include_usage: bool,
     /// Include metadata (UUIDs, session IDs, etc.).
@@ -77,6 +79,7 @@ impl Default for ExportOptions {
             include_tool_results: true,
             include_system: false,
             include_timestamps: true,
+            relative_timestamps: false,
             include_usage: true,
             include_metadata: false,
             include_images: true,
@@ -98,6 +101,7 @@ impl ExportOptions {
             include_tool_results: true,
             include_system: true,
             include_timestamps: true,
+            relative_timestamps: false,
             include_usage: true,
             include_metadata: true,
             include_images: true,
@@ -117,6 +121,7 @@ impl ExportOptions {
             include_tool_results: false,
             include_system: false,
             include_timestamps: false,
+            relative_timestamps: false,
             include_usage: false,
             include_metadata: false,
             include_images: false,
@@ -153,6 +158,13 @@ impl ExportOptions {
     pub fn with_branches(mut self, include: bool) -> Self {
         self.include_branches = include;
         self.main_thread_only = !include;
+        self
+    }
+
+    /// Builder: use relative timestamps (e.g., "2 hours ago").
+    #[must_use]
+    pub fn with_relative_timestamps(mut self, relative: bool) -> Self {
+        self.relative_timestamps = relative;
         self
     }
 }
@@ -353,6 +365,69 @@ pub fn export_to_string(
     String::from_utf8(buffer).map_err(SnatchError::from)
 }
 
+use chrono::{DateTime, Utc};
+
+/// Format a timestamp, optionally as relative time.
+///
+/// If `relative` is true, returns human-readable relative time like "2 hours ago".
+/// Otherwise returns ISO-8601 formatted timestamp.
+pub fn format_timestamp(ts: &DateTime<Utc>, relative: bool) -> String {
+    if relative {
+        format_relative_time(ts)
+    } else {
+        ts.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+    }
+}
+
+/// Format a timestamp as relative time (e.g., "2 hours ago", "yesterday").
+pub fn format_relative_time(ts: &DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let duration = now.signed_duration_since(*ts);
+
+    if duration.num_seconds() < 0 {
+        // Future time
+        let abs = -duration.num_seconds();
+        if abs < 60 {
+            return "in a moment".to_string();
+        } else if abs < 3600 {
+            let mins = abs / 60;
+            return format!("in {} minute{}", mins, if mins == 1 { "" } else { "s" });
+        } else if abs < 86400 {
+            let hours = abs / 3600;
+            return format!("in {} hour{}", hours, if hours == 1 { "" } else { "s" });
+        } else {
+            let days = abs / 86400;
+            return format!("in {} day{}", days, if days == 1 { "" } else { "s" });
+        }
+    }
+
+    let secs = duration.num_seconds();
+
+    if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        let mins = secs / 60;
+        format!("{} minute{} ago", mins, if mins == 1 { "" } else { "s" })
+    } else if secs < 86400 {
+        let hours = secs / 3600;
+        format!("{} hour{} ago", hours, if hours == 1 { "" } else { "s" })
+    } else if secs < 172800 {
+        "yesterday".to_string()
+    } else if secs < 604800 {
+        let days = secs / 86400;
+        format!("{} days ago", days)
+    } else if secs < 2592000 {
+        let weeks = secs / 604800;
+        format!("{} week{} ago", weeks, if weeks == 1 { "" } else { "s" })
+    } else if secs < 31536000 {
+        let months = secs / 2592000;
+        format!("{} month{} ago", months, if months == 1 { "" } else { "s" })
+    } else {
+        let years = secs / 31536000;
+        format!("{} year{} ago", years, if years == 1 { "" } else { "s" })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,5 +455,66 @@ mod tests {
 
         assert!(!opts.include_thinking);
         assert!(opts.include_metadata);
+    }
+
+    #[test]
+    fn test_relative_timestamps_builder() {
+        let opts = ExportOptions::default().with_relative_timestamps(true);
+        assert!(opts.relative_timestamps);
+    }
+
+    #[test]
+    fn test_format_timestamp_absolute() {
+        use chrono::TimeZone;
+        let ts = Utc.with_ymd_and_hms(2025, 12, 24, 10, 30, 0).unwrap();
+        let result = format_timestamp(&ts, false);
+        assert_eq!(result, "2025-12-24 10:30:00 UTC");
+    }
+
+    #[test]
+    fn test_format_relative_time_just_now() {
+        let ts = Utc::now();
+        let result = format_relative_time(&ts);
+        assert_eq!(result, "just now");
+    }
+
+    #[test]
+    fn test_format_relative_time_minutes() {
+        use chrono::Duration;
+        let ts = Utc::now() - Duration::minutes(5);
+        let result = format_relative_time(&ts);
+        assert_eq!(result, "5 minutes ago");
+    }
+
+    #[test]
+    fn test_format_relative_time_hours() {
+        use chrono::Duration;
+        let ts = Utc::now() - Duration::hours(3);
+        let result = format_relative_time(&ts);
+        assert_eq!(result, "3 hours ago");
+    }
+
+    #[test]
+    fn test_format_relative_time_yesterday() {
+        use chrono::Duration;
+        let ts = Utc::now() - Duration::hours(30);
+        let result = format_relative_time(&ts);
+        assert_eq!(result, "yesterday");
+    }
+
+    #[test]
+    fn test_format_relative_time_days() {
+        use chrono::Duration;
+        let ts = Utc::now() - Duration::days(4);
+        let result = format_relative_time(&ts);
+        assert_eq!(result, "4 days ago");
+    }
+
+    #[test]
+    fn test_format_relative_time_weeks() {
+        use chrono::Duration;
+        let ts = Utc::now() - Duration::weeks(2);
+        let result = format_relative_time(&ts);
+        assert_eq!(result, "2 weeks ago");
     }
 }

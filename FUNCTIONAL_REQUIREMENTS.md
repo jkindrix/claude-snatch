@@ -522,7 +522,7 @@ When Claude Code is actively writing to a JSONL file while claude-snatch reads i
 | [ ] SRCH-008 | Filter by token usage thresholds | P2 | |
 | [ ] SRCH-009 | Filter by git branch | P2 | |
 | [x] SRCH-010 | Search within tool inputs/outputs | P1 | ✓ |
-| [ ] SRCH-011 | Fuzzy search support | P2 | |
+| [x] SRCH-011 | Fuzzy search support | P2 | |
 | [ ] SRCH-012 | Search result ranking/relevance | P2 | |
 
 ### 5.6 File Backup Integration
@@ -589,7 +589,7 @@ When Claude Code is actively writing to a JSONL file while claude-snatch reads i
 | [x] HTML-002 | Syntax highlighting for code | P1 | ✓ |
 | [x] HTML-003 | Dark/light theme support | P2 | ✓ |
 | [x] HTML-004 | Collapsible sections | P1 | ✓ |
-| [ ] HTML-005 | Navigation/table of contents | P2 | |
+| [x] HTML-005 | Navigation/table of contents | P2 | |
 | [x] HTML-006 | Responsive design | P2 | ✓ |
 | [ ] HTML-007 | Inline images (base64) | P2 | |
 | [x] HTML-008 | Print-friendly CSS | P2 | ✓ |
@@ -748,7 +748,7 @@ esac
 | [x] COMP-002 | Zsh completions | P1 | ✓ |
 | [x] COMP-003 | Fish completions | P2 | ✓ |
 | [x] COMP-004 | PowerShell completions | P2 | ✓ |
-| [ ] COMP-005 | Dynamic session/project completion | P2 | |
+| [x] COMP-005 | Dynamic session/project completion | P2 | |
 
 ---
 
