@@ -832,7 +832,7 @@ esac
 | [ ] VIS-004 | Custom color schemes | P3 | |
 | [x] VIS-005 | Unicode box drawing | P0 | ✓ |
 | [x] VIS-006 | Emoji support | P1 | ✓ |
-| [ ] VIS-007 | ASCII fallback mode | P2 | |
+| [x] VIS-007 | ASCII fallback mode | P2 | ✓ (--ascii) |
 | [x] VIS-008 | Responsive layout | P1 | ✓ |
 
 ---

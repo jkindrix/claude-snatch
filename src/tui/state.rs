@@ -872,6 +872,8 @@ pub struct AppState {
     pub selected_sessions: HashSet<String>,
     /// Command palette state.
     pub command_palette: CommandPalette,
+    /// Use ASCII-only characters (no Unicode box drawing).
+    pub ascii_mode: bool,
 }
 
 impl AppState {
@@ -925,6 +927,7 @@ impl AppState {
             tree_session_ids: Vec::new(),
             selected_sessions: HashSet::new(),
             command_palette: CommandPalette::default(),
+            ascii_mode: false,
         })
     }
 
@@ -1720,6 +1723,40 @@ impl AppState {
             "light" => Theme::high_contrast(),
             _ => Theme::dark(),
         };
+    }
+
+    /// Get border characters based on ASCII mode setting.
+    #[must_use]
+    pub fn border_chars(&self) -> (&'static str, &'static str, &'static str, &'static str) {
+        if self.ascii_mode {
+            // ASCII-only: simple corners and lines
+            ("+", "+", "+", "+")
+        } else {
+            // Unicode box drawing
+            ("┌", "┐", "└", "┘")
+        }
+    }
+
+    /// Get horizontal line character based on ASCII mode.
+    #[must_use]
+    pub fn hline_char(&self) -> &'static str {
+        if self.ascii_mode { "-" } else { "─" }
+    }
+
+    /// Get vertical line character based on ASCII mode.
+    #[must_use]
+    pub fn vline_char(&self) -> &'static str {
+        if self.ascii_mode { "|" } else { "│" }
+    }
+
+    /// Get arrow/indicator characters based on ASCII mode.
+    #[must_use]
+    pub fn indicator_chars(&self) -> (&'static str, &'static str) {
+        if self.ascii_mode {
+            (">", "<")
+        } else {
+            ("▶", "◀")
+        }
     }
 
     /// Copy current message to clipboard.

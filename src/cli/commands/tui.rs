@@ -7,13 +7,14 @@ use crate::error::{Result, SnatchError};
 
 /// Run the TUI command.
 pub fn run(_cli: &Cli, args: &TuiArgs) -> Result<()> {
-    // Launch the TUI with optional project, session, and theme
+    // Launch the TUI with optional project, session, theme, and ASCII mode
     #[cfg(feature = "tui")]
     {
-        crate::tui::run_with_theme(
+        crate::tui::run_with_options(
             args.project.as_deref(),
             args.session.as_deref(),
             args.theme.as_deref(),
+            args.ascii,
         )
     }
 

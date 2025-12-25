@@ -25,11 +25,21 @@ use super::theme::available_themes;
 
 /// Run the TUI application.
 pub fn run(project: Option<&str>, session: Option<&str>) -> Result<()> {
-    run_with_theme(project, session, None)
+    run_with_options(project, session, None, false)
 }
 
 /// Run the TUI application with a specific theme.
 pub fn run_with_theme(project: Option<&str>, session: Option<&str>, theme: Option<&str>) -> Result<()> {
+    run_with_options(project, session, theme, false)
+}
+
+/// Run the TUI application with all options.
+pub fn run_with_options(
+    project: Option<&str>,
+    session: Option<&str>,
+    theme: Option<&str>,
+    ascii_mode: bool,
+) -> Result<()> {
     // Setup terminal
     enable_raw_mode().map_err(|e| SnatchError::io("Failed to enable raw mode", e))?;
 
@@ -43,6 +53,7 @@ pub fn run_with_theme(project: Option<&str>, session: Option<&str>, theme: Optio
 
     // Create app state with optional theme
     let mut app = AppState::with_theme(theme)?;
+    app.ascii_mode = ascii_mode;
 
     // Load initial data
     if let Some(session_id) = session {

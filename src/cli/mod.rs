@@ -652,6 +652,10 @@ pub struct TuiArgs {
     /// Theme to use.
     #[arg(long, env = "SNATCH_TUI_THEME")]
     pub theme: Option<String>,
+
+    /// Use ASCII-only characters (no Unicode box drawing).
+    #[arg(long, env = "SNATCH_ASCII")]
+    pub ascii: bool,
 }
 
 /// Arguments for the validate command.
