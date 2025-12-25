@@ -565,7 +565,7 @@ When Claude Code is actively writing to a JSONL file while claude-snatch reads i
 | [x] MD-006 | Preserve timestamps | P0 | ✓ |
 | [x] MD-007 | Format tool calls with inputs/outputs | P0 | ✓ |
 | [x] MD-008 | Support thinking block toggle | P1 | ✓ |
-| [ ] MD-009 | Include table of contents | P2 | |
+| [x] MD-009 | Include table of contents | P2 | ✓ write_toc |
 | [x] MD-010 | GitHub-flavored markdown compliance | P0 | ✓ |
 
 ### 6.2 JSON Export

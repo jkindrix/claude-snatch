@@ -503,6 +503,91 @@ impl MarkdownExporter {
         writeln!(writer)?;
         Ok(())
     }
+
+    /// Write table of contents.
+    fn write_toc<W: Write>(
+        &self,
+        writer: &mut W,
+        entries: &[&LogEntry],
+        options: &ExportOptions,
+    ) -> Result<()> {
+        writeln!(writer, "## Table of Contents")?;
+        writeln!(writer)?;
+
+        let mut message_num = 0;
+        for entry in entries {
+            message_num += 1;
+            let (icon, role, timestamp): (&str, &str, Option<&DateTime<Utc>>) = match entry {
+                LogEntry::User(user) => ("👤", "User", Some(&user.timestamp)),
+                LogEntry::Assistant(assistant) => ("🤖", "Assistant", Some(&assistant.timestamp)),
+                LogEntry::System(system) => ("⚙️", "System", Some(&system.timestamp)),
+                LogEntry::Summary(_) => ("📋", "Summary", None),
+                _ => continue,
+            };
+
+            let anchor = format!("{}-{}", role.to_lowercase(), message_num);
+            let time_str = if options.include_timestamps {
+                if let Some(ts) = timestamp {
+                    format!(" ({})", format_timestamp(ts))
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
+            // Preview of content
+            let preview = match entry {
+                LogEntry::User(user) => {
+                    let text = match &user.message {
+                        crate::model::UserContent::Simple(s) => s.content.clone(),
+                        crate::model::UserContent::Blocks(b) => {
+                            b.content.iter()
+                                .filter_map(|c| match c {
+                                    ContentBlock::Text(t) => Some(t.text.as_str()),
+                                    _ => None,
+                                })
+                                .next()
+                                .unwrap_or("")
+                                .to_string()
+                        }
+                    };
+                    truncate_preview(&text, 50)
+                }
+                LogEntry::Assistant(assistant) => {
+                    let text = assistant.message.content.iter()
+                        .filter_map(|c| match c {
+                            ContentBlock::Text(t) => Some(t.text.as_str()),
+                            _ => None,
+                        })
+                        .next()
+                        .unwrap_or("");
+                    truncate_preview(text, 50)
+                }
+                LogEntry::Summary(summary) => truncate_preview(&summary.summary, 50),
+                _ => String::new(),
+            };
+
+            writeln!(writer, "{}. [{} {}{}](#{}) - {}",
+                message_num, icon, role, time_str, anchor, preview)?;
+        }
+
+        writeln!(writer)?;
+        writeln!(writer, "---")?;
+        writeln!(writer)?;
+
+        Ok(())
+    }
+}
+
+/// Truncate text to a maximum length, adding ellipsis if needed.
+fn truncate_preview(text: &str, max_len: usize) -> String {
+    let text = text.trim().replace('\n', " ");
+    if text.len() <= max_len {
+        text
+    } else {
+        format!("{}...", &text[..max_len.saturating_sub(3)])
+    }
 }
 
 impl Exporter for MarkdownExporter {
@@ -521,6 +606,11 @@ impl Exporter for MarkdownExporter {
         } else {
             conversation.chronological_entries()
         };
+
+        // Write table of contents if enabled
+        if self.include_toc && !self.plain_text {
+            self.write_toc(writer, &entries, options)?;
+        }
 
         // Write conversation header
         if !self.plain_text && !self.include_header {
@@ -705,5 +795,34 @@ mod tests {
         let long_output = String::from_utf8(output).unwrap();
         assert!(long_output.contains("<details>"));
         assert!(long_output.contains("</details>"));
+    }
+
+    #[test]
+    fn test_truncate_preview() {
+        // Short text - no truncation
+        assert_eq!(truncate_preview("Hello", 10), "Hello");
+
+        // Exact length
+        assert_eq!(truncate_preview("Hello", 5), "Hello");
+
+        // Long text - should truncate with ellipsis
+        let result = truncate_preview("This is a longer text that should be truncated", 20);
+        assert!(result.ends_with("..."));
+        assert!(result.len() <= 20);
+
+        // Newlines should be replaced with spaces
+        assert_eq!(truncate_preview("Hello\nWorld", 20), "Hello World");
+
+        // Leading/trailing whitespace should be trimmed
+        assert_eq!(truncate_preview("  Hello  ", 10), "Hello");
+    }
+
+    #[test]
+    fn test_toc_builder_flag() {
+        let exporter = MarkdownExporter::new().with_toc(true);
+        assert!(exporter.include_toc);
+
+        let exporter = MarkdownExporter::new().with_toc(false);
+        assert!(!exporter.include_toc);
     }
 }
