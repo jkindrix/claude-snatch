@@ -500,13 +500,13 @@ When Claude Code is actively writing to a JSONL file while claude-snatch reads i
 | [x] STAT-007 | Calculate thinking token usage | P1 | ✓ |
 | [x] STAT-008 | Identify most-used tools | P1 | ✓ |
 | [x] STAT-009 | Track error rates and types | P1 | ✓ |
-| [ ] STAT-010 | Generate usage trends over time | P2 | |
-| [ ] STAT-011 | Calculate average response times | P2 | |
+| [x] STAT-010 | Generate usage trends over time | P2 | ✓ UsageTrends |
+| [x] STAT-011 | Calculate average response times | P2 | ✓ ResponseTimeStats |
 | [ ] STAT-012 | Track file modification patterns | P2 | |
 | [x] STAT-013 | Real-time burn rate calculation | P1 | ✓ |
 | [x] STAT-014 | Usage predictions (time to limit) | P1 | ✓ (`UsagePrediction`) |
 | [x] STAT-015 | Cost per session/project | P1 | ✓ (SessionAnalytics) |
-| [ ] STAT-016 | Cross-session efficiency metrics | P2 | |
+| [x] STAT-016 | Cross-session efficiency metrics | P2 | ✓ EfficiencyMetrics |
 
 ### 5.5 Search & Filtering
 

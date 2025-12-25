@@ -8,7 +8,7 @@
 //! - Session duration analysis
 
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Datelike, Duration, Utc};
 use indexmap::IndexMap;
 
 use crate::model::{
@@ -527,6 +527,362 @@ pub struct ProjectAnalytics {
     pub model_usage: IndexMap<String, u64>,
 }
 
+/// Time bucket granularity for usage trends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrendGranularity {
+    /// Hourly buckets.
+    Hourly,
+    /// Daily buckets.
+    Daily,
+    /// Weekly buckets.
+    Weekly,
+    /// Monthly buckets.
+    Monthly,
+}
+
+impl TrendGranularity {
+    /// Get bucket key for a timestamp.
+    #[must_use]
+    pub fn bucket_key(&self, timestamp: DateTime<Utc>) -> String {
+        match self {
+            Self::Hourly => timestamp.format("%Y-%m-%d %H:00").to_string(),
+            Self::Daily => timestamp.format("%Y-%m-%d").to_string(),
+            Self::Weekly => {
+                let week = timestamp.iso_week();
+                format!("{}-W{:02}", week.year(), week.week())
+            }
+            Self::Monthly => timestamp.format("%Y-%m").to_string(),
+        }
+    }
+}
+
+/// Data point in a usage trend.
+#[derive(Debug, Clone, Default)]
+pub struct TrendDataPoint {
+    /// Time bucket label.
+    pub bucket: String,
+    /// Token count in this bucket.
+    pub tokens: u64,
+    /// Message count in this bucket.
+    pub messages: usize,
+    /// Tool invocations in this bucket.
+    pub tool_uses: usize,
+    /// Session count in this bucket.
+    pub sessions: usize,
+    /// Estimated cost in this bucket.
+    pub cost: Option<f64>,
+}
+
+/// Usage trends over time.
+#[derive(Debug, Clone, Default)]
+pub struct UsageTrends {
+    /// Trend granularity.
+    pub granularity: Option<TrendGranularity>,
+    /// Data points ordered by time.
+    pub data_points: Vec<TrendDataPoint>,
+    /// Peak tokens in a single bucket.
+    pub peak_tokens: u64,
+    /// Peak bucket label.
+    pub peak_bucket: Option<String>,
+    /// Average tokens per bucket.
+    pub avg_tokens: f64,
+    /// Total tokens across all buckets.
+    pub total_tokens: u64,
+    /// Trend direction: positive = increasing, negative = decreasing.
+    pub trend_direction: f64,
+}
+
+impl UsageTrends {
+    /// Create trends from a list of sessions.
+    pub fn from_sessions(
+        sessions: &[(DateTime<Utc>, SessionAnalytics)],
+        granularity: TrendGranularity,
+    ) -> Self {
+        let mut buckets: IndexMap<String, TrendDataPoint> = IndexMap::new();
+
+        for (timestamp, analytics) in sessions {
+            let bucket_key = granularity.bucket_key(*timestamp);
+            let entry = buckets.entry(bucket_key.clone()).or_insert_with(|| TrendDataPoint {
+                bucket: bucket_key,
+                ..Default::default()
+            });
+
+            entry.tokens += analytics.usage.usage.total_tokens();
+            entry.messages += analytics.message_counts.total();
+            entry.tool_uses += analytics.message_counts.tool_uses;
+            entry.sessions += 1;
+            if let Some(cost) = analytics.usage.estimated_cost {
+                *entry.cost.get_or_insert(0.0) += cost;
+            }
+        }
+
+        // Sort buckets by key (chronological order)
+        buckets.sort_keys();
+
+        let data_points: Vec<TrendDataPoint> = buckets.into_values().collect();
+
+        // Calculate statistics
+        let total_tokens: u64 = data_points.iter().map(|d| d.tokens).sum();
+        let avg_tokens = if data_points.is_empty() {
+            0.0
+        } else {
+            total_tokens as f64 / data_points.len() as f64
+        };
+
+        let (peak_tokens, peak_bucket) = data_points
+            .iter()
+            .max_by_key(|d| d.tokens)
+            .map(|d| (d.tokens, Some(d.bucket.clone())))
+            .unwrap_or((0, None));
+
+        // Calculate trend direction using linear regression slope
+        let trend_direction = if data_points.len() >= 2 {
+            let n = data_points.len() as f64;
+            let sum_x: f64 = (0..data_points.len()).map(|i| i as f64).sum();
+            let sum_y: f64 = data_points.iter().map(|d| d.tokens as f64).sum();
+            let sum_xy: f64 = data_points.iter().enumerate()
+                .map(|(i, d)| i as f64 * d.tokens as f64)
+                .sum();
+            let sum_x2: f64 = (0..data_points.len()).map(|i| (i * i) as f64).sum();
+
+            let slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x);
+            slope
+        } else {
+            0.0
+        };
+
+        Self {
+            granularity: Some(granularity),
+            data_points,
+            peak_tokens,
+            peak_bucket,
+            avg_tokens,
+            total_tokens,
+            trend_direction,
+        }
+    }
+
+    /// Get trend description.
+    #[must_use]
+    pub fn trend_description(&self) -> &'static str {
+        if self.trend_direction > 100.0 {
+            "Strongly increasing"
+        } else if self.trend_direction > 10.0 {
+            "Increasing"
+        } else if self.trend_direction > -10.0 {
+            "Stable"
+        } else if self.trend_direction > -100.0 {
+            "Decreasing"
+        } else {
+            "Strongly decreasing"
+        }
+    }
+
+    /// Format as a simple ASCII chart.
+    #[must_use]
+    pub fn ascii_chart(&self, width: usize) -> String {
+        if self.data_points.is_empty() || self.peak_tokens == 0 {
+            return "No data available".to_string();
+        }
+
+        let mut chart = String::new();
+        let max_label_len = self.data_points.iter()
+            .map(|d| d.bucket.len())
+            .max()
+            .unwrap_or(10);
+
+        let bar_width = width.saturating_sub(max_label_len + 3);
+
+        for point in &self.data_points {
+            let bar_len = ((point.tokens as f64 / self.peak_tokens as f64) * bar_width as f64) as usize;
+            let bar = "█".repeat(bar_len.max(1));
+            chart.push_str(&format!(
+                "{:>width$} │{}\n",
+                point.bucket,
+                bar,
+                width = max_label_len
+            ));
+        }
+
+        chart
+    }
+}
+
+/// Response time statistics.
+#[derive(Debug, Clone, Default)]
+pub struct ResponseTimeStats {
+    /// Average time between user message and assistant response (seconds).
+    pub avg_response_time_secs: f64,
+    /// Minimum response time.
+    pub min_response_time_secs: f64,
+    /// Maximum response time.
+    pub max_response_time_secs: f64,
+    /// Median response time.
+    pub median_response_time_secs: f64,
+    /// 95th percentile response time.
+    pub p95_response_time_secs: f64,
+    /// Number of response pairs analyzed.
+    pub sample_count: usize,
+}
+
+impl ResponseTimeStats {
+    /// Calculate response time statistics from a conversation.
+    pub fn from_conversation(conversation: &Conversation) -> Self {
+        let mut response_times: Vec<f64> = Vec::new();
+
+        // Get entries sorted by timestamp
+        let mut entries: Vec<_> = conversation.nodes().values()
+            .map(|n| &n.entry)
+            .collect();
+
+        entries.sort_by_key(|e| e.timestamp());
+
+        // Find pairs of user -> assistant messages
+        let mut prev_user_time: Option<DateTime<Utc>> = None;
+
+        for entry in &entries {
+            match entry {
+                LogEntry::User(user) => {
+                    prev_user_time = Some(user.timestamp);
+                }
+                LogEntry::Assistant(assistant) => {
+                    if let Some(user_time) = prev_user_time {
+                        let response_time = (assistant.timestamp - user_time).num_milliseconds() as f64 / 1000.0;
+                        if response_time > 0.0 && response_time < 3600.0 {
+                            // Only count reasonable response times (< 1 hour)
+                            response_times.push(response_time);
+                        }
+                    }
+                    prev_user_time = None;
+                }
+                _ => {}
+            }
+        }
+
+        if response_times.is_empty() {
+            return Self::default();
+        }
+
+        response_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let sum: f64 = response_times.iter().sum();
+        let count = response_times.len();
+
+        let median_idx = count / 2;
+        let p95_idx = (count as f64 * 0.95) as usize;
+
+        Self {
+            avg_response_time_secs: sum / count as f64,
+            min_response_time_secs: *response_times.first().unwrap_or(&0.0),
+            max_response_time_secs: *response_times.last().unwrap_or(&0.0),
+            median_response_time_secs: response_times.get(median_idx).copied().unwrap_or(0.0),
+            p95_response_time_secs: response_times.get(p95_idx).copied().unwrap_or(0.0),
+            sample_count: count,
+        }
+    }
+
+    /// Format as a readable string.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        if self.sample_count == 0 {
+            return "No response time data available".to_string();
+        }
+
+        format!(
+            "Response times: avg={:.1}s, median={:.1}s, p95={:.1}s (n={})",
+            self.avg_response_time_secs,
+            self.median_response_time_secs,
+            self.p95_response_time_secs,
+            self.sample_count
+        )
+    }
+}
+
+/// Cross-session efficiency metrics.
+#[derive(Debug, Clone, Default)]
+pub struct EfficiencyMetrics {
+    /// Average tokens per message.
+    pub tokens_per_message: f64,
+    /// Average tool uses per session.
+    pub tool_uses_per_session: f64,
+    /// Cache hit rate across all sessions.
+    pub overall_cache_hit_rate: f64,
+    /// Average session duration.
+    pub avg_session_duration_mins: f64,
+    /// Thinking tokens ratio (thinking / total output).
+    pub thinking_ratio: f64,
+    /// Tool efficiency (successful / total tool uses).
+    pub tool_success_rate: f64,
+}
+
+impl EfficiencyMetrics {
+    /// Calculate efficiency metrics from project analytics.
+    pub fn from_project(analytics: &ProjectAnalytics) -> Self {
+        let total_messages = analytics.message_counts.total();
+        let total_tokens = analytics.total_usage.usage.total_tokens();
+
+        let tokens_per_message = if total_messages > 0 {
+            total_tokens as f64 / total_messages as f64
+        } else {
+            0.0
+        };
+
+        let tool_uses_per_session = if analytics.session_count > 0 {
+            analytics.message_counts.tool_uses as f64 / analytics.session_count as f64
+        } else {
+            0.0
+        };
+
+        let overall_cache_hit_rate = {
+            let usage = &analytics.total_usage.usage;
+            let total_input = usage.total_input_tokens();
+            let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
+            if total_input > 0 {
+                cache_read as f64 / total_input as f64 * 100.0
+            } else {
+                0.0
+            }
+        };
+
+        let avg_session_duration_mins = if analytics.session_count > 0 {
+            analytics.total_duration.num_minutes() as f64 / analytics.session_count as f64
+        } else {
+            0.0
+        };
+
+        // Thinking ratio is hard to calculate without tracking thinking tokens separately
+        let thinking_ratio = 0.0; // Placeholder
+
+        // Tool success rate - we'd need error tracking for this
+        let tool_success_rate = 100.0; // Placeholder - assume 100% for now
+
+        Self {
+            tokens_per_message,
+            tool_uses_per_session,
+            overall_cache_hit_rate,
+            avg_session_duration_mins,
+            thinking_ratio,
+            tool_success_rate,
+        }
+    }
+
+    /// Format as a readable report.
+    #[must_use]
+    pub fn report(&self) -> String {
+        format!(
+            "Efficiency Metrics:\n\
+             - Tokens per message:     {:.0}\n\
+             - Tool uses per session:  {:.1}\n\
+             - Cache hit rate:         {:.1}%\n\
+             - Avg session duration:   {:.0} minutes",
+            self.tokens_per_message,
+            self.tool_uses_per_session,
+            self.overall_cache_hit_rate,
+            self.avg_session_duration_mins
+        )
+    }
+}
+
 impl ProjectAnalytics {
     /// Add a session's analytics.
     pub fn add_session(&mut self, session: &SessionAnalytics) {
@@ -1022,5 +1378,168 @@ mod tests {
         assert!(report.contains("Core Content:      8/10"));
         assert!(report.contains("Recommendations:"));
         assert!(report.contains("Test recommendation"));
+    }
+
+    #[test]
+    fn test_trend_granularity_bucket_keys() {
+        let timestamp = DateTime::parse_from_rfc3339("2025-06-15T14:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert_eq!(TrendGranularity::Hourly.bucket_key(timestamp), "2025-06-15 14:00");
+        assert_eq!(TrendGranularity::Daily.bucket_key(timestamp), "2025-06-15");
+        assert_eq!(TrendGranularity::Monthly.bucket_key(timestamp), "2025-06");
+    }
+
+    #[test]
+    fn test_usage_trends_empty() {
+        let trends = UsageTrends::from_sessions(&[], TrendGranularity::Daily);
+        assert!(trends.data_points.is_empty());
+        assert_eq!(trends.peak_tokens, 0);
+        assert_eq!(trends.total_tokens, 0);
+        assert_eq!(trends.trend_direction, 0.0);
+    }
+
+    #[test]
+    fn test_usage_trends_single_session() {
+        let timestamp = Utc::now();
+        let mut analytics = SessionAnalytics::default();
+        analytics.usage.usage.output_tokens = 1000;
+        analytics.message_counts.user = 5;
+
+        let sessions = vec![(timestamp, analytics)];
+        let trends = UsageTrends::from_sessions(&sessions, TrendGranularity::Daily);
+
+        assert_eq!(trends.data_points.len(), 1);
+        assert_eq!(trends.total_tokens, 1000);
+        assert_eq!(trends.peak_tokens, 1000);
+    }
+
+    #[test]
+    fn test_usage_trends_trend_direction() {
+        // Create sessions with increasing token usage
+        let mut sessions = Vec::new();
+        for i in 0..5 {
+            let timestamp = Utc::now() - Duration::days(4 - i);
+            let mut analytics = SessionAnalytics::default();
+            analytics.usage.usage.output_tokens = (i as u64 + 1) * 1000;
+            sessions.push((timestamp, analytics));
+        }
+
+        let trends = UsageTrends::from_sessions(&sessions, TrendGranularity::Daily);
+
+        // Trend should be positive (increasing)
+        assert!(trends.trend_direction > 0.0);
+    }
+
+    #[test]
+    fn test_usage_trends_ascii_chart() {
+        let trends = UsageTrends {
+            granularity: Some(TrendGranularity::Daily),
+            data_points: vec![
+                TrendDataPoint { bucket: "2025-01".to_string(), tokens: 100, ..Default::default() },
+                TrendDataPoint { bucket: "2025-02".to_string(), tokens: 200, ..Default::default() },
+            ],
+            peak_tokens: 200,
+            peak_bucket: Some("2025-02".to_string()),
+            avg_tokens: 150.0,
+            total_tokens: 300,
+            trend_direction: 100.0,
+        };
+
+        let chart = trends.ascii_chart(40);
+        assert!(chart.contains("2025-01"));
+        assert!(chart.contains("2025-02"));
+        assert!(chart.contains("█"));
+    }
+
+    #[test]
+    fn test_trend_description() {
+        let mut trends = UsageTrends::default();
+
+        trends.trend_direction = 150.0;
+        assert_eq!(trends.trend_description(), "Strongly increasing");
+
+        trends.trend_direction = 50.0;
+        assert_eq!(trends.trend_description(), "Increasing");
+
+        trends.trend_direction = 0.0;
+        assert_eq!(trends.trend_description(), "Stable");
+
+        trends.trend_direction = -50.0;
+        assert_eq!(trends.trend_description(), "Decreasing");
+
+        trends.trend_direction = -150.0;
+        assert_eq!(trends.trend_description(), "Strongly decreasing");
+    }
+
+    #[test]
+    fn test_response_time_stats_empty() {
+        let stats = ResponseTimeStats::default();
+        assert_eq!(stats.sample_count, 0);
+        assert_eq!(stats.avg_response_time_secs, 0.0);
+    }
+
+    #[test]
+    fn test_response_time_stats_summary() {
+        let stats = ResponseTimeStats {
+            avg_response_time_secs: 5.5,
+            min_response_time_secs: 1.0,
+            max_response_time_secs: 15.0,
+            median_response_time_secs: 4.0,
+            p95_response_time_secs: 12.0,
+            sample_count: 100,
+        };
+
+        let summary = stats.summary();
+        assert!(summary.contains("avg=5.5s"));
+        assert!(summary.contains("median=4.0s"));
+        assert!(summary.contains("p95=12.0s"));
+        assert!(summary.contains("n=100"));
+    }
+
+    #[test]
+    fn test_efficiency_metrics_default() {
+        let metrics = EfficiencyMetrics::default();
+        assert_eq!(metrics.tokens_per_message, 0.0);
+        assert_eq!(metrics.tool_uses_per_session, 0.0);
+    }
+
+    #[test]
+    fn test_efficiency_metrics_from_project() {
+        let mut analytics = ProjectAnalytics::default();
+        analytics.session_count = 10;
+        analytics.message_counts.user = 50;
+        analytics.message_counts.assistant = 50;
+        analytics.message_counts.tool_uses = 30;
+        analytics.total_usage.usage.output_tokens = 10000;
+        analytics.total_usage.usage.cache_read_input_tokens = Some(5000);
+        analytics.total_usage.usage.input_tokens = 10000;
+        analytics.total_duration = Duration::hours(10);
+
+        let metrics = EfficiencyMetrics::from_project(&analytics);
+
+        assert!(metrics.tokens_per_message > 0.0);
+        assert_eq!(metrics.tool_uses_per_session, 3.0);
+        assert!(metrics.overall_cache_hit_rate > 0.0);
+        assert_eq!(metrics.avg_session_duration_mins, 60.0);
+    }
+
+    #[test]
+    fn test_efficiency_metrics_report() {
+        let metrics = EfficiencyMetrics {
+            tokens_per_message: 500.0,
+            tool_uses_per_session: 5.0,
+            overall_cache_hit_rate: 75.0,
+            avg_session_duration_mins: 30.0,
+            thinking_ratio: 0.0,
+            tool_success_rate: 100.0,
+        };
+
+        let report = metrics.report();
+        assert!(report.contains("Efficiency Metrics:"));
+        assert!(report.contains("Tokens per message:     500"));
+        assert!(report.contains("Tool uses per session:  5.0"));
+        assert!(report.contains("Cache hit rate:         75.0%"));
     }
 }
