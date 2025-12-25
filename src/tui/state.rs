@@ -166,22 +166,26 @@ pub struct FilterState {
     pub thinking_only: bool,
     /// Only show messages with tool use.
     pub tools_only: bool,
-    /// Current date input mode (for TUI).
-    pub date_input_mode: DateInputMode,
-    /// Buffer for date input.
-    pub date_input_buffer: String,
+    /// Current input mode (for TUI).
+    pub input_mode: InputMode,
+    /// Buffer for text input (dates, model names).
+    pub input_buffer: String,
+    /// Model filter (e.g., "sonnet", "opus", "claude-3-5-sonnet").
+    pub model_filter: Option<String>,
 }
 
-/// Date input mode for filter UI.
+/// Input mode for filter UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DateInputMode {
-    /// Not entering a date.
+pub enum InputMode {
+    /// Not entering any value.
     #[default]
     None,
     /// Entering start date.
-    From,
+    DateFrom,
     /// Entering end date.
-    To,
+    DateTo,
+    /// Entering model filter.
+    Model,
 }
 
 impl FilterState {
@@ -194,6 +198,7 @@ impl FilterState {
             || self.errors_only
             || self.thinking_only
             || self.tools_only
+            || self.model_filter.is_some()
     }
 
     /// Clear all filters.
@@ -204,58 +209,116 @@ impl FilterState {
         self.errors_only = false;
         self.thinking_only = false;
         self.tools_only = false;
-        self.date_input_mode = DateInputMode::None;
-        self.date_input_buffer.clear();
+        self.input_mode = InputMode::None;
+        self.input_buffer.clear();
+        self.model_filter = None;
+    }
+
+    /// Check if currently entering input.
+    #[must_use]
+    pub fn is_entering_input(&self) -> bool {
+        self.input_mode != InputMode::None
     }
 
     /// Check if currently entering a date.
     #[must_use]
     pub fn is_entering_date(&self) -> bool {
-        self.date_input_mode != DateInputMode::None
+        matches!(self.input_mode, InputMode::DateFrom | InputMode::DateTo)
+    }
+
+    /// Check if currently entering a model filter.
+    #[must_use]
+    pub fn is_entering_model(&self) -> bool {
+        self.input_mode == InputMode::Model
     }
 
     /// Start entering a date.
-    pub fn start_date_input(&mut self, mode: DateInputMode) {
-        self.date_input_mode = mode;
-        self.date_input_buffer.clear();
+    pub fn start_date_input(&mut self, mode: InputMode) {
+        self.input_mode = mode;
+        self.input_buffer.clear();
     }
 
-    /// Cancel date input.
-    pub fn cancel_date_input(&mut self) {
-        self.date_input_mode = DateInputMode::None;
-        self.date_input_buffer.clear();
+    /// Start entering model filter.
+    pub fn start_model_input(&mut self) {
+        self.input_mode = InputMode::Model;
+        // Pre-fill with current filter if set
+        self.input_buffer = self.model_filter.clone().unwrap_or_default();
     }
 
-    /// Add character to date input buffer.
-    pub fn push_date_char(&mut self, c: char) {
-        // Only allow valid date characters
-        if c.is_ascii_digit() || c == '-' {
-            self.date_input_buffer.push(c);
+    /// Cancel input.
+    pub fn cancel_input(&mut self) {
+        self.input_mode = InputMode::None;
+        self.input_buffer.clear();
+    }
+
+    /// Add character to input buffer.
+    pub fn push_input_char(&mut self, c: char) {
+        match self.input_mode {
+            InputMode::DateFrom | InputMode::DateTo => {
+                // Only allow valid date characters
+                if c.is_ascii_digit() || c == '-' {
+                    self.input_buffer.push(c);
+                }
+            }
+            InputMode::Model => {
+                // Allow alphanumeric and common model name characters
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                    self.input_buffer.push(c);
+                }
+            }
+            InputMode::None => {}
         }
     }
 
-    /// Remove character from date input buffer.
-    pub fn pop_date_char(&mut self) {
-        self.date_input_buffer.pop();
+    /// Remove character from input buffer.
+    pub fn pop_input_char(&mut self) {
+        self.input_buffer.pop();
+    }
+
+    /// Confirm input and apply filter.
+    pub fn confirm_input(&mut self) -> bool {
+        match self.input_mode {
+            InputMode::DateFrom | InputMode::DateTo => self.confirm_date_input(),
+            InputMode::Model => self.confirm_model_input(),
+            InputMode::None => false,
+        }
     }
 
     /// Confirm date input and apply filter.
-    pub fn confirm_date_input(&mut self) -> bool {
+    fn confirm_date_input(&mut self) -> bool {
         use chrono::NaiveDate;
 
         // Try to parse the date
-        if let Ok(date) = NaiveDate::parse_from_str(&self.date_input_buffer, "%Y-%m-%d") {
-            match self.date_input_mode {
-                DateInputMode::From => self.date_from = Some(date),
-                DateInputMode::To => self.date_to = Some(date),
-                DateInputMode::None => {}
+        if let Ok(date) = NaiveDate::parse_from_str(&self.input_buffer, "%Y-%m-%d") {
+            match self.input_mode {
+                InputMode::DateFrom => self.date_from = Some(date),
+                InputMode::DateTo => self.date_to = Some(date),
+                _ => {}
             }
-            self.date_input_mode = DateInputMode::None;
-            self.date_input_buffer.clear();
+            self.input_mode = InputMode::None;
+            self.input_buffer.clear();
             true
         } else {
             false
         }
+    }
+
+    /// Confirm model input and apply filter.
+    fn confirm_model_input(&mut self) -> bool {
+        let model = self.input_buffer.trim().to_string();
+        if model.is_empty() {
+            self.model_filter = None;
+        } else {
+            self.model_filter = Some(model);
+        }
+        self.input_mode = InputMode::None;
+        self.input_buffer.clear();
+        true
+    }
+
+    /// Clear the model filter.
+    pub fn clear_model_filter(&mut self) {
+        self.model_filter = None;
     }
 
     /// Check if a timestamp falls within the date range.
@@ -299,10 +362,25 @@ impl FilterState {
         if self.tools_only {
             parts.push("Tools".to_string());
         }
+        if let Some(model) = &self.model_filter {
+            parts.push(format!("Model:{model}"));
+        }
         if parts.is_empty() {
             "No filters".to_string()
         } else {
             parts.join("+")
+        }
+    }
+
+    /// Check if a model name matches the filter.
+    ///
+    /// The filter is case-insensitive and can match any part of the model string.
+    /// For example, "sonnet" matches "claude-3-5-sonnet-20241022".
+    #[must_use]
+    pub fn model_matches(&self, model: &str) -> bool {
+        match &self.model_filter {
+            Some(filter) => model.to_lowercase().contains(&filter.to_lowercase()),
+            None => true,
         }
     }
 }
@@ -1037,40 +1115,53 @@ impl AppState {
 
     /// Start entering date-from filter.
     pub fn start_date_from_input(&mut self) {
-        self.filter_state.start_date_input(DateInputMode::From);
+        self.filter_state.start_date_input(InputMode::DateFrom);
         self.status_message = Some("Enter start date (YYYY-MM-DD):".to_string());
     }
 
     /// Start entering date-to filter.
     pub fn start_date_to_input(&mut self) {
-        self.filter_state.start_date_input(DateInputMode::To);
+        self.filter_state.start_date_input(InputMode::DateTo);
         self.status_message = Some("Enter end date (YYYY-MM-DD):".to_string());
     }
 
-    /// Handle character input during date entry.
-    pub fn date_input(&mut self, c: char) {
-        self.filter_state.push_date_char(c);
+    /// Start entering model filter.
+    pub fn start_model_input(&mut self) {
+        self.filter_state.start_model_input();
+        self.status_message = Some("Enter model filter (e.g., 'sonnet', 'opus'):".to_string());
     }
 
-    /// Handle backspace during date entry.
-    pub fn date_backspace(&mut self) {
-        self.filter_state.pop_date_char();
+    /// Handle character input during filter entry.
+    pub fn filter_input(&mut self, c: char) {
+        self.filter_state.push_input_char(c);
     }
 
-    /// Confirm date input.
-    pub fn confirm_date_input(&mut self) {
-        if self.filter_state.confirm_date_input() {
+    /// Handle backspace during filter entry.
+    pub fn filter_backspace(&mut self) {
+        self.filter_state.pop_input_char();
+    }
+
+    /// Confirm filter input.
+    pub fn confirm_filter_input(&mut self) {
+        let mode = self.filter_state.input_mode;
+        if self.filter_state.confirm_input() {
             self.status_message = Some(format!("Filter: {}", self.filter_state.summary()));
             self.update_conversation_display();
-        } else {
+        } else if matches!(mode, InputMode::DateFrom | InputMode::DateTo) {
             self.status_message = Some("Invalid date format. Use YYYY-MM-DD".to_string());
         }
     }
 
-    /// Cancel date input.
-    pub fn cancel_date_input(&mut self) {
-        self.filter_state.cancel_date_input();
-        self.status_message = Some("Date input cancelled".to_string());
+    /// Cancel filter input.
+    pub fn cancel_filter_input(&mut self) {
+        self.filter_state.cancel_input();
+        self.status_message = Some("Input cancelled".to_string());
+    }
+
+    /// Check if currently entering any filter input.
+    #[must_use]
+    pub fn is_entering_input(&self) -> bool {
+        self.filter_state.is_entering_input()
     }
 
     /// Check if currently entering a date.
@@ -1079,16 +1170,38 @@ impl AppState {
         self.filter_state.is_entering_date()
     }
 
-    /// Get the current date input buffer for display.
+    /// Check if currently entering a model filter.
     #[must_use]
-    pub fn date_input_buffer(&self) -> &str {
-        &self.filter_state.date_input_buffer
+    pub fn is_entering_model(&self) -> bool {
+        self.filter_state.is_entering_model()
     }
 
-    /// Get the current date input mode.
+    /// Get the current input buffer for display.
     #[must_use]
-    pub fn date_input_mode(&self) -> DateInputMode {
-        self.filter_state.date_input_mode
+    pub fn input_buffer(&self) -> &str {
+        &self.filter_state.input_buffer
+    }
+
+    /// Get the current input mode.
+    #[must_use]
+    pub fn input_mode(&self) -> InputMode {
+        self.filter_state.input_mode
+    }
+
+    /// Clear the model filter.
+    pub fn clear_model_filter(&mut self) {
+        self.filter_state.clear_model_filter();
+        self.status_message = Some("Model filter cleared".to_string());
+        self.update_conversation_display();
+    }
+
+    /// Toggle the model filter (enable input if not active, clear if active).
+    pub fn toggle_model_filter(&mut self) {
+        if self.filter_state.model_filter.is_some() {
+            self.clear_model_filter();
+        } else {
+            self.start_model_input();
+        }
     }
 
     /// Check if filter panel is active.
@@ -1366,6 +1479,19 @@ impl AppState {
                 if !self.filter_state.is_in_date_range(ts) {
                     return false;
                 }
+            }
+        }
+
+        // Check model filter
+        if self.filter_state.model_filter.is_some() {
+            match entry {
+                LogEntry::Assistant(a) => {
+                    if !self.filter_state.model_matches(&a.message.model) {
+                        return false;
+                    }
+                }
+                // Non-assistant entries don't have a model, exclude them when filtering by model
+                _ => return false,
             }
         }
 
@@ -1679,6 +1805,194 @@ mod tests {
 
             filter.prev();
             assert_eq!(filter, MessageTypeFilter::All); // wraps around
+        }
+    }
+
+    mod filter_state {
+        use super::*;
+
+        #[test]
+        fn test_default_filter_state() {
+            let state = FilterState::default();
+            assert!(!state.active);
+            assert_eq!(state.message_type, MessageTypeFilter::All);
+            assert!(state.date_from.is_none());
+            assert!(state.date_to.is_none());
+            assert!(!state.errors_only);
+            assert!(!state.thinking_only);
+            assert!(!state.tools_only);
+            assert!(state.model_filter.is_none());
+            assert!(!state.is_filtering());
+        }
+
+        #[test]
+        fn test_model_filter_makes_is_filtering_true() {
+            let mut state = FilterState::default();
+            assert!(!state.is_filtering());
+
+            state.model_filter = Some("sonnet".to_string());
+            assert!(state.is_filtering());
+        }
+
+        #[test]
+        fn test_model_matches_case_insensitive() {
+            let mut state = FilterState::default();
+            state.model_filter = Some("sonnet".to_string());
+
+            assert!(state.model_matches("claude-3-5-sonnet-20241022"));
+            assert!(state.model_matches("claude-3-5-SONNET-20241022"));
+            assert!(state.model_matches("Sonnet"));
+            assert!(!state.model_matches("claude-opus-4-5-20251101"));
+        }
+
+        #[test]
+        fn test_model_matches_partial() {
+            let mut state = FilterState::default();
+            state.model_filter = Some("opus".to_string());
+
+            assert!(state.model_matches("claude-opus-4-5-20251101"));
+            assert!(state.model_matches("claude-opus-4-20240229"));
+            assert!(!state.model_matches("claude-3-5-sonnet-20241022"));
+        }
+
+        #[test]
+        fn test_model_matches_no_filter() {
+            let state = FilterState::default();
+            // When no filter is set, all models match
+            assert!(state.model_matches("claude-opus-4-5-20251101"));
+            assert!(state.model_matches("claude-3-5-sonnet-20241022"));
+            assert!(state.model_matches("anything"));
+        }
+
+        #[test]
+        fn test_summary_includes_model() {
+            let mut state = FilterState::default();
+            state.model_filter = Some("sonnet".to_string());
+
+            let summary = state.summary();
+            assert!(summary.contains("Model:sonnet"));
+        }
+
+        #[test]
+        fn test_clear_resets_model_filter() {
+            let mut state = FilterState::default();
+            state.model_filter = Some("opus".to_string());
+            state.errors_only = true;
+
+            state.clear();
+            assert!(state.model_filter.is_none());
+            assert!(!state.errors_only);
+        }
+
+        #[test]
+        fn test_model_input_flow() {
+            let mut state = FilterState::default();
+
+            // Start model input
+            state.start_model_input();
+            assert_eq!(state.input_mode, InputMode::Model);
+            assert!(state.input_buffer.is_empty());
+
+            // Type "opus"
+            state.push_input_char('o');
+            state.push_input_char('p');
+            state.push_input_char('u');
+            state.push_input_char('s');
+            assert_eq!(state.input_buffer, "opus");
+
+            // Confirm
+            assert!(state.confirm_input());
+            assert_eq!(state.model_filter, Some("opus".to_string()));
+            assert_eq!(state.input_mode, InputMode::None);
+            assert!(state.input_buffer.is_empty());
+        }
+
+        #[test]
+        fn test_model_input_cancel() {
+            let mut state = FilterState::default();
+
+            state.start_model_input();
+            state.push_input_char('o');
+            state.push_input_char('p');
+
+            state.cancel_input();
+            assert_eq!(state.input_mode, InputMode::None);
+            assert!(state.input_buffer.is_empty());
+            assert!(state.model_filter.is_none());
+        }
+
+        #[test]
+        fn test_model_input_with_existing_filter() {
+            let mut state = FilterState::default();
+            state.model_filter = Some("opus".to_string());
+
+            // Start input should pre-fill with existing filter
+            state.start_model_input();
+            assert_eq!(state.input_buffer, "opus");
+        }
+
+        #[test]
+        fn test_model_input_empty_clears_filter() {
+            let mut state = FilterState::default();
+            state.model_filter = Some("opus".to_string());
+
+            state.start_model_input();
+            state.input_buffer.clear(); // User deletes all content
+
+            state.confirm_input();
+            assert!(state.model_filter.is_none());
+        }
+    }
+
+    mod input_mode {
+        use super::*;
+
+        #[test]
+        fn test_default_input_mode() {
+            let mode = InputMode::default();
+            assert_eq!(mode, InputMode::None);
+        }
+
+        #[test]
+        fn test_is_entering_input() {
+            let mut state = FilterState::default();
+            assert!(!state.is_entering_input());
+
+            state.input_mode = InputMode::DateFrom;
+            assert!(state.is_entering_input());
+
+            state.input_mode = InputMode::Model;
+            assert!(state.is_entering_input());
+
+            state.input_mode = InputMode::None;
+            assert!(!state.is_entering_input());
+        }
+
+        #[test]
+        fn test_is_entering_date() {
+            let mut state = FilterState::default();
+            assert!(!state.is_entering_date());
+
+            state.input_mode = InputMode::DateFrom;
+            assert!(state.is_entering_date());
+
+            state.input_mode = InputMode::DateTo;
+            assert!(state.is_entering_date());
+
+            state.input_mode = InputMode::Model;
+            assert!(!state.is_entering_date());
+        }
+
+        #[test]
+        fn test_is_entering_model() {
+            let mut state = FilterState::default();
+            assert!(!state.is_entering_model());
+
+            state.input_mode = InputMode::Model;
+            assert!(state.is_entering_model());
+
+            state.input_mode = InputMode::DateFrom;
+            assert!(!state.is_entering_model());
         }
     }
 }

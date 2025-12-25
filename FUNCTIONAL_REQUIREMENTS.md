@@ -792,7 +792,7 @@ esac
 | [x] TSRCH-002 | Highlight search matches | P0 | ✓ |
 | [x] TSRCH-003 | Filter panel for message types | P1 | ✓ (f/F/E keys) |
 | [x] TSRCH-004 | Filter by date range | P1 | ✓ ([ and ] keys) |
-| [ ] TSRCH-005 | Filter by model | P2 | |
+| [x] TSRCH-005 | Filter by model | P2 | ✓ (M key, case-insensitive substring match) |
 | [ ] TSRCH-006 | Save/load filter presets | P3 | |
 
 ### 8.4 Conversation Display

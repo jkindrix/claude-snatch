@@ -160,27 +160,27 @@ fn run_loop<B: ratatui::backend::Backend>(
                     }
                 }
 
-                // Handle date input mode
-                if app.is_entering_date() {
+                // Handle filter input mode (dates, model, etc.)
+                if app.is_entering_input() {
                     match (key.modifiers, key.code) {
-                        // Cancel date input
+                        // Cancel input
                         (KeyModifiers::NONE, KeyCode::Esc) => {
-                            app.cancel_date_input();
+                            app.cancel_filter_input();
                             continue;
                         }
-                        // Confirm date input
+                        // Confirm input
                         (KeyModifiers::NONE, KeyCode::Enter) => {
-                            app.confirm_date_input();
+                            app.confirm_filter_input();
                             continue;
                         }
                         // Backspace
                         (KeyModifiers::NONE, KeyCode::Backspace) => {
-                            app.date_backspace();
+                            app.filter_backspace();
                             continue;
                         }
-                        // Character input (digits and dash)
-                        (KeyModifiers::NONE, KeyCode::Char(c)) if c.is_ascii_digit() || c == '-' => {
-                            app.date_input(c);
+                        // Character input
+                        (KeyModifiers::NONE, KeyCode::Char(c)) => {
+                            app.filter_input(c);
                             continue;
                         }
                         _ => continue,
@@ -321,6 +321,10 @@ fn run_loop<B: ratatui::backend::Backend>(
                     }
                     (KeyModifiers::NONE, KeyCode::Char(']')) => {
                         app.start_date_to_input();
+                    }
+                    // Model filter
+                    (KeyModifiers::SHIFT, KeyCode::Char('M')) => {
+                        app.toggle_model_filter();
                     }
 
                     // Cycle theme
@@ -591,21 +595,22 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
         }
     };
 
-    let left_content = if app.is_entering_date() {
-        // Show date input prompt with current buffer
-        use super::state::DateInputMode;
-        let label = match app.date_input_mode() {
-            DateInputMode::From => "From",
-            DateInputMode::To => "To",
-            DateInputMode::None => "Date",
+    let left_content = if app.is_entering_input() {
+        // Show input prompt with current buffer
+        use super::state::InputMode;
+        let (label, hint) = match app.input_mode() {
+            InputMode::DateFrom => ("From", "YYYY-MM-DD"),
+            InputMode::DateTo => ("To", "YYYY-MM-DD"),
+            InputMode::Model => ("Model", "e.g., sonnet, opus"),
+            InputMode::None => ("Input", ""),
         };
         vec![
             Span::styled(" snatch ", Style::default().fg(app.theme.primary).add_modifier(Modifier::BOLD)),
             Span::raw("│ "),
             Span::styled(format!("{}: ", label), Style::default().fg(app.theme.warning)),
-            Span::styled(app.date_input_buffer().to_string(), Style::default().fg(app.theme.primary).add_modifier(Modifier::BOLD)),
+            Span::styled(app.input_buffer().to_string(), Style::default().fg(app.theme.primary).add_modifier(Modifier::BOLD)),
             Span::styled("█", Style::default().fg(app.theme.primary)),
-            Span::raw(" (YYYY-MM-DD, Enter to confirm, Esc to cancel)"),
+            Span::raw(format!(" ({}, Enter to confirm, Esc to cancel)", hint)),
         ]
     } else if let Some(ref msg) = app.status_message {
         // Show status message if present
@@ -697,6 +702,7 @@ fn draw_help_overlay(f: &mut Frame) {
         Line::from("  f         Toggle filter panel"),
         Line::from("  F         Cycle message type filter"),
         Line::from("  E         Toggle errors-only filter"),
+        Line::from("  M         Filter by model (e.g., sonnet, opus)"),
         Line::from("  [         Set date-from filter (YYYY-MM-DD)"),
         Line::from("  ]         Set date-to filter (YYYY-MM-DD)"),
         Line::from("  X         Clear all filters"),
