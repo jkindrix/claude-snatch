@@ -980,7 +980,7 @@ Given versions A (file) and B (schema):
 | [x] CACHE-002 | Parsed message cache (LRU) | P1 | ✓ (`ParsedEntriesCache` with LRU) |
 | [x] CACHE-003 | Cache invalidation on file change | P1 | ✓ (mtime-based) |
 | [x] CACHE-004 | Configurable cache size limits | P2 | ✓ (`CacheConfig.max_size`) |
-| [ ] CACHE-005 | Cache persistence between runs | P2 | |
+| [x] CACHE-005 | Cache persistence between runs | P2 | ✓ (`save_to_disk()`, `load_from_disk()`) |
 | [x] INDEX-001 | Full-text search index (tantivy or similar) | P1 | ✓ (`SearchIndex` with tantivy) |
 | [x] INDEX-002 | Incremental index updates | P1 | ✓ (`index build` command) |
 | [ ] INDEX-003 | Index storage location configuration | P2 | |

@@ -248,7 +248,7 @@ impl Session {
 }
 
 /// Quick metadata extracted from a session without full parsing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct QuickSessionMetadata {
     /// Session ID.
     pub session_id: String,
