@@ -343,7 +343,7 @@ Based on analysis of 49+ existing tools, the following elements are **not extrac
 | [x] BJ-009 | API key presence | `~/.claude/.credentials.json` | No | P2 | ✓ |
 | [ ] BJ-010 | Permissions state | Runtime (not persisted) | No | P3 |
 | [x] BJ-011 | Hook configurations | `settings.json` hooks section | Yes | P1 | ✓ |
-| [ ] BJ-012 | Git correlation | `.git/` directory | Yes | P2 |
+| [x] BJ-012 | Git correlation | `.git/` directory | Yes | P2 | ✓ (git module) |
 | [x] BJ-013 | Subagent JSONL files | `agent-*.jsonl` | Yes | P0 | ✓ |
 | [x] BJ-014 | Session retention config | `settings.json` | Yes | P2 | ✓ |
 | [x] BJ-015 | Sandbox configuration | `settings.json` sandbox section | Yes | P2 | ✓ |
