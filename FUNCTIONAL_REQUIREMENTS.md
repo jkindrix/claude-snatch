@@ -872,7 +872,7 @@ esac
 |----|-------------|----------|--------|
 | [x] CONC-001 | Parallel file parsing | P1 | ✓ (`rayon` parallel iterators in stats) |
 | [x] CONC-002 | Async I/O operations | P1 | ✓ (tokio-based async_io module) |
-| [ ] CONC-003 | Background indexing | P2 | |
+| [x] CONC-003 | Background indexing | P2 | ✓ (BackgroundIndexHandle, IndexingProgress) |
 | [x] CONC-004 | Non-blocking TUI updates | P0 | ✓ (event handler) |
 | [x] CONC-005 | Configurable thread count | P2 | ✓ (-j/--threads) |
 

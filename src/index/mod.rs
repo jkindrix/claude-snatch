@@ -678,6 +678,172 @@ pub struct IndexingResult {
     pub errors: Vec<(String, String)>,
 }
 
+/// Progress update for background indexing.
+#[derive(Debug, Clone)]
+pub struct IndexingProgress {
+    /// Current session being indexed.
+    pub current_session: usize,
+    /// Total sessions to index.
+    pub total_sessions: usize,
+    /// Documents indexed so far.
+    pub documents_indexed: usize,
+    /// Errors encountered so far.
+    pub error_count: usize,
+    /// Whether indexing is complete.
+    pub completed: bool,
+    /// Final result (only set when completed).
+    pub result: Option<IndexingResult>,
+}
+
+impl IndexingProgress {
+    /// Get progress as a percentage (0-100).
+    pub fn percentage(&self) -> f64 {
+        if self.total_sessions == 0 {
+            100.0
+        } else {
+            (self.current_session as f64 / self.total_sessions as f64) * 100.0
+        }
+    }
+
+    /// Create an in-progress update.
+    fn in_progress(current: usize, total: usize, docs: usize, errors: usize) -> Self {
+        Self {
+            current_session: current,
+            total_sessions: total,
+            documents_indexed: docs,
+            error_count: errors,
+            completed: false,
+            result: None,
+        }
+    }
+
+    /// Create a completed update.
+    fn complete(result: IndexingResult) -> Self {
+        Self {
+            current_session: result.sessions_indexed,
+            total_sessions: result.sessions_indexed,
+            documents_indexed: result.documents_indexed,
+            error_count: result.errors.len(),
+            completed: true,
+            result: Some(result),
+        }
+    }
+}
+
+/// Handle for a background indexing operation.
+pub struct BackgroundIndexHandle {
+    /// Receiver for progress updates.
+    progress_rx: std::sync::mpsc::Receiver<IndexingProgress>,
+    /// Handle to the indexing thread.
+    thread_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl BackgroundIndexHandle {
+    /// Check if indexing is still running.
+    pub fn is_running(&self) -> bool {
+        self.thread_handle.as_ref().map_or(false, |h| !h.is_finished())
+    }
+
+    /// Get the latest progress (non-blocking).
+    pub fn try_progress(&self) -> Option<IndexingProgress> {
+        // Drain channel and return latest
+        let mut latest = None;
+        while let Ok(progress) = self.progress_rx.try_recv() {
+            latest = Some(progress);
+        }
+        latest
+    }
+
+    /// Wait for completion and get the final result.
+    pub fn wait(mut self) -> Option<IndexingResult> {
+        if let Some(handle) = self.thread_handle.take() {
+            let _ = handle.join();
+        }
+        // Get final progress
+        while let Ok(progress) = self.progress_rx.try_recv() {
+            if progress.completed {
+                return progress.result;
+            }
+        }
+        None
+    }
+}
+
+impl SearchIndex {
+    /// Start background indexing of sessions.
+    ///
+    /// Returns a handle that can be used to monitor progress and wait for completion.
+    pub fn index_sessions_background(
+        index: Arc<SearchIndex>,
+        sessions: Vec<crate::discovery::Session>,
+    ) -> BackgroundIndexHandle {
+        use std::sync::mpsc;
+        use std::thread;
+
+        let (progress_tx, progress_rx) = mpsc::channel();
+
+        let handle = thread::spawn(move || {
+            let total = sessions.len();
+            let mut documents_indexed = 0;
+            let mut session_count = 0;
+            let mut errors = Vec::new();
+
+            {
+                let mut writer = index.writer.write();
+
+                for (i, session) in sessions.iter().enumerate() {
+                    match session.parse() {
+                        Ok(entries) => {
+                            let session_id = session.session_id();
+                            let project = session.project_path();
+
+                            for entry in &entries {
+                                if let Err(e) = index.index_entry(&mut writer, session_id, project, entry) {
+                                    errors.push((session.session_id().to_string(), e.to_string()));
+                                } else {
+                                    documents_indexed += 1;
+                                }
+                            }
+                            session_count += 1;
+                        }
+                        Err(e) => {
+                            errors.push((session.session_id().to_string(), e.to_string()));
+                        }
+                    }
+
+                    // Send progress update every 5 sessions or at the end
+                    if (i + 1) % 5 == 0 || i + 1 == total {
+                        let _ = progress_tx.send(IndexingProgress::in_progress(
+                            i + 1,
+                            total,
+                            documents_indexed,
+                            errors.len(),
+                        ));
+                    }
+                }
+            }
+
+            // Commit the index
+            if let Err(e) = index.commit() {
+                errors.push(("commit".to_string(), e.to_string()));
+            }
+
+            let result = IndexingResult {
+                documents_indexed,
+                sessions_indexed: session_count,
+                errors,
+            };
+
+            let _ = progress_tx.send(IndexingProgress::complete(result));
+        });
+
+        BackgroundIndexHandle {
+            progress_rx,
+            thread_handle: Some(handle),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,5 +965,49 @@ mod tests {
         assert!(json.contains("tool_name"));
         assert!(json.contains("Read"));
         assert!(json.contains("50"));
+    }
+
+    #[test]
+    fn test_indexing_progress_percentage() {
+        let progress = IndexingProgress::in_progress(5, 10, 50, 1);
+        assert!((progress.percentage() - 50.0).abs() < 0.01);
+        assert!(!progress.completed);
+    }
+
+    #[test]
+    fn test_indexing_progress_complete() {
+        let result = IndexingResult {
+            documents_indexed: 100,
+            sessions_indexed: 10,
+            errors: vec![("err1".to_string(), "error".to_string())],
+        };
+        let progress = IndexingProgress::complete(result);
+        assert!(progress.completed);
+        assert_eq!(progress.documents_indexed, 100);
+        assert_eq!(progress.error_count, 1);
+        assert!(progress.result.is_some());
+    }
+
+    #[test]
+    fn test_indexing_progress_zero_total() {
+        let progress = IndexingProgress::in_progress(0, 0, 0, 0);
+        assert!((progress.percentage() - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_background_handle_empty() {
+        use std::sync::mpsc;
+
+        let (_tx, rx) = mpsc::channel();
+        let handle = BackgroundIndexHandle {
+            progress_rx: rx,
+            thread_handle: None,
+        };
+
+        // No thread, so not running
+        assert!(!handle.is_running());
+
+        // No progress available
+        assert!(handle.try_progress().is_none());
     }
 }
