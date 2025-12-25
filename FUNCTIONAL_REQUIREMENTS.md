@@ -817,7 +817,7 @@ esac
 | [x] ACT-002 | Export selected sessions | P1 | ✓ (Space=toggle, Ctrl+A=all, e=export) |
 | [x] ACT-003 | Copy message to clipboard | P1 | ✓ (c key) |
 | [x] ACT-004 | Copy code block to clipboard | P1 | ✓ (C key) |
-| [ ] ACT-005 | Open in external editor | P2 | |
+| [x] ACT-005 | Open in external editor | P2 | ✓ (O key) |
 | [ ] ACT-006 | Resume session in Claude Code | P2 | |
 | [x] ACT-007 | Show session statistics | P0 | ✓ (details panel) |
 | [x] ACT-008 | Refresh session list | P1 | ✓ (r key) |

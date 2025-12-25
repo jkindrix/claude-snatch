@@ -523,6 +523,7 @@ pub enum CommandId {
     Export,
     CopyMessage,
     CopyCodeBlock,
+    OpenInEditor,
     SelectAll,
     ClearSelection,
     // Help
@@ -701,6 +702,12 @@ impl Default for CommandPalette {
                 description: "Copy code block to clipboard",
                 shortcut: "C",
                 id: CommandId::CopyCodeBlock,
+            },
+            PaletteCommand {
+                name: "Open in Editor",
+                description: "Open conversation in external editor",
+                shortcut: "O",
+                id: CommandId::OpenInEditor,
             },
             PaletteCommand {
                 name: "Select All Sessions",
@@ -1312,6 +1319,9 @@ impl AppState {
             CommandId::CopyCodeBlock => {
                 self.copy_code_block()?;
             }
+            CommandId::OpenInEditor => {
+                self.open_in_editor()?;
+            }
             CommandId::SelectAll => self.select_all_sessions(),
             CommandId::ClearSelection => self.clear_selection(),
             // Help
@@ -1813,6 +1823,71 @@ impl AppState {
         }
 
         blocks
+    }
+
+    /// Open current conversation in external editor.
+    pub fn open_in_editor(&mut self) -> Result<()> {
+        if self.current_session.is_none() {
+            self.status_message = Some("No session selected".to_string());
+            return Ok(());
+        }
+
+        // Get the editor from environment or use sensible defaults
+        let editor = std::env::var("EDITOR")
+            .or_else(|_| std::env::var("VISUAL"))
+            .unwrap_or_else(|_| {
+                // Platform-specific defaults
+                if cfg!(windows) {
+                    "notepad".to_string()
+                } else {
+                    "vi".to_string()
+                }
+            });
+
+        // Create a temporary file with the conversation content
+        let content = self.get_current_message_text();
+        if content.is_empty() {
+            self.status_message = Some("No content to edit".to_string());
+            return Ok(());
+        }
+
+        // Create temp file with meaningful name
+        let session_id = self.current_session.as_ref().unwrap();
+        let short_id = if session_id.len() > 8 {
+            &session_id[..8]
+        } else {
+            session_id
+        };
+
+        let temp_path = std::env::temp_dir().join(format!("snatch-{}.md", short_id));
+
+        // Write content to temp file
+        std::fs::write(&temp_path, &content).map_err(|e| {
+            crate::error::SnatchError::io("Failed to create temporary file", e)
+        })?;
+
+        // Open editor
+        let status = std::process::Command::new(&editor)
+            .arg(&temp_path)
+            .status();
+
+        match status {
+            Ok(exit_status) => {
+                if exit_status.success() {
+                    self.status_message = Some(format!("Editor closed ({})", editor));
+                } else {
+                    self.status_message = Some(format!("Editor exited with code: {:?}", exit_status.code()));
+                }
+            }
+            Err(e) => {
+                self.status_message = Some(format!("Failed to open editor '{}': {}", editor, e));
+            }
+        }
+
+        // Clean up temp file (optional, it's in temp dir anyway)
+        let _ = std::fs::remove_file(&temp_path);
+
+        Ok(())
     }
 
     /// Update tree for project.

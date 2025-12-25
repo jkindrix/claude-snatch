@@ -326,6 +326,11 @@ fn run_loop<B: ratatui::backend::Backend>(
                         app.copy_code_block()?;
                     }
 
+                    // Open in external editor
+                    (KeyModifiers::SHIFT, KeyCode::Char('O')) => {
+                        app.open_in_editor()?;
+                    }
+
                     // Toggle thinking
                     (KeyModifiers::NONE, KeyCode::Char('t')) => {
                         app.toggle_thinking();
