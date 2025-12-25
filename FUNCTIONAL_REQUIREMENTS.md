@@ -803,7 +803,7 @@ esac
 | [x] DISP-002 | Collapsible tool calls | P1 | ✓ (toggle with 'o') |
 | [x] DISP-003 | Collapsible thinking blocks | P1 | ✓ (toggle with 't') |
 | [ ] DISP-004 | Image preview (sixel/kitty) | P2 | |
-| [ ] DISP-005 | Diff view for edits | P2 | |
+| [x] DISP-005 | Diff view for edits | P2 | ✓ (colored diff for Edit tool calls) |
 | [x] DISP-006 | Timestamp display toggle | P1 | ✓ |
 | [x] DISP-007 | Token usage display toggle | P1 | ✓ (details panel) |
 | [x] DISP-008 | Word wrap toggle | P1 | ✓ (w key) |

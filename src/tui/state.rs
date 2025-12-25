@@ -3,7 +3,9 @@
 use std::collections::HashSet;
 use std::io::BufWriter;
 
-use ratatui::text::Line;
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
+use similar::{ChangeTag, TextDiff};
 
 use crate::analytics::SessionAnalytics;
 use crate::discovery::{ClaudeDirectory, HierarchyBuilder, Project, Session};
@@ -2227,6 +2229,15 @@ impl AppState {
                                     tool.name,
                                     &tool.id[..8.min(tool.id.len())]
                                 )));
+
+                                // Show diff view for Edit tool calls
+                                if tool.name == "Edit" {
+                                    if let Some(diff_lines) = self.format_edit_diff(&tool.input) {
+                                        for line in diff_lines {
+                                            self.conversation_lines.push(line);
+                                        }
+                                    }
+                                }
                             }
                             ContentBlock::ToolResult(result) if self.show_tools => {
                                 let status = if result.is_explicit_error() { "❌" } else { "✓" };
@@ -2267,6 +2278,66 @@ impl AppState {
                 _ => {}
             }
         }
+    }
+
+    /// Format an Edit tool input as a diff view.
+    ///
+    /// Returns styled lines showing the difference between old_string and new_string
+    /// with appropriate colors (red for deletions, green for additions).
+    fn format_edit_diff(&self, input: &serde_json::Value) -> Option<Vec<Line<'static>>> {
+        let old_string = input.get("old_string")?.as_str()?;
+        let new_string = input.get("new_string")?.as_str()?;
+        let file_path = input.get("file_path").and_then(|v| v.as_str()).unwrap_or("unknown");
+
+        let mut lines = Vec::new();
+
+        // Header with file path
+        lines.push(Line::from(vec![
+            Span::styled("   ┌─ ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("Diff: {}", file_path),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(" ─", Style::default().fg(Color::DarkGray)),
+        ]));
+
+        // Generate unified diff
+        let diff = TextDiff::from_lines(old_string, new_string);
+
+        let mut line_count = 0;
+        let max_lines = 20; // Limit diff display
+
+        for change in diff.iter_all_changes() {
+            if line_count >= max_lines {
+                lines.push(Line::from(Span::styled(
+                    "   │ ... (diff truncated)",
+                    Style::default().fg(Color::DarkGray),
+                )));
+                break;
+            }
+
+            let (prefix, style) = match change.tag() {
+                ChangeTag::Delete => ("-", Style::default().fg(Color::Red)),
+                ChangeTag::Insert => ("+", Style::default().fg(Color::Green)),
+                ChangeTag::Equal => (" ", Style::default().fg(Color::DarkGray)),
+            };
+
+            let content = change.value().trim_end_matches('\n');
+            lines.push(Line::from(vec![
+                Span::styled("   │ ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{} {}", prefix, content), style),
+            ]));
+
+            line_count += 1;
+        }
+
+        // Footer
+        lines.push(Line::from(Span::styled(
+            "   └─────────────────────────────────────",
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        Some(lines)
     }
 }
 
