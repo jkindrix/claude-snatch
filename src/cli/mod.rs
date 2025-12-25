@@ -60,6 +60,10 @@ pub struct Cli {
     #[arg(long, global = true, default_value = "warn", env = "SNATCH_LOG_LEVEL")]
     pub log_level: LogLevel,
 
+    /// Log format (text, json, compact, pretty).
+    #[arg(long, global = true, default_value = "text", env = "SNATCH_LOG_FORMAT")]
+    pub log_format: LogFormat,
+
     /// Log output file (default: stderr).
     #[arg(long, global = true, env = "SNATCH_LOG_FILE")]
     pub log_file: Option<std::path::PathBuf>,
@@ -79,6 +83,20 @@ pub enum LogLevel {
     Debug,
     /// All messages including trace-level details.
     Trace,
+}
+
+/// Log format options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum LogFormat {
+    /// Human-readable text format.
+    #[default]
+    Text,
+    /// Structured JSON format for machine consumption.
+    Json,
+    /// Compact single-line format.
+    Compact,
+    /// Pretty format with full details.
+    Pretty,
 }
 
 impl LogLevel {
@@ -877,19 +895,67 @@ pub struct IndexSearchArgs {
 
 /// Initialize tracing/logging based on CLI options.
 fn init_logging(cli: &Cli) {
-    use tracing_subscriber::{fmt, EnvFilter};
+    use tracing_subscriber::{
+        fmt::{self, format::FmtSpan},
+        layer::SubscriberExt,
+        util::SubscriberInitExt,
+        EnvFilter,
+    };
 
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(cli.log_level.to_filter_string()));
 
-    let subscriber = fmt::Subscriber::builder()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr);
+    // Build subscriber based on log format
+    let result = match cli.log_format {
+        LogFormat::Json => {
+            // Structured JSON format for machine consumption
+            let layer = fmt::layer()
+                .json()
+                .with_span_events(FmtSpan::CLOSE)
+                .with_thread_ids(true)
+                .with_file(true)
+                .with_line_number(true)
+                .with_writer(std::io::stderr);
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(layer)
+                .try_init()
+        }
+        LogFormat::Compact => {
+            // Compact single-line format
+            let layer = fmt::layer()
+                .compact()
+                .with_target(false)
+                .with_writer(std::io::stderr);
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(layer)
+                .try_init()
+        }
+        LogFormat::Pretty => {
+            // Pretty format with full details
+            let layer = fmt::layer()
+                .pretty()
+                .with_thread_ids(true)
+                .with_file(true)
+                .with_line_number(true)
+                .with_writer(std::io::stderr);
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(layer)
+                .try_init()
+        }
+        LogFormat::Text => {
+            // Default human-readable text format
+            let layer = fmt::layer().with_writer(std::io::stderr);
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(layer)
+                .try_init()
+        }
+    };
 
-    // If a log file is specified, we'd need more complex setup
-    // For now, just use stderr
-    if let Err(e) = subscriber.try_init() {
-        // Logging already initialized or other error, that's ok
+    if let Err(e) = result {
         eprintln!("Warning: Could not initialize logging: {e}");
     }
 }
@@ -962,5 +1028,22 @@ mod tests {
             ExportFormat::from(ExportFormatArg::Json),
             ExportFormat::Json
         );
+    }
+
+    #[test]
+    fn test_log_format_variants() {
+        assert_eq!(LogFormat::default(), LogFormat::Text);
+        assert!(matches!(LogFormat::Json, LogFormat::Json));
+        assert!(matches!(LogFormat::Compact, LogFormat::Compact));
+        assert!(matches!(LogFormat::Pretty, LogFormat::Pretty));
+    }
+
+    #[test]
+    fn test_log_level_to_filter() {
+        assert_eq!(LogLevel::Error.to_filter_string(), "error");
+        assert_eq!(LogLevel::Warn.to_filter_string(), "warn");
+        assert_eq!(LogLevel::Info.to_filter_string(), "info");
+        assert_eq!(LogLevel::Debug.to_filter_string(), "debug");
+        assert_eq!(LogLevel::Trace.to_filter_string(), "trace");
     }
 }

@@ -1000,7 +1000,7 @@ Given versions A (file) and B (schema):
 | [ ] CFG-007 | Per-project configuration (`.claude-snatch.toml`) | P2 | |
 | [x] CFG-008 | Log output location (stderr default, file optional) | P1 | ✓ (`--log-file`, default stderr) |
 | [x] CFG-009 | Log level configuration (error/warn/info/debug/trace) | P1 | ✓ (`--log-level`, `SNATCH_LOG_LEVEL`) |
-| [ ] CFG-010 | Structured logging format option (JSON for machines) | P2 | |
+| [x] CFG-010 | Structured logging format option (JSON for machines) | P2 | ✓ |
 
 ### 10.6 Error Handling
 
