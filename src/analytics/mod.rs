@@ -1067,8 +1067,9 @@ impl EfficiencyMetrics {
 /// useful for comparing before/after states or identifying patterns.
 #[derive(Debug, Clone, Default)]
 pub struct SessionDiff {
-    /// Session identifiers.
+    /// Identifier for session A (the baseline).
     pub session_a_id: Option<String>,
+    /// Identifier for session B (the comparison target).
     pub session_b_id: Option<String>,
     /// Duration difference.
     pub duration_diff: DurationDiff,
@@ -1076,13 +1077,15 @@ pub struct SessionDiff {
     pub message_diff: MessageCountDiff,
     /// Token usage differences.
     pub usage_diff: UsageDiff,
-    /// Tools that appear in only one session.
+    /// Tools that appear only in session A.
     pub tools_only_in_a: Vec<String>,
+    /// Tools that appear only in session B.
     pub tools_only_in_b: Vec<String>,
     /// Tools used in both sessions with count differences.
     pub tools_diff: Vec<(String, i64)>,
-    /// Files modified in only one session.
+    /// Files modified only in session A.
     pub files_only_in_a: Vec<String>,
+    /// Files modified only in session B.
     pub files_only_in_b: Vec<String>,
     /// Summary of key differences.
     pub summary: Vec<String>,
@@ -1518,6 +1521,12 @@ impl FidelityScore {
                     let results = user.message.tool_results();
                     if !results.is_empty() {
                         has_tool_results = true;
+                        // Check for structured (array) tool results
+                        for result in &results {
+                            if let Some(crate::model::ToolResultContent::Array(_)) = &result.content {
+                                has_tool_structured_output = true;
+                            }
+                        }
                     }
                     // Check for images
                     if !user.message.images().is_empty() {

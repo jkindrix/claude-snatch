@@ -231,7 +231,10 @@ impl FilterState {
     }
 
     /// Check if currently entering a model filter.
+    ///
+    /// Used by tests and available for future UI enhancements.
     #[must_use]
+    #[allow(dead_code)]
     pub fn is_entering_model(&self) -> bool {
         self.input_mode == InputMode::Model
     }
@@ -995,21 +998,38 @@ impl AppState {
         false
     }
 
-    /// Check if a session is selected (for multi-select).
+    /// Check if a session is selected (for multi-select) by session ID.
+    ///
+    /// Available for external API use and future features.
     #[must_use]
+    #[allow(dead_code)]
     pub fn is_session_selected(&self, session_id: &str) -> bool {
         self.selected_sessions.contains(session_id)
     }
 
-    /// Check if the currently highlighted tree item is selected.
+    /// Check if a tree item at the given index is selected.
+    ///
+    /// This is used by the rendering code to show selection indicators.
     #[must_use]
+    pub fn is_tree_item_selected(&self, index: usize) -> bool {
+        if let Some(session_id) = self.tree_session_ids.get(index) {
+            self.selected_sessions.contains(session_id)
+        } else {
+            false
+        }
+    }
+
+    /// Check if the currently highlighted tree item is selected.
+    ///
+    /// Available for external API use and future features.
+    #[must_use]
+    #[allow(dead_code)]
     pub fn is_current_selected(&self) -> bool {
         if let Some(selected) = self.tree_selected {
-            if let Some(session_id) = self.tree_session_ids.get(selected) {
-                return self.selected_sessions.contains(session_id);
-            }
+            self.is_tree_item_selected(selected)
+        } else {
+            false
         }
-        false
     }
 
     /// Clear all selected sessions.
@@ -1126,25 +1146,6 @@ impl AppState {
         self.filter_state.input_buffer.clear();
     }
 
-    /// Cancel go-to-line input.
-    pub fn cancel_goto_line(&mut self) {
-        self.filter_state.input_mode = InputMode::None;
-        self.filter_state.input_buffer.clear();
-    }
-
-    /// Handle character input during go-to-line.
-    pub fn goto_line_input(&mut self, c: char) {
-        // Only accept digits
-        if c.is_ascii_digit() {
-            self.filter_state.input_buffer.push(c);
-        }
-    }
-
-    /// Handle backspace during go-to-line.
-    pub fn goto_line_backspace(&mut self) {
-        self.filter_state.input_buffer.pop();
-    }
-
     /// Confirm go-to-line and jump.
     pub fn confirm_goto_line(&mut self) {
         if let Ok(line) = self.filter_state.input_buffer.parse::<usize>() {
@@ -1156,12 +1157,6 @@ impl AppState {
         }
         self.filter_state.input_mode = InputMode::None;
         self.filter_state.input_buffer.clear();
-    }
-
-    /// Check if in go-to-line input mode.
-    #[must_use]
-    pub fn is_entering_line_number(&self) -> bool {
-        self.filter_state.input_mode == InputMode::LineNumber
     }
 
     /// Start search mode.
@@ -1600,9 +1595,16 @@ impl AppState {
         }
     }
 
-    /// Cycle through message type filters.
+    /// Cycle through message type filters (forward).
     pub fn cycle_message_filter(&mut self) {
         self.filter_state.message_type.next();
+        self.status_message = Some(format!("Filter: {}", self.filter_state.message_type.display_name()));
+        self.update_conversation_display();
+    }
+
+    /// Cycle through message type filters (backward).
+    pub fn reverse_cycle_message_filter(&mut self) {
+        self.filter_state.message_type.prev();
         self.status_message = Some(format!("Filter: {}", self.filter_state.message_type.display_name()));
         self.update_conversation_display();
     }
@@ -1689,7 +1691,10 @@ impl AppState {
     }
 
     /// Check if currently entering a model filter.
+    ///
+    /// Used by tests and available for future UI enhancements.
     #[must_use]
+    #[allow(dead_code)]
     pub fn is_entering_model(&self) -> bool {
         self.filter_state.is_entering_model()
     }
@@ -1722,12 +1727,6 @@ impl AppState {
         }
     }
 
-    /// Check if filter panel is active.
-    #[must_use]
-    pub fn is_filter_active(&self) -> bool {
-        self.filter_state.active
-    }
-
     /// Cycle through available themes.
     pub fn cycle_theme(&mut self) {
         self.theme = match self.theme.name.as_str() {
@@ -1735,40 +1734,6 @@ impl AppState {
             "light" => Theme::high_contrast(),
             _ => Theme::dark(),
         };
-    }
-
-    /// Get border characters based on ASCII mode setting.
-    #[must_use]
-    pub fn border_chars(&self) -> (&'static str, &'static str, &'static str, &'static str) {
-        if self.ascii_mode {
-            // ASCII-only: simple corners and lines
-            ("+", "+", "+", "+")
-        } else {
-            // Unicode box drawing
-            ("┌", "┐", "└", "┘")
-        }
-    }
-
-    /// Get horizontal line character based on ASCII mode.
-    #[must_use]
-    pub fn hline_char(&self) -> &'static str {
-        if self.ascii_mode { "-" } else { "─" }
-    }
-
-    /// Get vertical line character based on ASCII mode.
-    #[must_use]
-    pub fn vline_char(&self) -> &'static str {
-        if self.ascii_mode { "|" } else { "│" }
-    }
-
-    /// Get arrow/indicator characters based on ASCII mode.
-    #[must_use]
-    pub fn indicator_chars(&self) -> (&'static str, &'static str) {
-        if self.ascii_mode {
-            (">", "<")
-        } else {
-            ("▶", "◀")
-        }
     }
 
     /// Copy current message to clipboard.

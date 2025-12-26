@@ -3,7 +3,9 @@
 //! Launches the interactive TUI interface.
 
 use crate::cli::{Cli, TuiArgs};
-use crate::error::{Result, SnatchError};
+use crate::error::Result;
+#[cfg(not(feature = "tui"))]
+use crate::error::SnatchError;
 
 /// Run the TUI command.
 pub fn run(_cli: &Cli, args: &TuiArgs) -> Result<()> {

@@ -17,14 +17,17 @@
 //!         println!("Project: {}", project.path);
 //!     }
 //!
-//!     // List recent sessions
-//!     for session in client.recent_sessions(10)? {
+//!     // List recent sessions and export the first one
+//!     let sessions = client.recent_sessions(10)?;
+//!     for session in &sessions {
 //!         println!("Session: {} ({} messages)", session.id, session.message_count);
 //!     }
 //!
-//!     // Export a session to markdown
-//!     let markdown = client.export_session(&session.id, ExportFormat::Markdown)?;
-//!     println!("{}", markdown);
+//!     // Export the first session to markdown (if any exist)
+//!     if let Some(session) = sessions.first() {
+//!         let markdown = client.export_session(&session.id, ExportFormat::Markdown)?;
+//!         println!("{}", markdown);
+//!     }
 //!
 //!     Ok(())
 //! }

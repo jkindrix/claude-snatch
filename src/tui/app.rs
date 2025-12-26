@@ -374,6 +374,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                     (KeyModifiers::SHIFT, KeyCode::Char('F')) => {
                         app.cycle_message_filter();
                     }
+                    (KeyModifiers::SHIFT, KeyCode::Char('B')) => {
+                        app.reverse_cycle_message_filter();
+                    }
                     (KeyModifiers::SHIFT, KeyCode::Char('E')) => {
                         app.toggle_errors_filter();
                     }
@@ -580,12 +583,25 @@ fn draw_tree_panel(f: &mut Frame, app: &AppState, area: Rect) {
         .iter()
         .enumerate()
         .map(|(i, item)| {
-            let style = if Some(i) == app.tree_selected {
+            let is_cursor = Some(i) == app.tree_selected;
+            let is_selected = app.is_tree_item_selected(i);
+
+            // Determine display text with selection indicator
+            let display_text = if is_selected {
+                format!("● {}", item) // Selected indicator
+            } else {
+                format!("  {}", item) // Padding for alignment
+            };
+
+            let style = if is_cursor {
                 app.theme.selection_style()
+            } else if is_selected {
+                // Selected but not cursor - show with different style
+                Style::default().fg(app.theme.success)
             } else {
                 Style::default()
             };
-            ListItem::new(item.clone()).style(style)
+            ListItem::new(display_text).style(style)
         })
         .collect();
 
@@ -804,7 +820,8 @@ fn draw_help_overlay(f: &mut Frame) {
         Line::from(""),
         Line::from("Filters:"),
         Line::from("  f         Toggle filter panel"),
-        Line::from("  F         Cycle message type filter"),
+        Line::from("  F         Cycle message type filter (next)"),
+        Line::from("  B         Cycle message type filter (prev)"),
         Line::from("  E         Toggle errors-only filter"),
         Line::from("  M         Filter by model (e.g., sonnet, opus)"),
         Line::from("  [         Set date-from filter (YYYY-MM-DD)"),
