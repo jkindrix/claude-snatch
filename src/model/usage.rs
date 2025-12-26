@@ -449,4 +449,203 @@ mod tests {
         assert_eq!(usage1.output_tokens, 150);
         assert_eq!(usage1.cache_read_input_tokens, Some(50));
     }
+
+    #[test]
+    fn test_usage_default() {
+        let usage = Usage::default();
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 0);
+        assert_eq!(usage.total_tokens(), 0);
+        assert!(!usage.has_caching());
+        assert!(!usage.has_server_tool_use());
+    }
+
+    #[test]
+    fn test_usage_cache_hit_rate_no_cache() {
+        let usage = Usage::default();
+        assert_eq!(usage.cache_hit_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_usage_cache_efficiency() {
+        let usage = Usage {
+            cache_creation_input_tokens: Some(100),
+            cache_read_input_tokens: Some(500),
+            ..Default::default()
+        };
+
+        let efficiency = usage.cache_efficiency().unwrap();
+        assert!((efficiency - 5.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_usage_cache_efficiency_no_write() {
+        let usage = Usage {
+            cache_creation_input_tokens: Some(0),
+            cache_read_input_tokens: Some(500),
+            ..Default::default()
+        };
+
+        assert!(usage.cache_efficiency().is_none());
+    }
+
+    #[test]
+    fn test_usage_cache_efficiency_no_cache() {
+        let usage = Usage::default();
+        assert!(usage.cache_efficiency().is_none());
+    }
+
+    #[test]
+    fn test_usage_has_caching() {
+        let mut usage = Usage::default();
+        assert!(!usage.has_caching());
+
+        usage.cache_creation_input_tokens = Some(100);
+        assert!(usage.has_caching());
+
+        usage = Usage::default();
+        usage.cache_read_input_tokens = Some(100);
+        assert!(usage.has_caching());
+    }
+
+    #[test]
+    fn test_usage_web_search_requests() {
+        let usage = Usage {
+            server_tool_use: Some(ServerToolUse {
+                web_search_requests: Some(5),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(usage.web_search_requests(), 5);
+        assert!(usage.has_server_tool_use());
+    }
+
+    #[test]
+    fn test_usage_web_fetch_requests() {
+        let usage = Usage {
+            server_tool_use: Some(ServerToolUse {
+                web_fetch_requests: Some(3),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(usage.web_fetch_requests(), 3);
+    }
+
+    #[test]
+    fn test_usage_web_requests_no_server_use() {
+        let usage = Usage::default();
+        assert_eq!(usage.web_search_requests(), 0);
+        assert_eq!(usage.web_fetch_requests(), 0);
+    }
+
+    #[test]
+    fn test_cache_creation_details_total() {
+        let details = CacheCreationDetails {
+            ephemeral_5m_input_tokens: Some(100),
+            ephemeral_1h_input_tokens: Some(200),
+            extra: IndexMap::new(),
+        };
+
+        assert_eq!(details.total_ephemeral_tokens(), 300);
+    }
+
+    #[test]
+    fn test_cache_creation_details_default() {
+        let details = CacheCreationDetails::default();
+        assert_eq!(details.total_ephemeral_tokens(), 0);
+    }
+
+    #[test]
+    fn test_server_tool_use_total() {
+        let tools = ServerToolUse {
+            web_search_requests: Some(10),
+            web_fetch_requests: Some(5),
+            extra: IndexMap::new(),
+        };
+
+        assert_eq!(tools.total_requests(), 15);
+    }
+
+    #[test]
+    fn test_server_tool_use_default() {
+        let tools = ServerToolUse::default();
+        assert_eq!(tools.total_requests(), 0);
+    }
+
+    #[test]
+    fn test_model_pricing_opus() {
+        let pricing = ModelPricing::claude_opus_4_5();
+        assert!(pricing.model.contains("opus"));
+        assert!(pricing.input_per_million > 0.0);
+        assert!(pricing.output_per_million > 0.0);
+    }
+
+    #[test]
+    fn test_model_pricing_sonnet() {
+        let pricing = ModelPricing::claude_sonnet_4();
+        assert!(pricing.model.contains("sonnet"));
+        assert!(pricing.input_per_million > 0.0);
+    }
+
+    #[test]
+    fn test_model_pricing_haiku() {
+        let pricing = ModelPricing::claude_haiku_3_5();
+        assert!(pricing.model.contains("haiku"));
+        assert!(pricing.input_per_million > 0.0);
+    }
+
+    #[test]
+    fn test_cost_estimate_struct() {
+        let cost = CostEstimate {
+            input_cost: 1.0,
+            output_cost: 2.0,
+            cache_write_cost: 0.5,
+            cache_read_cost: 0.1,
+            total_cost: 3.6,
+            currency: "USD".to_string(),
+        };
+
+        assert_eq!(cost.currency, "USD");
+        assert_eq!(cost.total_cost, 3.6);
+    }
+
+    #[test]
+    fn test_usage_merge_with_cache_creation() {
+        let mut usage1 = Usage::default();
+        let usage2 = Usage {
+            cache_creation: Some(CacheCreationDetails {
+                ephemeral_5m_input_tokens: Some(100),
+                ephemeral_1h_input_tokens: Some(200),
+                extra: IndexMap::new(),
+            }),
+            ..Default::default()
+        };
+
+        usage1.merge(&usage2);
+        assert!(usage1.cache_creation.is_some());
+        let cache = usage1.cache_creation.unwrap();
+        assert_eq!(cache.ephemeral_5m_input_tokens, Some(100));
+    }
+
+    #[test]
+    fn test_usage_merge_with_server_tools() {
+        let mut usage1 = Usage::default();
+        let usage2 = Usage {
+            server_tool_use: Some(ServerToolUse {
+                web_search_requests: Some(5),
+                web_fetch_requests: Some(3),
+                extra: IndexMap::new(),
+            }),
+            ..Default::default()
+        };
+
+        usage1.merge(&usage2);
+        assert!(usage1.server_tool_use.is_some());
+        assert_eq!(usage1.web_search_requests(), 5);
+        assert_eq!(usage1.web_fetch_requests(), 3);
+    }
 }
