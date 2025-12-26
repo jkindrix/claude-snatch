@@ -1,1 +1,76 @@
-/target
+# Build artifacts
+/target/
+debug/
+release/
+
+# Cargo
+.cargo/
+!.cargo/config.toml
+
+# IDE and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.bak
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Coverage and profiling
+*.profraw
+*.profdata
+coverage/
+lcov.info
+tarpaulin-report.html
+cobertura.xml
+
+# Benchmarks output
+criterion/
+
+# Testing
+.test-results/
+test-output/
+
+# Documentation build
+/doc/
+/docs/generated/
+
+# Local configuration (keep examples)
+.env
+.env.local
+*.local.toml
+config.local.toml
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+tmp/
+temp/
+
+# Package manager artifacts
+node_modules/
+package-lock.json
+yarn.lock
+
+# Binary artifacts (built binaries in project root)
+/snatch
+/snatch.exe
