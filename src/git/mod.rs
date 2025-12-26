@@ -401,6 +401,131 @@ mod tests {
         assert!(!result.has_data());
     }
 
+    #[test]
+    fn test_git_repo_info_struct() {
+        let info = GitRepoInfo {
+            root: "/path/to/repo".to_string(),
+            branch: Some("main".to_string()),
+            remote_url: Some("https://github.com/user/repo.git".to_string()),
+            head_commit: Some("abc123def456".to_string()),
+            name: "repo".to_string(),
+        };
+
+        assert_eq!(info.root, "/path/to/repo");
+        assert_eq!(info.branch, Some("main".to_string()));
+        assert_eq!(info.name, "repo");
+    }
+
+    #[test]
+    fn test_git_commit_struct() {
+        let commit = GitCommit {
+            hash: "abc123def456789".to_string(),
+            short_hash: "abc123d".to_string(),
+            message: "Initial commit".to_string(),
+            author: "Test User".to_string(),
+            author_email: "test@example.com".to_string(),
+            timestamp: Utc::now(),
+            files_changed: vec!["file1.rs".to_string(), "file2.rs".to_string()],
+        };
+
+        assert_eq!(commit.message, "Initial commit");
+        assert_eq!(commit.files_changed.len(), 2);
+    }
+
+    #[test]
+    fn test_git_correlation_has_data_with_repo() {
+        let correlation = GitCorrelation {
+            repo: Some(GitRepoInfo {
+                root: "/test".to_string(),
+                branch: None,
+                remote_url: None,
+                head_commit: None,
+                name: "test".to_string(),
+            }),
+            commits_during_session: Vec::new(),
+            correlated_files: Vec::new(),
+            session_branch: None,
+        };
+
+        assert!(correlation.has_data());
+    }
+
+    #[test]
+    fn test_git_correlation_has_data_with_commits() {
+        let correlation = GitCorrelation {
+            repo: None,
+            commits_during_session: vec![GitCommit {
+                hash: "abc".to_string(),
+                short_hash: "abc".to_string(),
+                message: "test".to_string(),
+                author: "test".to_string(),
+                author_email: "test@test.com".to_string(),
+                timestamp: Utc::now(),
+                files_changed: vec![],
+            }],
+            correlated_files: Vec::new(),
+            session_branch: None,
+        };
+
+        assert!(correlation.has_data());
+    }
+
+    #[test]
+    fn test_extract_repo_name_various_formats() {
+        // Various URL formats
+        assert_eq!(
+            extract_repo_name_from_url("https://gitlab.com/group/subgroup/repo.git"),
+            "repo"
+        );
+        assert_eq!(
+            extract_repo_name_from_url("git@bitbucket.org:team/repo.git"),
+            "repo"
+        );
+        assert_eq!(
+            extract_repo_name_from_url("file:///path/to/repo.git"),
+            "repo"
+        );
+    }
+
+    #[test]
+    fn test_extract_repo_name_edge_cases() {
+        // Edge cases
+        assert_eq!(extract_repo_name_from_url("repo"), "repo");
+        assert_eq!(extract_repo_name_from_url(""), "");
+        assert_eq!(extract_repo_name_from_url("/"), "");
+    }
+
+    #[test]
+    fn test_get_repo_root_nonexistent() {
+        assert!(get_repo_root(Path::new("/definitely/nonexistent/path")).is_none());
+    }
+
+    #[test]
+    fn test_correlate_with_session_branch() {
+        let result = correlate_session(
+            Some("/nonexistent"),
+            None,
+            None,
+            Some("feature/test"),
+            &[],
+        );
+        // Path doesn't exist, so no data
+        assert!(!result.has_data());
+    }
+
+    #[test]
+    fn test_correlate_with_modified_files() {
+        let files = vec!["src/main.rs".to_string(), "README.md".to_string()];
+        let result = correlate_session(
+            Some("/nonexistent"),
+            None,
+            None,
+            None,
+            &files,
+        );
+        assert!(!result.has_data());
+    }
+
     // Note: Tests that require an actual git repo are marked as integration tests
     // and should be run in a real git repository environment
 }
