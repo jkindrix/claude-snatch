@@ -477,17 +477,253 @@ impl RetryStatistics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{AssistantMessage, AssistantContent, TextBlock, SummaryMessage};
+    use chrono::Utc;
+    use indexmap::IndexMap;
+
+    fn make_assistant_entry(msg_id: &str, uuid: &str, text: &str) -> LogEntry {
+        LogEntry::Assistant(AssistantMessage {
+            uuid: uuid.to_string(),
+            parent_uuid: None,
+            timestamp: Utc::now(),
+            session_id: "test-session".to_string(),
+            version: "1.0.0".to_string(),
+            cwd: None,
+            git_branch: None,
+            user_type: None,
+            is_sidechain: false,
+            is_teammate: None,
+            agent_id: None,
+            slug: None,
+            request_id: None,
+            is_api_error_message: None,
+            message: AssistantContent {
+                id: msg_id.to_string(),
+                msg_type: "message".to_string(),
+                role: "assistant".to_string(),
+                content: vec![ContentBlock::Text(TextBlock {
+                    text: text.to_string(),
+                    extra: IndexMap::new(),
+                })],
+                model: "test-model".to_string(),
+                stop_reason: None,
+                stop_sequence: None,
+                usage: None,
+                container: None,
+                context_management: None,
+                extra: IndexMap::new(),
+            },
+            extra: IndexMap::new(),
+        })
+    }
 
     #[test]
-    fn test_message_grouper() {
-        // Would need actual entries to test fully
+    fn test_message_grouper_new() {
         let grouper = MessageGrouper::new();
         assert!(grouper.is_empty());
         assert_eq!(grouper.len(), 0);
     }
 
     #[test]
-    fn test_retry_statistics() {
+    fn test_message_grouper_add() {
+        let mut grouper = MessageGrouper::new();
+        let entry = make_assistant_entry("msg-1", "uuid-1", "Hello");
+        grouper.add(entry);
+
+        assert!(!grouper.is_empty());
+        assert_eq!(grouper.len(), 1);
+        assert!(grouper.get_group("msg-1").is_some());
+    }
+
+    #[test]
+    fn test_message_grouper_add_multiple_same_id() {
+        let mut grouper = MessageGrouper::new();
+        grouper.add(make_assistant_entry("msg-1", "uuid-1", "Hello"));
+        grouper.add(make_assistant_entry("msg-1", "uuid-2", " world"));
+
+        assert_eq!(grouper.len(), 1);
+        let group = grouper.get_group("msg-1").unwrap();
+        assert_eq!(group.chunk_count(), 2);
+    }
+
+    #[test]
+    fn test_message_grouper_add_different_ids() {
+        let mut grouper = MessageGrouper::new();
+        grouper.add(make_assistant_entry("msg-1", "uuid-1", "First"));
+        grouper.add(make_assistant_entry("msg-2", "uuid-2", "Second"));
+
+        assert_eq!(grouper.len(), 2);
+        assert!(grouper.get_group("msg-1").is_some());
+        assert!(grouper.get_group("msg-2").is_some());
+    }
+
+    #[test]
+    fn test_message_grouper_add_all() {
+        let mut grouper = MessageGrouper::new();
+        let entries = vec![
+            make_assistant_entry("msg-1", "uuid-1", "First"),
+            make_assistant_entry("msg-1", "uuid-2", " part"),
+            make_assistant_entry("msg-2", "uuid-3", "Second"),
+        ];
+        grouper.add_all(entries);
+
+        assert_eq!(grouper.len(), 2);
+        assert_eq!(grouper.get_group("msg-1").unwrap().chunk_count(), 2);
+        assert_eq!(grouper.get_group("msg-2").unwrap().chunk_count(), 1);
+    }
+
+    #[test]
+    fn test_message_grouper_groups_order() {
+        let mut grouper = MessageGrouper::new();
+        grouper.add(make_assistant_entry("msg-a", "uuid-1", "A"));
+        grouper.add(make_assistant_entry("msg-b", "uuid-2", "B"));
+        grouper.add(make_assistant_entry("msg-c", "uuid-3", "C"));
+
+        let groups = grouper.groups();
+        assert_eq!(groups.len(), 3);
+        // Order should be preserved
+        assert_eq!(groups[0].chunk_count(), 1);
+    }
+
+    #[test]
+    fn test_message_grouper_reconstruct() {
+        let mut grouper = MessageGrouper::new();
+        grouper.add(make_assistant_entry("msg-1", "uuid-1", "Hello"));
+        grouper.add(make_assistant_entry("msg-1", "uuid-2", " world"));
+
+        let messages = grouper.reconstruct();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text(), "Hello world");
+        assert_eq!(messages[0].chunk_count, 2);
+    }
+
+    #[test]
+    fn test_message_grouper_ignores_non_assistant() {
+        let mut grouper = MessageGrouper::new();
+        grouper.add(LogEntry::Summary(SummaryMessage {
+            summary: "test".to_string(),
+            leaf_uuid: None,
+            is_compact_summary: None,
+            extra: IndexMap::new(),
+        }));
+
+        assert!(grouper.is_empty());
+    }
+
+    #[test]
+    fn test_message_group_new() {
+        let group = MessageGroup::new();
+        assert_eq!(group.chunk_count(), 0);
+        assert!(group.chunks().is_empty());
+        assert!(group.content().is_empty());
+        assert!(group.first().is_none());
+        assert!(group.last().is_none());
+    }
+
+    #[test]
+    fn test_message_group_add_chunk() {
+        let mut group = MessageGroup::new();
+        group.add_chunk(make_assistant_entry("msg-1", "uuid-1", "Hello"));
+
+        assert_eq!(group.chunk_count(), 1);
+        assert_eq!(group.content().len(), 1);
+        assert!(group.first().is_some());
+        assert!(group.last().is_some());
+    }
+
+    #[test]
+    fn test_message_group_default() {
+        let group = MessageGroup::default();
+        assert_eq!(group.chunk_count(), 0);
+    }
+
+    #[test]
+    fn test_reconstructed_message_text() {
+        let msg = ReconstructedMessage {
+            uuid: "uuid".to_string(),
+            message_id: "msg".to_string(),
+            timestamp: Utc::now(),
+            session_id: "session".to_string(),
+            version: "1.0".to_string(),
+            model: "model".to_string(),
+            content: vec![
+                ContentBlock::Text(TextBlock {
+                    text: "Hello ".to_string(),
+                    extra: IndexMap::new(),
+                }),
+                ContentBlock::Text(TextBlock {
+                    text: "world".to_string(),
+                    extra: IndexMap::new(),
+                }),
+            ],
+            stop_reason: None,
+            usage: None,
+            chunk_count: 1,
+        };
+
+        assert_eq!(msg.text(), "Hello world");
+    }
+
+    #[test]
+    fn test_reconstructed_message_has_thinking() {
+        let msg = ReconstructedMessage {
+            uuid: "uuid".to_string(),
+            message_id: "msg".to_string(),
+            timestamp: Utc::now(),
+            session_id: "session".to_string(),
+            version: "1.0".to_string(),
+            model: "model".to_string(),
+            content: vec![ContentBlock::Text(TextBlock {
+                text: "text".to_string(),
+                extra: IndexMap::new(),
+            })],
+            stop_reason: None,
+            usage: None,
+            chunk_count: 1,
+        };
+
+        assert!(!msg.has_thinking());
+        assert!(!msg.has_tool_use());
+    }
+
+    #[test]
+    fn test_retry_chain_new() {
+        let chain = RetryChain::new();
+        assert_eq!(chain.attempt_count(), 0);
+        assert!(!chain.succeeded);
+        assert_eq!(chain.total_delay_ms(), 0.0);
+    }
+
+    #[test]
+    fn test_retry_chain_add_attempt() {
+        let mut chain = RetryChain::new();
+        chain.add_attempt(RetryAttempt {
+            uuid: "uuid-1".to_string(),
+            retry_attempt: 1,
+            max_retries: 3,
+            retry_in_ms: Some(1000.0),
+            timestamp: Utc::now(),
+        });
+        chain.add_attempt(RetryAttempt {
+            uuid: "uuid-2".to_string(),
+            retry_attempt: 2,
+            max_retries: 3,
+            retry_in_ms: Some(2000.0),
+            timestamp: Utc::now(),
+        });
+
+        assert_eq!(chain.attempt_count(), 2);
+        assert_eq!(chain.total_delay_ms(), 3000.0);
+    }
+
+    #[test]
+    fn test_retry_chain_default() {
+        let chain = RetryChain::default();
+        assert_eq!(chain.attempt_count(), 0);
+    }
+
+    #[test]
+    fn test_retry_statistics_success_rate() {
         let stats = RetryStatistics {
             total_chains: 10,
             total_retries: 25,
@@ -496,5 +732,46 @@ mod tests {
         };
 
         assert!((stats.success_rate() - 80.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_retry_statistics_success_rate_zero_chains() {
+        let stats = RetryStatistics::default();
+        assert_eq!(stats.success_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_retry_statistics_success_rate_full_success() {
+        let stats = RetryStatistics {
+            total_chains: 5,
+            total_retries: 10,
+            max_retries_seen: 3,
+            successful_recoveries: 5,
+        };
+
+        assert!((stats.success_rate() - 100.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_retry_chain_tracker_new() {
+        let tracker = RetryChainTracker::new();
+        assert!(tracker.chains().is_empty());
+    }
+
+    #[test]
+    fn test_retry_chain_tracker_statistics_empty() {
+        let tracker = RetryChainTracker::new();
+        let stats = tracker.statistics();
+
+        assert_eq!(stats.total_chains, 0);
+        assert_eq!(stats.total_retries, 0);
+        assert_eq!(stats.max_retries_seen, 0);
+        assert_eq!(stats.successful_recoveries, 0);
+    }
+
+    #[test]
+    fn test_retry_chain_tracker_chain_from_none() {
+        let tracker = RetryChainTracker::new();
+        assert!(tracker.chain_from("nonexistent").is_none());
     }
 }

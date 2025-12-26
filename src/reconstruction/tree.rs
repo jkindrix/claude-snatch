@@ -342,7 +342,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_conversation_path() {
+    fn test_conversation_path_new() {
+        let path = ConversationPath::new();
+        assert!(path.is_empty());
+        assert_eq!(path.len(), 0);
+        assert!(path.root().is_none());
+        assert!(path.leaf().is_none());
+    }
+
+    #[test]
+    fn test_conversation_path_from_uuids() {
         let path = ConversationPath::from_uuids(vec![
             "root".to_string(),
             "mid".to_string(),
@@ -354,5 +363,122 @@ mod tests {
         assert_eq!(path.leaf(), Some("leaf"));
         assert!(path.contains("mid"));
         assert!(!path.contains("other"));
+    }
+
+    #[test]
+    fn test_conversation_path_default() {
+        let path = ConversationPath::default();
+        assert!(path.is_empty());
+    }
+
+    #[test]
+    fn test_conversation_path_single_element() {
+        let path = ConversationPath::from_uuids(vec!["only".to_string()]);
+
+        assert_eq!(path.len(), 1);
+        assert_eq!(path.root(), Some("only"));
+        assert_eq!(path.leaf(), Some("only"));
+        assert!(path.contains("only"));
+    }
+
+    #[test]
+    fn test_conversation_path_contains() {
+        let path = ConversationPath::from_uuids(vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+        ]);
+
+        assert!(path.contains("a"));
+        assert!(path.contains("b"));
+        assert!(path.contains("c"));
+        assert!(!path.contains("d"));
+        assert!(!path.contains(""));
+    }
+
+    #[test]
+    fn test_conversation_turn_struct() {
+        let turn = ConversationTurn {
+            user_message: None,
+            assistant_message: None,
+            tool_uses: vec![],
+            tool_results: vec![],
+        };
+
+        assert!(turn.user_message.is_none());
+        assert!(turn.assistant_message.is_none());
+        assert!(turn.tool_uses.is_empty());
+        assert!(turn.tool_results.is_empty());
+    }
+
+    #[test]
+    fn test_depth_first_iterator_empty() {
+        // Create an empty conversation
+        let conversation = Conversation::from_entries(vec![]).unwrap();
+        let mut iter = conversation.iter_depth_first();
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_breadth_first_iterator_empty() {
+        let conversation = Conversation::from_entries(vec![]).unwrap();
+        let mut iter = conversation.iter_breadth_first();
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_main_thread_iterator_empty() {
+        let conversation = Conversation::from_entries(vec![]).unwrap();
+        let mut iter = conversation.iter_main_thread();
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_conversation_leaves_empty() {
+        let conversation = Conversation::from_entries(vec![]).unwrap();
+        assert!(conversation.leaves().is_empty());
+    }
+
+    #[test]
+    fn test_conversation_nodes_at_depth_empty() {
+        let conversation = Conversation::from_entries(vec![]).unwrap();
+        assert!(conversation.nodes_at_depth(0).is_empty());
+        assert!(conversation.nodes_at_depth(1).is_empty());
+    }
+
+    #[test]
+    fn test_conversation_branch_paths_empty() {
+        let conversation = Conversation::from_entries(vec![]).unwrap();
+        assert!(conversation.branch_paths().is_empty());
+    }
+
+    #[test]
+    fn test_conversation_turns_empty() {
+        let conversation = Conversation::from_entries(vec![]).unwrap();
+        assert!(conversation.turns().is_empty());
+    }
+
+    #[test]
+    fn test_conversation_path_to_nonexistent() {
+        let conversation = Conversation::from_entries(vec![]).unwrap();
+        assert!(conversation.path_to("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_conversation_subtree_nonexistent() {
+        let conversation = Conversation::from_entries(vec![]).unwrap();
+        assert!(conversation.subtree("nonexistent").is_empty());
+    }
+
+    #[test]
+    fn test_conversation_subtree_size_nonexistent() {
+        let conversation = Conversation::from_entries(vec![]).unwrap();
+        assert_eq!(conversation.subtree_size("nonexistent"), 0);
+    }
+
+    #[test]
+    fn test_conversation_common_ancestor_nonexistent() {
+        let conversation = Conversation::from_entries(vec![]).unwrap();
+        assert!(conversation.common_ancestor("a", "b").is_none());
     }
 }
