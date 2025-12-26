@@ -84,6 +84,7 @@ impl SessionAnalytics {
 
                 for result in tool_results {
                     if result.is_explicit_error() {
+                        self.message_counts.tool_errors += 1;
                         *self.error_counts.entry("tool_error".to_string()).or_insert(0) += 1;
                     }
                 }
@@ -296,6 +297,8 @@ pub struct MessageCounts {
     pub tool_uses: usize,
     /// Tool result blocks.
     pub tool_results: usize,
+    /// Tool errors (tool results with is_error=true).
+    pub tool_errors: usize,
     /// Thinking blocks.
     pub thinking_blocks: usize,
     /// Image blocks.
@@ -1009,11 +1012,23 @@ impl EfficiencyMetrics {
             0.0
         };
 
-        // Thinking ratio is hard to calculate without tracking thinking tokens separately
-        let thinking_ratio = 0.0; // Placeholder
+        // Thinking ratio: percentage of assistant output blocks that are thinking
+        let thinking_blocks = analytics.message_counts.thinking_blocks as f64;
+        let text_blocks = analytics.message_counts.text_blocks as f64;
+        let thinking_ratio = if thinking_blocks + text_blocks > 0.0 {
+            thinking_blocks / (thinking_blocks + text_blocks) * 100.0
+        } else {
+            0.0
+        };
 
-        // Tool success rate - we'd need error tracking for this
-        let tool_success_rate = 100.0; // Placeholder - assume 100% for now
+        // Tool success rate: percentage of tool results that succeeded
+        let tool_results = analytics.message_counts.tool_results as f64;
+        let tool_errors = analytics.message_counts.tool_errors as f64;
+        let tool_success_rate = if tool_results > 0.0 {
+            (tool_results - tool_errors) / tool_results * 100.0
+        } else {
+            100.0 // No tool results means no failures
+        };
 
         Self {
             tokens_per_message,
@@ -1033,11 +1048,15 @@ impl EfficiencyMetrics {
              - Tokens per message:     {:.0}\n\
              - Tool uses per session:  {:.1}\n\
              - Cache hit rate:         {:.1}%\n\
-             - Avg session duration:   {:.0} minutes",
+             - Avg session duration:   {:.0} minutes\n\
+             - Thinking ratio:         {:.1}%\n\
+             - Tool success rate:      {:.1}%",
             self.tokens_per_message,
             self.tool_uses_per_session,
             self.overall_cache_hit_rate,
-            self.avg_session_duration_mins
+            self.avg_session_duration_mins,
+            self.thinking_ratio,
+            self.tool_success_rate
         )
     }
 }
@@ -1365,6 +1384,7 @@ impl ProjectAnalytics {
         self.message_counts.system += session.message_counts.system;
         self.message_counts.tool_uses += session.message_counts.tool_uses;
         self.message_counts.tool_results += session.message_counts.tool_results;
+        self.message_counts.tool_errors += session.message_counts.tool_errors;
         self.message_counts.thinking_blocks += session.message_counts.thinking_blocks;
 
         // Merge tool counts
@@ -2009,6 +2029,49 @@ mod tests {
         assert!(report.contains("Tokens per message:     500"));
         assert!(report.contains("Tool uses per session:  5.0"));
         assert!(report.contains("Cache hit rate:         75.0%"));
+        assert!(report.contains("Thinking ratio:         0.0%"));
+        assert!(report.contains("Tool success rate:      100.0%"));
+    }
+
+    #[test]
+    fn test_efficiency_metrics_thinking_and_tool_success() {
+        let mut analytics = ProjectAnalytics::default();
+        analytics.session_count = 5;
+        analytics.message_counts.thinking_blocks = 20;
+        analytics.message_counts.text_blocks = 80;
+        analytics.message_counts.tool_results = 50;
+        analytics.message_counts.tool_errors = 5;
+        analytics.message_counts.tool_uses = 50;
+        analytics.total_duration = Duration::hours(5);
+
+        let metrics = EfficiencyMetrics::from_project(&analytics);
+
+        // thinking_ratio = 20 / (20 + 80) * 100 = 20%
+        assert!((metrics.thinking_ratio - 20.0).abs() < 0.01);
+
+        // tool_success_rate = (50 - 5) / 50 * 100 = 90%
+        assert!((metrics.tool_success_rate - 90.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_efficiency_metrics_edge_cases() {
+        // No thinking or text blocks
+        let mut analytics = ProjectAnalytics::default();
+        let metrics = EfficiencyMetrics::from_project(&analytics);
+        assert_eq!(metrics.thinking_ratio, 0.0);
+        assert_eq!(metrics.tool_success_rate, 100.0); // No results = no failures
+
+        // 100% thinking
+        analytics.message_counts.thinking_blocks = 10;
+        analytics.message_counts.text_blocks = 0;
+        let metrics = EfficiencyMetrics::from_project(&analytics);
+        assert!((metrics.thinking_ratio - 100.0).abs() < 0.01);
+
+        // All tool results are errors
+        analytics.message_counts.tool_results = 10;
+        analytics.message_counts.tool_errors = 10;
+        let metrics = EfficiencyMetrics::from_project(&analytics);
+        assert!((metrics.tool_success_rate - 0.0).abs() < 0.01);
     }
 
     #[test]
