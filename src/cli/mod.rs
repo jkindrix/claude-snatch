@@ -353,8 +353,8 @@ pub struct ExportArgs {
     pub session: Option<String>,
 
     /// Output file path (stdout if not specified).
-    #[arg(short = 'o', long)]
-    pub output: Option<PathBuf>,
+    #[arg(short = 'O', long = "out")]
+    pub output_file: Option<PathBuf>,
 
     /// Export format.
     #[arg(short = 'f', long, default_value = "markdown", env = "SNATCH_EXPORT_FORMAT")]

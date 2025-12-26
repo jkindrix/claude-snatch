@@ -123,13 +123,35 @@ impl Project {
         Ok(self.sessions()?.into_iter().filter(|s| s.is_subagent()).collect())
     }
 
-    /// Find a session by its ID.
+    /// Find a session by its ID (supports both full and prefix matching).
+    ///
+    /// This will first try an exact match. If no exact match is found and
+    /// the provided ID is shorter than a full UUID (36 characters), it will
+    /// try prefix matching. If multiple sessions match the prefix, returns None.
     pub fn find_session(&self, session_id: &str) -> Result<Option<Session>> {
-        for session in self.sessions()? {
+        let sessions = self.sessions()?;
+
+        // First try exact match
+        for session in &sessions {
             if session.session_id() == session_id {
-                return Ok(Some(session));
+                return Ok(Some(session.clone()));
             }
         }
+
+        // If no exact match and the ID is a prefix (shorter than full UUID),
+        // try prefix matching
+        if session_id.len() < 36 {
+            let matches: Vec<_> = sessions
+                .into_iter()
+                .filter(|s| s.session_id().starts_with(session_id))
+                .collect();
+
+            // Only return if there's exactly one match (no ambiguity)
+            if matches.len() == 1 {
+                return Ok(Some(matches.into_iter().next().unwrap()));
+            }
+        }
+
         Ok(None)
     }
 

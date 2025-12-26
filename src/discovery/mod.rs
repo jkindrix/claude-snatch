@@ -165,13 +165,37 @@ impl ClaudeDirectory {
     }
 
     /// Find a session by UUID across all projects.
+    ///
+    /// Supports both full UUIDs and short prefixes (e.g., first 8 characters).
+    /// For prefix matching, returns the session only if there's exactly one match
+    /// across all projects to avoid ambiguity.
     pub fn find_session(&self, session_id: &str) -> Result<Option<Session>> {
+        // For full UUIDs (36 chars), just find first match
+        if session_id.len() >= 36 {
+            for project in self.projects()? {
+                if let Some(session) = project.find_session(session_id)? {
+                    return Ok(Some(session));
+                }
+            }
+            return Ok(None);
+        }
+
+        // For prefixes, collect all matches to ensure uniqueness
+        let mut matches: Vec<Session> = Vec::new();
         for project in self.projects()? {
-            if let Some(session) = project.find_session(session_id)? {
-                return Ok(Some(session));
+            for session in project.sessions()? {
+                if session.session_id().starts_with(session_id) {
+                    matches.push(session);
+                }
             }
         }
-        Ok(None)
+
+        // Only return if exactly one match (no ambiguity)
+        if matches.len() == 1 {
+            Ok(Some(matches.into_iter().next().unwrap()))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Get global settings file path.

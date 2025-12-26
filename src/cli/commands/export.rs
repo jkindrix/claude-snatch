@@ -57,14 +57,14 @@ fn export_single_session(cli: &Cli, args: &ExportArgs, session_id: &str) -> Resu
     }
 
     // Export the session
-    let exported = export_session(cli, args, &session, args.output.as_ref())?;
+    let exported = export_session(cli, args, &session, args.output_file.as_ref())?;
 
     // Print success message to stderr if writing to file
-    if exported && args.output.is_some() && !cli.quiet {
+    if exported && args.output_file.is_some() && !cli.quiet {
         eprintln!(
             "Exported session {} to {}",
             session_id,
-            args.output.as_ref().unwrap().display()
+            args.output_file.as_ref().unwrap().display()
         );
     }
 
@@ -144,7 +144,7 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
 
     // Handle SQLite separately as it manages its own file
     if matches!(args.format, ExportFormatArg::Sqlite) {
-        if let Some(output_path) = &args.output {
+        if let Some(output_path) = &args.output_file {
             let exporter = SqliteExporter::new();
             exporter.export_to_file(&conversation, output_path, &options)?;
             if !cli.quiet {
@@ -165,7 +165,7 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
     }
 
     // For file output, use atomic writes
-    if let Some(output_path) = &args.output {
+    if let Some(output_path) = &args.output_file {
         let mut atomic = AtomicFile::create(output_path)?;
         let mut output = std::io::BufWriter::new(atomic.writer());
 
@@ -355,7 +355,7 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
     sessions.sort_by(|a, b| b.modified_time().cmp(&a.modified_time()));
 
     // Determine output directory
-    let output_dir = if let Some(ref output) = args.output {
+    let output_dir = if let Some(ref output) = args.output_file {
         // If output is a directory, use it; otherwise use its parent
         if output.is_dir() {
             output.clone()
