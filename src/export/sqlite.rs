@@ -24,6 +24,8 @@ pub struct SessionMeta {
     pub project_path: Option<String>,
     /// Whether this is a subagent session.
     pub is_subagent: bool,
+    /// Agent hash for subagent sessions (e.g., "a5", "ae").
+    pub agent_hash: Option<String>,
     /// File size in bytes.
     pub file_size: Option<u64>,
     /// Git branch at time of session.
@@ -215,6 +217,7 @@ impl SqliteExporter {
                 version TEXT,
                 project_path TEXT,
                 is_subagent INTEGER DEFAULT 0,
+                agent_hash TEXT,
                 file_size INTEGER,
                 git_branch TEXT,
                 git_commit TEXT,
@@ -405,17 +408,19 @@ impl SqliteExporter {
         // Extract metadata fields
         let project_path = meta.and_then(|m| m.project_path.clone());
         let is_subagent = meta.map(|m| m.is_subagent).unwrap_or(false);
+        let agent_hash = meta.and_then(|m| m.agent_hash.clone());
         let file_size = meta.and_then(|m| m.file_size.map(|s| s as i64));
         let git_commit = meta.and_then(|m| m.git_commit.clone());
 
         conn.execute(
-            "INSERT INTO sessions (session_id, version, project_path, is_subagent, file_size, git_branch, git_commit, start_time, end_time, duration_seconds)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO sessions (session_id, version, project_path, is_subagent, agent_hash, file_size, git_branch, git_commit, start_time, end_time, duration_seconds)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 session_id,
                 version,
                 project_path,
                 is_subagent,
+                agent_hash,
                 file_size,
                 git_branch,
                 git_commit,

@@ -617,6 +617,7 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
                         let meta = SessionMeta {
                             project_path: Some(session.project_path().to_string()),
                             is_subagent: session.is_subagent(),
+                            agent_hash: session.agent_hash().map(String::from),
                             file_size: Some(session.file_size()),
                             git_branch: None,
                             git_commit: None,
@@ -742,6 +743,7 @@ fn export_session(
             let meta = SessionMeta {
                 project_path: Some(session.project_path().to_string()),
                 is_subagent: session.is_subagent(),
+                agent_hash: session.agent_hash().map(String::from),
                 file_size: Some(session.file_size()),
                 git_branch: None,
                 git_commit: None,
