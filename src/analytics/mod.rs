@@ -815,6 +815,9 @@ impl UsageTrends {
                 .sum();
             let sum_x2: f64 = (0..data_points.len()).map(|i| (i * i) as f64).sum();
 
+            // Linear regression slope formula: (n * Σxy - Σx * Σy) / (n * Σx² - (Σx)²)
+            // The `sum_x * sum_x` is intentional - it's (Σx)² not a typo for `n * sum_x`
+            #[allow(clippy::suspicious_operation_groupings)]
             let slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x);
             slope
         } else {
