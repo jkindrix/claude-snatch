@@ -353,10 +353,26 @@ impl SqliteExporter {
 
                 let message_id = conn.last_insert_rowid();
 
-                // Extract content blocks from user messages (tool results, images)
-                if let crate::model::message::UserContent::Blocks(blocks) = &user.message {
-                    for (order, block) in blocks.content.iter().enumerate() {
-                        self.insert_content_block(conn, message_id, block, order as i32, options)?;
+                // Insert content blocks for user messages
+                match &user.message {
+                    crate::model::message::UserContent::Simple(simple) => {
+                        // Add text content to content_blocks for schema consistency
+                        if !simple.content.is_empty() {
+                            conn.execute(
+                                "INSERT INTO content_blocks (message_fk, block_type, content, block_order)
+                                 VALUES (?1, 'text', ?2, 0)",
+                                params![message_id, simple.content],
+                            )
+                            .map_err(|e| {
+                                SnatchError::export(format!("Failed to insert user text block: {}", e))
+                            })?;
+                        }
+                    }
+                    crate::model::message::UserContent::Blocks(blocks) => {
+                        // Extract content blocks from user messages (tool results, images, text)
+                        for (order, block) in blocks.content.iter().enumerate() {
+                            self.insert_content_block(conn, message_id, block, order as i32, options)?;
+                        }
                     }
                 }
             }

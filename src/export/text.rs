@@ -193,6 +193,24 @@ impl TextExporter {
         Ok(())
     }
 
+    /// Check if a user message has displayable text content.
+    fn has_user_text_content(user: &UserMessage, options: &ExportOptions) -> bool {
+        match &user.message {
+            crate::model::UserContent::Simple(simple) => !simple.content.trim().is_empty(),
+            crate::model::UserContent::Blocks(blocks) => {
+                blocks.content.iter().any(|block| {
+                    match block {
+                        ContentBlock::Text(t) => !t.text.trim().is_empty(),
+                        ContentBlock::ToolResult(_) => options.should_include_tool_results(),
+                        ContentBlock::ToolUse(_) => options.should_include_tool_use(),
+                        ContentBlock::Thinking(_) => options.should_include_thinking(),
+                        ContentBlock::Image(_) => true,
+                    }
+                })
+            }
+        }
+    }
+
     /// Write a user message.
     fn write_user_message<W: Write>(
         &self,
@@ -200,6 +218,11 @@ impl TextExporter {
         user: &UserMessage,
         options: &ExportOptions,
     ) -> Result<()> {
+        // Skip empty user messages (e.g., tool result placeholders with no text)
+        if !Self::has_user_text_content(user, options) {
+            return Ok(());
+        }
+
         write!(writer, "[USER]")?;
         if options.include_timestamps {
             write!(writer, " ({})", format_timestamp(&user.timestamp))?;
