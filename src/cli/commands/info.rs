@@ -105,10 +105,22 @@ fn show_session_info(
                 println!("Started:      {}", start.format("%Y-%m-%d %H:%M:%S UTC"));
             }
             if let Some(end) = &summary.end_time {
-                println!("Ended:        {}", end.format("%Y-%m-%d %H:%M:%S UTC"));
+                // Use "Last Activity" for active sessions, "Ended" for inactive
+                let label = if summary.state.is_active() {
+                    "Last Activity"
+                } else {
+                    "Ended"
+                };
+                println!("{label}:{}{}",
+                    if label.len() < 8 { "        " } else { "  " },
+                    end.format("%Y-%m-%d %H:%M:%S UTC")
+                );
             }
             if let Some(duration) = summary.duration_human() {
-                println!("Duration:     {duration}");
+                // Only show duration for inactive sessions (completed)
+                if !summary.state.is_active() {
+                    println!("Duration:     {duration}");
+                }
             }
             println!();
 
@@ -161,7 +173,10 @@ fn show_tree_structure(session: &crate::discovery::Session) -> Result<()> {
     println!("  Branches:     {}", stats.branch_count);
     println!("  Tool Uses:    {}", stats.tool_uses);
     println!("  Tool Results: {}", stats.tool_results);
-    println!("  Balanced:     {}", stats.tools_balanced());
+    println!(
+        "  Balanced:     {} (tool calls match results)",
+        if stats.tools_balanced() { "yes" } else { "no" }
+    );
 
     if stats.branch_count > 0 {
         println!();

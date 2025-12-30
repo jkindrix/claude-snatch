@@ -184,12 +184,12 @@ impl Session {
         let mut parser = JsonlParser::new().with_lenient(true);
         let entries = parser.parse_file(&self.path)?;
 
-        let first_entry = entries.first();
-        let last_entry = entries.last();
-
-        let start_time = first_entry.and_then(|e| e.timestamp());
-        let end_time = last_entry.and_then(|e| e.timestamp());
-        let version = first_entry.and_then(|e| e.version().map(String::from));
+        // Find the first entry with a timestamp (Summary entries don't have timestamps)
+        let start_time = entries.iter().find_map(|e| e.timestamp());
+        // Find the last entry with a timestamp
+        let end_time = entries.iter().rev().find_map(|e| e.timestamp());
+        // Get version from first entry that has one
+        let version = entries.iter().find_map(|e| e.version().map(String::from));
         let schema_version = version
             .as_deref()
             .map(SchemaVersion::from_version_string);

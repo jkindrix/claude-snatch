@@ -209,17 +209,39 @@ fn validate_session(
         }
     }
 
-    // Basic validation
+    // Basic validation - only check fields for entry types that require them
     for (i, entry) in entries.iter().enumerate() {
-        // Check for missing required fields
-        if entry.uuid().is_none() {
-            result.errors.push(format!("Entry {i}: missing UUID"));
+        // Only Assistant, User, and System messages require UUIDs
+        // Summary, FileHistorySnapshot, QueueOperation, and TurnEnd legitimately lack UUIDs
+        let requires_uuid = matches!(
+            entry,
+            LogEntry::Assistant(_) | LogEntry::User(_) | LogEntry::System(_)
+        );
+
+        if requires_uuid && entry.uuid().is_none() {
+            result.errors.push(format!(
+                "Entry {i} ({}): missing UUID",
+                entry.message_type()
+            ));
             result.is_valid = false;
         }
 
-        // Validate timestamps
-        if entry.timestamp().is_none() && !matches!(entry, LogEntry::TurnEnd(_)) {
-            result.warnings.push(format!("Entry {i}: missing timestamp"));
+        // Only certain entry types have timestamps
+        // Summary and FileHistorySnapshot legitimately lack timestamps
+        let requires_timestamp = matches!(
+            entry,
+            LogEntry::Assistant(_)
+                | LogEntry::User(_)
+                | LogEntry::System(_)
+                | LogEntry::QueueOperation(_)
+                | LogEntry::TurnEnd(_)
+        );
+
+        if requires_timestamp && entry.timestamp().is_none() {
+            result.warnings.push(format!(
+                "Entry {i} ({}): missing timestamp",
+                entry.message_type()
+            ));
         }
     }
 

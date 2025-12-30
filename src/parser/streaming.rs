@@ -159,6 +159,12 @@ impl SessionState {
             Self::PossiblyActive => "possibly active",
         }
     }
+
+    /// Check if this state indicates the session is active.
+    #[must_use]
+    pub const fn is_active(&self) -> bool {
+        matches!(self, Self::RecentlyActive | Self::PossiblyActive)
+    }
 }
 
 /// Check if a session file is currently active.

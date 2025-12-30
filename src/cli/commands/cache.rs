@@ -4,6 +4,7 @@
 
 use crate::cache::global_cache;
 use crate::cli::{CacheAction, CacheArgs, Cli};
+use crate::discovery::format_size;
 use crate::error::Result;
 
 /// Run the cache command.
@@ -39,9 +40,9 @@ fn show_stats() -> Result<()> {
     println!("Metadata Cache:");
     println!("  Entries: {} / {}", stats.metadata.entry_count, stats.metadata.max_entries);
     println!(
-        "  Size: {} / {} bytes ({:.1}%)",
-        stats.metadata.current_size,
-        stats.metadata.max_size,
+        "  Size: {} / {} ({:.1}%)",
+        format_size(stats.metadata.current_size as u64),
+        format_size(stats.metadata.max_size as u64),
         stats.metadata.size_usage_percent()
     );
     println!();
@@ -49,16 +50,16 @@ fn show_stats() -> Result<()> {
     println!("Entries Cache:");
     println!("  Entries: {} / {}", stats.entries.entry_count, stats.entries.max_entries);
     println!(
-        "  Size: {} / {} bytes ({:.1}%)",
-        stats.entries.current_size,
-        stats.entries.max_size,
+        "  Size: {} / {} ({:.1}%)",
+        format_size(stats.entries.current_size as u64),
+        format_size(stats.entries.max_size as u64),
         stats.entries.size_usage_percent()
     );
     println!();
 
     println!("Total:");
     println!("  Entries: {}", stats.total_entries());
-    println!("  Size: {} bytes", stats.total_size());
+    println!("  Size: {}", format_size(stats.total_size() as u64));
 
     Ok(())
 }
@@ -71,9 +72,9 @@ fn clear_cache() -> Result<()> {
     cache.clear();
 
     println!(
-        "Cleared {} entries ({} bytes)",
+        "Cleared {} entries ({})",
         stats_before.total_entries(),
-        stats_before.total_size()
+        format_size(stats_before.total_size() as u64)
     );
 
     Ok(())
@@ -106,9 +107,9 @@ fn show_status() -> Result<()> {
     if stats.enabled {
         println!("Cache: enabled");
         println!(
-            "Usage: {} entries, {} bytes",
+            "Usage: {} entries, {}",
             stats.total_entries(),
-            stats.total_size()
+            format_size(stats.total_size() as u64)
         );
     } else {
         println!("Cache: disabled");

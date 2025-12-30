@@ -169,6 +169,10 @@ impl ClaudeDirectory {
     /// Supports both full UUIDs and short prefixes (e.g., first 8 characters).
     /// For prefix matching, returns the session only if there's exactly one match
     /// across all projects to avoid ambiguity.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AmbiguousSessionPrefix` if the prefix matches multiple sessions.
     pub fn find_session(&self, session_id: &str) -> Result<Option<Session>> {
         // For full UUIDs (36 chars), just find first match
         if session_id.len() >= 36 {
@@ -190,11 +194,13 @@ impl ClaudeDirectory {
             }
         }
 
-        // Only return if exactly one match (no ambiguity)
-        if matches.len() == 1 {
-            Ok(Some(matches.into_iter().next().unwrap()))
-        } else {
-            Ok(None)
+        match matches.len() {
+            0 => Ok(None),
+            1 => Ok(Some(matches.into_iter().next().unwrap())),
+            n => Err(SnatchError::AmbiguousSessionPrefix {
+                prefix: session_id.to_string(),
+                match_count: n,
+            }),
         }
     }
 
@@ -304,6 +310,26 @@ pub fn format_size(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+/// Format a number with thousand separators (e.g., 1234567 -> "1,234,567").
+#[must_use]
+pub fn format_number(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result
+}
+
+/// Format a number with thousand separators (usize version).
+#[must_use]
+pub fn format_count(n: usize) -> String {
+    format_number(n as u64)
 }
 
 #[cfg(test)]

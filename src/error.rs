@@ -51,6 +51,15 @@ pub enum SnatchError {
         session_id: String,
     },
 
+    /// Session prefix is ambiguous (matches multiple sessions).
+    #[error("Session prefix '{prefix}' is ambiguous ({match_count} matches). Use a longer prefix or full UUID.")]
+    AmbiguousSessionPrefix {
+        /// The prefix that was used.
+        prefix: String,
+        /// Number of sessions that matched.
+        match_count: usize,
+    },
+
     /// Project not found.
     #[error("Project not found: {project_path}")]
     ProjectNotFound {
@@ -299,7 +308,7 @@ impl SnatchError {
     pub const fn exit_code(&self) -> i32 {
         match self {
             Self::ParseError { .. } => 2,
-            Self::FileNotFound { .. } | Self::SessionNotFound { .. } | Self::ProjectNotFound { .. } => 3,
+            Self::FileNotFound { .. } | Self::SessionNotFound { .. } | Self::AmbiguousSessionPrefix { .. } | Self::ProjectNotFound { .. } => 3,
             Self::PermissionDenied { .. } => 4,
             Self::ConfigError { .. } => 5,
             Self::ExportError { .. } => 6,

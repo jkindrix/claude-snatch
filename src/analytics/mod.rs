@@ -233,6 +233,14 @@ impl SessionAnalytics {
         self.error_counts.values().sum()
     }
 
+    /// Get error breakdown by type.
+    #[must_use]
+    pub fn error_breakdown(&self) -> Vec<(&str, usize)> {
+        let mut errors: Vec<_> = self.error_counts.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+        errors.sort_by(|a, b| b.1.cmp(&a.1));
+        errors
+    }
+
     /// Get cache efficiency percentage.
     #[must_use]
     pub fn cache_efficiency(&self) -> f64 {

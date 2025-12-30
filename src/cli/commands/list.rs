@@ -68,9 +68,11 @@ fn list_projects<W: Write>(
         }
     }
 
-    // Apply limit
-    if let Some(limit) = args.limit {
-        projects.truncate(limit);
+    // Apply limit (0 means unlimited)
+    let total_count = projects.len();
+    let truncated = args.limit > 0 && total_count > args.limit;
+    if args.limit > 0 {
+        projects.truncate(args.limit);
     }
 
     // Output
@@ -97,7 +99,11 @@ fn list_projects<W: Write>(
                 return Ok(());
             }
 
-            writeln!(writer, "Projects ({} found):", projects.len())?;
+            if truncated {
+                writeln!(writer, "Projects (showing {} of {}, use -n 0 for all):", projects.len(), total_count)?;
+            } else {
+                writeln!(writer, "Projects ({} found):", projects.len())?;
+            }
             writeln!(writer)?;
 
             for project in &projects {
@@ -172,9 +178,11 @@ fn list_sessions<W: Write>(
         }
     }
 
-    // Apply limit
-    if let Some(limit) = args.limit {
-        sessions.truncate(limit);
+    // Apply limit (0 means unlimited)
+    let total_count = sessions.len();
+    let truncated = args.limit > 0 && total_count > args.limit;
+    if args.limit > 0 {
+        sessions.truncate(args.limit);
     }
 
     // Output
@@ -197,7 +205,7 @@ fn list_sessions<W: Write>(
                     id,
                     session.project_path(),
                     session.file_size(),
-                    session.modified_datetime().format("%Y-%m-%d %H:%M"),
+                    session.modified_datetime().format("%Y-%m-%d %H:%M:%S UTC"),
                     session.is_subagent()
                 )?;
             }
@@ -217,7 +225,11 @@ fn list_sessions<W: Write>(
                 return Ok(());
             }
 
-            writeln!(writer, "Sessions ({} found):", sessions.len())?;
+            if truncated {
+                writeln!(writer, "Sessions (showing {} of {}, use -n 0 for all):", sessions.len(), total_count)?;
+            } else {
+                writeln!(writer, "Sessions ({} found):", sessions.len())?;
+            }
             writeln!(writer)?;
 
             for session in &sessions {
@@ -237,7 +249,7 @@ fn list_sessions<W: Write>(
 
                 writeln!(writer)?;
                 writeln!(writer, "    Project: {}", session.project_path())?;
-                writeln!(writer, "    Modified: {}", session.modified_datetime().format("%Y-%m-%d %H:%M:%S"))?;
+                writeln!(writer, "    Modified: {}", session.modified_datetime().format("%Y-%m-%d %H:%M:%S UTC"))?;
 
                 if let Ok(state) = session.state() {
                     if state != crate::discovery::SessionState::Inactive {

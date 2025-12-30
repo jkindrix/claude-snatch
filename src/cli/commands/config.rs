@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use crate::cli::{Cli, ConfigArgs, ConfigAction, OutputFormat};
 use crate::config::{default_config_path, Config};
+use crate::discovery::format_size;
 use crate::error::{Result, SnatchError};
 
 /// Run the config command.
@@ -61,8 +62,16 @@ fn show_config(cli: &Cli) -> Result<()> {
             } else {
                 println!("  directory = # not set (auto-detect)");
             }
-            println!("  max_size = {}", config.cache.max_size);
-            println!("  ttl_seconds = {}", config.cache.ttl_seconds);
+            println!(
+                "  max_size = {} ({} bytes)",
+                format_size(config.cache.max_size),
+                config.cache.max_size
+            );
+            println!(
+                "  ttl_seconds = {} ({} seconds)",
+                format_duration_human(config.cache.ttl_seconds),
+                config.cache.ttl_seconds
+            );
         }
     }
 
@@ -244,4 +253,40 @@ fn parse_u64(s: &str) -> Result<u64> {
     s.parse().map_err(|_| SnatchError::ConfigError {
         message: format!("Invalid number: {s}"),
     })
+}
+
+/// Format seconds as human-readable duration.
+fn format_duration_human(seconds: u64) -> String {
+    if seconds == 0 {
+        return "0 seconds".to_string();
+    }
+
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let secs = seconds % 60;
+
+    let mut parts = Vec::new();
+    if hours > 0 {
+        parts.push(if hours == 1 {
+            "1 hour".to_string()
+        } else {
+            format!("{hours} hours")
+        });
+    }
+    if minutes > 0 {
+        parts.push(if minutes == 1 {
+            "1 minute".to_string()
+        } else {
+            format!("{minutes} minutes")
+        });
+    }
+    if secs > 0 {
+        parts.push(if secs == 1 {
+            "1 second".to_string()
+        } else {
+            format!("{secs} seconds")
+        });
+    }
+
+    parts.join(" ")
 }

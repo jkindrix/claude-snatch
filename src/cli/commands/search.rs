@@ -520,7 +520,7 @@ fn output_full_results(
                 }
 
                 println!();
-                println!("  [{} in {}]", result.entry_type, result.location);
+                println!("  [{}]", format_match_label(&result.entry_type, &result.location));
 
                 if args.context > 0 && !result.context_before.is_empty() {
                     for line in result.context_before.lines() {
@@ -795,6 +795,30 @@ fn find_fuzzy_matches(
     }
 
     matches
+}
+
+/// Format match label in a non-redundant way.
+///
+/// Simplifies labels like "user in user message" to just "user".
+fn format_match_label(entry_type: &str, location: &str) -> String {
+    // Handle cases where entry_type and location are redundant
+    match (entry_type, location) {
+        // Simple message types - just show the type
+        ("user", "user message") => "user".to_string(),
+        ("summary", "summary") => "summary".to_string(),
+        ("system", "system") => "system".to_string(),
+        // Assistant text - just show "assistant"
+        ("assistant", "assistant text") => "assistant".to_string(),
+        // Assistant thinking - show "assistant/thinking"
+        ("assistant", "thinking") => "assistant/thinking".to_string(),
+        // Tool use - show "tool: name"
+        ("assistant", loc) if loc.starts_with("tool:") => loc.to_string(),
+        // Tool result - show "tool result"
+        ("assistant", "tool result") => "tool result".to_string(),
+        // Default: show "type/location" if different, or just type
+        (t, l) if t == l => t.to_string(),
+        (t, l) => format!("{t}/{l}"),
+    }
 }
 
 #[cfg(test)]

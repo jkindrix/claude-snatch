@@ -212,13 +212,13 @@ run-release *args:
 # Install
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Install locally
+# Install locally (all features)
 install:
-    {{cargo}} install --path . --locked
-
-# Install with all features
-install-all:
     {{cargo}} install --path . --locked --all-features
+
+# Install minimal (no optional features)
+install-minimal:
+    {{cargo}} install --path . --locked
 
 # Uninstall
 uninstall:

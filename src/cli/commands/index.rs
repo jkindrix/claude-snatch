@@ -3,6 +3,7 @@
 //! Manages the full-text search index for fast searching across sessions.
 
 use crate::cli::{Cli, IndexArgs, IndexSubcommand, OutputFormat};
+use crate::discovery::{format_count, format_number, format_size};
 use crate::error::Result;
 use crate::index::SearchIndex;
 
@@ -52,10 +53,11 @@ fn run_build(cli: &Cli, args: &crate::cli::IndexBuildArgs) -> Result<()> {
         _ => {
             println!(
                 "Indexed {} documents from {} sessions",
-                result.documents_indexed, result.sessions_indexed
+                format_count(result.documents_indexed),
+                format_count(result.sessions_indexed)
             );
             if !result.errors.is_empty() {
-                println!("Errors: {}", result.errors.len());
+                println!("Errors: {}", format_count(result.errors.len()));
                 if cli.verbose {
                     for (session, error) in &result.errors {
                         eprintln!("  {}: {}", &session[..8.min(session.len())], error);
@@ -107,10 +109,11 @@ fn run_rebuild(cli: &Cli, args: &crate::cli::IndexRebuildArgs) -> Result<()> {
         _ => {
             println!(
                 "Rebuilt index: {} documents from {} sessions",
-                result.documents_indexed, result.sessions_indexed
+                format_count(result.documents_indexed),
+                format_count(result.sessions_indexed)
             );
             if !result.errors.is_empty() {
-                println!("Errors: {}", result.errors.len());
+                println!("Errors: {}", format_count(result.errors.len()));
                 if cli.verbose {
                     for (session, error) in &result.errors {
                         eprintln!("  {}: {}", &session[..8.min(session.len())], error);
@@ -136,11 +139,8 @@ fn run_status(cli: &Cli) -> Result<()> {
             println!("Search Index Status");
             println!("==================");
             println!("Path: {}", index.path().display());
-            println!("Documents: {}", stats.document_count);
-            println!(
-                "Size: {} KB",
-                stats.size_bytes / 1024
-            );
+            println!("Documents: {}", format_number(stats.document_count));
+            println!("Size: {}", format_size(stats.size_bytes));
             if stats.document_count == 0 {
                 println!();
                 println!("Index is empty. Run 'snatch index build' to create it.");
@@ -233,7 +233,7 @@ fn run_search(cli: &Cli, args: &crate::cli::IndexSearchArgs) -> Result<()> {
                 return Ok(());
             }
 
-            println!("Found {} matches:", results.len());
+            println!("Found {} matches:", format_count(results.len()));
             println!();
 
             let mut current_session = String::new();

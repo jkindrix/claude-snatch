@@ -127,8 +127,14 @@ impl Project {
     ///
     /// This will first try an exact match. If no exact match is found and
     /// the provided ID is shorter than a full UUID (36 characters), it will
-    /// try prefix matching. If multiple sessions match the prefix, returns None.
+    /// try prefix matching.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AmbiguousSessionPrefix` if the prefix matches multiple sessions.
     pub fn find_session(&self, session_id: &str) -> Result<Option<Session>> {
+        use crate::error::SnatchError;
+
         let sessions = self.sessions()?;
 
         // First try exact match
@@ -146,9 +152,15 @@ impl Project {
                 .filter(|s| s.session_id().starts_with(session_id))
                 .collect();
 
-            // Only return if there's exactly one match (no ambiguity)
-            if matches.len() == 1 {
-                return Ok(Some(matches.into_iter().next().unwrap()));
+            match matches.len() {
+                0 => return Ok(None),
+                1 => return Ok(Some(matches.into_iter().next().unwrap())),
+                n => {
+                    return Err(SnatchError::AmbiguousSessionPrefix {
+                        prefix: session_id.to_string(),
+                        match_count: n,
+                    })
+                }
             }
         }
 

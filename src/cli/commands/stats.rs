@@ -6,7 +6,7 @@ use rayon::prelude::*;
 
 use crate::analytics::{ProjectAnalytics, SessionAnalytics};
 use crate::cli::{Cli, OutputFormat, StatsArgs};
-use crate::discovery::Session;
+use crate::discovery::{format_count, format_number, Session};
 use crate::error::{Result, SnatchError};
 use crate::reconstruction::Conversation;
 
@@ -127,30 +127,30 @@ fn output_session_stats(cli: &Cli, args: &StatsArgs, analytics: &SessionAnalytic
 
             // Token usage
             println!("Token Usage:");
-            println!("  Input:  {:>10} tokens", summary.input_tokens);
-            println!("  Output: {:>10} tokens", summary.output_tokens);
-            println!("  Total:  {:>10} tokens", summary.total_tokens);
+            println!("  Input:  {:>14} tokens", format_number(summary.input_tokens));
+            println!("  Output: {:>14} tokens", format_number(summary.output_tokens));
+            println!("  Total:  {:>14} tokens", format_number(summary.total_tokens));
             println!("  Cache Hit Rate: {:.1}%", summary.cache_hit_rate);
             println!();
 
             // Messages
             println!("Messages:");
-            println!("  User:      {:>6}", summary.user_messages);
-            println!("  Assistant: {:>6}", summary.assistant_messages);
-            println!("  Total:     {:>6}", summary.total_messages);
+            println!("  User:      {:>10}", format_count(summary.user_messages));
+            println!("  Assistant: {:>10}", format_count(summary.assistant_messages));
+            println!("  Total:     {:>10}", format_count(summary.total_messages));
             println!();
 
             // Tools
             if summary.tool_invocations > 0 || args.tools || args.all {
                 println!("Tool Usage:");
-                println!("  Total Invocations: {}", summary.tool_invocations);
-                println!("  Unique Tools:      {}", summary.unique_tools);
+                println!("  Total Invocations: {}", format_count(summary.tool_invocations));
+                println!("  Unique Tools:      {}", format_count(summary.unique_tools));
 
                 if args.tools || args.all {
                     println!();
                     println!("  Top Tools:");
                     for (tool, count) in analytics.top_tools(10) {
-                        println!("    {tool}: {count}");
+                        println!("    {tool}: {}", format_count(count));
                     }
                 }
                 println!();
@@ -159,8 +159,11 @@ fn output_session_stats(cli: &Cli, args: &StatsArgs, analytics: &SessionAnalytic
             // Thinking
             if summary.thinking_blocks > 0 {
                 println!("Thinking:");
-                println!("  Blocks: {}", summary.thinking_blocks);
-                println!("  Avg Length: {} chars", analytics.thinking_stats.average_length());
+                println!("  Blocks: {}", format_count(summary.thinking_blocks));
+                println!(
+                    "  Avg Block Length: {} chars",
+                    format_count(analytics.thinking_stats.average_length())
+                );
                 println!();
             }
 
@@ -170,7 +173,19 @@ fn output_session_stats(cli: &Cli, args: &StatsArgs, analytics: &SessionAnalytic
             // Errors
             if summary.error_count > 0 {
                 println!();
-                println!("Errors: {}", summary.error_count);
+                println!("Errors: {}", format_count(summary.error_count));
+                let breakdown = analytics.error_breakdown();
+                if !breakdown.is_empty() {
+                    for (error_type, count) in breakdown {
+                        // Format error type for display (e.g., "tool_error" -> "Tool errors")
+                        let label = match error_type {
+                            "tool_error" => "Tool errors",
+                            "api_error" => "API errors",
+                            other => other,
+                        };
+                        println!("  {label}: {}", format_count(count));
+                    }
+                }
             }
         }
     }
@@ -207,7 +222,7 @@ fn output_project_stats(
             println!("Project Statistics: {project_path}");
             println!("{}", "=".repeat(20 + project_path.len()));
             println!();
-            println!("Sessions: {}", analytics.session_count);
+            println!("Sessions: {}", format_count(analytics.session_count));
             println!();
 
             // Duration
@@ -222,13 +237,13 @@ fn output_project_stats(
 
             // Token usage
             println!("Token Usage:");
-            println!("  Total: {} tokens", analytics.total_usage.usage.total_tokens());
+            println!("  Total: {} tokens", format_number(analytics.total_usage.usage.total_tokens()));
             println!();
 
             // Messages
             println!("Messages:");
-            println!("  User:      {}", analytics.message_counts.user);
-            println!("  Assistant: {}", analytics.message_counts.assistant);
+            println!("  User:      {}", format_count(analytics.message_counts.user));
+            println!("  Assistant: {}", format_count(analytics.message_counts.assistant));
             println!();
 
             // Tools
@@ -237,7 +252,7 @@ fn output_project_stats(
                 let mut tools: Vec<_> = analytics.tool_counts.iter().collect();
                 tools.sort_by(|a, b| b.1.cmp(a.1));
                 for (tool, count) in tools.iter().take(10) {
-                    println!("  {tool}: {count}");
+                    println!("  {tool}: {}", format_count(**count));
                 }
                 println!();
             }
@@ -246,7 +261,7 @@ fn output_project_stats(
             if args.models || args.all {
                 println!("Model Usage:");
                 for (model, count) in &analytics.model_usage {
-                    println!("  {model}: {count} uses");
+                    println!("  {model}: {} uses", format_number(*count));
                 }
                 println!();
             }
@@ -287,7 +302,7 @@ fn output_global_stats(cli: &Cli, args: &StatsArgs, analytics: &ProjectAnalytics
             println!("Global Statistics");
             println!("=================");
             println!();
-            println!("Total Sessions: {}", analytics.session_count);
+            println!("Total Sessions: {}", format_count(analytics.session_count));
             println!();
 
             // Duration
@@ -303,16 +318,16 @@ fn output_global_stats(cli: &Cli, args: &StatsArgs, analytics: &ProjectAnalytics
             // Token usage
             let usage = &analytics.total_usage.usage;
             println!("Token Usage:");
-            println!("  Input:  {} tokens", usage.total_input_tokens());
-            println!("  Output: {} tokens", usage.output_tokens);
-            println!("  Total:  {} tokens", usage.total_tokens());
+            println!("  Input:  {} tokens", format_number(usage.total_input_tokens()));
+            println!("  Output: {} tokens", format_number(usage.output_tokens));
+            println!("  Total:  {} tokens", format_number(usage.total_tokens()));
             println!();
 
             // Messages
             println!("Messages:");
-            println!("  User:      {}", analytics.message_counts.user);
-            println!("  Assistant: {}", analytics.message_counts.assistant);
-            println!("  Tool Uses: {}", analytics.message_counts.tool_uses);
+            println!("  User:      {}", format_count(analytics.message_counts.user));
+            println!("  Assistant: {}", format_count(analytics.message_counts.assistant));
+            println!("  Tool Uses: {}", format_count(analytics.message_counts.tool_uses));
             println!();
 
             // Top tools
@@ -321,7 +336,7 @@ fn output_global_stats(cli: &Cli, args: &StatsArgs, analytics: &ProjectAnalytics
                 let mut tools: Vec<_> = analytics.tool_counts.iter().collect();
                 tools.sort_by(|a, b| b.1.cmp(a.1));
                 for (tool, count) in tools.iter().take(10) {
-                    println!("  {tool}: {count}");
+                    println!("  {tool}: {}", format_count(**count));
                 }
                 println!();
             }
@@ -330,7 +345,7 @@ fn output_global_stats(cli: &Cli, args: &StatsArgs, analytics: &ProjectAnalytics
             if args.models || args.all {
                 println!("Model Usage:");
                 for (model, count) in &analytics.model_usage {
-                    println!("  {model}: {count} uses");
+                    println!("  {model}: {} uses", format_number(*count));
                 }
                 println!();
             }
@@ -381,13 +396,13 @@ fn output_overview(
             println!("Claude Code Overview");
             println!("====================");
             println!();
-            println!("Projects:        {}", stats.project_count);
-            println!("Sessions:        {}", stats.session_count);
-            println!("Subagents:       {}", stats.subagent_count);
+            println!("Projects:        {}", format_count(stats.project_count));
+            println!("Sessions:        {}", format_count(stats.session_count));
+            println!("Subagents:       {}", format_count(stats.subagent_count));
             println!("Total Size:      {}", stats.total_size_human());
 
             if stats.has_file_history {
-                println!("Backup Files:    {}", stats.backup_file_count);
+                println!("Backup Files:    {}", format_count(stats.backup_file_count));
             }
 
             println!();
