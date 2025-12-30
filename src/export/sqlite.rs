@@ -211,6 +211,7 @@ impl SqliteExporter {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 message_fk INTEGER NOT NULL,
                 tool_use_id TEXT,
+                is_error INTEGER DEFAULT 0,
                 status TEXT,
                 output TEXT,
                 block_order INTEGER,
@@ -254,7 +255,10 @@ impl SqliteExporter {
             CREATE INDEX IF NOT EXISTS idx_thinking_blocks_message ON thinking_blocks(message_fk);
             CREATE INDEX IF NOT EXISTS idx_tool_uses_message ON tool_uses(message_fk);
             CREATE INDEX IF NOT EXISTS idx_tool_uses_name ON tool_uses(tool_name);
+            CREATE INDEX IF NOT EXISTS idx_tool_uses_id ON tool_uses(tool_use_id);
             CREATE INDEX IF NOT EXISTS idx_tool_results_message ON tool_results(message_fk);
+            CREATE INDEX IF NOT EXISTS idx_tool_results_tool_use_id ON tool_results(tool_use_id);
+            CREATE INDEX IF NOT EXISTS idx_tool_results_is_error ON tool_results(is_error);
         "#;
 
         conn.execute_batch(schema)
@@ -346,6 +350,15 @@ impl SqliteExporter {
                     params![session_fk, uuid, parent_uuid, timestamp, content],
                 )
                 .map_err(|e| SnatchError::export(format!("Failed to insert user message: {}", e)))?;
+
+                let message_id = conn.last_insert_rowid();
+
+                // Extract content blocks from user messages (tool results, images)
+                if let crate::model::message::UserContent::Blocks(blocks) = &user.message {
+                    for (order, block) in blocks.content.iter().enumerate() {
+                        self.insert_content_block(conn, message_id, block, order as i32, options)?;
+                    }
+                }
             }
             LogEntry::Assistant(assistant) if options.should_include_assistant() => {
                 let uuid = entry.uuid();
@@ -462,8 +475,11 @@ impl SqliteExporter {
             }
             ContentBlock::ToolResult(result) => {
                 if options.should_include_tool_results() {
-                    let status = if result.is_explicit_error() {
+                    let is_error = result.is_explicit_error();
+                    let status = if is_error {
                         "error"
+                    } else if result.is_implicit_success() {
+                        "success_implicit"
                     } else {
                         "success"
                     };
@@ -476,9 +492,9 @@ impl SqliteExporter {
                     });
 
                     conn.execute(
-                        "INSERT INTO tool_results (message_fk, tool_use_id, status, output, block_order)
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
-                        params![message_fk, result.tool_use_id, status, output, order],
+                        "INSERT INTO tool_results (message_fk, tool_use_id, is_error, status, output, block_order)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![message_fk, result.tool_use_id, is_error as i32, status, output, order],
                     )
                     .map_err(|e| {
                         SnatchError::export(format!("Failed to insert tool result: {}", e))
@@ -604,5 +620,46 @@ mod tests {
 
         assert!(!exporter.enable_fts);
         assert!(!exporter.enable_foreign_keys);
+    }
+
+    #[test]
+    fn test_sqlite_schema_has_tool_results_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        let exporter = SqliteExporter::new().with_fts(false);
+        exporter.create_schema(&conn).unwrap();
+
+        // Verify tool_results table exists with correct columns
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(tool_results)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert!(columns.contains(&"tool_use_id".to_string()));
+        assert!(columns.contains(&"is_error".to_string()));
+        assert!(columns.contains(&"status".to_string()));
+        assert!(columns.contains(&"output".to_string()));
+    }
+
+    #[test]
+    fn test_sqlite_schema_has_tool_results_indexes() {
+        let conn = Connection::open_in_memory().unwrap();
+        let exporter = SqliteExporter::new().with_fts(false);
+        exporter.create_schema(&conn).unwrap();
+
+        // Verify indexes exist for efficient joins
+        let indexes: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_tool_%'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert!(indexes.contains(&"idx_tool_uses_id".to_string()));
+        assert!(indexes.contains(&"idx_tool_results_tool_use_id".to_string()));
+        assert!(indexes.contains(&"idx_tool_results_is_error".to_string()));
     }
 }
