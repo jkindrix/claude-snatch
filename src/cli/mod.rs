@@ -1084,6 +1084,27 @@ pub enum TagAction {
         /// Tag to search for.
         tag: String,
     },
+
+    /// Set outcome classification for a session.
+    Outcome {
+        /// Session ID (supports short prefixes like "780893e4").
+        session: String,
+        /// Outcome: success, partial, failed, abandoned (or clear to remove).
+        #[arg(value_parser = parse_outcome)]
+        outcome: Option<crate::tags::SessionOutcome>,
+    },
+
+    /// List sessions by outcome or show outcome statistics.
+    Outcomes {
+        /// Filter by specific outcome (success, partial, failed, abandoned).
+        #[arg(value_parser = parse_outcome)]
+        outcome: Option<crate::tags::SessionOutcome>,
+    },
+}
+
+/// Parse an outcome value from string.
+fn parse_outcome(s: &str) -> std::result::Result<crate::tags::SessionOutcome, String> {
+    s.parse()
 }
 
 /// Initialize tracing/logging based on CLI options.

@@ -239,6 +239,104 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                 }
             }
         }
+
+        TagAction::Outcome { session, outcome } => {
+            let session_id = resolve_session_id(cli, session)?;
+            if let Some(outcome) = outcome {
+                store.set_outcome(&session_id, Some(*outcome));
+                store.save()?;
+                println!(
+                    "Set outcome '{}' for session {}",
+                    outcome,
+                    short_id(&session_id)
+                );
+            } else {
+                store.set_outcome(&session_id, None);
+                store.save()?;
+                println!("Cleared outcome for session {}", short_id(&session_id));
+            }
+        }
+
+        TagAction::Outcomes { outcome } => {
+            if let Some(outcome) = outcome {
+                // List sessions with specific outcome
+                let sessions = store.sessions_with_outcome(*outcome);
+                if sessions.is_empty() {
+                    println!("No sessions with outcome '{}'.", outcome);
+                    return Ok(());
+                }
+
+                match cli.effective_output() {
+                    OutputFormat::Json => {
+                        println!("{}", serde_json::to_string_pretty(&sessions)?);
+                    }
+                    OutputFormat::Tsv => {
+                        println!("session_id\tname\toutcome");
+                        for id in &sessions {
+                            let name = store
+                                .get(id)
+                                .and_then(|m| m.name.as_deref())
+                                .unwrap_or("");
+                            println!("{}\t{}\t{}", id, name, outcome);
+                        }
+                    }
+                    OutputFormat::Compact => {
+                        for id in &sessions {
+                            println!("{}", short_id(id));
+                        }
+                    }
+                    OutputFormat::Text => {
+                        println!(
+                            "Sessions with outcome '{}' ({}):",
+                            outcome,
+                            sessions.len()
+                        );
+                        for id in &sessions {
+                            let name = store
+                                .get(id)
+                                .and_then(|m| m.name.as_deref())
+                                .map(|n| format!(" - {}", n))
+                                .unwrap_or_default();
+                            println!("  {}{}", short_id(id), name);
+                        }
+                    }
+                }
+            } else {
+                // Show outcome statistics
+                let stats = store.outcome_stats();
+
+                match cli.effective_output() {
+                    OutputFormat::Json => {
+                        println!("{}", serde_json::to_string_pretty(&stats)?);
+                    }
+                    OutputFormat::Tsv => {
+                        println!("outcome\tcount");
+                        println!("success\t{}", stats.success);
+                        println!("partial\t{}", stats.partial);
+                        println!("failed\t{}", stats.failed);
+                        println!("abandoned\t{}", stats.abandoned);
+                        println!("unclassified\t{}", stats.unclassified);
+                    }
+                    OutputFormat::Compact => {
+                        println!("{} {} {} {} {}",
+                            stats.success, stats.partial, stats.failed,
+                            stats.abandoned, stats.unclassified);
+                    }
+                    OutputFormat::Text => {
+                        println!("Session Outcome Statistics");
+                        println!("==========================");
+                        println!("  Success:      {:>5}", stats.success);
+                        println!("  Partial:      {:>5}", stats.partial);
+                        println!("  Failed:       {:>5}", stats.failed);
+                        println!("  Abandoned:    {:>5}", stats.abandoned);
+                        println!("  Unclassified: {:>5}", stats.unclassified);
+                        println!();
+                        println!("  Classified:   {:>5}", stats.classified());
+                        println!("  Success Rate: {:>5.1}%", stats.success_rate());
+                    }
+                }
+            }
+        }
     }
 
     Ok(())

@@ -334,6 +334,11 @@ fn find_node_in_children<'a>(
 
 /// Export all sessions matching filters.
 fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
+    // Special handling for SQLite: export all sessions to a single database
+    if matches!(args.format, ExportFormatArg::Sqlite) {
+        return export_all_sessions_sqlite(cli, args);
+    }
+
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
 
     // Build session filter
@@ -487,6 +492,180 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
             exported_count,
             sessions.len(),
             output_dir.display(),
+            suffix
+        );
+    }
+
+    Ok(())
+}
+
+/// Export all sessions to a single SQLite database.
+fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
+    use rusqlite::Connection;
+
+    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
+
+    // SQLite export requires an output file
+    let output_path = args.output_file.as_ref().ok_or_else(|| {
+        SnatchError::export("SQLite export requires an output file (--output <path.db>)".to_string())
+    })?;
+
+    // Build session filter
+    let mut filter = SessionFilter::new();
+
+    if !args.include_agents {
+        filter = filter.main_only();
+    }
+
+    if let Some(ref since) = args.since {
+        let since_time = parse_date_filter(since)?;
+        filter.modified_after = Some(since_time);
+    }
+
+    if let Some(ref until) = args.until {
+        let until_time = parse_date_filter(until)?;
+        filter.modified_before = Some(until_time);
+    }
+
+    // Get all sessions
+    let all_sessions = claude_dir.all_sessions()?;
+
+    // Filter sessions
+    let mut sessions: Vec<&Session> = all_sessions
+        .iter()
+        .filter(|s| {
+            if let Some(ref project) = args.project {
+                if !s.project_path().contains(project) {
+                    return false;
+                }
+            }
+            match filter.matches(s) {
+                Ok(matches) => matches,
+                Err(_) => false,
+            }
+        })
+        .collect();
+
+    if sessions.is_empty() {
+        if !cli.quiet {
+            eprintln!("No sessions match the specified filters");
+        }
+        return Ok(());
+    }
+
+    // Sort by modification time (oldest first for database insertion order)
+    sessions.sort_by(|a, b| a.modified_time().cmp(&b.modified_time()));
+
+    // Remove existing file if present
+    if output_path.exists() {
+        std::fs::remove_file(output_path).map_err(|e| {
+            SnatchError::io(
+                format!("Failed to remove existing database: {}", output_path.display()),
+                e,
+            )
+        })?;
+    }
+
+    // Create database connection
+    let conn = Connection::open(output_path).map_err(|e| {
+        SnatchError::export(format!("Failed to create SQLite database: {}", e))
+    })?;
+
+    // Create exporter and schema
+    let exporter = SqliteExporter::new()
+        .with_fts(true)
+        .with_foreign_keys(true)
+        .with_usage(true);
+
+    // Build export options
+    let options = ExportOptions {
+        include_thinking: args.thinking,
+        include_tool_use: true,
+        include_tool_results: true,
+        include_system: true,
+        include_usage: true,
+        include_timestamps: true,
+        include_metadata: true,
+        main_thread_only: false,
+        ..Default::default()
+    };
+
+    // Create progress bar
+    let progress = if args.progress && !cli.quiet {
+        let pb = ProgressBar::new(sessions.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+                .expect("Invalid progress bar template")
+                .progress_chars("#>-"),
+        );
+        Some(pb)
+    } else {
+        None
+    };
+
+    let mut exported_count = 0;
+    let mut error_count = 0;
+
+    for session in &sessions {
+        // Parse session
+        match session.parse() {
+            Ok(entries) if !entries.is_empty() => {
+                match Conversation::from_entries(entries) {
+                    Ok(conversation) => {
+                        match exporter.export_to_connection(&conversation, &conn, &options) {
+                            Ok(()) => {
+                                exported_count += 1;
+                                if cli.verbose {
+                                    eprintln!("Exported: {}", session.session_id());
+                                }
+                            }
+                            Err(e) => {
+                                error_count += 1;
+                                if !cli.quiet {
+                                    eprintln!("Failed to export {}: {}", session.session_id(), e);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error_count += 1;
+                        if !cli.quiet {
+                            eprintln!("Failed to build conversation for {}: {}", session.session_id(), e);
+                        }
+                    }
+                }
+            }
+            Ok(_) => {
+                // Empty session, skip
+            }
+            Err(e) => {
+                error_count += 1;
+                if !cli.quiet {
+                    eprintln!("Failed to parse {}: {}", session.session_id(), e);
+                }
+            }
+        }
+
+        if let Some(ref pb) = progress {
+            pb.inc(1);
+        }
+    }
+
+    if let Some(pb) = progress {
+        pb.finish_with_message("Export complete");
+    }
+
+    // Print summary
+    if !cli.quiet {
+        let mut suffix = String::new();
+        if error_count > 0 {
+            suffix.push_str(&format!(" ({} errors)", error_count));
+        }
+        eprintln!(
+            "Exported {} sessions to {}{}",
+            exported_count,
+            output_path.display(),
             suffix
         );
     }
