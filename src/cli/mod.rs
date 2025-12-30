@@ -303,9 +303,9 @@ pub struct ListArgs {
     #[arg(short = 's', long, default_value = "modified")]
     pub sort: SortOrder,
 
-    /// Limit number of results.
-    #[arg(short = 'n', long)]
-    pub limit: Option<usize>,
+    /// Limit number of results (default: 50, use 0 for unlimited).
+    #[arg(short = 'n', long, default_value = "50")]
+    pub limit: usize,
 
     /// Show full UUIDs instead of short IDs.
     #[arg(long)]
@@ -346,10 +346,46 @@ pub enum SortOrder {
     Name,
 }
 
+/// Content types that can be filtered in exports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum)]
+pub enum ContentFilter {
+    /// User messages/prompts.
+    User,
+    /// Assistant responses (text content).
+    Assistant,
+    /// Thinking/reasoning blocks.
+    Thinking,
+    /// Tool invocations.
+    #[value(alias = "tools")]
+    ToolUse,
+    /// Tool results/outputs.
+    ToolResults,
+    /// System messages.
+    System,
+    /// Summary entries.
+    Summary,
+}
+
+impl ContentFilter {
+    /// Get a human-readable description.
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::User => "user messages",
+            Self::Assistant => "assistant responses",
+            Self::Thinking => "thinking blocks",
+            Self::ToolUse => "tool invocations",
+            Self::ToolResults => "tool results",
+            Self::System => "system messages",
+            Self::Summary => "summary entries",
+        }
+    }
+}
+
 /// Arguments for the export command.
 #[derive(Debug, Parser)]
 pub struct ExportArgs {
-    /// Session ID or path to export (optional with --all).
+    /// Session ID to export (supports short prefixes like "780893e4").
+    /// Optional with --all flag.
     pub session: Option<String>,
 
     /// Output file path (stdout if not specified).
@@ -399,6 +435,12 @@ pub struct ExportArgs {
     /// Include system messages.
     #[arg(long)]
     pub system: bool,
+
+    /// Export ONLY specified content types (exclusive filter).
+    /// When set, only these content types are included; all others are excluded.
+    /// Accepts multiple values: --only user,thinking or --only user --only thinking
+    #[arg(long, value_delimiter = ',', value_name = "TYPES")]
+    pub only: Vec<ContentFilter>,
 
     /// Include timestamps.
     #[arg(long, default_value = "true")]
@@ -514,7 +556,7 @@ pub struct SearchArgs {
     #[arg(short = 'p', long)]
     pub project: Option<String>,
 
-    /// Search in specific session.
+    /// Filter by session ID (supports short prefixes like "780893e4").
     #[arg(short = 's', long)]
     pub session: Option<String>,
 
@@ -598,7 +640,7 @@ pub struct StatsArgs {
     #[arg(short = 'p', long)]
     pub project: Option<String>,
 
-    /// Show stats for specific session.
+    /// Show stats for specific session (supports short prefixes like "780893e4").
     #[arg(short = 's', long)]
     pub session: Option<String>,
 
@@ -627,6 +669,7 @@ pub struct StatsArgs {
 #[derive(Debug, Parser)]
 pub struct InfoArgs {
     /// Session ID or project path to show info for.
+    /// Session IDs support short prefixes like "780893e4".
     pub target: Option<String>,
 
     /// Show tree structure.
@@ -653,7 +696,7 @@ pub struct TuiArgs {
     #[arg(short = 'p', long)]
     pub project: Option<String>,
 
-    /// Start with specific session.
+    /// Start with specific session (supports short prefixes like "780893e4").
     #[arg(short = 's', long)]
     pub session: Option<String>,
 
@@ -669,7 +712,8 @@ pub struct TuiArgs {
 /// Arguments for the validate command.
 #[derive(Debug, Parser)]
 pub struct ValidateArgs {
-    /// Session ID or path to validate.
+    /// Session ID to validate (supports short prefixes like "780893e4").
+    /// Optional with --all flag.
     pub session: Option<String>,
 
     /// Validate all sessions.
@@ -692,7 +736,7 @@ pub struct ValidateArgs {
 /// Arguments for the watch command.
 #[derive(Debug, Parser)]
 pub struct WatchArgs {
-    /// Session ID to watch.
+    /// Session ID to watch (supports short prefixes like "780893e4").
     pub session: Option<String>,
 
     /// Watch all active sessions.
@@ -711,10 +755,10 @@ pub struct WatchArgs {
 /// Arguments for the diff command.
 #[derive(Debug, Parser)]
 pub struct DiffArgs {
-    /// First session ID or file path.
+    /// First session ID (supports short prefixes like "780893e4").
     pub first: String,
 
-    /// Second session ID or file path.
+    /// Second session ID (supports short prefixes like "780893e4").
     pub second: String,
 
     /// Only show summary, not details.
@@ -905,7 +949,7 @@ pub struct IndexSearchArgs {
     #[arg(short = 'm', long)]
     pub model: Option<String>,
 
-    /// Filter by session ID.
+    /// Filter by session ID (supports short prefixes like "780893e4").
     #[arg(short = 's', long)]
     pub session: Option<String>,
 

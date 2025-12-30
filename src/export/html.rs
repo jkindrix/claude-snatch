@@ -15,7 +15,7 @@ use crate::model::{
 };
 use crate::reconstruction::Conversation;
 
-use super::{ExportOptions, Exporter};
+use super::{ContentType, ExportOptions, Exporter};
 
 /// HTML exporter for conversations.
 #[derive(Debug, Clone)]
@@ -719,7 +719,7 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
         }
 
         // Write tool results if included
-        if options.include_tool_results {
+        if options.should_include_tool_results() {
             for result in user.message.tool_results() {
                 self.write_tool_result(writer, result)?;
             }
@@ -752,12 +752,15 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
         for content in &assistant.message.content {
             match content {
                 ContentBlock::Text(text) => {
-                    writeln!(writer, "    <p>{}</p>", escape_html(&text.text))?;
+                    // Use should_include() directly for text content to respect exclusive filter
+                    if options.should_include(ContentType::Assistant) {
+                        writeln!(writer, "    <p>{}</p>", escape_html(&text.text))?;
+                    }
                 }
-                ContentBlock::Thinking(thinking) if options.include_thinking => {
+                ContentBlock::Thinking(thinking) if options.should_include_thinking() => {
                     self.write_thinking(writer, thinking)?;
                 }
-                ContentBlock::ToolUse(tool_use) if options.include_tool_use => {
+                ContentBlock::ToolUse(tool_use) if options.should_include_tool_use() => {
                     self.write_tool_use(writer, tool_use)?;
                 }
                 _ => {}
@@ -931,13 +934,13 @@ impl Exporter for HtmlExporter {
 
         for entry in entries {
             match entry {
-                LogEntry::User(user) => {
+                LogEntry::User(user) if options.should_include_user() => {
                     self.write_user_message(writer, user, options)?;
                 }
-                LogEntry::Assistant(assistant) => {
+                LogEntry::Assistant(assistant) if options.should_include_assistant() => {
                     self.write_assistant_message(writer, assistant, options)?;
                 }
-                LogEntry::System(system) if options.include_system => {
+                LogEntry::System(system) if options.should_include_system() => {
                     self.write_system_message(writer, system, options)?;
                 }
                 _ => {}
@@ -959,13 +962,13 @@ impl Exporter for HtmlExporter {
 
         for entry in entries {
             match entry {
-                LogEntry::User(user) => {
+                LogEntry::User(user) if options.should_include_user() => {
                     self.write_user_message(writer, user, options)?;
                 }
-                LogEntry::Assistant(assistant) => {
+                LogEntry::Assistant(assistant) if options.should_include_assistant() => {
                     self.write_assistant_message(writer, assistant, options)?;
                 }
-                LogEntry::System(system) if options.include_system => {
+                LogEntry::System(system) if options.should_include_system() => {
                     self.write_system_message(writer, system, options)?;
                 }
                 _ => {}

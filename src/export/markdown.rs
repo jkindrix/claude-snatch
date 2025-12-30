@@ -15,7 +15,7 @@ use crate::model::{
 };
 use crate::reconstruction::Conversation;
 
-use super::{ExportOptions, Exporter};
+use super::{ContentType, ExportOptions, Exporter};
 
 /// Markdown exporter for conversations.
 #[derive(Debug, Clone)]
@@ -259,21 +259,24 @@ impl MarkdownExporter {
     ) -> Result<()> {
         match content {
             ContentBlock::Text(text) => {
-                writeln!(writer, "{}", text.text)?;
-                writeln!(writer)?;
+                // Use should_include() directly for text content to respect exclusive filter
+                if options.should_include(ContentType::Assistant) {
+                    writeln!(writer, "{}", text.text)?;
+                    writeln!(writer)?;
+                }
             }
             ContentBlock::Thinking(thinking) => {
-                if options.include_thinking {
+                if options.should_include_thinking() {
                     self.write_thinking(writer, thinking)?;
                 }
             }
             ContentBlock::ToolUse(tool_use) => {
-                if options.include_tool_use {
+                if options.should_include_tool_use() {
                     self.write_tool_use(writer, tool_use)?;
                 }
             }
             ContentBlock::ToolResult(result) => {
-                if options.include_tool_results {
+                if options.should_include_tool_results() {
                     self.write_tool_result(writer, result, options)?;
                 }
             }
@@ -445,7 +448,7 @@ impl MarkdownExporter {
         system: &SystemMessage,
         options: &ExportOptions,
     ) -> Result<()> {
-        if !options.include_system {
+        if !options.should_include_system() {
             return Ok(());
         }
 
@@ -667,16 +670,24 @@ impl MarkdownExporter {
     ) -> Result<()> {
         match entry {
             LogEntry::User(user) => {
-                self.write_user_message(writer, user, options)?;
+                if options.should_include_user() {
+                    self.write_user_message(writer, user, options)?;
+                }
             }
             LogEntry::Assistant(assistant) => {
-                self.write_assistant_message(writer, assistant, options)?;
+                if options.should_include_assistant() {
+                    self.write_assistant_message(writer, assistant, options)?;
+                }
             }
             LogEntry::System(system) => {
-                self.write_system_message(writer, system, options)?;
+                if options.should_include_system() {
+                    self.write_system_message(writer, system, options)?;
+                }
             }
             LogEntry::Summary(summary) => {
-                self.write_summary_message(writer, summary, options)?;
+                if options.should_include_summary() {
+                    self.write_summary_message(writer, summary, options)?;
+                }
             }
             LogEntry::FileHistorySnapshot(_) => {
                 // Skip file history snapshots in Markdown export

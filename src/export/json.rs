@@ -14,7 +14,7 @@ use crate::error::Result;
 use crate::model::LogEntry;
 use crate::reconstruction::Conversation;
 
-use super::{ExportOptions, Exporter};
+use super::{ContentType, ExportOptions, Exporter};
 
 /// JSON exporter for lossless data export.
 #[derive(Debug, Clone)]
@@ -133,17 +133,26 @@ impl Exporter for JsonExporter {
     }
 }
 
+/// Check if an entry should be included based on options.
+fn should_include_entry(entry: &LogEntry, options: &ExportOptions) -> bool {
+    match entry {
+        LogEntry::User(_) => options.should_include_user(),
+        LogEntry::Assistant(_) => options.should_include_assistant(),
+        LogEntry::System(_) => options.should_include_system(),
+        LogEntry::Summary(_) => options.should_include_summary(),
+        // Always include structural entries
+        LogEntry::FileHistorySnapshot(_) | LogEntry::QueueOperation(_) | LogEntry::TurnEnd(_) => true,
+    }
+}
+
 /// Filter entries based on options.
 fn filter_entries(entries: &[&LogEntry], options: &ExportOptions) -> Vec<FilteredEntry> {
     entries
         .iter()
         .filter_map(|entry| {
-            if !options.include_system {
-                if let LogEntry::System(_) = entry {
-                    return None;
-                }
+            if !should_include_entry(entry, options) {
+                return None;
             }
-
             Some(FilteredEntry::from_entry(entry, options))
         })
         .collect()
@@ -165,8 +174,9 @@ impl FilteredEntry {
         // Serialize to Value first
         let mut value = serde_json::to_value(entry).unwrap_or(Value::Null);
 
-        // Apply content filtering if needed
-        if !options.include_thinking
+        // Apply content filtering if needed (use exclusive filter methods)
+        if options.has_exclusive_filter()
+            || !options.include_thinking
             || !options.include_tool_use
             || !options.include_tool_results
             || !options.include_images
@@ -176,10 +186,12 @@ impl FilteredEntry {
                     arr.retain(|block| {
                         let block_type = block.get("type").and_then(Value::as_str);
                         match block_type {
-                            Some("thinking") => options.include_thinking,
-                            Some("tool_use") => options.include_tool_use,
-                            Some("tool_result") => options.include_tool_results,
+                            Some("thinking") => options.should_include_thinking(),
+                            Some("tool_use") => options.should_include_tool_use(),
+                            Some("tool_result") => options.should_include_tool_results(),
                             Some("image") => options.include_images,
+                            // Use should_include() directly for text to respect exclusive filter
+                            Some("text") => options.should_include(ContentType::Assistant),
                             _ => true,
                         }
                     });
@@ -531,11 +543,9 @@ impl StreamingJsonExporter {
         self.begin_array(writer)?;
 
         for entry in entries {
-            // Apply filtering
-            if !options.include_system {
-                if let LogEntry::System(_) = entry {
-                    continue;
-                }
+            // Apply entry-level filtering using exclusive filter support
+            if !should_include_entry(entry, options) {
+                continue;
             }
 
             let filtered = FilteredEntry::from_entry(entry, options);
@@ -559,11 +569,9 @@ impl StreamingJsonExporter {
         self.begin_array(writer)?;
 
         for entry in entries {
-            // Apply filtering
-            if !options.include_system {
-                if let LogEntry::System(_) = entry {
-                    continue;
-                }
+            // Apply entry-level filtering using exclusive filter support
+            if !should_include_entry(entry, options) {
+                continue;
             }
 
             let filtered = FilteredEntry::from_entry(entry, options);
@@ -590,11 +598,9 @@ impl StreamingJsonExporter {
         self.begin_array(writer)?;
 
         for entry in iter {
-            // Apply filtering
-            if !options.include_system {
-                if let LogEntry::System(_) = entry {
-                    continue;
-                }
+            // Apply entry-level filtering using exclusive filter support
+            if !should_include_entry(entry, options) {
+                continue;
             }
 
             let filtered = FilteredEntry::from_entry(entry, options);

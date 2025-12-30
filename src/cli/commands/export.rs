@@ -11,18 +11,36 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use std::collections::HashSet;
 
-use crate::cli::{Cli, ExportArgs, ExportFormatArg};
+use crate::cli::{Cli, ContentFilter, ExportArgs, ExportFormatArg};
 use crate::discovery::{Session, SessionFilter};
 use crate::error::{Result, SnatchError};
 use crate::export::{
-    conversation_to_jsonl, CsvExporter, ExportOptions, Exporter, HtmlExporter, JsonExporter,
-    MarkdownExporter, SqliteExporter, TextExporter, XmlExporter,
+    conversation_to_jsonl, ContentType, CsvExporter, ExportOptions, Exporter, HtmlExporter,
+    JsonExporter, MarkdownExporter, SqliteExporter, TextExporter, XmlExporter,
 };
 use crate::model::{ContentBlock, LogEntry};
 use crate::reconstruction::Conversation;
 use crate::util::{detect_sensitive, AtomicFile, RedactionConfig, SensitiveDataType};
 
 use super::get_claude_dir;
+
+/// Convert CLI ContentFilter to export ContentType.
+fn content_filter_to_type(filter: ContentFilter) -> ContentType {
+    match filter {
+        ContentFilter::User => ContentType::User,
+        ContentFilter::Assistant => ContentType::Assistant,
+        ContentFilter::Thinking => ContentType::Thinking,
+        ContentFilter::ToolUse => ContentType::ToolUse,
+        ContentFilter::ToolResults => ContentType::ToolResults,
+        ContentFilter::System => ContentType::System,
+        ContentFilter::Summary => ContentType::Summary,
+    }
+}
+
+/// Convert CLI --only filters to a HashSet of ContentTypes.
+fn build_only_filter(filters: &[ContentFilter]) -> HashSet<ContentType> {
+    filters.iter().map(|f| content_filter_to_type(*f)).collect()
+}
 
 /// Run the export command.
 pub fn run(cli: &Cli, args: &ExportArgs) -> Result<()> {
@@ -118,9 +136,11 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
 
     // Build export options
     let redaction = args.redact.map(|level| level.into());
+    let only_filter = build_only_filter(&args.only);
     let options = if args.lossless {
         let mut opts = ExportOptions::full();
         opts.redaction = redaction;
+        opts.only = only_filter;
         opts
     } else {
         ExportOptions {
@@ -139,6 +159,7 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
             main_thread_only: args.main_thread,
             redaction,
             minimization: None,
+            only: only_filter,
         }
     };
 
@@ -487,9 +508,11 @@ fn export_session(
 
     // Build export options - lossless mode overrides individual settings
     let redaction = args.redact.map(|level| level.into());
+    let only_filter = build_only_filter(&args.only);
     let options = if args.lossless {
         let mut opts = ExportOptions::full();
         opts.redaction = redaction;
+        opts.only = only_filter;
         opts
     } else {
         ExportOptions {
@@ -508,6 +531,7 @@ fn export_session(
             main_thread_only: args.main_thread,
             redaction,
             minimization: None,
+            only: only_filter,
         }
     };
 

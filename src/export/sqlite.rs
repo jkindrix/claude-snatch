@@ -334,7 +334,7 @@ impl SqliteExporter {
         options: &ExportOptions,
     ) -> Result<()> {
         match entry {
-            LogEntry::User(user) => {
+            LogEntry::User(user) if options.should_include_user() => {
                 let uuid = entry.uuid();
                 let parent_uuid = entry.parent_uuid();
                 let timestamp = format_timestamp(&user.timestamp);
@@ -347,7 +347,7 @@ impl SqliteExporter {
                 )
                 .map_err(|e| SnatchError::export(format!("Failed to insert user message: {}", e)))?;
             }
-            LogEntry::Assistant(assistant) => {
+            LogEntry::Assistant(assistant) if options.should_include_assistant() => {
                 let uuid = entry.uuid();
                 let parent_uuid = entry.parent_uuid();
                 let timestamp = format_timestamp(&assistant.timestamp);
@@ -384,23 +384,21 @@ impl SqliteExporter {
                     self.insert_content_block(conn, message_id, block, order as i32, options)?;
                 }
             }
-            LogEntry::System(system) => {
-                if options.include_system {
-                    let uuid = entry.uuid();
-                    let timestamp = format_timestamp(&system.timestamp);
-                    let content = system.content.as_deref();
+            LogEntry::System(system) if options.should_include_system() => {
+                let uuid = entry.uuid();
+                let timestamp = format_timestamp(&system.timestamp);
+                let content = system.content.as_deref();
 
-                    conn.execute(
-                        "INSERT INTO messages (session_fk, uuid, message_type, role, timestamp, content)
-                         VALUES (?1, ?2, 'system', 'system', ?3, ?4)",
-                        params![session_fk, uuid, timestamp, content],
-                    )
-                    .map_err(|e| {
-                        SnatchError::export(format!("Failed to insert system message: {}", e))
-                    })?;
-                }
+                conn.execute(
+                    "INSERT INTO messages (session_fk, uuid, message_type, role, timestamp, content)
+                     VALUES (?1, ?2, 'system', 'system', ?3, ?4)",
+                    params![session_fk, uuid, timestamp, content],
+                )
+                .map_err(|e| {
+                    SnatchError::export(format!("Failed to insert system message: {}", e))
+                })?;
             }
-            LogEntry::Summary(summary) => {
+            LogEntry::Summary(summary) if options.should_include_summary() => {
                 let uuid = entry.uuid();
 
                 conn.execute(
@@ -411,7 +409,7 @@ impl SqliteExporter {
                 .map_err(|e| SnatchError::export(format!("Failed to insert summary: {}", e)))?;
             }
             _ => {
-                // Skip other entry types
+                // Skip other entry types or filtered entries
             }
         }
 
@@ -437,7 +435,7 @@ impl SqliteExporter {
                 .map_err(|e| SnatchError::export(format!("Failed to insert text block: {}", e)))?;
             }
             ContentBlock::Thinking(thinking) => {
-                if options.include_thinking {
+                if options.should_include_thinking() {
                     conn.execute(
                         "INSERT INTO thinking_blocks (message_fk, signature, thinking, block_order)
                          VALUES (?1, ?2, ?3, ?4)",
@@ -449,7 +447,7 @@ impl SqliteExporter {
                 }
             }
             ContentBlock::ToolUse(tool_use) => {
-                if options.include_tool_use {
+                if options.should_include_tool_use() {
                     let input_json = serde_json::to_string(&tool_use.input).unwrap_or_default();
 
                     conn.execute(
@@ -463,7 +461,7 @@ impl SqliteExporter {
                 }
             }
             ContentBlock::ToolResult(result) => {
-                if options.include_tool_results {
+                if options.should_include_tool_results() {
                     let status = if result.is_explicit_error() {
                         "error"
                     } else {

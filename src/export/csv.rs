@@ -150,7 +150,7 @@ impl CsvExporter {
                 .unwrap_or_default();
 
             match entry {
-                LogEntry::User(user) => {
+                LogEntry::User(user) if options.should_include_user() => {
                     let content = match &user.message {
                         crate::model::UserContent::Simple(s) => &s.content,
                         crate::model::UserContent::Blocks(b) => {
@@ -172,7 +172,7 @@ impl CsvExporter {
                         ],
                     )?;
                 }
-                LogEntry::Assistant(assistant) => {
+                LogEntry::Assistant(assistant) if options.should_include_assistant() => {
                     let content = assistant
                         .message
                         .content
@@ -208,15 +208,13 @@ impl CsvExporter {
                         ],
                     )?;
                 }
-                LogEntry::System(_) => {
-                    if options.include_system {
-                        self.write_row(
-                            writer,
-                            &[uuid, parent_uuid, "system", &timestamp, "", "", "", "", ""],
-                        )?;
-                    }
+                LogEntry::System(_) if options.should_include_system() => {
+                    self.write_row(
+                        writer,
+                        &[uuid, parent_uuid, "system", &timestamp, "", "", "", "", ""],
+                    )?;
                 }
-                LogEntry::Summary(summary) => {
+                LogEntry::Summary(summary) if options.should_include_summary() => {
                     self.write_row(
                         writer,
                         &[
@@ -381,6 +379,19 @@ impl Exporter for CsvExporter {
         }
 
         for entry in entries {
+            // Apply entry-level filtering
+            let should_include = match entry {
+                LogEntry::User(_) => options.should_include_user(),
+                LogEntry::Assistant(_) => options.should_include_assistant(),
+                LogEntry::System(_) => options.should_include_system(),
+                LogEntry::Summary(_) => options.should_include_summary(),
+                _ => true,
+            };
+
+            if !should_include {
+                continue;
+            }
+
             let uuid = entry.uuid().unwrap_or("");
             let parent_uuid = entry.parent_uuid().unwrap_or("");
             let timestamp = entry
@@ -396,10 +407,6 @@ impl Exporter for CsvExporter {
                 LogEntry::QueueOperation(_) => "queue",
                 LogEntry::TurnEnd(_) => "turn_end",
             };
-
-            if !options.include_system && matches!(entry, LogEntry::System(_)) {
-                continue;
-            }
 
             self.write_row(writer, &[uuid, parent_uuid, entry_type, &timestamp, ""])?;
         }

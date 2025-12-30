@@ -15,7 +15,7 @@ use crate::model::{
 };
 use crate::reconstruction::Conversation;
 
-use super::{ExportOptions, Exporter};
+use super::{ContentType, ExportOptions, Exporter};
 
 /// Plain text exporter for conversations.
 #[derive(Debug, Clone)]
@@ -266,21 +266,24 @@ impl TextExporter {
     ) -> Result<()> {
         match content {
             ContentBlock::Text(text) => {
-                write!(writer, "{}", self.wrap_text(&text.text))?;
-                writeln!(writer)?;
+                // Use should_include() directly for text content to respect exclusive filter
+                if options.should_include(ContentType::Assistant) {
+                    write!(writer, "{}", self.wrap_text(&text.text))?;
+                    writeln!(writer)?;
+                }
             }
             ContentBlock::Thinking(thinking) => {
-                if options.include_thinking {
+                if options.should_include_thinking() {
                     self.write_thinking(writer, thinking)?;
                 }
             }
             ContentBlock::ToolUse(tool_use) => {
-                if options.include_tool_use {
+                if options.should_include_tool_use() {
                     self.write_tool_use(writer, tool_use)?;
                 }
             }
             ContentBlock::ToolResult(result) => {
-                if options.include_tool_results {
+                if options.should_include_tool_results() {
                     self.write_tool_result(writer, result)?;
                 }
             }
@@ -367,7 +370,7 @@ impl TextExporter {
         system: &SystemMessage,
         options: &ExportOptions,
     ) -> Result<()> {
-        if !options.include_system {
+        if !options.should_include_system() {
             return Ok(());
         }
 
@@ -432,22 +435,25 @@ impl Exporter for TextExporter {
         // Write each entry
         for entry in entries {
             match entry {
-                LogEntry::User(user) => {
+                LogEntry::User(user) if options.should_include_user() => {
                     self.write_user_message(writer, user, options)?;
                 }
-                LogEntry::Assistant(assistant) => {
+                LogEntry::Assistant(assistant) if options.should_include_assistant() => {
                     self.write_assistant_message(writer, assistant, options)?;
                 }
-                LogEntry::System(system) => {
+                LogEntry::System(system) if options.should_include_system() => {
                     self.write_system_message(writer, system, options)?;
                 }
-                LogEntry::Summary(summary) => {
+                LogEntry::Summary(summary) if options.should_include_summary() => {
                     self.write_summary_message(writer, summary, options)?;
                 }
                 LogEntry::FileHistorySnapshot(_)
                 | LogEntry::QueueOperation(_)
                 | LogEntry::TurnEnd(_) => {
                     // Skip these in text export
+                }
+                _ => {
+                    // Filtered out by options
                 }
             }
         }
@@ -467,16 +473,16 @@ impl Exporter for TextExporter {
     ) -> Result<()> {
         for entry in entries {
             match entry {
-                LogEntry::User(user) => {
+                LogEntry::User(user) if options.should_include_user() => {
                     self.write_user_message(writer, user, options)?;
                 }
-                LogEntry::Assistant(assistant) => {
+                LogEntry::Assistant(assistant) if options.should_include_assistant() => {
                     self.write_assistant_message(writer, assistant, options)?;
                 }
-                LogEntry::System(system) => {
+                LogEntry::System(system) if options.should_include_system() => {
                     self.write_system_message(writer, system, options)?;
                 }
-                LogEntry::Summary(summary) => {
+                LogEntry::Summary(summary) if options.should_include_summary() => {
                     self.write_summary_message(writer, summary, options)?;
                 }
                 _ => {}

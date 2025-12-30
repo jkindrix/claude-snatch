@@ -32,6 +32,7 @@ pub use sqlite::*;
 pub use text::*;
 pub use xml::*;
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
 
@@ -39,6 +40,42 @@ use crate::error::{Result, SnatchError};
 use crate::model::LogEntry;
 use crate::reconstruction::Conversation;
 use crate::util::AtomicFile;
+
+/// Content types that can be filtered in exports.
+///
+/// Used with the `--only` flag for exclusive filtering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ContentType {
+    /// User messages/prompts.
+    User,
+    /// Assistant responses (text content).
+    Assistant,
+    /// Thinking/reasoning blocks.
+    Thinking,
+    /// Tool invocations.
+    ToolUse,
+    /// Tool results/outputs.
+    ToolResults,
+    /// System messages.
+    System,
+    /// Summary entries.
+    Summary,
+}
+
+impl ContentType {
+    /// Get a human-readable description.
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::User => "user messages",
+            Self::Assistant => "assistant responses",
+            Self::Thinking => "thinking blocks",
+            Self::ToolUse => "tool invocations",
+            Self::ToolResults => "tool results",
+            Self::System => "system messages",
+            Self::Summary => "summary entries",
+        }
+    }
+}
 
 /// Common export options shared across formats.
 #[derive(Debug, Clone)]
@@ -73,6 +110,9 @@ pub struct ExportOptions {
     pub redaction: Option<crate::util::RedactionConfig>,
     /// Data minimization settings for privacy-conscious exports.
     pub minimization: Option<DataMinimizationConfig>,
+    /// Exclusive content filter - when non-empty, only these content types are included.
+    /// All other content is excluded. When empty, uses the include_* flags.
+    pub only: HashSet<ContentType>,
 }
 
 /// Configuration for data minimization in shared exports.
@@ -553,6 +593,7 @@ impl Default for ExportOptions {
             main_thread_only: true,
             redaction: None,
             minimization: None,
+            only: HashSet::new(),
         }
     }
 }
@@ -577,6 +618,7 @@ impl ExportOptions {
             main_thread_only: false,
             redaction: None,
             minimization: None,
+            only: HashSet::new(),
         }
     }
 
@@ -599,6 +641,7 @@ impl ExportOptions {
             main_thread_only: true,
             redaction: None,
             minimization: None,
+            only: HashSet::new(),
         }
     }
 
@@ -624,6 +667,7 @@ impl ExportOptions {
             main_thread_only: true,
             redaction: Some(crate::util::RedactionConfig::security()),
             minimization: Some(DataMinimizationConfig::for_sharing()),
+            only: HashSet::new(),
         }
     }
 
@@ -770,6 +814,91 @@ impl ExportOptions {
     #[must_use]
     pub fn should_strip_model(&self) -> bool {
         self.minimization.as_ref().map_or(false, |m| m.strip_model_names)
+    }
+
+    /// Check if exclusive filtering is active.
+    #[must_use]
+    pub fn has_exclusive_filter(&self) -> bool {
+        !self.only.is_empty()
+    }
+
+    /// Builder: set exclusive content filter.
+    #[must_use]
+    pub fn with_only(mut self, types: HashSet<ContentType>) -> Self {
+        self.only = types;
+        self
+    }
+
+    /// Check if a specific content type should be included.
+    ///
+    /// When `only` is non-empty, only content types in that set are included.
+    /// When `only` is empty, the include_* flags are used.
+    #[must_use]
+    pub fn should_include(&self, content_type: ContentType) -> bool {
+        if self.has_exclusive_filter() {
+            self.only.contains(&content_type)
+        } else {
+            match content_type {
+                ContentType::User => true, // Always include user messages by default
+                ContentType::Assistant => true, // Always include assistant messages by default
+                ContentType::Thinking => self.include_thinking,
+                ContentType::ToolUse => self.include_tool_use,
+                ContentType::ToolResults => self.include_tool_results,
+                ContentType::System => self.include_system,
+                ContentType::Summary => true, // Include summaries by default
+            }
+        }
+    }
+
+    /// Check if user messages should be included.
+    #[must_use]
+    pub fn should_include_user(&self) -> bool {
+        self.should_include(ContentType::User)
+    }
+
+    /// Check if assistant messages should be included.
+    #[must_use]
+    pub fn should_include_assistant(&self) -> bool {
+        if self.has_exclusive_filter() {
+            // Include assistant entries if Assistant is in the filter,
+            // OR if any assistant content types (Thinking, ToolUse, ToolResults) are in the filter
+            self.only.contains(&ContentType::Assistant)
+                || self.only.contains(&ContentType::Thinking)
+                || self.only.contains(&ContentType::ToolUse)
+                || self.only.contains(&ContentType::ToolResults)
+        } else {
+            true
+        }
+    }
+
+    /// Check if thinking blocks should be included.
+    #[must_use]
+    pub fn should_include_thinking(&self) -> bool {
+        self.should_include(ContentType::Thinking)
+    }
+
+    /// Check if tool use should be included.
+    #[must_use]
+    pub fn should_include_tool_use(&self) -> bool {
+        self.should_include(ContentType::ToolUse)
+    }
+
+    /// Check if tool results should be included.
+    #[must_use]
+    pub fn should_include_tool_results(&self) -> bool {
+        self.should_include(ContentType::ToolResults)
+    }
+
+    /// Check if system messages should be included.
+    #[must_use]
+    pub fn should_include_system(&self) -> bool {
+        self.should_include(ContentType::System)
+    }
+
+    /// Check if summary entries should be included.
+    #[must_use]
+    pub fn should_include_summary(&self) -> bool {
+        self.should_include(ContentType::Summary)
     }
 }
 
