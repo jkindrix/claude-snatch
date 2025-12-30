@@ -17,6 +17,21 @@ use crate::reconstruction::Conversation;
 
 use super::{ExportOptions, Exporter};
 
+/// Metadata about a session for SQLite export.
+#[derive(Debug, Default, Clone)]
+pub struct SessionMeta {
+    /// Project path this session belongs to.
+    pub project_path: Option<String>,
+    /// Whether this is a subagent session.
+    pub is_subagent: bool,
+    /// File size in bytes.
+    pub file_size: Option<u64>,
+    /// Git branch at time of session.
+    pub git_branch: Option<String>,
+    /// Git commit at time of session.
+    pub git_commit: Option<String>,
+}
+
 /// SQLite exporter for conversation data.
 #[derive(Debug)]
 pub struct SqliteExporter {
@@ -92,12 +107,50 @@ impl SqliteExporter {
         self.export_to_connection(conversation, &conn, options)
     }
 
+    /// Export a conversation to a SQLite database file with session metadata.
+    pub fn export_to_file_with_meta(
+        &self,
+        conversation: &Conversation,
+        path: impl AsRef<Path>,
+        options: &ExportOptions,
+        meta: Option<&SessionMeta>,
+    ) -> Result<()> {
+        let path = path.as_ref();
+
+        // Remove existing file if present
+        if path.exists() {
+            std::fs::remove_file(path).map_err(|e| {
+                SnatchError::io(
+                    format!("Failed to remove existing database: {}", path.display()),
+                    e,
+                )
+            })?;
+        }
+
+        let conn = Connection::open(path).map_err(|e| {
+            SnatchError::export(format!("Failed to create SQLite database: {}", e))
+        })?;
+
+        self.export_to_connection_with_meta(conversation, &conn, options, meta)
+    }
+
     /// Export a conversation to an existing SQLite connection.
     pub fn export_to_connection(
         &self,
         conversation: &Conversation,
         conn: &Connection,
         options: &ExportOptions,
+    ) -> Result<()> {
+        self.export_to_connection_with_meta(conversation, conn, options, None)
+    }
+
+    /// Export a conversation to an existing SQLite connection with session metadata.
+    pub fn export_to_connection_with_meta(
+        &self,
+        conversation: &Conversation,
+        conn: &Connection,
+        options: &ExportOptions,
+        meta: Option<&SessionMeta>,
     ) -> Result<()> {
         // Skip empty conversations (no exportable messages)
         if conversation.is_empty() {
@@ -118,7 +171,7 @@ impl SqliteExporter {
             .map_err(|e| SnatchError::export(format!("Failed to begin transaction: {}", e)))?;
 
         // Insert session metadata
-        let session_id = self.insert_session(conn, conversation)?;
+        let session_id = self.insert_session(conn, conversation, meta)?;
 
         // Insert messages
         let entries = if options.main_thread_only {
@@ -160,6 +213,11 @@ impl SqliteExporter {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT,
                 version TEXT,
+                project_path TEXT,
+                is_subagent INTEGER DEFAULT 0,
+                file_size INTEGER,
+                git_branch TEXT,
+                git_commit TEXT,
                 start_time TEXT,
                 end_time TEXT,
                 duration_seconds REAL,
@@ -305,7 +363,12 @@ impl SqliteExporter {
     }
 
     /// Insert session metadata.
-    fn insert_session(&self, conn: &Connection, conversation: &Conversation) -> Result<i64> {
+    fn insert_session(
+        &self,
+        conn: &Connection,
+        conversation: &Conversation,
+        meta: Option<&SessionMeta>,
+    ) -> Result<i64> {
         let analytics = SessionAnalytics::from_conversation(conversation);
 
         // Try main thread first, then fall back to chronological entries
@@ -333,14 +396,33 @@ impl SqliteExporter {
             })
             .map(String::from);
 
+        let git_branch = meta.and_then(|m| m.git_branch.clone());
+
         let start_time = analytics.start_time.map(|t| format_timestamp(&t));
         let end_time = analytics.end_time.map(|t| format_timestamp(&t));
         let duration = analytics.duration().map(|d| d.num_seconds() as f64);
 
+        // Extract metadata fields
+        let project_path = meta.and_then(|m| m.project_path.clone());
+        let is_subagent = meta.map(|m| m.is_subagent).unwrap_or(false);
+        let file_size = meta.and_then(|m| m.file_size.map(|s| s as i64));
+        let git_commit = meta.and_then(|m| m.git_commit.clone());
+
         conn.execute(
-            "INSERT INTO sessions (session_id, version, start_time, end_time, duration_seconds)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![session_id, version, start_time, end_time, duration],
+            "INSERT INTO sessions (session_id, version, project_path, is_subagent, file_size, git_branch, git_commit, start_time, end_time, duration_seconds)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                session_id,
+                version,
+                project_path,
+                is_subagent,
+                file_size,
+                git_branch,
+                git_commit,
+                start_time,
+                end_time,
+                duration
+            ],
         )
         .map_err(|e| SnatchError::export(format!("Failed to insert session: {}", e)))?;
 

@@ -13,7 +13,7 @@ use crate::discovery::{Session, SessionFilter};
 use crate::error::{Result, SnatchError};
 use crate::export::{
     conversation_to_jsonl, ContentType, CsvExporter, ExportOptions, Exporter, HtmlExporter,
-    JsonExporter, MarkdownExporter, SqliteExporter, TextExporter, XmlExporter,
+    JsonExporter, MarkdownExporter, SessionMeta, SqliteExporter, TextExporter, XmlExporter,
 };
 use crate::model::{ContentBlock, LogEntry};
 use crate::reconstruction::Conversation;
@@ -613,7 +613,15 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
             Ok(entries) if !entries.is_empty() => {
                 match Conversation::from_entries(entries) {
                     Ok(conversation) => {
-                        match exporter.export_to_connection(&conversation, &conn, &options) {
+                        // Build session metadata
+                        let meta = SessionMeta {
+                            project_path: Some(session.project_path().to_string()),
+                            is_subagent: session.is_subagent(),
+                            file_size: Some(session.file_size()),
+                            git_branch: None,
+                            git_commit: None,
+                        };
+                        match exporter.export_to_connection_with_meta(&conversation, &conn, &options, Some(&meta)) {
                             Ok(()) => {
                                 exported_count += 1;
                                 if cli.verbose {
@@ -730,7 +738,15 @@ fn export_session(
     if matches!(args.format, ExportFormatArg::Sqlite) {
         if let Some(path) = output_path {
             let exporter = SqliteExporter::new();
-            exporter.export_to_file(&conversation, path, &options)?;
+            // Build session metadata
+            let meta = SessionMeta {
+                project_path: Some(session.project_path().to_string()),
+                is_subagent: session.is_subagent(),
+                file_size: Some(session.file_size()),
+                git_branch: None,
+                git_commit: None,
+            };
+            exporter.export_to_file_with_meta(&conversation, path, &options, Some(&meta))?;
             if args.session.is_some() && !cli.quiet {
                 eprintln!("Exported {} entries to {}", conversation.len(), path.display());
             }
