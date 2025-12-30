@@ -345,7 +345,7 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
     let mut filter = SessionFilter::new();
 
     // By default exclude subagents unless explicitly included
-    if !args.include_agents {
+    if !args.subagents {
         filter = filter.main_only();
     }
 
@@ -513,7 +513,7 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
     // Build session filter
     let mut filter = SessionFilter::new();
 
-    if !args.include_agents {
+    if !args.subagents {
         filter = filter.main_only();
     }
 

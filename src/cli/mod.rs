@@ -437,7 +437,7 @@ pub struct ExportArgs {
 
     /// Include subagent sessions.
     #[arg(long)]
-    pub include_agents: bool,
+    pub subagents: bool,
 
     /// Combine parent session with its subagent transcripts (interleaved by time).
     #[arg(long)]
@@ -1138,7 +1138,7 @@ pub struct PromptsArgs {
 
     /// Include subagent sessions.
     #[arg(long)]
-    pub include_agents: bool,
+    pub subagents: bool,
 
     /// Output file path (default: stdout).
     #[arg(short = 'O', long = "file")]

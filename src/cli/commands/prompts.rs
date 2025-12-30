@@ -74,7 +74,7 @@ fn extract_multiple_sessions(cli: &Cli, args: &PromptsArgs) -> Result<()> {
     // Build session filter
     let mut filter = SessionFilter::new();
 
-    if !args.include_agents {
+    if !args.subagents {
         filter = filter.main_only();
     }
 
