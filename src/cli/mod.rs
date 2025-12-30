@@ -199,6 +199,9 @@ pub enum Commands {
 
     /// Manage session tags and names.
     Tag(TagArgs),
+
+    /// Extract user prompts from sessions.
+    Prompts(PromptsArgs),
 }
 
 /// Arguments for the completions command.
@@ -1107,6 +1110,53 @@ fn parse_outcome(s: &str) -> std::result::Result<crate::tags::SessionOutcome, St
     s.parse()
 }
 
+/// Arguments for the prompts command.
+#[derive(Debug, Parser)]
+pub struct PromptsArgs {
+    /// Session ID to extract prompts from (supports short prefixes).
+    pub session: Option<String>,
+
+    /// Extract prompts from all matching sessions.
+    #[arg(long)]
+    pub all: bool,
+
+    /// Filter by project path (substring match).
+    #[arg(short = 'p', long)]
+    pub project: Option<String>,
+
+    /// Only include sessions modified since this date (YYYY-MM-DD or relative like "1week").
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Only include sessions modified before this date.
+    #[arg(long)]
+    pub until: Option<String>,
+
+    /// Minimum prompt length to include (filters out short/empty prompts).
+    #[arg(long, default_value = "10")]
+    pub min_length: usize,
+
+    /// Include subagent sessions.
+    #[arg(long)]
+    pub include_agents: bool,
+
+    /// Output file path (default: stdout).
+    #[arg(short = 'O', long = "file")]
+    pub output_file: Option<PathBuf>,
+
+    /// Add session separator comments between sessions.
+    #[arg(long)]
+    pub separators: bool,
+
+    /// Include timestamps for each prompt.
+    #[arg(long)]
+    pub timestamps: bool,
+
+    /// Number formatting style (plain text lines, or numbered).
+    #[arg(long)]
+    pub numbered: bool,
+}
+
 /// Initialize tracing/logging based on CLI options.
 fn init_logging(cli: &Cli) {
     use tracing_subscriber::{
@@ -1243,6 +1293,7 @@ pub fn run() -> Result<()> {
         }
         Commands::Cleanup(args) => commands::cleanup::run(&cli, args),
         Commands::Tag(args) => commands::tag::run(&cli, args),
+        Commands::Prompts(args) => commands::prompts::run(&cli, args),
     }
 }
 

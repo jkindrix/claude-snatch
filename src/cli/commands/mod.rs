@@ -13,6 +13,7 @@ pub mod extract;
 pub mod index;
 pub mod info;
 pub mod list;
+pub mod prompts;
 pub mod search;
 pub mod stats;
 pub mod tag;
