@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use super::content::{AssistantContent, ContentBlock, ImageBlock};
 use super::metadata::{CompactMetadata, HookInfo, ThinkingMetadata, Todo};
+use super::usage::Usage;
 
 /// A parsed JSONL line representing any message type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,6 +128,16 @@ impl LogEntry {
             Self::User(m) => m.is_sidechain,
             Self::System(m) => m.is_sidechain.unwrap_or(false),
             _ => false,
+        }
+    }
+
+    /// Get the token usage for this entry, if available.
+    /// Usage data is only present on assistant messages.
+    #[must_use]
+    pub fn usage(&self) -> Option<&Usage> {
+        match self {
+            Self::Assistant(m) => m.message.usage.as_ref(),
+            _ => None,
         }
     }
 

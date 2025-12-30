@@ -238,6 +238,11 @@ impl SqliteExporter {
                 model TEXT,
                 timestamp TEXT,
                 content TEXT,
+                is_sidechain INTEGER DEFAULT 0,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                cache_creation_tokens INTEGER,
+                cache_read_tokens INTEGER,
                 FOREIGN KEY (session_fk) REFERENCES sessions(id) ON DELETE CASCADE
             );
 
@@ -448,11 +453,12 @@ impl SqliteExporter {
                 let parent_uuid = entry.parent_uuid();
                 let timestamp = format_timestamp(&user.timestamp);
                 let content = user.message.as_text().map(String::from);
+                let is_sidechain = entry.is_sidechain();
 
                 conn.execute(
-                    "INSERT INTO messages (session_fk, uuid, parent_uuid, message_type, role, timestamp, content)
-                     VALUES (?1, ?2, ?3, 'user', 'user', ?4, ?5)",
-                    params![session_fk, uuid, parent_uuid, timestamp, content],
+                    "INSERT INTO messages (session_fk, uuid, parent_uuid, message_type, role, timestamp, content, is_sidechain)
+                     VALUES (?1, ?2, ?3, 'user', 'user', ?4, ?5, ?6)",
+                    params![session_fk, uuid, parent_uuid, timestamp, content, is_sidechain],
                 )
                 .map_err(|e| SnatchError::export(format!("Failed to insert user message: {}", e)))?;
 
@@ -486,6 +492,14 @@ impl SqliteExporter {
                 let parent_uuid = entry.parent_uuid();
                 let timestamp = format_timestamp(&assistant.timestamp);
                 let model = &assistant.message.model;
+                let is_sidechain = entry.is_sidechain();
+
+                // Extract token usage
+                let usage = entry.usage();
+                let input_tokens = usage.map(|u| u.input_tokens as i64);
+                let output_tokens = usage.map(|u| u.output_tokens as i64);
+                let cache_creation_tokens = usage.and_then(|u| u.cache_creation_input_tokens.map(|t| t as i64));
+                let cache_read_tokens = usage.and_then(|u| u.cache_read_input_tokens.map(|t| t as i64));
 
                 // Collect text content
                 let text_content: String = assistant
@@ -503,9 +517,9 @@ impl SqliteExporter {
                     .join("\n");
 
                 conn.execute(
-                    "INSERT INTO messages (session_fk, uuid, parent_uuid, message_type, role, model, timestamp, content)
-                     VALUES (?1, ?2, ?3, 'assistant', 'assistant', ?4, ?5, ?6)",
-                    params![session_fk, uuid, parent_uuid, model, timestamp, text_content],
+                    "INSERT INTO messages (session_fk, uuid, parent_uuid, message_type, role, model, timestamp, content, is_sidechain, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens)
+                     VALUES (?1, ?2, ?3, 'assistant', 'assistant', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    params![session_fk, uuid, parent_uuid, model, timestamp, text_content, is_sidechain, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens],
                 )
                 .map_err(|e| {
                     SnatchError::export(format!("Failed to insert assistant message: {}", e))
@@ -522,11 +536,12 @@ impl SqliteExporter {
                 let uuid = entry.uuid();
                 let timestamp = format_timestamp(&system.timestamp);
                 let content = system.content.as_deref();
+                let is_sidechain = entry.is_sidechain();
 
                 conn.execute(
-                    "INSERT INTO messages (session_fk, uuid, message_type, role, timestamp, content)
-                     VALUES (?1, ?2, 'system', 'system', ?3, ?4)",
-                    params![session_fk, uuid, timestamp, content],
+                    "INSERT INTO messages (session_fk, uuid, message_type, role, timestamp, content, is_sidechain)
+                     VALUES (?1, ?2, 'system', 'system', ?3, ?4, ?5)",
+                    params![session_fk, uuid, timestamp, content, is_sidechain],
                 )
                 .map_err(|e| {
                     SnatchError::export(format!("Failed to insert system message: {}", e))
