@@ -12,6 +12,15 @@ use crate::reconstruction::Conversation;
 
 use super::get_claude_dir;
 
+/// Format a model name for display, adding explanatory notes for special values.
+fn format_model_name(model: &str) -> String {
+    match model {
+        "<synthetic>" => "(synthetic - internal/cached response)".to_string(),
+        "" => "(unknown model)".to_string(),
+        m => m.to_string(),
+    }
+}
+
 /// Compute statistics in parallel across multiple sessions.
 fn compute_stats_parallel(sessions: &[Session]) -> ProjectAnalytics {
     // Process sessions in parallel and collect individual analytics
@@ -261,13 +270,35 @@ fn output_project_stats(
             if args.models || args.all {
                 println!("Model Usage:");
                 for (model, count) in &analytics.model_usage {
-                    println!("  {model}: {} uses", format_number(*count));
+                    let display_name = format_model_name(model);
+                    println!("  {display_name}: {} uses", format_number(*count));
                 }
                 println!();
             }
 
-            // Cost
-            if let Some(cost) = analytics.total_usage.estimated_cost {
+            // Cost breakdown
+            if args.costs || args.all {
+                println!("Cost Breakdown by Model:");
+                let mut total_cost = 0.0;
+                for (model, usage) in &analytics.total_usage.by_model {
+                    if let Some(pricing) = crate::model::ModelPricing::for_model(model) {
+                        let cost = pricing.calculate_cost(usage);
+                        total_cost += cost.total_cost;
+                        if cost.total_cost > 0.0 {
+                            let display_name = format_model_name(model);
+                            println!("  {display_name}:");
+                            println!("    Input:       ${:.4}", cost.input_cost);
+                            println!("    Output:      ${:.4}", cost.output_cost);
+                            println!("    Cache Write: ${:.4}", cost.cache_write_cost);
+                            println!("    Cache Read:  ${:.4}", cost.cache_read_cost);
+                            println!("    Subtotal:    ${:.4}", cost.total_cost);
+                        }
+                    }
+                }
+                println!();
+                println!("Estimated Total Cost: ${total_cost:.2}");
+            } else if let Some(cost) = analytics.total_usage.estimated_cost {
+                // Just show total cost without breakdown
                 println!("Estimated Cost: ${cost:.2}");
             }
         }
@@ -345,13 +376,35 @@ fn output_global_stats(cli: &Cli, args: &StatsArgs, analytics: &ProjectAnalytics
             if args.models || args.all {
                 println!("Model Usage:");
                 for (model, count) in &analytics.model_usage {
-                    println!("  {model}: {} uses", format_number(*count));
+                    let display_name = format_model_name(model);
+                    println!("  {display_name}: {} uses", format_number(*count));
                 }
                 println!();
             }
 
-            // Cost
-            if let Some(cost) = analytics.total_usage.estimated_cost {
+            // Cost breakdown
+            if args.costs || args.all {
+                println!("Cost Breakdown by Model:");
+                let mut total_cost = 0.0;
+                for (model, usage) in &analytics.total_usage.by_model {
+                    if let Some(pricing) = crate::model::ModelPricing::for_model(model) {
+                        let cost = pricing.calculate_cost(usage);
+                        total_cost += cost.total_cost;
+                        if cost.total_cost > 0.0 {
+                            let display_name = format_model_name(model);
+                            println!("  {display_name}:");
+                            println!("    Input:       ${:.4}", cost.input_cost);
+                            println!("    Output:      ${:.4}", cost.output_cost);
+                            println!("    Cache Write: ${:.4}", cost.cache_write_cost);
+                            println!("    Cache Read:  ${:.4}", cost.cache_read_cost);
+                            println!("    Subtotal:    ${:.4}", cost.total_cost);
+                        }
+                    }
+                }
+                println!();
+                println!("Estimated Total Cost: ${total_cost:.2}");
+            } else if let Some(cost) = analytics.total_usage.estimated_cost {
+                // Just show total cost without breakdown
                 println!("Estimated Total Cost: ${cost:.2}");
             }
         }

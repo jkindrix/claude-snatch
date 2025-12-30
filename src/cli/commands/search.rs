@@ -15,14 +15,10 @@ use crate::model::{ContentBlock, LogEntry};
 struct FuzzyMatch {
     /// Match score (0-100).
     score: u8,
-    /// Start index of match in the text (for future highlighting).
-    #[allow(dead_code)]
+    /// Start index of match in the text.
     start: usize,
-    /// End index of match in the text (for future highlighting).
-    #[allow(dead_code)]
+    /// End index of match in the text.
     end: usize,
-    /// The matched substring.
-    matched_text: String,
 }
 
 /// Perform fuzzy matching (fzf-style subsequence matching with scoring).
@@ -70,17 +66,11 @@ fn fuzzy_match(pattern: &str, text: &str, ignore_case: bool, threshold: u8) -> O
         return None;
     }
 
-    // Build the matched text range
+    // Get the match range
     let start = match_positions.first().copied().unwrap_or(0);
     let end = match_positions.last().copied().unwrap_or(0) + 1;
-    let matched_text: String = text_chars[start..end].iter().collect();
 
-    Some(FuzzyMatch {
-        score,
-        start,
-        end,
-        matched_text,
-    })
+    Some(FuzzyMatch { score, start, end })
 }
 
 /// Calculate fuzzy match score (0-100).
@@ -287,6 +277,22 @@ fn is_error_message(entry: &LogEntry) -> bool {
 
 /// Run the search command.
 pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
+    // Reject empty search patterns - they would match everything and aren't useful
+    if args.pattern.is_empty() {
+        return Err(SnatchError::InvalidArgument {
+            name: "pattern".to_string(),
+            reason: "search pattern cannot be empty".to_string(),
+        });
+    }
+
+    // Reject whitespace-only patterns (also not useful)
+    if args.pattern.trim().is_empty() {
+        return Err(SnatchError::InvalidArgument {
+            name: "pattern".to_string(),
+            reason: "search pattern cannot be whitespace-only".to_string(),
+        });
+    }
+
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
 
     // Build regex
@@ -757,6 +763,31 @@ fn calculate_regex_score(line: &str, matched: &str, match_start: usize) -> u8 {
     score.clamp(0.0, 100.0) as u8
 }
 
+/// Expand a substring to word boundaries within the given text.
+///
+/// Given start/end indices that may be mid-word, expand them to include
+/// complete words at both ends for better readability.
+fn expand_to_word_boundaries(text: &str, start: usize, end: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() || start >= chars.len() {
+        return text.to_string();
+    }
+
+    // Expand start backwards to word boundary (or start of string)
+    let mut expanded_start = start;
+    while expanded_start > 0 && chars[expanded_start - 1].is_alphanumeric() {
+        expanded_start -= 1;
+    }
+
+    // Expand end forwards to word boundary (or end of string)
+    let mut expanded_end = end.min(chars.len());
+    while expanded_end < chars.len() && chars[expanded_end].is_alphanumeric() {
+        expanded_end += 1;
+    }
+
+    chars[expanded_start..expanded_end].iter().collect()
+}
+
 /// Find fuzzy matches with context in text.
 fn find_fuzzy_matches(
     text: &str,
@@ -782,11 +813,18 @@ fn find_fuzzy_matches(
                 let context_before = lines[start..line_num].join("\n");
                 let context_after = lines[(line_num + 1)..end].join("\n");
 
+                // Expand matched_text to word boundaries for readability
+                let expanded_text = expand_to_word_boundaries(
+                    line,
+                    fuzzy_result.start,
+                    fuzzy_result.end,
+                );
+
                 matches.push(Match {
                     location: location.to_string(),
                     line: (*line).to_string(),
                     context_before,
-                    matched_text: fuzzy_result.matched_text,
+                    matched_text: expanded_text,
                     context_after,
                     score: fuzzy_result.score,
                 });
@@ -855,28 +893,34 @@ mod tests {
     #[test]
     fn test_fuzzy_match_exact() {
         // Exact match should have very high score
-        let result = fuzzy_match("hello", "hello world", false, 60);
+        let text = "hello world";
+        let result = fuzzy_match("hello", text, false, 60);
         assert!(result.is_some());
         let m = result.unwrap();
-        assert_eq!(m.matched_text, "hello");
+        let matched = expand_to_word_boundaries(text, m.start, m.end);
+        assert_eq!(matched, "hello");
         assert!(m.score >= 80); // High score for exact match
     }
 
     #[test]
     fn test_fuzzy_match_subsequence() {
         // Characters in order but not consecutive: "hlo" in "hello"
-        let result = fuzzy_match("hlo", "hello", false, 50);
+        let text = "hello";
+        let result = fuzzy_match("hlo", text, false, 50);
         assert!(result.is_some());
         let m = result.unwrap();
-        assert_eq!(m.matched_text, "hello");
+        let matched = expand_to_word_boundaries(text, m.start, m.end);
+        assert_eq!(matched, "hello");
     }
 
     #[test]
     fn test_fuzzy_match_case_insensitive() {
-        let result = fuzzy_match("HELLO", "hello world", true, 60);
+        let text = "hello world";
+        let result = fuzzy_match("HELLO", text, true, 60);
         assert!(result.is_some());
         let m = result.unwrap();
-        assert_eq!(m.matched_text, "hello");
+        let matched = expand_to_word_boundaries(text, m.start, m.end);
+        assert_eq!(matched, "hello");
     }
 
     #[test]
@@ -1050,6 +1094,56 @@ mod tests {
 
         // Should not match when no branch is present
         assert!(!matches_git_branch(&entry, "main"));
+    }
+
+    #[test]
+    fn test_expand_to_word_boundaries_mid_word() {
+        // "ient" within "orient yourself" - should expand to "orient"
+        // Indices 2-6 are "ient" in "orient"
+        let result = expand_to_word_boundaries("orient yourself", 2, 6);
+        assert_eq!(result, "orient");
+    }
+
+    #[test]
+    fn test_expand_to_word_boundaries_multiple_words() {
+        // Spanning from mid-"hello" to mid-"world"
+        // "llo wor" should expand to "hello world"
+        let result = expand_to_word_boundaries("hello world", 2, 9);
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_expand_to_word_boundaries_at_word_start() {
+        // Already at word start, should expand end only
+        let result = expand_to_word_boundaries("hello world", 0, 3);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_expand_to_word_boundaries_at_word_end() {
+        // Already at word end, should expand start only
+        let result = expand_to_word_boundaries("hello world", 3, 5);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_expand_to_word_boundaries_full_word() {
+        // Already a complete word
+        let result = expand_to_word_boundaries("hello world", 0, 5);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_expand_to_word_boundaries_with_punctuation() {
+        // Word followed by punctuation
+        let result = expand_to_word_boundaries("hello, world!", 1, 4);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_expand_to_word_boundaries_empty() {
+        let result = expand_to_word_boundaries("", 0, 0);
+        assert_eq!(result, "");
     }
 
 }

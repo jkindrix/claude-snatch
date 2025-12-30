@@ -91,6 +91,7 @@ pub mod index;
 pub mod model;
 pub mod parser;
 pub mod reconstruction;
+pub mod tags;
 pub mod tui;
 pub mod util;
 

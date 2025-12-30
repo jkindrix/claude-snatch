@@ -41,7 +41,13 @@ pub fn run_with_options(
     ascii_mode: bool,
 ) -> Result<()> {
     // Setup terminal
-    enable_raw_mode().map_err(|e| SnatchError::io("Failed to enable raw mode", e))?;
+    enable_raw_mode().map_err(|e| {
+        SnatchError::io(
+            "Cannot launch TUI - no interactive terminal available. \
+             The TUI requires a terminal with keyboard input support",
+            e,
+        )
+    })?;
 
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)

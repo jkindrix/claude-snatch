@@ -3,13 +3,14 @@
 //! Lists projects and sessions with various filtering and sorting options.
 
 use std::io::Write;
+use std::time::SystemTime;
 
 use crate::cli::{Cli, ListArgs, ListTarget, OutputFormat, SortOrder};
 use crate::discovery::{Project, Session, SessionFilter};
 use crate::error::Result;
 use crate::util::pager::PagerWriter;
 
-use super::get_claude_dir;
+use super::{get_claude_dir, parse_date_filter};
 
 /// Run the list command.
 pub fn run(cli: &Cli, args: &ListArgs) -> Result<()> {
@@ -131,6 +132,9 @@ fn list_sessions<W: Write>(
     claude_dir: &crate::discovery::ClaudeDirectory,
     writer: &mut W,
 ) -> Result<()> {
+    // Auto-enable sizes when sorting by size (makes UX intuitive)
+    let show_sizes = args.sizes || matches!(args.sort, SortOrder::Size);
+
     let mut sessions: Vec<Session> = if let Some(project_filter) = &args.project {
         // Get sessions from matching projects
         let projects = claude_dir.projects()?;
@@ -161,6 +165,36 @@ fn list_sessions<W: Write>(
     };
 
     sessions.retain(|s| filter.matches(s).unwrap_or(false));
+
+    // Apply date filters
+    let since_time: Option<SystemTime> = if let Some(ref since) = args.since {
+        Some(parse_date_filter(since)?)
+    } else {
+        None
+    };
+
+    let until_time: Option<SystemTime> = if let Some(ref until) = args.until {
+        Some(parse_date_filter(until)?)
+    } else {
+        None
+    };
+
+    if since_time.is_some() || until_time.is_some() {
+        sessions.retain(|s| {
+            let modified = s.modified_time();
+            if let Some(since) = since_time {
+                if modified < since {
+                    return false;
+                }
+            }
+            if let Some(until) = until_time {
+                if modified > until {
+                    return false;
+                }
+            }
+            true
+        });
+    }
 
     // Sort sessions
     match args.sort {
@@ -243,8 +277,14 @@ fn list_sessions<W: Write>(
 
                 write!(writer, "  {}{}", id, subagent_marker)?;
 
-                if args.sizes {
-                    write!(writer, " ({})", session.file_size_human())?;
+                if show_sizes {
+                    let size_str = session.file_size_human();
+                    if session.file_size() == 0 {
+                        // Add context for empty sessions
+                        write!(writer, " ({} - empty, possibly new or interrupted)", size_str)?;
+                    } else {
+                        write!(writer, " ({})", size_str)?;
+                    }
                 }
 
                 writeln!(writer)?;

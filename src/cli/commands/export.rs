@@ -2,14 +2,11 @@
 //!
 //! Exports conversations to various formats (Markdown, JSON, etc.).
 
+use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::time::SystemTime;
 
-use chrono::{Duration, NaiveDate, Utc};
 use indicatif::{ProgressBar, ProgressStyle};
-
-use std::collections::HashSet;
 
 use crate::cli::{Cli, ContentFilter, ExportArgs, ExportFormatArg};
 use crate::discovery::{Session, SessionFilter};
@@ -22,12 +19,13 @@ use crate::model::{ContentBlock, LogEntry};
 use crate::reconstruction::Conversation;
 use crate::util::{detect_sensitive, AtomicFile, RedactionConfig, SensitiveDataType};
 
-use super::get_claude_dir;
+use super::{get_claude_dir, parse_date_filter};
 
 /// Convert CLI ContentFilter to export ContentType.
 fn content_filter_to_type(filter: ContentFilter) -> ContentType {
     match filter {
         ContentFilter::User => ContentType::User,
+        ContentFilter::Prompts => ContentType::Prompts,
         ContentFilter::Assistant => ContentType::Assistant,
         ContentFilter::Thinking => ContentType::Thinking,
         ContentFilter::ToolUse => ContentType::ToolUse,
@@ -44,11 +42,25 @@ fn build_only_filter(filters: &[ContentFilter]) -> HashSet<ContentType> {
 
 /// Run the export command.
 pub fn run(cli: &Cli, args: &ExportArgs) -> Result<()> {
+    // Always validate date filters early to catch typos/errors immediately
+    if let Some(ref since) = args.since {
+        parse_date_filter(since)?; // Validate, but result is used later if needed
+    }
+    if let Some(ref until) = args.until {
+        parse_date_filter(until)?; // Validate, but result is used later if needed
+    }
+
     // Validate arguments
     if args.all {
         // Export all sessions with optional filtering
         export_all_sessions(cli, args)
     } else if let Some(ref session_id) = args.session {
+        // Warn if date filters are used with single-session export (they don't apply)
+        if (args.since.is_some() || args.until.is_some()) && !cli.quiet {
+            eprintln!(
+                "Note: --since/--until filters are only applied with --all; single session export ignores them"
+            );
+        }
         // Export a single session
         export_single_session(cli, args, session_id)
     } else {
@@ -647,65 +659,6 @@ fn export_session(
     }
 
     Ok(true)
-}
-
-/// Parse a date filter string.
-///
-/// Supports:
-/// - ISO date: `2024-12-24`
-/// - Relative: `1day`, `2weeks`, `3months`
-fn parse_date_filter(s: &str) -> Result<SystemTime> {
-    // Try parsing as ISO date first
-    if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        let datetime = date.and_hms_opt(0, 0, 0).unwrap();
-        let utc = chrono::TimeZone::from_utc_datetime(&Utc, &datetime);
-        return Ok(SystemTime::from(utc));
-    }
-
-    // Try parsing as relative duration
-    let s_lower = s.to_lowercase();
-
-    // Extract numeric part and unit
-    let numeric_end = s_lower
-        .char_indices()
-        .find(|(_, c)| !c.is_ascii_digit())
-        .map(|(i, _)| i)
-        .unwrap_or(s_lower.len());
-
-    if numeric_end == 0 || numeric_end == s_lower.len() {
-        return Err(SnatchError::ConfigError {
-            message: format!(
-                "Invalid date filter '{}'. Use YYYY-MM-DD or relative like '1week', '2days'",
-                s
-            ),
-        });
-    }
-
-    let amount: i64 = s_lower[..numeric_end].parse().map_err(|_| {
-        SnatchError::ConfigError {
-            message: format!("Invalid number in date filter: {}", &s_lower[..numeric_end]),
-        }
-    })?;
-
-    let unit = &s_lower[numeric_end..];
-    let duration = match unit {
-        "d" | "day" | "days" => Duration::days(amount),
-        "w" | "week" | "weeks" => Duration::weeks(amount),
-        "m" | "month" | "months" => Duration::days(amount * 30), // Approximate
-        "y" | "year" | "years" => Duration::days(amount * 365),  // Approximate
-        "h" | "hour" | "hours" => Duration::hours(amount),
-        _ => {
-            return Err(SnatchError::ConfigError {
-                message: format!(
-                    "Unknown time unit '{}'. Use days, weeks, months, or years",
-                    unit
-                ),
-            })
-        }
-    };
-
-    let target = Utc::now() - duration;
-    Ok(SystemTime::from(target))
 }
 
 /// Get the file extension for a format.

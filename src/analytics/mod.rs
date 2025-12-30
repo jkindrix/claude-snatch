@@ -1386,8 +1386,22 @@ impl ProjectAnalytics {
     pub fn add_session(&mut self, session: &SessionAnalytics) {
         self.session_count += 1;
 
-        // Merge usage
+        // Merge usage - both raw usage and by_model breakdown for cost calculation
         self.total_usage.usage.merge(&session.usage.usage);
+        self.total_usage.message_count += session.usage.message_count;
+        self.total_usage.tool_invocations += session.usage.tool_invocations;
+        self.total_usage.error_count += session.usage.error_count;
+
+        // Merge by_model breakdown (critical for cost calculation)
+        for (model, usage) in &session.usage.by_model {
+            let model_usage = self.total_usage.by_model.entry(model.clone()).or_default();
+            model_usage.merge(usage);
+        }
+
+        // Merge tools_by_name
+        for (tool, count) in &session.usage.tools_by_name {
+            *self.total_usage.tools_by_name.entry(tool.clone()).or_insert(0) += count;
+        }
 
         // Merge message counts
         self.message_counts.user += session.message_counts.user;
@@ -1397,6 +1411,7 @@ impl ProjectAnalytics {
         self.message_counts.tool_results += session.message_counts.tool_results;
         self.message_counts.tool_errors += session.message_counts.tool_errors;
         self.message_counts.thinking_blocks += session.message_counts.thinking_blocks;
+        self.message_counts.text_blocks += session.message_counts.text_blocks;
 
         // Merge tool counts
         for (tool, count) in &session.tool_counts {

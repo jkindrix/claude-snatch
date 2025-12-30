@@ -46,8 +46,10 @@ use crate::util::AtomicFile;
 /// Used with the `--only` flag for exclusive filtering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContentType {
-    /// User messages/prompts.
+    /// User messages/prompts (includes tool results within user entries).
     User,
+    /// Only human-typed prompts (excludes tool results within user entries).
+    Prompts,
     /// Assistant responses (text content).
     Assistant,
     /// Thinking/reasoning blocks.
@@ -67,6 +69,7 @@ impl ContentType {
     pub fn description(&self) -> &'static str {
         match self {
             Self::User => "user messages",
+            Self::Prompts => "human-typed prompts only",
             Self::Assistant => "assistant responses",
             Self::Thinking => "thinking blocks",
             Self::ToolUse => "tool invocations",
@@ -840,6 +843,7 @@ impl ExportOptions {
         } else {
             match content_type {
                 ContentType::User => true, // Always include user messages by default
+                ContentType::Prompts => true, // Prompts are part of user messages
                 ContentType::Assistant => true, // Always include assistant messages by default
                 ContentType::Thinking => self.include_thinking,
                 ContentType::ToolUse => self.include_tool_use,
@@ -853,7 +857,12 @@ impl ExportOptions {
     /// Check if user messages should be included.
     #[must_use]
     pub fn should_include_user(&self) -> bool {
-        self.should_include(ContentType::User)
+        if self.has_exclusive_filter() {
+            // Include user entries if User or Prompts is in the filter
+            self.only.contains(&ContentType::User) || self.only.contains(&ContentType::Prompts)
+        } else {
+            true
+        }
     }
 
     /// Check if assistant messages should be included.
@@ -884,9 +893,20 @@ impl ExportOptions {
     }
 
     /// Check if tool results should be included.
+    ///
+    /// When `--only prompts` is used, tool results within user messages are excluded
+    /// unless `--only tool-results` is also specified.
     #[must_use]
     pub fn should_include_tool_results(&self) -> bool {
-        self.should_include(ContentType::ToolResults)
+        if self.has_exclusive_filter() {
+            // If Prompts is in the filter without ToolResults, exclude tool results
+            if self.only.contains(&ContentType::Prompts) && !self.only.contains(&ContentType::ToolResults) {
+                return false;
+            }
+            self.only.contains(&ContentType::ToolResults)
+        } else {
+            self.include_tool_results
+        }
     }
 
     /// Check if system messages should be included.
@@ -899,6 +919,14 @@ impl ExportOptions {
     #[must_use]
     pub fn should_include_summary(&self) -> bool {
         self.should_include(ContentType::Summary)
+    }
+
+    /// Check if only prompts mode is active (excludes tool results from user messages).
+    #[must_use]
+    pub fn is_prompts_only(&self) -> bool {
+        self.has_exclusive_filter()
+            && self.only.contains(&ContentType::Prompts)
+            && !self.only.contains(&ContentType::ToolResults)
     }
 }
 

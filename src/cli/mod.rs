@@ -27,6 +27,7 @@ use crate::export::ExportFormat;
 #[command(name = "snatch")]
 #[command(author, version, about, long_about = None)]
 #[command(propagate_version = true)]
+#[command(arg_required_else_help = true)]
 pub struct Cli {
     /// Subcommand to run.
     #[command(subcommand)]
@@ -191,6 +192,13 @@ pub enum Commands {
     /// Generate dynamic completions (used by shell completion scripts).
     #[command(hide = true, name = "_complete")]
     DynamicCompletions(DynamicCompletionsArgs),
+
+    /// Clean up old or empty sessions.
+    #[command(alias = "clean")]
+    Cleanup(CleanupArgs),
+
+    /// Manage session tags and names.
+    Tag(TagArgs),
 }
 
 /// Arguments for the completions command.
@@ -318,6 +326,14 @@ pub struct ListArgs {
     /// Pipe output through a pager (less/more).
     #[arg(long)]
     pub pager: bool,
+
+    /// Filter sessions modified since this date (YYYY-MM-DD or relative like "1week", "3days").
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Filter sessions modified until this date (YYYY-MM-DD or relative like "1week", "3days").
+    #[arg(long)]
+    pub until: Option<String>,
 }
 
 /// What to list.
@@ -349,8 +365,11 @@ pub enum SortOrder {
 /// Content types that can be filtered in exports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum)]
 pub enum ContentFilter {
-    /// User messages/prompts.
+    /// User messages/prompts (includes tool results within user entries).
     User,
+    /// Only human-typed prompts (excludes tool results within user entries).
+    #[value(alias = "human")]
+    Prompts,
     /// Assistant responses (text content).
     Assistant,
     /// Thinking/reasoning blocks.
@@ -371,6 +390,7 @@ impl ContentFilter {
     pub fn description(&self) -> &'static str {
         match self {
             Self::User => "user messages",
+            Self::Prompts => "human-typed prompts only",
             Self::Assistant => "assistant responses",
             Self::Thinking => "thinking blocks",
             Self::ToolUse => "tool invocations",
@@ -420,19 +440,19 @@ pub struct ExportArgs {
     #[arg(long)]
     pub combine_agents: bool,
 
-    /// Include thinking blocks.
+    /// Include thinking blocks (enabled by default, use --no-thinking to disable).
     #[arg(long, default_value = "true")]
     pub thinking: bool,
 
-    /// Include tool use blocks.
+    /// Include tool use blocks (enabled by default, use --no-tool-use to disable).
     #[arg(long, default_value = "true")]
     pub tool_use: bool,
 
-    /// Include tool results.
+    /// Include tool results (enabled by default, use --no-tool-results to disable).
     #[arg(long, default_value = "true")]
     pub tool_results: bool,
 
-    /// Include system messages.
+    /// Include system messages (disabled by default).
     #[arg(long)]
     pub system: bool,
 
@@ -564,15 +584,15 @@ pub struct SearchArgs {
     #[arg(short = 'i', long)]
     pub ignore_case: bool,
 
-    /// Search in thinking blocks.
+    /// Also search in thinking blocks (by default only user/assistant text is searched).
     #[arg(long)]
     pub thinking: bool,
 
-    /// Search in tool outputs.
+    /// Also search in tool outputs (by default only user/assistant text is searched).
     #[arg(long)]
     pub tools: bool,
 
-    /// Search everywhere (user, assistant, thinking, tools).
+    /// Search everywhere (user, assistant, thinking, and tools).
     #[arg(short = 'a', long)]
     pub all: bool,
 
@@ -765,7 +785,7 @@ pub struct DiffArgs {
     #[arg(short = 's', long)]
     pub summary_only: bool,
 
-    /// Don't show content of differing lines.
+    /// Don't show content of differing lines (line-based mode only).
     #[arg(long)]
     pub no_content: bool,
 
@@ -773,8 +793,13 @@ pub struct DiffArgs {
     #[arg(short = 'e', long)]
     pub exit_code: bool,
 
-    /// Show semantic diff (compare by message structure).
+    /// Use line-based diff instead of semantic diff.
+    /// Line-based diff compares raw JSONL lines; semantic diff compares by message structure.
     #[arg(long)]
+    pub line_based: bool,
+
+    /// Show semantic diff (compare by message structure). This is the default.
+    #[arg(long, hide = true)]
     pub semantic: bool,
 }
 
@@ -966,6 +991,101 @@ pub struct IndexSearchArgs {
     pub limit: Option<usize>,
 }
 
+/// Arguments for the cleanup command.
+#[derive(Debug, Parser)]
+pub struct CleanupArgs {
+    /// Delete empty (0 byte) sessions.
+    #[arg(long)]
+    pub empty: bool,
+
+    /// Delete sessions older than this date (YYYY-MM-DD or relative like "1week", "3months").
+    #[arg(long)]
+    pub older_than: Option<String>,
+
+    /// Filter by project path (substring match).
+    #[arg(short = 'p', long)]
+    pub project: Option<String>,
+
+    /// Include subagent sessions.
+    #[arg(long)]
+    pub subagents: bool,
+
+    /// Preview what would be deleted without actually deleting.
+    #[arg(long, alias = "dry-run")]
+    pub preview: bool,
+
+    /// Skip confirmation prompt.
+    #[arg(long, short = 'y')]
+    pub yes: bool,
+
+    /// Show detailed output of each deleted session.
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
+}
+
+/// Arguments for the tag command.
+#[derive(Debug, Parser)]
+pub struct TagArgs {
+    /// Tag subcommand to run.
+    #[command(subcommand)]
+    pub action: TagAction,
+}
+
+/// Tag subcommand actions.
+#[derive(Debug, Subcommand)]
+pub enum TagAction {
+    /// Add a tag to a session.
+    Add {
+        /// Session ID (supports short prefixes like "780893e4").
+        session: String,
+        /// Tag to add.
+        tag: String,
+    },
+
+    /// Remove a tag from a session.
+    Remove {
+        /// Session ID (supports short prefixes like "780893e4").
+        session: String,
+        /// Tag to remove.
+        tag: String,
+    },
+
+    /// Set a human-readable name for a session.
+    Name {
+        /// Session ID (supports short prefixes like "780893e4").
+        session: String,
+        /// Name to set (empty to clear).
+        name: Option<String>,
+    },
+
+    /// List all tags or show tags for a session.
+    List {
+        /// Session ID to show tags for (optional).
+        session: Option<String>,
+    },
+
+    /// Bookmark a session for quick access.
+    Bookmark {
+        /// Session ID (supports short prefixes like "780893e4").
+        session: String,
+    },
+
+    /// Remove bookmark from a session.
+    Unbookmark {
+        /// Session ID (supports short prefixes like "780893e4").
+        session: String,
+    },
+
+    /// List all bookmarked sessions.
+    Bookmarks,
+
+    /// Show sessions with a specific tag.
+    Find {
+        /// Tag to search for.
+        tag: String,
+    },
+}
+
 /// Initialize tracing/logging based on CLI options.
 fn init_logging(cli: &Cli) {
     use tracing_subscriber::{
@@ -1028,9 +1148,9 @@ fn init_logging(cli: &Cli) {
         }
     };
 
-    if let Err(e) = result {
-        eprintln!("Warning: Could not initialize logging: {e}");
-    }
+    // Silently ignore "already set" errors - this is normal when a subscriber
+    // was already configured (e.g., by tests or environment)
+    let _ = result;
 }
 
 /// Initialize rayon thread pool with custom thread count if specified.
@@ -1100,6 +1220,8 @@ pub fn run() -> Result<()> {
             };
             commands::completions::run(&cli, &internal_args)
         }
+        Commands::Cleanup(args) => commands::cleanup::run(&cli, args),
+        Commands::Tag(args) => commands::tag::run(&cli, args),
     }
 }
 

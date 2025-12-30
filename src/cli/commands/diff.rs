@@ -19,12 +19,14 @@ pub fn run(cli: &Cli, args: &DiffArgs) -> Result<()> {
     // Resolve the two targets
     let (first_path, second_path) = resolve_targets(cli, args)?;
 
-    if args.semantic {
-        // Semantic diff: compare by message structure
-        run_semantic_diff(cli, args, &first_path, &second_path)
-    } else {
+    // Default to semantic diff (more useful for JSONL sessions)
+    // Use line-based only if explicitly requested
+    if args.line_based {
         // Line-based diff: compare raw JSONL content
         run_line_diff(cli, args, &first_path, &second_path)
+    } else {
+        // Semantic diff: compare by message structure (default)
+        run_semantic_diff(cli, args, &first_path, &second_path)
     }
 }
 
