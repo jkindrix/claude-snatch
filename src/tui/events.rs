@@ -174,3 +174,211 @@ impl KeyBindings {
         self.back.iter().any(|k| k.code == key.code && k.modifiers == key.modifiers)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    mod key_bindings {
+        use super::*;
+
+        #[test]
+        fn test_default_bindings() {
+            let bindings = KeyBindings::default();
+
+            // Should have quit bindings for 'q' and Ctrl+C
+            assert_eq!(bindings.quit.len(), 2);
+
+            // Should have up bindings for Up arrow and 'k'
+            assert_eq!(bindings.up.len(), 2);
+
+            // Should have down bindings for Down arrow and 'j'
+            assert_eq!(bindings.down.len(), 2);
+
+            // Should have left bindings for Left arrow and 'h'
+            assert_eq!(bindings.left.len(), 2);
+
+            // Should have right bindings for Right arrow and 'l'
+            assert_eq!(bindings.right.len(), 2);
+
+            // Should have Enter for select
+            assert_eq!(bindings.select.len(), 1);
+
+            // Should have Esc for back
+            assert_eq!(bindings.back.len(), 1);
+        }
+
+        #[test]
+        fn test_is_quit_q_key() {
+            let bindings = KeyBindings::default();
+            let q_key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+            assert!(bindings.is_quit(&q_key));
+        }
+
+        #[test]
+        fn test_is_quit_ctrl_c() {
+            let bindings = KeyBindings::default();
+            let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+            assert!(bindings.is_quit(&ctrl_c));
+        }
+
+        #[test]
+        fn test_is_quit_false_for_other_keys() {
+            let bindings = KeyBindings::default();
+            let x_key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+            assert!(!bindings.is_quit(&x_key));
+        }
+
+        #[test]
+        fn test_is_up_arrow() {
+            let bindings = KeyBindings::default();
+            let up_arrow = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+            assert!(bindings.is_up(&up_arrow));
+        }
+
+        #[test]
+        fn test_is_up_k_key() {
+            let bindings = KeyBindings::default();
+            let k_key = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
+            assert!(bindings.is_up(&k_key));
+        }
+
+        #[test]
+        fn test_is_down_arrow() {
+            let bindings = KeyBindings::default();
+            let down_arrow = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+            assert!(bindings.is_down(&down_arrow));
+        }
+
+        #[test]
+        fn test_is_down_j_key() {
+            let bindings = KeyBindings::default();
+            let j_key = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+            assert!(bindings.is_down(&j_key));
+        }
+
+        #[test]
+        fn test_is_left_arrow() {
+            let bindings = KeyBindings::default();
+            let left_arrow = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+            assert!(bindings.is_left(&left_arrow));
+        }
+
+        #[test]
+        fn test_is_left_h_key() {
+            let bindings = KeyBindings::default();
+            let h_key = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
+            assert!(bindings.is_left(&h_key));
+        }
+
+        #[test]
+        fn test_is_right_arrow() {
+            let bindings = KeyBindings::default();
+            let right_arrow = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+            assert!(bindings.is_right(&right_arrow));
+        }
+
+        #[test]
+        fn test_is_right_l_key() {
+            let bindings = KeyBindings::default();
+            let l_key = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE);
+            assert!(bindings.is_right(&l_key));
+        }
+
+        #[test]
+        fn test_is_select_enter() {
+            let bindings = KeyBindings::default();
+            let enter_key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+            assert!(bindings.is_select(&enter_key));
+        }
+
+        #[test]
+        fn test_is_back_escape() {
+            let bindings = KeyBindings::default();
+            let esc_key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+            assert!(bindings.is_back(&esc_key));
+        }
+
+        #[test]
+        fn test_modifier_sensitivity() {
+            let bindings = KeyBindings::default();
+
+            // 'q' with no modifiers should quit
+            let q_plain = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+            assert!(bindings.is_quit(&q_plain));
+
+            // 'q' with SHIFT should NOT quit (different modifier)
+            let q_shift = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::SHIFT);
+            assert!(!bindings.is_quit(&q_shift));
+
+            // 'c' alone should NOT quit (needs CONTROL)
+            let c_plain = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
+            assert!(!bindings.is_quit(&c_plain));
+        }
+
+        #[test]
+        fn test_vim_navigation_complete() {
+            let bindings = KeyBindings::default();
+
+            // h, j, k, l should map to left, down, up, right respectively
+            let h = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
+            let j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+            let k = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
+            let l = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE);
+
+            assert!(bindings.is_left(&h));
+            assert!(bindings.is_down(&j));
+            assert!(bindings.is_up(&k));
+            assert!(bindings.is_right(&l));
+
+            // And they should NOT match other directions
+            assert!(!bindings.is_right(&h));
+            assert!(!bindings.is_up(&j));
+            assert!(!bindings.is_down(&k));
+            assert!(!bindings.is_left(&l));
+        }
+    }
+
+    mod event_enum {
+        use super::*;
+
+        #[test]
+        fn test_event_tick() {
+            let event = Event::Tick;
+            assert!(matches!(event, Event::Tick));
+        }
+
+        #[test]
+        fn test_event_key() {
+            let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+            let event = Event::Key(key);
+            assert!(matches!(event, Event::Key(_)));
+        }
+
+        #[test]
+        fn test_event_resize() {
+            let event = Event::Resize(80, 24);
+            if let Event::Resize(w, h) = event {
+                assert_eq!(w, 80);
+                assert_eq!(h, 24);
+            } else {
+                panic!("Expected Resize event");
+            }
+        }
+
+        #[test]
+        fn test_event_clone() {
+            let event = Event::Tick;
+            let cloned = event.clone();
+            assert!(matches!(cloned, Event::Tick));
+        }
+
+        #[test]
+        fn test_event_debug() {
+            let event = Event::Tick;
+            let debug_str = format!("{:?}", event);
+            assert!(debug_str.contains("Tick"));
+        }
+    }
+}

@@ -24,7 +24,7 @@ High-performance CLI/TUI tool for extracting, analyzing, and exporting Claude Co
 
 ```bash
 # Clone the repository
-git clone https://github.com/claude-snatch/claude-snatch.git
+git clone https://github.com/jkindrix/claude-snatch.git
 cd claude-snatch
 
 # Build in release mode

@@ -243,6 +243,9 @@ impl SqliteExporter {
                 output_tokens INTEGER,
                 cache_creation_tokens INTEGER,
                 cache_read_tokens INTEGER,
+                thinking_level TEXT,
+                thinking_disabled INTEGER,
+                thinking_triggers TEXT,
                 FOREIGN KEY (session_fk) REFERENCES sessions(id) ON DELETE CASCADE
             );
 
@@ -455,10 +458,27 @@ impl SqliteExporter {
                 let content = user.message.as_text().map(String::from);
                 let is_sidechain = entry.is_sidechain();
 
+                // Extract thinking metadata
+                let thinking_level = user
+                    .thinking_metadata
+                    .as_ref()
+                    .and_then(|m| m.level.as_ref())
+                    .map(|l| format!("{:?}", l).to_lowercase());
+                let thinking_disabled = user
+                    .thinking_metadata
+                    .as_ref()
+                    .and_then(|m| m.disabled)
+                    .map(|d| if d { 1i32 } else { 0i32 });
+                let thinking_triggers = user
+                    .thinking_metadata
+                    .as_ref()
+                    .filter(|m| !m.triggers.is_empty())
+                    .map(|m| serde_json::to_string(&m.triggers).unwrap_or_default());
+
                 conn.execute(
-                    "INSERT INTO messages (session_fk, uuid, parent_uuid, message_type, role, timestamp, content, is_sidechain)
-                     VALUES (?1, ?2, ?3, 'user', 'user', ?4, ?5, ?6)",
-                    params![session_fk, uuid, parent_uuid, timestamp, content, is_sidechain],
+                    "INSERT INTO messages (session_fk, uuid, parent_uuid, message_type, role, timestamp, content, is_sidechain, thinking_level, thinking_disabled, thinking_triggers)
+                     VALUES (?1, ?2, ?3, 'user', 'user', ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![session_fk, uuid, parent_uuid, timestamp, content, is_sidechain, thinking_level, thinking_disabled, thinking_triggers],
                 )
                 .map_err(|e| SnatchError::export(format!("Failed to insert user message: {}", e)))?;
 

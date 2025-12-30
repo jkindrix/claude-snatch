@@ -34,7 +34,7 @@
 
 ## 1. Executive Summary
 
-**claude-snatch** is a high-performance, Rust-based CLI/TUI tool for extracting, analyzing, and exporting Claude Code conversation logs with **maximum achievable data fidelity**. It aims to be the most performant, reliable, and complete extraction tool in this space, addressing gaps in all 49 existing competitors by capturing every extractable data element from Claude Code's JSONL logs and supplementary data sources.
+**claude-snatch** is a high-performance, Rust-based CLI/TUI tool for extracting, analyzing, and exporting Claude Code conversation logs with **maximum achievable data fidelity**. It aims to be the most performant, reliable, and complete extraction tool in this space, addressing gaps identified in existing tools by capturing every extractable data element from Claude Code's JSONL logs and supplementary data sources.
 
 ### 1.1 Key Differentiators
 
@@ -163,12 +163,12 @@ To create the most comprehensive, performant, and reliable tool for extracting a
 ## 3. Competitive Analysis Summary
 
 > **Assessment Date:** December 23, 2025
-> **Tools Analyzed:** 49+ existing tools
+> **Tools Analyzed:** 7 representative tools (see Section 3.2)
 > **Next Review:** Quarterly (March 2026)
 
 ### 3.1 Current Landscape Gaps
 
-Based on analysis of 49+ existing tools, the following elements are **not extracted by ANY tool**:
+Based on analysis of existing Claude Code extraction tools, the following elements are **not extracted by ANY analyzed tool**:
 
 #### Agent & Hierarchy (2 elements)
 - [x] `isTeammate` — Teammate mode flag ✓ (`is_teammate` in CommonFields)
@@ -208,7 +208,7 @@ Based on analysis of 49+ existing tools, the following elements are **not extrac
 
 | Tool | Version | Stars | Score | Grade | Primary Gap |
 |------|---------|-------|-------|-------|-------------|
-| [daaain/claude-code-log](https://github.com/daaain/claude-code-log) | v0.9.0 | 575 | ~65% | D+ | Missing LSP, queue ops, error recovery |
+| [daaain/claude-code-log](https://github.com/daaain/claude-code-log) | v0.9.0 | 594 | ~65% | D+ | Missing LSP, queue ops, error recovery |
 | [d-kimuson/claude-code-viewer](https://github.com/d-kimuson/claude-code-viewer) | - | - | ~55% | D | Missing thinking metadata, backups |
 | [adewale/claude-history-explorer](https://github.com/adewale/claude-history-explorer) | - | - | ~45% | F | Missing usage stats, system events |
 | [haasonsaas/claude-usage-tracker](https://github.com/haasonsaas/claude-usage-tracker) | - | - | ~35% | F | Usage-focused, missing content |
@@ -1320,7 +1320,7 @@ To maintain competitive advantage in a rapidly evolving ecosystem, the following
 - [ ] Assess feature parity gaps
 
 **Annually:**
-- [ ] Comprehensive 49+ tool re-analysis
+- [ ] Comprehensive competitor landscape analysis
 - [ ] Strategic positioning review
 - [ ] Roadmap adjustment based on market trends
 

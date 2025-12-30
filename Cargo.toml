@@ -6,7 +6,7 @@ rust-version = "1.75.0"
 authors = ["claude-snatch contributors"]
 description = "High-performance CLI/TUI tool for extracting and analyzing Claude Code conversation logs"
 license = "MIT"
-repository = "https://github.com/claude-snatch/claude-snatch"
+repository = "https://github.com/jkindrix/claude-snatch"
 keywords = ["claude", "code", "jsonl", "extraction", "cli", "tui"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
@@ -117,10 +117,9 @@ opt-level = 3
 name = "snatch"
 path = "src/main.rs"
 
-# Benchmarks (optional, create file to enable)
-# [[bench]]
-# name = "parser_bench"
-# harness = false
+[[bench]]
+name = "parser_bench"
+harness = false
 
 [features]
 default = []
