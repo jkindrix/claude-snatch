@@ -477,8 +477,8 @@ pub struct ExportArgs {
     #[arg(long)]
     pub metadata: bool,
 
-    /// Only export main thread (exclude branches).
-    #[arg(long, default_value = "true")]
+    /// Only export main thread (exclude branches). By default all entries are exported.
+    #[arg(long)]
     pub main_thread: bool,
 
     /// Pretty-print JSON output.

@@ -99,6 +99,11 @@ impl SqliteExporter {
         conn: &Connection,
         options: &ExportOptions,
     ) -> Result<()> {
+        // Skip empty conversations (no exportable messages)
+        if conversation.is_empty() {
+            return Ok(());
+        }
+
         // Enable foreign keys if requested
         if self.enable_foreign_keys {
             conn.execute_batch("PRAGMA foreign_keys = ON;")
@@ -303,16 +308,29 @@ impl SqliteExporter {
     fn insert_session(&self, conn: &Connection, conversation: &Conversation) -> Result<i64> {
         let analytics = SessionAnalytics::from_conversation(conversation);
 
+        // Try main thread first, then fall back to chronological entries
         let session_id = conversation
             .main_thread_entries()
             .first()
             .and_then(|e| e.session_id())
+            .or_else(|| {
+                conversation
+                    .chronological_entries()
+                    .iter()
+                    .find_map(|e| e.session_id())
+            })
             .map(String::from);
 
         let version = conversation
             .main_thread_entries()
             .first()
             .and_then(|e| e.version())
+            .or_else(|| {
+                conversation
+                    .chronological_entries()
+                    .iter()
+                    .find_map(|e| e.version())
+            })
             .map(String::from);
 
         let start_time = analytics.start_time.map(|t| format_timestamp(&t));
