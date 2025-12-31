@@ -868,7 +868,7 @@ mod tests {
         let manager2 = CacheManager::new(&config);
         let loaded = manager2.load_from_disk(&cache_dir).unwrap();
 
-        // Entry should be loaded if file wasn't modified
-        assert!(loaded >= 0); // May or may not load depending on timing
+        // Verify load succeeded (loaded count is valid, may be 0 or 1 depending on timing)
+        assert!(loaded <= 1, "Expected at most 1 entry to be loaded");
     }
 }
