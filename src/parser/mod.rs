@@ -50,6 +50,9 @@ use std::path::Path;
 use crate::error::{Result, SnatchError};
 use crate::model::{LogEntry, SchemaVersion};
 
+/// Default maximum file size (500 MB).
+pub const DEFAULT_MAX_FILE_SIZE: u64 = 500 * 1024 * 1024;
+
 /// JSONL parser for Claude Code session logs.
 #[derive(Debug)]
 pub struct JsonlParser {
@@ -59,6 +62,8 @@ pub struct JsonlParser {
     preserve_raw: bool,
     /// Whether to skip malformed lines instead of failing.
     lenient: bool,
+    /// Maximum file size in bytes (0 = unlimited).
+    max_file_size: u64,
     /// Statistics about parsing.
     stats: ParseStats,
 }
@@ -114,6 +119,7 @@ impl JsonlParser {
             schema_version: None,
             preserve_raw: false,
             lenient: true,
+            max_file_size: DEFAULT_MAX_FILE_SIZE,
             stats: ParseStats::default(),
         }
     }
@@ -129,6 +135,16 @@ impl JsonlParser {
     #[must_use]
     pub fn with_lenient(mut self, lenient: bool) -> Self {
         self.lenient = lenient;
+        self
+    }
+
+    /// Set maximum file size in bytes (0 = unlimited).
+    ///
+    /// Prevents memory exhaustion from malicious or corrupted large files.
+    /// Default is 500 MB.
+    #[must_use]
+    pub fn with_max_file_size(mut self, max_bytes: u64) -> Self {
+        self.max_file_size = max_bytes;
         self
     }
 
@@ -160,6 +176,20 @@ impl JsonlParser {
                 SnatchError::io(format!("Failed to open {}", path.display()), e)
             }
         })?;
+
+        // Check file size limit to prevent memory exhaustion
+        if self.max_file_size > 0 {
+            let metadata = file.metadata().map_err(|e| {
+                SnatchError::io(format!("Failed to get metadata for {}", path.display()), e)
+            })?;
+            if metadata.len() > self.max_file_size {
+                return Err(SnatchError::validation(format!(
+                    "File size {} bytes exceeds maximum {} bytes",
+                    metadata.len(),
+                    self.max_file_size
+                )));
+            }
+        }
 
         let reader = BufReader::new(file);
         self.parse_reader(reader)
