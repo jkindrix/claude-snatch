@@ -890,6 +890,8 @@ pub struct AppState {
 
 impl AppState {
     /// Create new app state with the default theme.
+    ///
+    /// Reserved for external API use and test convenience.
     #[allow(dead_code)]
     pub fn new() -> Result<Self> {
         Self::with_theme(None)

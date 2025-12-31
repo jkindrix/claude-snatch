@@ -94,7 +94,7 @@ memmap2 = { version = "0.9", optional = true }
 [dev-dependencies]
 # Testing
 pretty_assertions = "1.4"
-insta = { version = "1.41", features = ["json", "yaml"] }
+insta = { version = "1.41", features = ["json", "yaml", "filters"] }
 proptest = "1.5"
 criterion = { version = "0.5", features = ["async_tokio"] }
 tempfile = "3.14"

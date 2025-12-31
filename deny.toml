@@ -22,6 +22,8 @@ ignore = [
 ]
 
 [licenses]
+# SPDX 3.11 short identifiers - see https://spdx.org/licenses/
+# Removed Unicode-DFS-2016 as no dependencies currently use it
 allow = [
     "MIT",
     "MIT-0",
@@ -32,7 +34,6 @@ allow = [
     "ISC",
     "Zlib",
     "MPL-2.0",
-    "Unicode-DFS-2016",
     "CC0-1.0",
     "BSL-1.0",
     "Unicode-3.0",

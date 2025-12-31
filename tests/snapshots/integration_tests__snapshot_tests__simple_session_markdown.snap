@@ -1,0 +1,71 @@
+---
+source: tests/integration_tests.rs
+assertion_line: 905
+expression: markdown
+---
+# Claude Code Conversation
+
+**Started:** 2025-01-15 10:00:00 UTC
+**Ended:** 2025-01-15 10:00:33 UTC
+**Duration:** 33s
+
+## Statistics
+- **Messages:** 6 (3 user, 3 assistant)
+- **Total Tokens:** 230
+- **Input Tokens:** 160
+- **Output Tokens:** 70
+- **Tool Invocations:** 1
+- **Primary Model:** claude-sonnet-4-20250514
+- **Estimated Cost:** $0.0015
+
+---
+
+## 👤 User *(2025-01-15 10:00:00 UTC)* 
+
+Hello, Claude!
+
+## 🤖 Assistant *(2025-01-15 10:00:01 UTC)* 
+
+Hello! How can I help you today?
+
+
+*Tokens: 10 in, 15 out*
+
+## 👤 User *(2025-01-15 10:00:30 UTC)* 
+
+Can you list the files in the current directory?
+
+## 🤖 Assistant *(2025-01-15 10:00:31 UTC)* 
+
+### 🔧 Tool: `Bash`
+
+**ID:** `toolu_001`
+
+**Input:**
+```json
+{
+  "command": "ls -la"
+}
+```
+
+
+*Tokens: 50 in, 30 out*
+
+## 👤 User *(2025-01-15 10:00:32 UTC)* 
+
+#### ✅ Result for `toolu_001`
+
+```
+total 8
+drwxr-xr-x 2 user user 4096 Jan 15 10:00 .
+drwxr-xr-x 3 user user 4096 Jan 15 09:00 ..
+-rw-r--r-- 1 user user  100 Jan 15 10:00 file.txt
+```
+
+
+## 🤖 Assistant *(2025-01-15 10:00:33 UTC)* 
+
+The directory contains one file: `file.txt`. Would you like me to read its contents?
+
+
+*Tokens: 100 in, 25 out*

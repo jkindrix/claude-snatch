@@ -1,0 +1,51 @@
+---
+source: tests/snapshot_exports.rs
+expression: output
+---
+[
+  {
+    "type": "user",
+    "uuid": "a1111111-1111-1111-1111-111111111111",
+    "timestamp": "2025-01-15T11:00:00Z",
+    "sessionId": "test-session-002",
+    "version": "2.0.74",
+    "isSidechain": false,
+    "message": {
+      "role": "user",
+      "content": "Solve this problem step by step: What is 15 * 23?"
+    }
+  },
+  {
+    "type": "assistant",
+    "uuid": "a2222222-2222-2222-2222-222222222222",
+    "parentUuid": "a1111111-1111-1111-1111-111111111111",
+    "timestamp": "2025-01-15T11:00:01Z",
+    "sessionId": "test-session-002",
+    "version": "2.0.74",
+    "isSidechain": false,
+    "message": {
+      "id": "msg_think_001",
+      "type": "message",
+      "role": "assistant",
+      "model": "claude-sonnet-4-20250514",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": "Let me break down this multiplication:\n- 15 * 23 = 15 * (20 + 3)\n- = 15 * 20 + 15 * 3\n- = 300 + 45\n- = 345",
+          "signature": "thinking_sig_001"
+        },
+        {
+          "type": "text",
+          "text": "Let me solve this step by step:\n\n1. Break down 23 into 20 + 3\n2. Calculate 15 × 20 = 300\n3. Calculate 15 × 3 = 45\n4. Add them together: 300 + 45 = **345**\n\nThe answer is 345."
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 80,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0
+      },
+      "stop_reason": "end_turn"
+    }
+  }
+]

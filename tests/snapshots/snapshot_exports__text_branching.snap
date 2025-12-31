@@ -1,0 +1,45 @@
+---
+source: tests/snapshot_exports.rs
+expression: output
+---
+[USER] (2025-01-15 12:00:00 UTC)
+
+What language should I learn?
+
+[ASSISTANT] (2025-01-15 12:00:01 UTC)
+
+That depends on your goals! Python is great for beginners and data science,
+while Rust is excellent for systems programming.
+
+
+  [Tokens: 15 in, 35 out]
+
+[USER] (2025-01-15 12:01:00 UTC)
+
+Tell me more about Python
+
+[USER] (2025-01-15 12:01:05 UTC)
+
+Tell me more about Rust
+
+[ASSISTANT] (2025-01-15 12:01:10 UTC)
+
+Python is a versatile, beginner-friendly language known for:
+- Clean, readable syntax
+- Extensive libraries for data science (NumPy, Pandas)
+- Great for web development (Django, Flask)
+- Strong community support
+
+
+  [Tokens: 45 in, 60 out]
+
+[ASSISTANT] (2025-01-15 12:01:15 UTC)
+
+Rust is a systems programming language known for:
+- Memory safety without garbage collection
+- Zero-cost abstractions
+- Excellent concurrency support
+- Growing ecosystem for web (Actix, Axum)
+
+
+  [Tokens: 45 in, 55 out]

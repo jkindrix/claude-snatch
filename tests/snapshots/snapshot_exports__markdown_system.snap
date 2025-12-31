@@ -1,0 +1,45 @@
+---
+source: tests/snapshot_exports.rs
+expression: output
+---
+## 👤 User *(2025-01-15 13:00:01 UTC)* 
+
+What is this project?
+
+## 🤖 Assistant *(2025-01-15 13:00:02 UTC)* 
+
+### 🔧 Tool: `Glob`
+
+**ID:** `toolu_glob_001`
+
+**Input:**
+```json
+{
+  "pattern": "**/*.rs"
+}
+```
+
+
+*Tokens: 30 in, 20 out*
+
+## 👤 User *(2025-01-15 13:00:03 UTC)* 
+
+#### ✅ Result for `toolu_glob_001`
+
+```
+Found 2 files:
+src/main.rs
+src/lib.rs
+```
+
+
+## 🤖 Assistant *(2025-01-15 13:00:04 UTC)* 
+
+This appears to be a Rust project with 2 source files: `src/main.rs` and `src/lib.rs`.
+
+
+*Tokens: 70 in, 30 out*
+
+## 📋 Summary
+
+Explored a Rust project with main.rs and lib.rs

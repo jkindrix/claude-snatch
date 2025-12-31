@@ -1,0 +1,31 @@
+---
+source: tests/snapshot_exports.rs
+expression: output
+---
+## 👤 User *(2025-01-15 11:00:00 UTC)* 
+
+Solve this problem step by step: What is 15 * 23?
+
+## 🤖 Assistant *(2025-01-15 11:00:01 UTC)* 
+
+### 💭 Thinking
+
+```
+Let me break down this multiplication:
+- 15 * 23 = 15 * (20 + 3)
+- = 15 * 20 + 15 * 3
+- = 300 + 45
+- = 345
+```
+
+Let me solve this step by step:
+
+1. Break down 23 into 20 + 3
+2. Calculate 15 × 20 = 300
+3. Calculate 15 × 3 = 45
+4. Add them together: 300 + 45 = **345**
+
+The answer is 345.
+
+
+*Tokens: 20 in, 80 out*

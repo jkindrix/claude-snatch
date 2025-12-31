@@ -1,0 +1,45 @@
+---
+source: tests/snapshot_exports.rs
+expression: output
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<entries>
+    <message type="user">
+      <timestamp>2025-01-15T11:00:00Z</timestamp>
+      <content>
+        <text>
+          <![CDATA[Solve this problem step by step: What is 15 * 23?]]>
+        </text>
+      </content>
+    </message>
+    <message type="assistant" model="claude-sonnet-4-20250514">
+      <timestamp>2025-01-15T11:00:01Z</timestamp>
+      <usage>
+        <input-tokens>20</input-tokens>
+        <output-tokens>80</output-tokens>
+        <cache-read-tokens>0</cache-read-tokens>
+        <cache-creation-tokens>0</cache-creation-tokens>
+      </usage>
+      <content>
+        <thinking signature="thinking_sig_001">
+          <content>
+            <![CDATA[Let me break down this multiplication:
+- 15 * 23 = 15 * (20 + 3)
+- = 15 * 20 + 15 * 3
+- = 300 + 45
+- = 345]]>
+          </content>
+        </thinking>
+        <text>
+          <![CDATA[Let me solve this step by step:
+
+1. Break down 23 into 20 + 3
+2. Calculate 15 × 20 = 300
+3. Calculate 15 × 3 = 45
+4. Add them together: 300 + 45 = **345**
+
+The answer is 345.]]>
+        </text>
+      </content>
+    </message>
+</entries>

@@ -381,9 +381,9 @@ mod tests {
 
     #[test]
     fn test_local_command_parsing() {
-        let content = r#"<command-name>/mcp</command-name>
+        let content = r"<command-name>/mcp</command-name>
             <command-message>mcp</command-message>
-            <command-args></command-args>"#;
+            <command-args></command-args>";
 
         let parsed = LocalCommandContent::parse(content).unwrap();
         assert_eq!(parsed.command_name, "/mcp");

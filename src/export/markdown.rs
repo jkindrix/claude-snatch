@@ -2,6 +2,25 @@
 //!
 //! Generates human-readable Markdown output from Claude Code conversations,
 //! suitable for documentation, archival, and sharing.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use std::io::Cursor;
+//! use claude_snatch::export::{MarkdownExporter, Exporter, ExportOptions};
+//! use claude_snatch::reconstruction::Conversation;
+//!
+//! fn export_to_markdown(conversation: &Conversation) -> claude_snatch::Result<String> {
+//!     let exporter = MarkdownExporter::new()
+//!         .with_toc(true)           // Add table of contents
+//!         .with_header(true);       // Include session header
+//!
+//!     let mut buffer = Cursor::new(Vec::new());
+//!     let options = ExportOptions::default();
+//!     exporter.export_conversation(conversation, &mut buffer, &options)?;
+//!     Ok(String::from_utf8(buffer.into_inner())?)
+//! }
+//! ```
 
 use std::io::Write;
 

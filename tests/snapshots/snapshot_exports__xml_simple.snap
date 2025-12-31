@@ -1,0 +1,82 @@
+---
+source: tests/snapshot_exports.rs
+expression: output
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<entries>
+    <message type="user">
+      <timestamp>2025-01-15T10:00:00Z</timestamp>
+      <content>
+        <text>
+          <![CDATA[Hello, Claude!]]>
+        </text>
+      </content>
+    </message>
+    <message type="assistant" model="claude-sonnet-4-20250514">
+      <timestamp>2025-01-15T10:00:01Z</timestamp>
+      <usage>
+        <input-tokens>10</input-tokens>
+        <output-tokens>15</output-tokens>
+        <cache-read-tokens>0</cache-read-tokens>
+        <cache-creation-tokens>0</cache-creation-tokens>
+      </usage>
+      <content>
+        <text>
+          <![CDATA[Hello! How can I help you today?]]>
+        </text>
+      </content>
+    </message>
+    <message type="user">
+      <timestamp>2025-01-15T10:00:30Z</timestamp>
+      <content>
+        <text>
+          <![CDATA[Can you list the files in the current directory?]]>
+        </text>
+      </content>
+    </message>
+    <message type="assistant" model="claude-sonnet-4-20250514">
+      <timestamp>2025-01-15T10:00:31Z</timestamp>
+      <usage>
+        <input-tokens>50</input-tokens>
+        <output-tokens>30</output-tokens>
+        <cache-read-tokens>0</cache-read-tokens>
+        <cache-creation-tokens>0</cache-creation-tokens>
+      </usage>
+      <content>
+        <tool-use id="toolu_001" name="Bash">
+          <input>
+            <![CDATA[{
+  "command": "ls -la"
+}]]>
+          </input>
+        </tool-use>
+      </content>
+    </message>
+    <message type="user">
+      <timestamp>2025-01-15T10:00:32Z</timestamp>
+      <content>
+        <tool-result tool-use-id="toolu_001" status="success">
+          <output>
+            <![CDATA[total 8
+drwxr-xr-x 2 user user 4096 Jan 15 10:00 .
+drwxr-xr-x 3 user user 4096 Jan 15 09:00 ..
+-rw-r--r-- 1 user user  100 Jan 15 10:00 file.txt]]>
+          </output>
+        </tool-result>
+      </content>
+    </message>
+    <message type="assistant" model="claude-sonnet-4-20250514">
+      <timestamp>2025-01-15T10:00:33Z</timestamp>
+      <usage>
+        <input-tokens>100</input-tokens>
+        <output-tokens>25</output-tokens>
+        <cache-read-tokens>0</cache-read-tokens>
+        <cache-creation-tokens>0</cache-creation-tokens>
+      </usage>
+      <content>
+        <text>
+          <![CDATA[The directory contains one file: `file.txt`. Would you like me to read its contents?]]>
+        </text>
+      </content>
+    </message>
+</entries>

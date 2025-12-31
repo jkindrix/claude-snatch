@@ -798,3 +798,158 @@ mod large_file_handling {
         assert_eq!(conversation.len(), 2000);
     }
 }
+
+/// Property-based tests using proptest.
+///
+/// These tests verify parser robustness against arbitrary input.
+mod property_tests {
+    use proptest::prelude::*;
+
+    use claude_snatch::parser::JsonlParser;
+
+    proptest! {
+        /// Parser should never panic on arbitrary byte sequences.
+        #[test]
+        fn parser_never_panics_on_arbitrary_input(input in any::<Vec<u8>>()) {
+            let content = String::from_utf8_lossy(&input);
+            let mut parser = JsonlParser::new().with_lenient(true);
+            // Should not panic, even on malformed input
+            let _ = parser.parse_str(&content);
+        }
+
+        /// Parser handles arbitrary valid-looking JSONL lines without panic.
+        #[test]
+        fn parser_handles_json_like_strings(
+            uuid in "[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}",
+            content in ".*"
+        ) {
+            let json = format!(
+                r#"{{"uuid":"{}","type":"user","message":{{"role":"user","content":"{}"}}}}"#,
+                uuid, content.replace('\\', "\\\\").replace('"', "\\\"")
+            );
+            let mut parser = JsonlParser::new().with_lenient(true);
+            let _ = parser.parse_str(&json);
+        }
+
+        /// Empty lines and whitespace-only lines are always skipped.
+        #[test]
+        fn parser_skips_whitespace_lines(
+            spaces in "[ \t\n\r]*",
+            valid_json in prop::bool::ANY
+        ) {
+            let content = if valid_json {
+                format!(
+                    "{}\n{{\n\"uuid\":\"test\",\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"test\"}}}}\n{}",
+                    spaces, spaces
+                )
+            } else {
+                spaces.clone()
+            };
+            let mut parser = JsonlParser::new().with_lenient(true);
+            let result = parser.parse_str(&content);
+            // Should succeed without panic
+            assert!(result.is_ok());
+        }
+
+        /// Lenient mode should always return Ok, even with bad input.
+        #[test]
+        fn lenient_mode_always_succeeds(input in ".*") {
+            let mut parser = JsonlParser::new().with_lenient(true);
+            let result = parser.parse_str(&input);
+            assert!(result.is_ok(), "Lenient mode should always succeed");
+        }
+
+        /// Parse stats are consistent with the number of lines.
+        #[test]
+        fn parse_stats_are_consistent(lines in prop::collection::vec(".*", 0..20)) {
+            let content = lines.join("\n");
+            let mut parser = JsonlParser::new().with_lenient(true);
+            let entries = parser.parse_str(&content).unwrap();
+            let stats = parser.stats();
+
+            // Total lines = entries parsed + skipped + empty
+            let accounted = stats.entries_parsed + stats.lines_skipped + stats.empty_lines;
+            assert_eq!(
+                stats.lines_processed, accounted,
+                "Stats should account for all lines: processed={}, accounted={}",
+                stats.lines_processed, accounted
+            );
+
+            // Entries returned should match entries_parsed
+            assert_eq!(
+                entries.len(), stats.entries_parsed,
+                "Returned entries should match stats"
+            );
+        }
+    }
+}
+
+/// Snapshot tests using insta.
+///
+/// These tests capture expected output formats to detect regressions.
+mod snapshot_tests {
+    use super::*;
+    use claude_snatch::export::{ExportOptions, Exporter, MarkdownExporter, JsonExporter};
+
+    #[test]
+    fn test_markdown_export_snapshot() {
+        let entries = parse_fixture("simple_session.jsonl");
+        let conversation = Conversation::from_entries(entries).unwrap();
+
+        let exporter = MarkdownExporter::new();
+        let options = ExportOptions::default();
+        let mut output = Vec::new();
+        exporter.export_conversation(&conversation, &mut output, &options).unwrap();
+        let markdown = String::from_utf8(output).unwrap();
+
+        insta::assert_snapshot!("simple_session_markdown", markdown);
+    }
+
+    #[test]
+    fn test_json_export_snapshot() {
+        let entries = parse_fixture("simple_session.jsonl");
+        let conversation = Conversation::from_entries(entries).unwrap();
+
+        let exporter = JsonExporter::new().pretty(true);
+        let options = ExportOptions::default();
+        let mut output = Vec::new();
+        exporter.export_conversation(&conversation, &mut output, &options).unwrap();
+        let json = String::from_utf8(output).unwrap();
+
+        // Redact the timestamp which changes on each run
+        let mut settings = insta::Settings::clone_current();
+        settings.add_filter(r#""exported_at": "[^"]+""#, r#""exported_at": "[REDACTED]""#);
+        settings.bind(|| {
+            insta::assert_snapshot!("simple_session_json", json);
+        });
+    }
+
+    #[test]
+    fn test_thinking_session_markdown_snapshot() {
+        let entries = parse_fixture("thinking_session.jsonl");
+        let conversation = Conversation::from_entries(entries).unwrap();
+
+        let exporter = MarkdownExporter::new();
+        let options = ExportOptions::default().with_thinking(true);
+        let mut output = Vec::new();
+        exporter.export_conversation(&conversation, &mut output, &options).unwrap();
+        let markdown = String::from_utf8(output).unwrap();
+
+        insta::assert_snapshot!("thinking_session_markdown", markdown);
+    }
+
+    #[test]
+    fn test_branching_session_main_thread_snapshot() {
+        let entries = parse_fixture("branching_session.jsonl");
+        let conversation = Conversation::from_entries(entries).unwrap();
+
+        let exporter = MarkdownExporter::new();
+        // main_thread_only is true by default in ExportOptions
+        let options = ExportOptions::default();
+        let mut output = Vec::new();
+        exporter.export_conversation(&conversation, &mut output, &options).unwrap();
+        let markdown = String::from_utf8(output).unwrap();
+
+        insta::assert_snapshot!("branching_session_main_thread", markdown);
+    }
+}

@@ -5,6 +5,39 @@
 //! - Graceful error recovery for malformed lines
 //! - Schema version detection
 //! - Partial line handling for active sessions
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use claude_snatch::parser::JsonlParser;
+//!
+//! // Parse from file
+//! let mut parser = JsonlParser::new()
+//!     .with_lenient(true);  // Skip malformed lines
+//!
+//! let entries = parser.parse_file("session.jsonl")?;
+//! println!("Parsed {} entries", entries.len());
+//!
+//! // Check parsing statistics
+//! let stats = parser.stats();
+//! println!("Success rate: {:.1}%", stats.success_rate());
+//! # Ok::<(), claude_snatch::SnatchError>(())
+//! ```
+//!
+//! # Parsing Modes
+//!
+//! - **Lenient mode** (default): Skips malformed lines, logs errors
+//! - **Strict mode**: Fails on first parse error
+//!
+//! ```rust
+//! use claude_snatch::parser::JsonlParser;
+//!
+//! // Strict mode for validation
+//! let mut strict_parser = JsonlParser::new().with_lenient(false);
+//!
+//! // Lenient mode for robust parsing
+//! let mut lenient_parser = JsonlParser::new().with_lenient(true);
+//! ```
 
 mod streaming;
 
@@ -219,11 +252,18 @@ impl Default for JsonlParser {
 }
 
 /// Truncate a string for preview display.
+///
+/// Uses character-aware truncation to avoid panicking on multi-byte UTF-8 characters.
 fn truncate_preview(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len])
+        // Find a valid character boundary at or before max_len
+        let mut end = max_len;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
     }
 }
 

@@ -1,0 +1,50 @@
+---
+source: tests/snapshot_exports.rs
+assertion_line: 72
+description: Text export of simple session
+expression: output
+---
+[USER] (2025-01-15 10:00:00 UTC)
+
+Hello, Claude!
+
+[ASSISTANT] (2025-01-15 10:00:01 UTC)
+
+Hello! How can I help you today?
+
+
+  [Tokens: 10 in, 15 out]
+
+[USER] (2025-01-15 10:00:30 UTC)
+
+Can you list the files in the current directory?
+
+[ASSISTANT] (2025-01-15 10:00:31 UTC)
+
+  [TOOL: Bash]
+  ID: toolu_001
+  | {
+  |   "command": "ls -la"
+  | }
+  [/TOOL]
+
+
+  [Tokens: 50 in, 30 out]
+
+[USER] (2025-01-15 10:00:32 UTC)
+
+  [RESULT: toolu_001 (OK)]
+  | total 8
+  | drwxr-xr-x 2 user user 4096 Jan 15 10:00 .
+  | drwxr-xr-x 3 user user 4096 Jan 15 09:00 ..
+  | -rw-r--r-- 1 user user  100 Jan 15 10:00 file.txt
+  [/RESULT]
+
+
+[ASSISTANT] (2025-01-15 10:00:33 UTC)
+
+The directory contains one file: `file.txt`. Would you like me to read its
+contents?
+
+
+  [Tokens: 100 in, 25 out]

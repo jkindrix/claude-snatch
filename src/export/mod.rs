@@ -10,6 +10,25 @@
 //!
 //! All exporters support streaming output for large conversations
 //! and configurable formatting options.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use claude_snatch::export::{export_to_string, ExportFormat, ExportOptions};
+//! use claude_snatch::parser::JsonlParser;
+//! use claude_snatch::reconstruction::Conversation;
+//!
+//! fn export_session(jsonl_path: &str) -> claude_snatch::Result<String> {
+//!     // Parse the session
+//!     let mut parser = JsonlParser::new();
+//!     let entries = parser.parse_file(jsonl_path)?;
+//!
+//!     // Build conversation and export to markdown
+//!     let conversation = Conversation::from_entries(entries)?;
+//!     let options = ExportOptions::default();
+//!     export_to_string(&conversation, ExportFormat::Markdown, &options)
+//! }
+//! ```
 
 mod csv;
 mod html;

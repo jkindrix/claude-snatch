@@ -73,7 +73,9 @@
 //! ```
 
 #![doc(html_root_url = "https://docs.rs/claude-snatch/0.1.0")]
-#![forbid(unsafe_code)]
+// Use deny instead of forbid to allow targeted unsafe in mmap feature.
+// When mmap feature is enabled, streaming.rs uses memmap2 which requires unsafe.
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(rustdoc::missing_crate_level_docs)]
 
@@ -117,7 +119,6 @@ pub const FILE_HISTORY_DIR_NAME: &str = "filehistory";
 
 /// Prelude module for convenient imports.
 pub mod prelude {
-    //! Prelude module with commonly used types.
 
     pub use crate::api::{SnatchClient, ExportFormat, ExportOptionsBuilder};
     pub use crate::error::{Result, SnatchError};

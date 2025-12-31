@@ -1,0 +1,47 @@
+---
+source: tests/integration_tests.rs
+assertion_line: 948
+expression: markdown
+---
+# Claude Code Conversation
+
+**Started:** 2025-01-15 12:00:00 UTC
+**Ended:** 2025-01-15 12:01:15 UTC
+**Duration:** 1m 15s
+
+## Statistics
+- **Messages:** 6 (3 user, 3 assistant)
+- **Total Tokens:** 255
+- **Input Tokens:** 105
+- **Output Tokens:** 150
+- **Tool Invocations:** 0
+- **Primary Model:** claude-sonnet-4-20250514
+- **Estimated Cost:** $0.0026
+
+---
+
+## 👤 User *(2025-01-15 12:00:00 UTC)* 
+
+What language should I learn?
+
+## 🤖 Assistant *(2025-01-15 12:00:01 UTC)* 
+
+That depends on your goals! Python is great for beginners and data science, while Rust is excellent for systems programming.
+
+
+*Tokens: 15 in, 35 out*
+
+## 👤 User *(2025-01-15 12:01:00 UTC)* 
+
+Tell me more about Python
+
+## 🤖 Assistant *(2025-01-15 12:01:10 UTC)* 
+
+Python is a versatile, beginner-friendly language known for:
+- Clean, readable syntax
+- Extensive libraries for data science (NumPy, Pandas)
+- Great for web development (Django, Flask)
+- Strong community support
+
+
+*Tokens: 45 in, 60 out*
