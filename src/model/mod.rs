@@ -4,6 +4,44 @@
 //! content blocks, and metadata captured in Claude Code session logs.
 //! The model supports 77+ documented data elements with forward-compatible
 //! unknown field preservation.
+//!
+//! # Message Types
+//!
+//! The main entry point is [`LogEntry`], which represents any JSONL line:
+//!
+//! ```rust,no_run
+//! use claude_snatch::model::LogEntry;
+//!
+//! fn process_entry(entry: &LogEntry) {
+//!     match entry {
+//!         LogEntry::User(user) => {
+//!             println!("User message at {}", user.timestamp);
+//!         }
+//!         LogEntry::Assistant(assistant) => {
+//!             println!("Model: {}", assistant.message.model);
+//!             for block in &assistant.message.content {
+//!                 // Process content blocks
+//!             }
+//!         }
+//!         LogEntry::System(system) => {
+//!             println!("System event: {:?}", system.subtype);
+//!         }
+//!         _ => {} // Handle other types
+//!     }
+//! }
+//! ```
+//!
+//! # Schema Versions
+//!
+//! The [`SchemaVersion`] enum tracks Claude Code format evolution:
+//!
+//! ```rust
+//! use claude_snatch::model::SchemaVersion;
+//!
+//! let version = SchemaVersion::from_version_string("2.0.74");
+//! assert!(version.supports_feature("lsp"));
+//! assert!(version.supports_feature("thinking_metadata"));
+//! ```
 
 pub mod content;
 pub mod message;
@@ -90,7 +128,7 @@ impl<T> std::ops::DerefMut for WithUnknown<T> {
 }
 
 /// Schema version identifier for Claude Code JSONL format.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SchemaVersion {
     /// Original format (v1.x)
@@ -114,6 +152,7 @@ pub enum SchemaVersion {
     /// Chrome MCP (v2.0.72 - v2.0.73)
     V2Chrome,
     /// LSP tool (v2.0.74+)
+    #[default]
     V2Lsp,
     /// Unknown version for forward compatibility
     Unknown(String),
@@ -194,11 +233,6 @@ impl SchemaVersion {
     }
 }
 
-impl Default for SchemaVersion {
-    fn default() -> Self {
-        Self::V2Lsp
-    }
-}
 
 impl std::fmt::Display for SchemaVersion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

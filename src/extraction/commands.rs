@@ -123,9 +123,9 @@ fn extract_description(content: &str) -> Option<String> {
     let trimmed = content.trim();
 
     // Check for YAML frontmatter
-    if trimmed.starts_with("---") {
-        if let Some(end) = trimmed[3..].find("---") {
-            let frontmatter = &trimmed[3..3 + end];
+    if let Some(after_prefix) = trimmed.strip_prefix("---") {
+        if let Some(end) = after_prefix.find("---") {
+            let frontmatter = &after_prefix[..end];
             for line in frontmatter.lines() {
                 if let Some(desc) = line.strip_prefix("description:") {
                     return Some(desc.trim().trim_matches('"').to_string());

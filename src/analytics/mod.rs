@@ -6,7 +6,44 @@
 //! - Tool invocation tracking
 //! - Cost estimation
 //! - Session duration analysis
+//! - Historical cost tracking and persistence
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use claude_snatch::analytics::SessionAnalytics;
+//! use claude_snatch::reconstruction::Conversation;
+//! use claude_snatch::parser::JsonlParser;
+//!
+//! fn main() -> claude_snatch::Result<()> {
+//!     // Parse and reconstruct a session
+//!     let mut parser = JsonlParser::new();
+//!     let entries = parser.parse_file("session.jsonl")?;
+//!     let conversation = Conversation::from_entries(entries)?;
+//!
+//!     // Generate analytics
+//!     let analytics = SessionAnalytics::from_conversation(&conversation);
+//!
+//!     // Access various metrics
+//!     println!("Duration: {:?}", analytics.duration_string());
+//!     println!("Total tokens: {}", analytics.usage.usage.total_tokens());
+//!     println!("Cache efficiency: {:.1}%", analytics.cache_efficiency());
+//!     println!("Primary model: {:?}", analytics.primary_model());
+//!
+//!     // Get top tools by usage
+//!     for (tool, count) in analytics.top_tools(5) {
+//!         println!("  {}: {} invocations", tool, count);
+//!     }
+//!
+//!     // Generate a summary report
+//!     let summary = analytics.summary_report();
+//!     println!("Estimated cost: {}", summary.cost_string());
+//!
+//!     Ok(())
+//! }
+//! ```
 
+pub mod history;
 
 use chrono::{DateTime, Datelike, Duration, Utc};
 use indexmap::IndexMap;
@@ -1423,7 +1460,7 @@ impl ProjectAnalytics {
 
         // Add duration
         if let Some(duration) = session.duration() {
-            self.total_duration = self.total_duration + duration;
+            self.total_duration += duration;
         }
 
         // Merge model usage

@@ -199,16 +199,16 @@ fn list_sessions<W: Write>(
     // Sort sessions
     match args.sort {
         SortOrder::Modified => {
-            sessions.sort_by(|a, b| b.modified_time().cmp(&a.modified_time()));
+            sessions.sort_by_key(|s| std::cmp::Reverse(s.modified_time()));
         }
         SortOrder::Oldest => {
-            sessions.sort_by(|a, b| a.modified_time().cmp(&b.modified_time()));
+            sessions.sort_by_key(|s| s.modified_time());
         }
         SortOrder::Size => {
-            sessions.sort_by(|a, b| b.file_size().cmp(&a.file_size()));
+            sessions.sort_by_key(|s| std::cmp::Reverse(s.file_size()));
         }
         SortOrder::Name => {
-            sessions.sort_by(|a, b| a.session_id().cmp(b.session_id()));
+            sessions.sort_by_key(|s| s.session_id().to_string());
         }
     }
 

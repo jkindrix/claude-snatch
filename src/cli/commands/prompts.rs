@@ -7,7 +7,9 @@
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 
-use crate::cli::{Cli, PromptsArgs};
+use serde::Serialize;
+
+use crate::cli::{Cli, OutputFormat, PromptsArgs};
 use crate::discovery::{Session, SessionFilter};
 use crate::error::{Result, SnatchError};
 use crate::model::LogEntry;
@@ -43,14 +45,27 @@ fn extract_single_session(cli: &Cli, args: &PromptsArgs, session_id: &str) -> Re
             session_id: session_id.to_string(),
         })?;
 
-    let prompts = extract_prompts_from_session(&session, args)?;
+    let mut prompts = extract_prompts_from_session(&session, args, cli.max_file_size)?;
+
+    // Apply limit if specified
+    let total_before_limit = prompts.len();
+    if let Some(limit) = args.limit {
+        prompts.truncate(limit);
+    }
+
+    // Check if JSON output is requested
+    let use_json = matches!(cli.effective_output(), OutputFormat::Json);
 
     if let Some(ref path) = args.output_file {
         let file = File::create(path).map_err(|e| {
             SnatchError::io(format!("Failed to create output file: {}", path.display()), e)
         })?;
         let mut writer = BufWriter::new(file);
-        write_prompts(&mut writer, &prompts, args, None)?;
+        if use_json {
+            write_prompts_json(&mut writer, &prompts, total_before_limit, None)?;
+        } else {
+            write_prompts(&mut writer, &prompts, args, None)?;
+        }
         writer.flush()?;
         if !cli.quiet {
             eprintln!(
@@ -61,7 +76,11 @@ fn extract_single_session(cli: &Cli, args: &PromptsArgs, session_id: &str) -> Re
         }
     } else {
         let mut writer = io::stdout();
-        write_prompts(&mut writer, &prompts, args, None)?;
+        if use_json {
+            write_prompts_json(&mut writer, &prompts, total_before_limit, None)?;
+        } else {
+            write_prompts(&mut writer, &prompts, args, None)?;
+        }
     }
 
     Ok(())
@@ -100,10 +119,7 @@ fn extract_multiple_sessions(cli: &Cli, args: &PromptsArgs) -> Result<()> {
                     return false;
                 }
             }
-            match filter.matches(s) {
-                Ok(matches) => matches,
-                Err(_) => false,
-            }
+            filter.matches(s).unwrap_or_default()
         })
         .collect();
 
@@ -115,21 +131,17 @@ fn extract_multiple_sessions(cli: &Cli, args: &PromptsArgs) -> Result<()> {
     }
 
     // Sort by modification time (oldest first for chronological order)
-    sessions.sort_by(|a, b| a.modified_time().cmp(&b.modified_time()));
+    sessions.sort_by_key(|s| s.modified_time());
 
-    let mut writer: Box<dyn Write> = if let Some(ref path) = args.output_file {
-        let file = File::create(path).map_err(|e| {
-            SnatchError::io(format!("Failed to create output file: {}", path.display()), e)
-        })?;
-        Box::new(BufWriter::new(file))
-    } else {
-        Box::new(io::stdout())
-    };
+    // Check if JSON output is requested
+    let use_json = matches!(cli.effective_output(), OutputFormat::Json);
 
-    let mut total_prompts = 0;
+    // Collect all prompts (needed for JSON output and limit application)
+    let mut all_prompts: Vec<Prompt> = Vec::new();
+    let mut session_count = 0;
 
     for session in &sessions {
-        let prompts = match extract_prompts_from_session(session, args) {
+        let prompts = match extract_prompts_from_session(session, args, cli.max_file_size) {
             Ok(p) => p,
             Err(e) => {
                 if !cli.quiet {
@@ -143,18 +155,85 @@ fn extract_multiple_sessions(cli: &Cli, args: &PromptsArgs) -> Result<()> {
             continue;
         }
 
-        let session_info = if args.separators {
-            Some(SessionInfo {
-                session_id: session.session_id().to_string(),
-                project_path: session.project_path().to_string(),
+        session_count += 1;
+
+        // Add session metadata to prompts if separators are enabled
+        let prompts_with_meta: Vec<Prompt> = prompts
+            .into_iter()
+            .map(|mut p| {
+                if args.separators || use_json {
+                    p.session_id = Some(session.session_id().to_string());
+                    p.project_path = Some(session.project_path().to_string());
+                }
+                p
             })
+            .collect();
+
+        all_prompts.extend(prompts_with_meta);
+
+        // Check if we've reached the limit
+        if let Some(limit) = args.limit {
+            if all_prompts.len() >= limit {
+                all_prompts.truncate(limit);
+                break;
+            }
+        }
+    }
+
+    let total_before_limit = all_prompts.len();
+
+    // Write output
+    let mut writer: Box<dyn Write> = if let Some(ref path) = args.output_file {
+        let file = File::create(path).map_err(|e| {
+            SnatchError::io(format!("Failed to create output file: {}", path.display()), e)
+        })?;
+        Box::new(BufWriter::new(file))
+    } else {
+        Box::new(io::stdout())
+    };
+
+    if use_json {
+        write_prompts_json(&mut writer, &all_prompts, total_before_limit, Some(session_count))?;
+    } else {
+        // Group prompts by session for text output if separators are enabled
+        if args.separators {
+            let mut current_session: Option<String> = None;
+            let mut session_prompts: Vec<Prompt> = Vec::new();
+
+            for prompt in &all_prompts {
+                let prompt_session = prompt.session_id.clone();
+                if current_session.as_ref() != prompt_session.as_ref() {
+                    // Write previous session's prompts
+                    if !session_prompts.is_empty() {
+                        let info = current_session.as_ref().map(|sid| SessionInfo {
+                            session_id: sid.clone(),
+                            project_path: session_prompts[0]
+                                .project_path
+                                .clone()
+                                .unwrap_or_default(),
+                        });
+                        write_prompts(&mut writer, &session_prompts, args, info.as_ref())?;
+                    }
+                    session_prompts.clear();
+                    current_session = prompt_session;
+                }
+                session_prompts.push(prompt.clone());
+            }
+
+            // Write final session's prompts
+            if !session_prompts.is_empty() {
+                let info = current_session.as_ref().map(|sid| SessionInfo {
+                    session_id: sid.clone(),
+                    project_path: session_prompts[0]
+                        .project_path
+                        .clone()
+                        .unwrap_or_default(),
+                });
+                write_prompts(&mut writer, &session_prompts, args, info.as_ref())?;
+            }
         } else {
-            None
-        };
-
-        write_prompts(&mut writer, &prompts, args, session_info.as_ref())?;
-
-        total_prompts += prompts.len();
+            write_prompts(&mut writer, &all_prompts, args, None)?;
+        }
     }
 
     // Finalize atomic file if writing to file
@@ -163,8 +242,8 @@ fn extract_multiple_sessions(cli: &Cli, args: &PromptsArgs) -> Result<()> {
         if !cli.quiet {
             eprintln!(
                 "Extracted {} prompts from {} sessions to {}",
-                total_prompts,
-                sessions.len(),
+                all_prompts.len(),
+                session_count,
                 path.display()
             );
         }
@@ -174,20 +253,36 @@ fn extract_multiple_sessions(cli: &Cli, args: &PromptsArgs) -> Result<()> {
 }
 
 /// Session information for separators.
+#[derive(Debug, Clone, Serialize)]
 struct SessionInfo {
     session_id: String,
     project_path: String,
 }
 
 /// Extracted prompt with metadata.
+#[derive(Debug, Clone, Serialize)]
 struct Prompt {
     text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     timestamp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_path: Option<String>,
+}
+
+/// Collection of prompts for JSON output.
+#[derive(Debug, Clone, Serialize)]
+struct PromptsOutput {
+    prompts: Vec<Prompt>,
+    total_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_count: Option<usize>,
 }
 
 /// Extract prompts from a session.
-fn extract_prompts_from_session(session: &Session, args: &PromptsArgs) -> Result<Vec<Prompt>> {
-    let entries = session.parse()?;
+fn extract_prompts_from_session(session: &Session, args: &PromptsArgs, max_file_size: Option<u64>) -> Result<Vec<Prompt>> {
+    let entries = session.parse_with_options(max_file_size)?;
     let mut prompts = Vec::new();
 
     for entry in entries {
@@ -226,12 +321,31 @@ fn extract_prompts_from_session(session: &Session, args: &PromptsArgs) -> Result
                 prompts.push(Prompt {
                     text: trimmed.to_string(),
                     timestamp,
+                    session_id: None,    // Will be filled in by caller if needed
+                    project_path: None,  // Will be filled in by caller if needed
                 });
             }
         }
     }
 
     Ok(prompts)
+}
+
+/// Write prompts as JSON to output.
+fn write_prompts_json<W: Write>(
+    writer: &mut W,
+    prompts: &[Prompt],
+    total_count: usize,
+    session_count: Option<usize>,
+) -> Result<()> {
+    let output = PromptsOutput {
+        prompts: prompts.to_vec(),
+        total_count,
+        session_count,
+    };
+    serde_json::to_writer_pretty(&mut *writer, &output)?;
+    writeln!(writer)?;
+    Ok(())
 }
 
 /// Write prompts to output.
@@ -277,6 +391,8 @@ mod tests {
         let prompt = Prompt {
             text: "Hello world".to_string(),
             timestamp: Some("2025-12-30 12:00:00 UTC".to_string()),
+            session_id: None,
+            project_path: None,
         };
         assert_eq!(prompt.text, "Hello world");
         assert!(prompt.timestamp.is_some());

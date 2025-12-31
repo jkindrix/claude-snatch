@@ -7,6 +7,34 @@
 //! - Grouping streaming chunks by message.id
 //! - Identifying main threads vs sidechains
 //! - Linking tool_use to corresponding tool_result
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use claude_snatch::reconstruction::Conversation;
+//! use claude_snatch::parser::JsonlParser;
+//!
+//! fn main() -> claude_snatch::Result<()> {
+//!     // Parse a session file
+//!     let mut parser = JsonlParser::new();
+//!     let entries = parser.parse_file("session.jsonl")?;
+//!
+//!     // Reconstruct the conversation tree
+//!     let conversation = Conversation::from_entries(entries)?;
+//!
+//!     // Access conversation statistics
+//!     println!("Total messages: {}", conversation.len());
+//!     println!("Has branches: {}", conversation.has_branches());
+//!     println!("Branch count: {}", conversation.branch_count());
+//!
+//!     // Get main thread entries
+//!     for entry in conversation.main_thread_entries() {
+//!         println!("Entry: {:?}", entry.uuid());
+//!     }
+//!
+//!     Ok(())
+//! }
+//! ```
 
 mod tree;
 mod thread;
@@ -17,6 +45,7 @@ pub use thread::*;
 use std::collections::HashMap;
 
 use indexmap::IndexMap;
+use tracing::{debug, instrument, trace};
 
 use crate::error::Result;
 use crate::model::{ContentBlock, LogEntry};
@@ -77,9 +106,10 @@ pub struct Conversation {
 
 impl Conversation {
     /// Build a conversation from log entries.
+    #[instrument(skip(entries), fields(entry_count = entries.len()))]
     pub fn from_entries(entries: Vec<LogEntry>) -> Result<Self> {
+        debug!("Building conversation tree");
         let mut nodes = IndexMap::new();
-        let mut uuid_to_index = HashMap::new();
         let mut roots = Vec::new();
         let mut tool_uses: HashMap<String, String> = HashMap::new(); // tool_use_id -> node_uuid
         let mut tool_links = HashMap::new();
@@ -131,7 +161,6 @@ impl Conversation {
                     is_branch_point: false,
                 };
 
-                uuid_to_index.insert(uuid.clone(), nodes.len());
                 nodes.insert(uuid, node);
             }
         }
@@ -204,6 +233,19 @@ impl Conversation {
         for (uuid, node) in &mut nodes {
             node.is_main_thread = main_set.contains(uuid);
         }
+
+        debug!(
+            nodes = nodes.len(),
+            roots = roots.len(),
+            main_thread_len = main_thread.len(),
+            branches = branch_points.len(),
+            "Conversation tree built"
+        );
+        trace!(
+            tool_links = tool_links.len(),
+            message_groups = message_groups.len(),
+            "Tool and message linkage complete"
+        );
 
         Ok(Self {
             nodes,

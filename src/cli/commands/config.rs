@@ -83,13 +83,13 @@ fn get_config_value(cli: &Cli, key: &str) -> Result<()> {
     let config = Config::load().unwrap_or_default();
 
     let value = match key {
-        "default_format.format" => config.default_format.format.clone(),
+        "default_format.format" => config.default_format.format,
         "default_format.include_thinking" => config.default_format.include_thinking.to_string(),
         "default_format.include_tool_use" => config.default_format.include_tool_use.to_string(),
         "default_format.include_timestamps" => config.default_format.include_timestamps.to_string(),
         "default_format.pretty_json" => config.default_format.pretty_json.to_string(),
 
-        "theme.name" => config.theme.name.clone(),
+        "theme.name" => config.theme.name,
         "theme.color" => config.theme.color.to_string(),
         "theme.unicode" => config.theme.unicode.to_string(),
 

@@ -17,8 +17,10 @@ clap = { version = "4.5", features = ["derive", "env", "string", "wrap_help"] }
 clap_complete = "4.5"
 
 # TUI Framework
-ratatui = { version = "0.29", features = ["all-widgets"] }
-crossterm = { version = "0.28", features = ["event-stream"] }
+ratatui = { version = "0.30", features = ["all-widgets"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
+ratatui-image = { version = "10.0", default-features = false, features = ["image-defaults", "crossterm"], optional = true }
+image = { version = "0.25", optional = true }
 
 # Async Runtime
 tokio = { version = "1.41", features = ["full"] }
@@ -44,29 +46,36 @@ humantime = "2.1"
 
 # File system utilities
 walkdir = "2.5"
-dirs = "5.0"
-notify = { version = "7.0", features = ["serde"] }
-directories = "5.0"
+dirs = "6.0"
+notify = { version = "8.0", features = ["serde"] }
+directories = "6.0"
 tempfile = "3.14"
 
 # Clipboard
 arboard = "3.4"
 
+# Interactive prompts
+dialoguer = { version = "0.11", features = ["fuzzy-select"] }
+
 # Search/Filtering
 regex = "1.11"
 globset = "0.4"
-tantivy = "0.22"
+tantivy = "0.25"
 
 # Text Diff
 similar = "2.6"
 
 # JSON Schema
 jsonschema = "0.29"
+schemars = "1.0"
+
+# MCP Server (Model Context Protocol)
+mcpkit = { version = "0.5", optional = true }
 
 # Terminal utilities
-console = "0.15"
-indicatif = { version = "0.17", features = ["tokio"] }
-syntect = { version = "5.2", default-features = false, features = ["default-fancy"] }
+console = "0.16"
+indicatif = { version = "0.18", features = ["tokio"] }
+syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
 
 # Data structures
 indexmap = { version = "2.6", features = ["serde"] }
@@ -126,17 +135,86 @@ default = []
 tui = []
 tracing = []
 mmap = ["dep:memmap2"]  # Memory-mapped file parsing for very large JSONL files
+mcp = ["dep:mcpkit"]  # MCP server mode for AI model integration
+image-preview = ["dep:ratatui-image", "dep:image"]  # Terminal image preview (sixel/kitty/iterm)
 
 [lints.rust]
 # Use deny instead of forbid to allow targeted unsafe in mmap feature
 unsafe_code = "deny"
 
 [lints.clippy]
-all = "warn"
-pedantic = "warn"
-nursery = "warn"
-# Allow some pedantic lints that are too strict
+# Set lint groups with lower priority so individual allows take precedence
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# Allow some pedantic lints that are too strict or purely stylistic
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+similar_names = "allow"           # Variable naming style preference
+redundant_else = "allow"          # Control flow style preference
+needless_raw_string_hashes = "allow"  # Raw string formatting preference
+unreadable_literal = "allow"      # Number formatting style preference
+unnested_or_patterns = "allow"    # Match pattern style preference
+too_many_lines = "allow"          # Function length is not always a problem
+cognitive_complexity = "allow"    # Complex functions are sometimes necessary
+struct_excessive_bools = "allow"  # Sometimes structs need many bools
+struct_field_names = "allow"      # Field naming is contextual
+items_after_statements = "allow"  # Helper functions after usage is fine
+option_if_let_else = "allow"      # if-let is often clearer than map_or
+single_match_else = "allow"       # Explicit match is sometimes clearer
+redundant_closure_for_method_calls = "allow"  # Closures can be clearer
+use_self = "allow"                # Self vs type name is preference
+if_not_else = "allow"             # if !cond is often clearer
+match_same_arms = "allow"         # Sometimes explicit arms are clearer
+cast_possible_truncation = "allow"  # Truncation is intentional in these cases
+cast_sign_loss = "allow"          # Sign loss is intentional
+cast_precision_loss = "allow"     # Precision loss is acceptable for display
+cast_lossless = "allow"           # Type is clearer than auto-widening
+trivially_copy_pass_by_ref = "allow"  # Consistency with other methods
+unnecessary_wraps = "allow"       # API consistency sometimes requires wrapping
+uninlined_format_args = "allow"   # Format style preference
+significant_drop_tightening = "allow"  # Explicit scoping is clearer
+return_self_not_must_use = "allow"  # Builder pattern doesn't need must_use
+self_named_constructors = "allow" # new() is idiomatic
+should_implement_trait = "allow"  # Not all types need full trait impls
+missing_const_for_fn = "allow"    # const fn isn't always worth the complexity
+needless_pass_by_value = "allow"  # Sometimes owning is clearer
+ptr_arg = "allow"                 # &Vec is fine for simple cases
+redundant_closure = "allow"       # Closures can be clearer
+or_fun_call = "allow"             # unwrap_or vs unwrap_or_else is situational
+map_unwrap_or = "allow"           # map().unwrap_or() is often clearer
+manual_let_else = "allow"         # if-let vs let-else is preference
+match_wildcard_for_single_variants = "allow"  # Explicit variant is clearer
+missing_fields_in_debug = "allow" # Debug doesn't need all fields
+iter_without_into_iter = "allow"  # Not all types need IntoIterator
+needless_borrow = "allow"         # Explicit borrows can be clearer
+cast_possible_wrap = "allow"      # Wrap is intentional for diff calculations
+doc_markdown = "allow"            # Doc formatting is preference
+suboptimal_flops = "allow"        # Readable math is preferred over micro-optimization
+format_push_string = "allow"      # format!() is clearer than write!() macros
+iter_on_single_items = "allow"    # Sometimes explicit iteration is clearer
+unused_self = "allow"             # API consistency sometimes requires self
+explicit_iter_loop = "allow"      # for x in iter() is sometimes clearer than for x in &iter
+assigning_clones = "allow"        # x = y.clone() is sometimes clearer than x.clone_from(&y)
+inefficient_to_string = "allow"   # Readability over micro-optimization
+set_contains_or_insert = "allow"  # Explicit check-then-insert can be clearer
+io_other_error = "allow"          # io::Error::other is fine for custom errors
+redundant_clone = "allow"         # False positives in conditional paths
+needless_continue = "allow"       # Explicit continue for clarity in match arms
+branches_sharing_code = "allow"   # Sometimes duplicate code is clearer
+doc_overindented_list_items = "allow"  # Doc formatting preference
+collapsible_match = "allow"       # Sometimes separate matches are clearer
+filter_map_next = "allow"         # filter_map().next() can be clearer than find_map
+bool_to_int_with_if = "allow"     # Explicit if is clearer for bool to int
+field_reassign_with_default = "allow"  # Sometimes sequential assignment is clearer
+large_enum_variant = "allow"      # Boxing adds complexity, memory is acceptable
+derive_partial_eq_without_eq = "allow"  # Eq not always needed with PartialEq
+while_let_loop = "allow"          # Sometimes explicit loop is clearer
+elidable_lifetime_names = "allow" # Explicit lifetimes can be clearer
+ignored_unit_patterns = "allow"   # _ is clear for unit
+unnecessary_join = "allow"        # collect().join() can be clearer
+explicit_counter_loop = "allow"   # Manual counter can be clearer
+needless_pass_by_ref_mut = "allow"  # &mut ensures API contract

@@ -15,9 +15,10 @@ use crate::reconstruction::Conversation;
 use super::{ExportOptions, Exporter};
 
 /// CSV export mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CsvMode {
     /// Export messages with basic info.
+    #[default]
     Messages,
     /// Export token usage statistics.
     Usage,
@@ -25,12 +26,6 @@ pub enum CsvMode {
     Tools,
     /// Export all data in a single table.
     Full,
-}
-
-impl Default for CsvMode {
-    fn default() -> Self {
-        Self::Messages
-    }
 }
 
 /// CSV exporter for conversation data.

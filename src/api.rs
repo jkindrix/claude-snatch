@@ -175,7 +175,7 @@ impl SnatchClient {
     /// List recent sessions (sorted by modification time, newest first).
     pub fn recent_sessions(&self, limit: usize) -> Result<Vec<SessionInfo>> {
         let mut sessions = self.claude_dir.all_sessions()?;
-        sessions.sort_by(|a, b| b.modified_time().cmp(&a.modified_time()));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.modified_time()));
         sessions.truncate(limit);
         Ok(sessions.iter().map(|s| self.session_to_info(s)).collect())
     }

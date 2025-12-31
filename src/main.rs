@@ -9,13 +9,7 @@ use std::process::ExitCode;
 use claude_snatch::cli;
 
 fn main() -> ExitCode {
-    // Initialize logging if verbose mode
-    #[cfg(feature = "tracing")]
-    {
-        tracing_subscriber::fmt::init();
-    }
-
-    // Run the CLI
+    // Run the CLI (logging is initialized by cli::run based on --log-level and --log-format)
     match cli::run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

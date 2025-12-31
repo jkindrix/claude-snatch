@@ -507,7 +507,7 @@ pub fn redact_sensitive<'a>(text: &'a str, config: &RedactionConfig) -> Cow<'a, 
 
     // AWS keys (specific patterns)
     if config.aws_keys {
-        result = PATTERNS.aws_access_key.replace_all(&result, format!("{}", placeholder)).to_string();
+        result = PATTERNS.aws_access_key.replace_all(&result, placeholder.to_string()).to_string();
         result = PATTERNS.aws_secret_key.replace_all(&result, |caps: &regex::Captures| {
             format!("{}={}", &caps[1], placeholder)
         }).to_string();
@@ -595,30 +595,29 @@ pub fn redact_sensitive<'a>(text: &'a str, config: &RedactionConfig) -> Cow<'a, 
 pub fn detect_sensitive(text: &str, config: &RedactionConfig) -> Vec<SensitiveDataType> {
     let mut detected = Vec::new();
 
-    if config.api_keys {
-        if PATTERNS.api_key.is_match(text)
+    if config.api_keys
+        && (PATTERNS.api_key.is_match(text)
             || PATTERNS.bearer_token.is_match(text)
             || PATTERNS.github_token.is_match(text)
-            || PATTERNS.generic_secret.is_match(text)
-        {
-            detected.push(SensitiveDataType::ApiKey);
-        }
+            || PATTERNS.generic_secret.is_match(text))
+    {
+        detected.push(SensitiveDataType::ApiKey);
     }
 
-    if config.aws_keys {
-        if PATTERNS.aws_access_key.is_match(text) || PATTERNS.aws_secret_key.is_match(text) {
-            detected.push(SensitiveDataType::AwsCredential);
-        }
+    if config.aws_keys
+        && (PATTERNS.aws_access_key.is_match(text) || PATTERNS.aws_secret_key.is_match(text))
+    {
+        detected.push(SensitiveDataType::AwsCredential);
     }
 
     if config.emails && PATTERNS.email.is_match(text) {
         detected.push(SensitiveDataType::Email);
     }
 
-    if config.passwords {
-        if PATTERNS.password_env.is_match(text) || PATTERNS.password_url.is_match(text) {
-            detected.push(SensitiveDataType::Password);
-        }
+    if config.passwords
+        && (PATTERNS.password_env.is_match(text) || PATTERNS.password_url.is_match(text))
+    {
+        detected.push(SensitiveDataType::Password);
     }
 
     if config.credit_cards && PATTERNS.credit_card.is_match(text) {
@@ -795,6 +794,123 @@ pub mod pager {
             Ok(())
         }
     }
+}
+
+// ============================================================================
+// Sparkline Visualization
+// ============================================================================
+
+/// Unicode block characters for sparklines (from lowest to highest).
+const SPARKLINE_BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// Generate a sparkline visualization from a list of values.
+///
+/// Returns a Unicode string using block characters to represent relative values.
+///
+/// # Arguments
+///
+/// * `values` - Slice of values to visualize
+/// * `min_val` - Optional minimum value for scaling (defaults to data minimum)
+/// * `max_val` - Optional maximum value for scaling (defaults to data maximum)
+///
+/// # Example
+///
+/// ```
+/// use claude_snatch::util::sparkline;
+/// let data = [1.0, 3.0, 5.0, 2.0, 7.0];
+/// let spark = sparkline(&data, None, None);
+/// // Returns something like "▁▃▅▂█"
+/// ```
+pub fn sparkline(values: &[f64], min_val: Option<f64>, max_val: Option<f64>) -> String {
+    if values.is_empty() {
+        return String::new();
+    }
+
+    // Calculate min/max
+    let min = min_val.unwrap_or_else(|| {
+        values.iter().copied().fold(f64::INFINITY, f64::min)
+    });
+    let max = max_val.unwrap_or_else(|| {
+        values.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+    });
+
+    // Handle constant values
+    if (max - min).abs() < f64::EPSILON {
+        return SPARKLINE_BLOCKS[4].to_string().repeat(values.len());
+    }
+
+    let range = max - min;
+    let block_count = SPARKLINE_BLOCKS.len() as f64;
+
+    values
+        .iter()
+        .map(|&v| {
+            let normalized = ((v - min) / range).clamp(0.0, 1.0);
+            let index = ((normalized * (block_count - 1.0)).round() as usize).min(SPARKLINE_BLOCKS.len() - 1);
+            SPARKLINE_BLOCKS[index]
+        })
+        .collect()
+}
+
+/// Generate a sparkline from u64 values.
+pub fn sparkline_u64(values: &[u64]) -> String {
+    let float_values: Vec<f64> = values.iter().map(|&v| v as f64).collect();
+    sparkline(&float_values, None, None)
+}
+
+/// Generate a labeled sparkline with min/max values.
+///
+/// Returns a string like "▁▃▅▂█ (0 - 100)"
+pub fn sparkline_with_range(values: &[f64], label: Option<&str>) -> String {
+    if values.is_empty() {
+        return String::new();
+    }
+
+    let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let spark = sparkline(values, Some(min), Some(max));
+
+    match label {
+        Some(l) => format!("{spark} {l}"),
+        None => {
+            if min == max {
+                format!("{spark} ({min:.0})")
+            } else {
+                format!("{spark} ({min:.0}-{max:.0})")
+            }
+        }
+    }
+}
+
+/// Format a sparkline with a trend indicator.
+///
+/// Shows an arrow indicating the overall trend (↑ ↓ →).
+pub fn sparkline_with_trend(values: &[f64]) -> String {
+    if values.is_empty() {
+        return String::new();
+    }
+
+    let spark = sparkline(values, None, None);
+
+    // Calculate simple trend based on first and last value
+    let trend = if values.len() < 2 {
+        "→"
+    } else {
+        let first = values[0];
+        let last = values[values.len() - 1];
+        let threshold = (values.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+            - values.iter().copied().fold(f64::INFINITY, f64::min)) * 0.1;
+
+        if last > first + threshold {
+            "↑"
+        } else if last < first - threshold {
+            "↓"
+        } else {
+            "→"
+        }
+    };
+
+    format!("{spark} {trend}")
 }
 
 #[cfg(test)]
@@ -1002,5 +1118,84 @@ mod tests {
         assert_eq!(SensitiveDataType::ApiKey.description(), "API key or token");
         assert_eq!(SensitiveDataType::Email.description(), "email address");
         assert_eq!(SensitiveDataType::Ssn.description(), "Social Security Number");
+    }
+
+    // Sparkline tests
+
+    #[test]
+    fn test_sparkline_basic() {
+        let values = [1.0, 3.0, 5.0, 2.0, 7.0];
+        let spark = super::sparkline(&values, None, None);
+        assert_eq!(spark.chars().count(), 5);
+        // First value should be lowest block, last should be highest
+        let chars: Vec<char> = spark.chars().collect();
+        assert_eq!(chars[0], '▁'); // 1.0 is the minimum
+        assert_eq!(chars[4], '█'); // 7.0 is the maximum
+    }
+
+    #[test]
+    fn test_sparkline_empty() {
+        let values: [f64; 0] = [];
+        let spark = super::sparkline(&values, None, None);
+        assert!(spark.is_empty());
+    }
+
+    #[test]
+    fn test_sparkline_constant() {
+        let values = [5.0, 5.0, 5.0, 5.0];
+        let spark = super::sparkline(&values, None, None);
+        // All same value should produce middle blocks
+        assert_eq!(spark.chars().count(), 4);
+        let chars: Vec<char> = spark.chars().collect();
+        assert!(chars.iter().all(|&c| c == chars[0]));
+    }
+
+    #[test]
+    fn test_sparkline_u64() {
+        let values = [100, 200, 300, 400, 500];
+        let spark = super::sparkline_u64(&values);
+        assert_eq!(spark.chars().count(), 5);
+        let chars: Vec<char> = spark.chars().collect();
+        assert_eq!(chars[0], '▁');
+        assert_eq!(chars[4], '█');
+    }
+
+    #[test]
+    fn test_sparkline_with_range() {
+        let values = [10.0, 50.0, 100.0];
+        let spark = super::sparkline_with_range(&values, None);
+        // Should contain the sparkline plus range info
+        assert!(spark.contains('▁'));
+        assert!(spark.contains('█'));
+        assert!(spark.contains("10"));
+        assert!(spark.contains("100"));
+    }
+
+    #[test]
+    fn test_sparkline_with_range_label() {
+        let values = [10.0, 50.0, 100.0];
+        let spark = super::sparkline_with_range(&values, Some("tokens"));
+        assert!(spark.contains("tokens"));
+    }
+
+    #[test]
+    fn test_sparkline_with_trend_up() {
+        let values = [10.0, 50.0, 100.0];
+        let spark = super::sparkline_with_trend(&values);
+        assert!(spark.contains('↑'));
+    }
+
+    #[test]
+    fn test_sparkline_with_trend_down() {
+        let values = [100.0, 50.0, 10.0];
+        let spark = super::sparkline_with_trend(&values);
+        assert!(spark.contains('↓'));
+    }
+
+    #[test]
+    fn test_sparkline_with_trend_stable() {
+        let values = [50.0, 51.0, 50.0, 49.0, 50.0];
+        let spark = super::sparkline_with_trend(&values);
+        assert!(spark.contains('→'));
     }
 }

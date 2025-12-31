@@ -50,7 +50,8 @@ impl SyntaxHighlighter {
         let theme = THEME_SET
             .themes
             .get(&self.theme_name)
-            .unwrap_or_else(|| THEME_SET.themes.values().next().unwrap());
+            .or_else(|| THEME_SET.themes.values().next())
+            .expect("syntect default theme set is never empty");
 
         let mut highlighter = HighlightLines::new(syntax, theme);
         let mut lines = Vec::new();

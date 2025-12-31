@@ -186,16 +186,17 @@ impl SearchIndex {
         project: &str,
         entry: &LogEntry,
     ) -> Result<()> {
-        let session_id_field = self.schema.get_field(fields::SESSION_ID).unwrap();
-        let project_field = self.schema.get_field(fields::PROJECT).unwrap();
-        let uuid_field = self.schema.get_field(fields::UUID).unwrap();
-        let timestamp_field = self.schema.get_field(fields::TIMESTAMP).unwrap();
-        let message_type_field = self.schema.get_field(fields::MESSAGE_TYPE).unwrap();
-        let model_field = self.schema.get_field(fields::MODEL).unwrap();
-        let content_field = self.schema.get_field(fields::CONTENT).unwrap();
-        let thinking_field = self.schema.get_field(fields::THINKING).unwrap();
-        let tool_name_field = self.schema.get_field(fields::TOOL_NAME).unwrap();
-        let tool_input_field = self.schema.get_field(fields::TOOL_INPUT).unwrap();
+        // Field lookups - these fields are added by build_schema() and always exist
+        let session_id_field = self.schema.get_field(fields::SESSION_ID).expect("schema field");
+        let project_field = self.schema.get_field(fields::PROJECT).expect("schema field");
+        let uuid_field = self.schema.get_field(fields::UUID).expect("schema field");
+        let timestamp_field = self.schema.get_field(fields::TIMESTAMP).expect("schema field");
+        let message_type_field = self.schema.get_field(fields::MESSAGE_TYPE).expect("schema field");
+        let model_field = self.schema.get_field(fields::MODEL).expect("schema field");
+        let content_field = self.schema.get_field(fields::CONTENT).expect("schema field");
+        let thinking_field = self.schema.get_field(fields::THINKING).expect("schema field");
+        let tool_name_field = self.schema.get_field(fields::TOOL_NAME).expect("schema field");
+        let tool_input_field = self.schema.get_field(fields::TOOL_INPUT).expect("schema field");
 
         let uuid = entry.uuid().unwrap_or("").to_string();
         let timestamp = entry.timestamp().map_or_else(String::new, |t| t.to_rfc3339());
@@ -385,7 +386,7 @@ impl SearchIndex {
 
     /// Delete documents for a specific session.
     pub fn delete_session(&self, session_id: &str) -> Result<()> {
-        let session_id_field = self.schema.get_field(fields::SESSION_ID).unwrap();
+        let session_id_field = self.schema.get_field(fields::SESSION_ID).expect("schema field");
         let term = tantivy::Term::from_field_text(session_id_field, session_id);
 
         let writer = self.writer.write();
@@ -398,9 +399,9 @@ impl SearchIndex {
         let searcher = self.reader.searcher();
 
         // Parse query - search content by default
-        let content_field = self.schema.get_field(fields::CONTENT).unwrap();
-        let thinking_field = self.schema.get_field(fields::THINKING).unwrap();
-        let tool_input_field = self.schema.get_field(fields::TOOL_INPUT).unwrap();
+        let content_field = self.schema.get_field(fields::CONTENT).expect("schema field");
+        let thinking_field = self.schema.get_field(fields::THINKING).expect("schema field");
+        let tool_input_field = self.schema.get_field(fields::TOOL_INPUT).expect("schema field");
 
         let query_parser =
             QueryParser::for_index(&self.index, vec![content_field, thinking_field, tool_input_field]);
@@ -512,7 +513,7 @@ impl SearchIndex {
 
     /// Get text from a field in a document.
     fn get_text_field(&self, doc: &TantivyDocument, field_name: &str) -> String {
-        let field = self.schema.get_field(field_name).unwrap();
+        let field = self.schema.get_field(field_name).expect("schema field");
         doc.get_first(field)
             .and_then(|v| v.as_str())
             .unwrap_or("")
@@ -741,7 +742,7 @@ pub struct BackgroundIndexHandle {
 impl BackgroundIndexHandle {
     /// Check if indexing is still running.
     pub fn is_running(&self) -> bool {
-        self.thread_handle.as_ref().map_or(false, |h| !h.is_finished())
+        self.thread_handle.as_ref().is_some_and(|h| !h.is_finished())
     }
 
     /// Get the latest progress (non-blocking).

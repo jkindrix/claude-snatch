@@ -12,7 +12,7 @@ mod commands;
 
 pub use commands::*;
 
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
 use std::io;
 use std::path::PathBuf;
@@ -20,6 +20,8 @@ use std::path::PathBuf;
 use crate::cache::init_global_cache;
 use crate::config::Config;
 use crate::error::Result;
+#[cfg(feature = "mcp")]
+use crate::error::SnatchError;
 use crate::export::ExportFormat;
 
 /// Claude Code conversation extractor with maximum data fidelity.
@@ -28,13 +30,22 @@ use crate::export::ExportFormat;
 #[command(author, version, about, long_about = None)]
 #[command(propagate_version = true)]
 #[command(arg_required_else_help = true)]
+#[command(disable_help_flag = true)]
 pub struct Cli {
     /// Subcommand to run.
     #[command(subcommand)]
     pub command: Commands,
 
+    /// Print short help (use --help for full details).
+    #[arg(short = 'h', global = true, action = ArgAction::HelpShort)]
+    short_help: (),
+
+    /// Print full help with all options.
+    #[arg(long = "help", global = true, action = ArgAction::HelpLong)]
+    long_help: (),
+
     /// Path to Claude directory (default: ~/.claude).
-    #[arg(short = 'd', long, global = true, env = "SNATCH_CLAUDE_DIR")]
+    #[arg(short = 'd', long, global = true, env = "SNATCH_CLAUDE_DIR", hide_short_help = true)]
     pub claude_dir: Option<PathBuf>,
 
     /// Output format for structured data.
@@ -50,7 +61,7 @@ pub struct Cli {
     pub quiet: bool,
 
     /// Enable colored output (auto-detected by default).
-    #[arg(long, global = true, env = "SNATCH_COLOR")]
+    #[arg(long, global = true, env = "SNATCH_COLOR", hide_short_help = true)]
     pub color: Option<bool>,
 
     /// Output as JSON (shorthand for -o json).
@@ -58,24 +69,29 @@ pub struct Cli {
     pub json: bool,
 
     /// Log level (error, warn, info, debug, trace).
-    #[arg(long, global = true, default_value = "warn", env = "SNATCH_LOG_LEVEL")]
+    #[arg(long, global = true, default_value = "warn", env = "SNATCH_LOG_LEVEL", hide_short_help = true)]
     pub log_level: LogLevel,
 
     /// Log format (text, json, compact, pretty).
-    #[arg(long, global = true, default_value = "text", env = "SNATCH_LOG_FORMAT")]
+    #[arg(long, global = true, default_value = "text", env = "SNATCH_LOG_FORMAT", hide_short_help = true)]
     pub log_format: LogFormat,
 
     /// Log output file (default: stderr).
-    #[arg(long, global = true, env = "SNATCH_LOG_FILE")]
+    #[arg(long, global = true, env = "SNATCH_LOG_FILE", hide_short_help = true)]
     pub log_file: Option<std::path::PathBuf>,
 
     /// Number of threads for parallel processing (default: number of CPUs).
-    #[arg(short = 'j', long, global = true, env = "SNATCH_THREADS")]
+    #[arg(short = 'j', long, global = true, env = "SNATCH_THREADS", hide_short_help = true)]
     pub threads: Option<usize>,
 
     /// Path to custom configuration file.
-    #[arg(long, global = true, env = "SNATCH_CONFIG")]
+    #[arg(long, global = true, env = "SNATCH_CONFIG", hide_short_help = true)]
     pub config: Option<PathBuf>,
+
+    /// Maximum file size to parse in bytes (default: 100MB).
+    /// Use 0 for unlimited. Prevents memory exhaustion on large files.
+    #[arg(long, global = true, env = "SNATCH_MAX_FILE_SIZE", value_name = "BYTES", hide_short_help = true)]
+    pub max_file_size: Option<u64>,
 }
 
 /// Log level options.
@@ -202,6 +218,20 @@ pub enum Commands {
 
     /// Extract user prompts from sessions.
     Prompts(PromptsArgs),
+
+    /// Generate a standup report of recent activity.
+    #[command(alias = "daily")]
+    Standup(StandupArgs),
+
+    /// Interactively pick a session using fuzzy search.
+    #[command(alias = "browse")]
+    Pick(PickArgs),
+
+    /// Start MCP (Model Context Protocol) server mode.
+    /// Requires the 'mcp' feature to be enabled.
+    #[cfg(feature = "mcp")]
+    #[command(alias = "mcp")]
+    ServeMcp(ServeMcpArgs),
 }
 
 /// Arguments for the completions command.
@@ -507,6 +537,31 @@ pub struct ExportArgs {
     /// Does not modify output, only displays warnings.
     #[arg(long)]
     pub warn_pii: bool,
+
+    /// Upload export to GitHub Gist instead of writing to file.
+    /// Requires the `gh` CLI to be installed and authenticated.
+    #[arg(long)]
+    pub gist: bool,
+
+    /// Make the gist public (default is secret/private).
+    #[arg(long)]
+    pub gist_public: bool,
+
+    /// Description for the gist.
+    #[arg(long)]
+    pub gist_description: Option<String>,
+
+    /// Include table of contents/navigation sidebar in HTML export.
+    #[arg(long)]
+    pub toc: bool,
+
+    /// Use dark theme for HTML export (default is light).
+    #[arg(long)]
+    pub dark: bool,
+
+    /// Copy export to clipboard instead of writing to file/stdout.
+    #[arg(long)]
+    pub clipboard: bool,
 }
 
 /// Export format argument.
@@ -533,6 +588,8 @@ pub enum ExportFormatArg {
     Html,
     /// SQLite database.
     Sqlite,
+    /// OpenTelemetry (OTLP JSON).
+    Otel,
 }
 
 /// Redaction level for sensitive data.
@@ -565,6 +622,7 @@ impl From<ExportFormatArg> for ExportFormat {
             ExportFormatArg::Xml => ExportFormat::Xml,
             ExportFormatArg::Html => ExportFormat::Html,
             ExportFormatArg::Sqlite => ExportFormat::Sqlite,
+            ExportFormatArg::Otel => ExportFormat::Otel,
         }
     }
 }
@@ -683,9 +741,65 @@ pub struct StatsArgs {
     #[arg(long)]
     pub costs: bool,
 
+    /// Show usage grouped by 5-hour billing windows.
+    #[arg(short = 'b', long)]
+    pub blocks: bool,
+
+    /// Token limit for blocks display (e.g., 500000). Use "max" for highest historical block.
+    #[arg(long, value_name = "LIMIT")]
+    pub token_limit: Option<String>,
+
     /// Show all detailed stats.
     #[arg(short = 'a', long)]
     pub all: bool,
+
+    /// Show sparkline visualizations for usage trends.
+    #[arg(long)]
+    pub sparkline: bool,
+
+    /// Show historical cost tracking data.
+    #[arg(long)]
+    pub history: bool,
+
+    /// Number of days to show in history (default: 30).
+    #[arg(long, default_value = "30", value_name = "DAYS")]
+    pub days: i64,
+
+    /// Record current global stats to cost history.
+    #[arg(long)]
+    pub record: bool,
+
+    /// Show weekly cost aggregation.
+    #[arg(long)]
+    pub weekly: bool,
+
+    /// Show monthly cost aggregation.
+    #[arg(long)]
+    pub monthly: bool,
+
+    /// Export cost history as CSV.
+    #[arg(long)]
+    pub csv: bool,
+
+    /// Clear all cost history data.
+    #[arg(long)]
+    pub clear_history: bool,
+
+    /// Show activity timeline visualization.
+    #[arg(long)]
+    pub timeline: bool,
+
+    /// Time granularity for timeline: "hourly", "daily", or "weekly".
+    #[arg(long, value_name = "GRANULARITY", default_value = "daily")]
+    pub granularity: String,
+
+    /// Show token usage graph visualization.
+    #[arg(long)]
+    pub graph: bool,
+
+    /// Width of graph visualization (default: 60).
+    #[arg(long, value_name = "WIDTH", default_value = "60")]
+    pub graph_width: usize,
 }
 
 /// Arguments for the info command.
@@ -769,6 +883,10 @@ pub struct WatchArgs {
     /// Follow mode (like tail -f).
     #[arg(short = 'f', long)]
     pub follow: bool,
+
+    /// Live dashboard mode with real-time stats display.
+    #[arg(short = 'l', long)]
+    pub live: bool,
 
     /// Polling interval in milliseconds.
     #[arg(long, default_value = "500")]
@@ -1103,6 +1221,37 @@ pub enum TagAction {
         #[arg(value_parser = parse_outcome)]
         outcome: Option<crate::tags::SessionOutcome>,
     },
+
+    /// Add a note to a session.
+    Note {
+        /// Session ID (supports short prefixes like "780893e4").
+        session: String,
+        /// Note text to add.
+        text: String,
+        /// Optional label/category for the note (e.g., "todo", "bug", "idea").
+        #[arg(short = 'l', long)]
+        label: Option<String>,
+    },
+
+    /// List notes for a session.
+    Notes {
+        /// Session ID to show notes for (supports short prefixes like "780893e4").
+        session: String,
+    },
+
+    /// Remove a note from a session by index.
+    Unnote {
+        /// Session ID (supports short prefixes like "780893e4").
+        session: String,
+        /// Index of the note to remove (0-based, as shown in `notes` command).
+        index: usize,
+    },
+
+    /// Clear all notes from a session.
+    ClearNotes {
+        /// Session ID (supports short prefixes like "780893e4").
+        session: String,
+    },
 }
 
 /// Parse an outcome value from string.
@@ -1136,6 +1285,10 @@ pub struct PromptsArgs {
     #[arg(long, default_value = "10")]
     pub min_length: usize,
 
+    /// Maximum number of prompts to extract.
+    #[arg(short = 'n', long)]
+    pub limit: Option<usize>,
+
     /// Include subagent sessions.
     #[arg(long)]
     pub subagents: bool,
@@ -1155,6 +1308,96 @@ pub struct PromptsArgs {
     /// Number formatting style (plain text lines, or numbered).
     #[arg(long)]
     pub numbered: bool,
+}
+
+/// Arguments for the standup command.
+#[derive(Debug, Parser)]
+pub struct StandupArgs {
+    /// Time period for the report (e.g., "24h", "1d", "7d", "1w").
+    /// Default is 24 hours.
+    #[arg(long, short = 'p', default_value = "24h")]
+    pub period: String,
+
+    /// Filter by project path (substring match).
+    #[arg(long)]
+    pub project: Option<String>,
+
+    /// Include token usage statistics.
+    #[arg(long)]
+    pub usage: bool,
+
+    /// Include file modification summary.
+    #[arg(long)]
+    pub files: bool,
+
+    /// Include tool usage breakdown.
+    #[arg(long)]
+    pub tools: bool,
+
+    /// Show all details (equivalent to --usage --files --tools).
+    #[arg(long)]
+    pub all: bool,
+
+    /// Output format: text, json, markdown.
+    #[arg(long, short = 'f', value_enum, default_value = "text")]
+    pub format: StandupFormat,
+
+    /// Copy output to clipboard.
+    #[arg(long)]
+    pub clipboard: bool,
+}
+
+/// Output formats for standup reports.
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+pub enum StandupFormat {
+    /// Plain text with sections.
+    #[default]
+    Text,
+    /// Markdown with bullet points (great for Slack/Teams).
+    Markdown,
+    /// JSON for programmatic use.
+    Json,
+}
+
+/// Arguments for the pick command.
+#[derive(Debug, Parser)]
+pub struct PickArgs {
+    /// Filter by project path (substring match).
+    #[arg(short = 'p', long)]
+    pub project: Option<String>,
+
+    /// Include subagent sessions.
+    #[arg(long)]
+    pub subagents: bool,
+
+    /// Maximum number of sessions to show in the picker.
+    #[arg(short = 'n', long)]
+    pub limit: Option<usize>,
+
+    /// Action to perform after selection.
+    #[arg(short = 'a', long, default_value = "export")]
+    pub action: PickAction,
+}
+
+/// Actions available after picking a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum PickAction {
+    /// Print session ID (for piping to other commands).
+    #[default]
+    Export,
+    /// Show session info.
+    Info,
+    /// Show session stats.
+    Stats,
+    /// Print session file path.
+    Open,
+}
+
+/// Arguments for the MCP server command.
+#[cfg(feature = "mcp")]
+#[derive(Debug, Parser)]
+pub struct ServeMcpArgs {
+    // No additional arguments - uses global claude_dir and max_file_size
 }
 
 /// Initialize tracing/logging based on CLI options.
@@ -1294,6 +1537,19 @@ pub fn run() -> Result<()> {
         Commands::Cleanup(args) => commands::cleanup::run(&cli, args),
         Commands::Tag(args) => commands::tag::run(&cli, args),
         Commands::Prompts(args) => commands::prompts::run(&cli, args),
+        Commands::Standup(args) => commands::standup::run(&cli, args),
+        Commands::Pick(args) => commands::pick::run(&cli, args),
+        #[cfg(feature = "mcp")]
+        Commands::ServeMcp(_) => {
+            // Run the MCP server
+            let rt = tokio::runtime::Runtime::new().map_err(|e| {
+                SnatchError::ExportError {
+                    message: format!("Failed to create tokio runtime: {e}"),
+                    source: None,
+                }
+            })?;
+            rt.block_on(crate::mcp_server::run_server(cli.claude_dir.clone(), cli.max_file_size))
+        }
     }
 }
 

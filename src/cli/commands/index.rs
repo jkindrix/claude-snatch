@@ -207,8 +207,7 @@ fn run_search(cli: &Cli, args: &crate::cli::IndexSearchArgs) -> Result<()> {
                         .chars()
                         .take(50)
                         .collect::<String>()
-                        .replace('\t', " ")
-                        .replace('\n', " ")
+                        .replace(['\t', '\n'], " ")
                 );
             }
         }

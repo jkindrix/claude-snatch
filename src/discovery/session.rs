@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
+use tracing::{debug, instrument, trace};
 
 use crate::cache::global_cache;
 use crate::error::{Result, SnatchError};
@@ -37,6 +38,7 @@ pub struct Session {
 
 impl Session {
     /// Create a Session from its file path.
+    #[instrument(skip(path, project_path), fields(path = %path.as_ref().display()))]
     pub fn from_path(path: impl AsRef<Path>, project_path: &str) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
 
@@ -66,6 +68,13 @@ impl Session {
         let modified_time = metadata.modified().map_err(|e| {
             SnatchError::io(format!("Failed to get mtime for {}", path.display()), e)
         })?;
+
+        trace!(
+            session_id = %file_info.session_id,
+            is_subagent = file_info.is_subagent,
+            file_size = metadata.len(),
+            "Session loaded"
+        );
 
         Ok(Self {
             path,
@@ -143,15 +152,34 @@ impl Session {
     }
 
     /// Parse all entries from this session.
+    #[instrument(skip(self), fields(session_id = %self.session_id))]
     pub fn parse(&self) -> Result<Vec<LogEntry>> {
+        debug!("Parsing session");
+        self.parse_with_options(None)
+    }
+
+    /// Parse all entries with custom max file size.
+    ///
+    /// # Arguments
+    /// * `max_file_size` - Maximum file size in bytes. Use 0 for unlimited.
+    ///                     If None, uses the default limit.
+    #[instrument(skip(self), fields(session_id = %self.session_id))]
+    pub fn parse_with_options(&self, max_file_size: Option<u64>) -> Result<Vec<LogEntry>> {
         let mut parser = JsonlParser::new().with_lenient(true);
-        parser.parse_file(&self.path)
+        if let Some(max_size) = max_file_size {
+            parser = parser.with_max_file_size(max_size);
+        }
+        let entries = parser.parse_file(&self.path)?;
+        debug!(entries = entries.len(), "Session parsed");
+        Ok(entries)
     }
 
     /// Parse all entries with caching support.
     ///
     /// Uses the global cache to avoid re-parsing unchanged files.
+    #[instrument(skip(self), fields(session_id = %self.session_id))]
     pub fn parse_cached(&self) -> Result<std::sync::Arc<Vec<LogEntry>>> {
+        trace!("Checking cache for session");
         global_cache().get_or_parse(&self.path, || self.parse())
     }
 

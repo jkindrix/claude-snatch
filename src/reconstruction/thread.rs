@@ -40,7 +40,7 @@ impl MessageGrouper {
 
             self.groups
                 .entry(msg_id)
-                .or_insert_with(MessageGroup::new)
+                .or_default()
                 .add_chunk(entry);
         }
     }
@@ -335,7 +335,7 @@ impl RetryChainTracker {
             self.find_chain_for(&uuid).unwrap_or_else(|| uuid.clone())
         };
 
-        let chain = self.chains.entry(chain_root).or_insert_with(RetryChain::new);
+        let chain = self.chains.entry(chain_root).or_default();
         chain.add_attempt(RetryAttempt {
             uuid,
             retry_attempt,

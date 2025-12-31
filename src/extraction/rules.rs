@@ -135,10 +135,10 @@ fn parse_rule_content(content: &str) -> (Option<String>, Option<RuleType>, i32, 
     let trimmed = content.trim();
 
     // Check for YAML frontmatter
-    if trimmed.starts_with("---") {
-        if let Some(end_idx) = trimmed[3..].find("---") {
-            let frontmatter = &trimmed[3..3 + end_idx];
-            let body = trimmed[3 + end_idx + 3..].trim().to_string();
+    if let Some(after_prefix) = trimmed.strip_prefix("---") {
+        if let Some(end_idx) = after_prefix.find("---") {
+            let frontmatter = &after_prefix[..end_idx];
+            let body = after_prefix[end_idx + 3..].trim().to_string();
 
             let mut description = None;
             let mut rule_type = None;

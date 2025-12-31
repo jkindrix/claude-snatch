@@ -6,6 +6,37 @@
 //! - Platform-specific path handling (Linux, macOS, Windows, WSL)
 //! - Project path encoding/decoding
 //! - Session enumeration and metadata extraction
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use claude_snatch::discovery::ClaudeDirectory;
+//!
+//! fn main() -> claude_snatch::Result<()> {
+//!     // Auto-discover Claude Code data directory
+//!     let claude_dir = ClaudeDirectory::discover()?;
+//!     println!("Claude directory: {}", claude_dir.root().display());
+//!
+//!     // List all projects
+//!     for project in claude_dir.projects()? {
+//!         println!("Project: {}", project.decoded_path());
+//!
+//!         // List sessions in each project
+//!         for session in project.sessions()? {
+//!             println!("  Session: {} ({} bytes)",
+//!                 session.session_id(),
+//!                 session.file_size());
+//!         }
+//!     }
+//!
+//!     // Find a specific session by UUID prefix
+//!     if let Some(session) = claude_dir.find_session("abc123")? {
+//!         println!("Found session: {}", session.session_id());
+//!     }
+//!
+//!     Ok(())
+//! }
+//! ```
 
 mod hierarchy;
 mod paths;
@@ -159,7 +190,7 @@ impl ClaudeDirectory {
         }
 
         // Sort by timestamp (newest first)
-        sessions.sort_by(|a, b| b.modified_time().cmp(&a.modified_time()));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.modified_time()));
 
         Ok(sessions)
     }
@@ -196,7 +227,8 @@ impl ClaudeDirectory {
 
         match matches.len() {
             0 => Ok(None),
-            1 => Ok(Some(matches.into_iter().next().unwrap())),
+            // Safety: match arm guarantees exactly 1 element
+            1 => Ok(Some(matches.into_iter().next().expect("len == 1"))),
             n => Err(SnatchError::AmbiguousSessionPrefix {
                 prefix: session_id.to_string(),
                 match_count: n,

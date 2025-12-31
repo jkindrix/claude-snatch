@@ -85,8 +85,8 @@ pub fn run_with_options(
 }
 
 /// Main event loop using EventHandler.
-fn run_loop<B: ratatui::backend::Backend>(
-    terminal: &mut Terminal<B>,
+fn run_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut AppState,
 ) -> Result<()> {
     // Create event handler with 100ms tick rate
@@ -95,7 +95,8 @@ fn run_loop<B: ratatui::backend::Backend>(
 
     loop {
         // Draw UI
-        terminal.draw(|f| draw_ui(f, app))?;
+        terminal.draw(|f| draw_ui(f, app))
+            .map_err(|e| SnatchError::io("Failed to draw TUI", e))?;
 
         // Handle events from the event handler
         match events.next() {

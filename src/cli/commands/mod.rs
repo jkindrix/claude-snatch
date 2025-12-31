@@ -13,8 +13,10 @@ pub mod extract;
 pub mod index;
 pub mod info;
 pub mod list;
+pub mod pick;
 pub mod prompts;
 pub mod search;
+pub mod standup;
 pub mod stats;
 pub mod tag;
 pub mod tui;
@@ -45,7 +47,8 @@ pub fn get_claude_dir(custom_path: Option<&PathBuf>) -> Result<ClaudeDirectory> 
 pub fn parse_date_filter(s: &str) -> Result<SystemTime> {
     // Try parsing as ISO date first
     if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        let datetime = date.and_hms_opt(0, 0, 0).unwrap();
+        // and_hms_opt(0, 0, 0) always returns Some for valid h/m/s values
+        let datetime = date.and_hms_opt(0, 0, 0).expect("midnight is always valid");
         let utc = chrono::TimeZone::from_utc_datetime(&Utc, &datetime);
         return Ok(SystemTime::from(utc));
     }

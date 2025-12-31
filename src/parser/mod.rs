@@ -41,6 +41,8 @@
 
 mod streaming;
 
+use tracing::{debug, instrument, trace, warn};
+
 pub use streaming::*;
 
 use std::fs::File;
@@ -50,8 +52,11 @@ use std::path::Path;
 use crate::error::{Result, SnatchError};
 use crate::model::{LogEntry, SchemaVersion};
 
-/// Default maximum file size (500 MB).
-pub const DEFAULT_MAX_FILE_SIZE: u64 = 500 * 1024 * 1024;
+/// Default maximum file size (100 MB).
+///
+/// This limit prevents memory exhaustion when parsing unexpectedly large files.
+/// Use `--max-file-size 0` for unlimited, or specify a custom limit in bytes.
+pub const DEFAULT_MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
 
 /// JSONL parser for Claude Code session logs.
 #[derive(Debug)]
@@ -161,8 +166,11 @@ impl JsonlParser {
     }
 
     /// Parse a JSONL file from a path.
+    #[instrument(skip(self), fields(path = %path.as_ref().display()))]
     pub fn parse_file(&mut self, path: impl AsRef<Path>) -> Result<Vec<LogEntry>> {
         let path = path.as_ref();
+        debug!("Opening file for parsing");
+
         let file = File::open(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 SnatchError::FileNotFound {
@@ -182,10 +190,14 @@ impl JsonlParser {
             let metadata = file.metadata().map_err(|e| {
                 SnatchError::io(format!("Failed to get metadata for {}", path.display()), e)
             })?;
-            if metadata.len() > self.max_file_size {
+            let file_size = metadata.len();
+            trace!(file_size, max_size = self.max_file_size, "Checking file size limit");
+
+            if file_size > self.max_file_size {
+                warn!(file_size, max_size = self.max_file_size, "File exceeds size limit");
                 return Err(SnatchError::validation(format!(
                     "File size {} bytes exceeds maximum {} bytes",
-                    metadata.len(),
+                    file_size,
                     self.max_file_size
                 )));
             }
@@ -196,6 +208,7 @@ impl JsonlParser {
     }
 
     /// Parse JSONL from a reader.
+    #[instrument(skip(self, reader), level = "debug")]
     pub fn parse_reader<R: BufRead>(&mut self, reader: R) -> Result<Vec<LogEntry>> {
         let mut entries = Vec::new();
         self.stats = ParseStats::default();
@@ -214,6 +227,7 @@ impl JsonlParser {
                             message: format!("I/O error: {e}"),
                             content_preview: String::new(),
                         });
+                        warn!(line = line_num, error = %e, "I/O error reading line, skipping");
                         continue;
                     }
                     return Err(SnatchError::io(format!("Failed to read line {line_num}"), e));
@@ -235,6 +249,7 @@ impl JsonlParser {
                         if let Some(version) = entry.version() {
                             self.schema_version = Some(SchemaVersion::from_version_string(version));
                             self.stats.schema_version = self.schema_version.clone();
+                            debug!(version, "Detected schema version");
                         }
                     }
 
@@ -249,6 +264,7 @@ impl JsonlParser {
                             message: e.to_string(),
                             content_preview: truncate_preview(trimmed, 100),
                         });
+                        trace!(line = line_num, error = %e, "Parse error, skipping line");
                         continue;
                     }
                     return Err(e);
@@ -256,6 +272,12 @@ impl JsonlParser {
             }
         }
 
+        debug!(
+            entries = entries.len(),
+            lines = self.stats.lines_processed,
+            skipped = self.stats.lines_skipped,
+            "Parsing complete"
+        );
         Ok(entries)
     }
 

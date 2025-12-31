@@ -108,7 +108,7 @@ impl Project {
         }
 
         // Sort by modification time (newest first)
-        sessions.sort_by(|a, b| b.modified_time().cmp(&a.modified_time()));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.modified_time()));
 
         Ok(sessions)
     }
@@ -154,7 +154,8 @@ impl Project {
 
             match matches.len() {
                 0 => return Ok(None),
-                1 => return Ok(Some(matches.into_iter().next().unwrap())),
+                // Safety: match arm guarantees exactly 1 element
+                1 => return Ok(Some(matches.into_iter().next().expect("len == 1"))),
                 n => {
                     return Err(SnatchError::AmbiguousSessionPrefix {
                         prefix: session_id.to_string(),

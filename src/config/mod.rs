@@ -14,7 +14,7 @@ use crate::error::{Result, SnatchError};
 use crate::util::atomic_write;
 
 /// Application configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     /// Default export format.
     #[serde(default)]
@@ -31,18 +31,6 @@ pub struct Config {
     /// Index settings.
     #[serde(default)]
     pub index: IndexConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            default_format: ExportFormatConfig::default(),
-            theme: ThemeConfig::default(),
-            display: DisplayConfig::default(),
-            cache: CacheConfig::default(),
-            index: IndexConfig::default(),
-        }
-    }
 }
 
 /// Project-specific configuration filename.

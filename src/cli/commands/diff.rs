@@ -285,11 +285,11 @@ fn truncate_line(line: &str, max_len: usize) -> String {
 
 /// Compare conversations semantically (by message structure, not raw text).
 pub fn compare_conversations(first: &Conversation, second: &Conversation) -> ConversationDiff {
-    let mut diff = ConversationDiff::default();
-
-    // Compare message counts
-    diff.first_message_count = first.len();
-    diff.second_message_count = second.len();
+    let mut diff = ConversationDiff {
+        first_message_count: first.len(),
+        second_message_count: second.len(),
+        ..Default::default()
+    };
 
     // Compare by UUIDs from nodes
     let first_uuids: std::collections::HashSet<&str> = first.nodes().keys()

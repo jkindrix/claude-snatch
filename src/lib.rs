@@ -98,6 +98,10 @@ pub mod tags;
 pub mod tui;
 pub mod util;
 
+// MCP server (Model Context Protocol) - optional feature
+#[cfg(feature = "mcp")]
+pub mod mcp_server;
+
 // Re-export commonly used types at the crate root
 pub use error::{Result, SnatchError};
 pub use model::{LogEntry, SchemaVersion};

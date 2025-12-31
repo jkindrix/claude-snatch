@@ -13,7 +13,8 @@ use crate::discovery::{Session, SessionFilter};
 use crate::error::{Result, SnatchError};
 use crate::export::{
     conversation_to_jsonl, ContentType, CsvExporter, ExportOptions, Exporter, HtmlExporter,
-    JsonExporter, MarkdownExporter, SessionMeta, SqliteExporter, TextExporter, XmlExporter,
+    JsonExporter, MarkdownExporter, OtelExporter, SessionMeta, SqliteExporter, TextExporter,
+    XmlExporter,
 };
 use crate::model::{ContentBlock, LogEntry};
 use crate::reconstruction::Conversation;
@@ -48,6 +49,55 @@ pub fn run(cli: &Cli, args: &ExportArgs) -> Result<()> {
     }
     if let Some(ref until) = args.until {
         parse_date_filter(until)?; // Validate, but result is used later if needed
+    }
+
+    // Validate gist-specific arguments
+    if args.gist {
+        // Check that gh CLI is available
+        if !is_gh_cli_available() {
+            return Err(SnatchError::ConfigError {
+                message: "GitHub CLI (gh) is not installed or not in PATH. \
+                    Install from https://cli.github.com/ and run 'gh auth login'".to_string(),
+            });
+        }
+
+        // Gist doesn't support SQLite format
+        if matches!(args.format, ExportFormatArg::Sqlite) {
+            return Err(SnatchError::ConfigError {
+                message: "--gist is not compatible with SQLite format".to_string(),
+            });
+        }
+
+        // Gist doesn't support --all (too many gists would be created)
+        if args.all {
+            return Err(SnatchError::ConfigError {
+                message: "--gist is not compatible with --all. Export a single session.".to_string(),
+            });
+        }
+
+        // Gist and clipboard are mutually exclusive
+        if args.clipboard {
+            return Err(SnatchError::ConfigError {
+                message: "--gist and --clipboard are mutually exclusive".to_string(),
+            });
+        }
+    }
+
+    // Validate clipboard-specific arguments
+    if args.clipboard {
+        // Clipboard doesn't support --all
+        if args.all {
+            return Err(SnatchError::ConfigError {
+                message: "--clipboard is not compatible with --all. Export a single session.".to_string(),
+            });
+        }
+
+        // Clipboard doesn't support SQLite format
+        if matches!(args.format, ExportFormatArg::Sqlite) {
+            return Err(SnatchError::ConfigError {
+                message: "--clipboard is not compatible with SQLite format".to_string(),
+            });
+        }
     }
 
     // Validate arguments
@@ -86,15 +136,116 @@ fn export_single_session(cli: &Cli, args: &ExportArgs, session_id: &str) -> Resu
         return export_combined_agents(cli, args, &session);
     }
 
+    // Handle gist upload
+    if args.gist {
+        return export_session_to_gist(cli, args, &session);
+    }
+
     // Export the session
     let exported = export_session(cli, args, &session, args.output_file.as_ref())?;
 
     // Print success message to stderr if writing to file
-    if exported && args.output_file.is_some() && !cli.quiet {
+    if let (true, Some(output_file)) = (exported && !cli.quiet, args.output_file.as_ref()) {
         eprintln!(
             "Exported session {} to {}",
             session_id,
-            args.output_file.as_ref().unwrap().display()
+            output_file.display()
+        );
+    }
+
+    Ok(())
+}
+
+/// Export a session to a GitHub Gist.
+fn export_session_to_gist(cli: &Cli, args: &ExportArgs, session: &Session) -> Result<()> {
+    // Parse the session
+    let entries = session.parse_with_options(cli.max_file_size)?;
+
+    if entries.is_empty() {
+        return Err(SnatchError::ConfigError {
+            message: "Session has no entries to export".to_string(),
+        });
+    }
+
+    // Build conversation tree
+    let conversation = Conversation::from_entries(entries)?;
+
+    // Check for PII if requested
+    if args.warn_pii {
+        check_for_pii(&conversation, cli.quiet);
+    }
+
+    // Build export options
+    let redaction = args.redact.map(|level| level.into());
+    let only_filter = build_only_filter(&args.only);
+    let options = if args.lossless {
+        let mut opts = ExportOptions::full();
+        opts.redaction = redaction;
+        opts.only = only_filter;
+        opts
+    } else {
+        ExportOptions {
+            include_thinking: args.thinking,
+            include_tool_use: args.tool_use,
+            include_tool_results: args.tool_results,
+            include_system: args.system,
+            include_timestamps: args.timestamps,
+            relative_timestamps: false,
+            include_usage: args.usage,
+            include_metadata: args.metadata,
+            include_images: true,
+            max_depth: None,
+            truncate_at: None,
+            include_branches: !args.main_thread,
+            main_thread_only: args.main_thread,
+            redaction,
+            minimization: None,
+            only: only_filter,
+        }
+    };
+
+    // Export to string
+    let content = export_to_string(
+        &conversation,
+        args.format,
+        &options,
+        args.pretty,
+        args.main_thread,
+        args.toc,
+        args.dark,
+    )?;
+
+    // Generate filename
+    let ext = get_format_extension(args.format);
+    let short_id = &session.session_id()[..8.min(session.session_id().len())];
+    let filename = format!("session-{short_id}.{ext}");
+
+    // Generate description
+    let description = args.gist_description.as_deref().unwrap_or_else(|| {
+        // Default description would be generated, but we can't return a reference
+        // to a temporary, so we use a static default
+        "Claude Code session export"
+    });
+
+    // Upload to gist
+    if !cli.quiet {
+        eprintln!("Uploading to GitHub Gist...");
+    }
+
+    let gist_url = upload_to_gist(&content, &filename, Some(description), args.gist_public)?;
+
+    // Print the gist URL
+    if cli.json {
+        println!(r#"{{"url": "{}"}}"#, gist_url);
+    } else {
+        println!("{gist_url}");
+    }
+
+    if !cli.quiet {
+        eprintln!(
+            "✓ Created {} gist with {} entries",
+            if args.gist_public { "public" } else { "secret" },
+            conversation.len()
         );
     }
 
@@ -219,7 +370,9 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
                 conversation_to_jsonl(&conversation, &mut output, args.main_thread)?;
             }
             ExportFormatArg::Html => {
-                let exporter = HtmlExporter::new();
+                let exporter = HtmlExporter::new()
+                    .with_toc(args.toc)
+                    .dark_theme(args.dark);
                 exporter.export_conversation(&conversation, &mut output, &options)?;
             }
             ExportFormatArg::Text => {
@@ -236,6 +389,10 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
             }
             ExportFormatArg::Sqlite => {
                 unreachable!("SQLite handled above");
+            }
+            ExportFormatArg::Otel => {
+                let exporter = OtelExporter::new();
+                exporter.export_conversation(&conversation, &mut output, &options)?;
             }
         }
 
@@ -273,7 +430,9 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
                 conversation_to_jsonl(&conversation, &mut output, args.main_thread)?;
             }
             ExportFormatArg::Html => {
-                let exporter = HtmlExporter::new();
+                let exporter = HtmlExporter::new()
+                    .with_toc(args.toc)
+                    .dark_theme(args.dark);
                 exporter.export_conversation(&conversation, &mut output, &options)?;
             }
             ExportFormatArg::Text => {
@@ -292,6 +451,10 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
                 return Err(SnatchError::ConfigError {
                     message: "SQLite export requires an output file path".to_string(),
                 });
+            }
+            ExportFormatArg::Otel => {
+                let exporter = OtelExporter::new();
+                exporter.export_conversation(&conversation, &mut output, &options)?;
             }
         }
     }
@@ -375,10 +538,7 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
             }
 
             // Apply session filter
-            match filter.matches(s) {
-                Ok(matches) => matches,
-                Err(_) => false,
-            }
+            filter.matches(s).unwrap_or_default()
         })
         .collect();
 
@@ -390,7 +550,7 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
     }
 
     // Sort by modification time (newest first)
-    sessions.sort_by(|a, b| b.modified_time().cmp(&a.modified_time()));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.modified_time()));
 
     // Determine output directory
     let output_dir = if let Some(ref output) = args.output_file {
@@ -435,7 +595,7 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
         // Generate output filename
         let filename = format!(
             "{}_{}.{}",
-            session.project_path().replace('/', "_").replace('\\', "_"),
+            session.project_path().replace(['/', '\\'], "_"),
             session.session_id(),
             extension
         );
@@ -539,10 +699,7 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
                     return false;
                 }
             }
-            match filter.matches(s) {
-                Ok(matches) => matches,
-                Err(_) => false,
-            }
+            filter.matches(s).unwrap_or_default()
         })
         .collect();
 
@@ -554,7 +711,7 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
     }
 
     // Sort by modification time (oldest first for database insertion order)
-    sessions.sort_by(|a, b| a.modified_time().cmp(&b.modified_time()));
+    sessions.sort_by_key(|s| s.modified_time());
 
     // Remove existing file if present
     if output_path.exists() {
@@ -608,8 +765,8 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
     let mut error_count = 0;
 
     for session in &sessions {
-        // Parse session
-        match session.parse() {
+        // Parse session with custom max file size if specified
+        match session.parse_with_options(cli.max_file_size) {
             Ok(entries) if !entries.is_empty() => {
                 match Conversation::from_entries(entries) {
                     Ok(conversation) => {
@@ -691,8 +848,8 @@ fn export_session(
     session: &Session,
     output_path: Option<&PathBuf>,
 ) -> Result<bool> {
-    // Parse the session
-    let entries = session.parse()?;
+    // Parse the session with custom max file size if specified
+    let entries = session.parse_with_options(cli.max_file_size)?;
 
     if entries.is_empty() {
         return Ok(false);
@@ -737,6 +894,11 @@ fn export_session(
 
     // Handle SQLite separately as it manages its own file
     if matches!(args.format, ExportFormatArg::Sqlite) {
+        if args.clipboard {
+            return Err(SnatchError::ConfigError {
+                message: "--clipboard is not compatible with SQLite format".to_string(),
+            });
+        }
         if let Some(path) = output_path {
             let exporter = SqliteExporter::new();
             // Build session metadata
@@ -758,6 +920,40 @@ fn export_session(
                 "SQLite export requires an output file (--output <path.db>)",
             ));
         }
+    }
+
+    // Handle clipboard export
+    if args.clipboard {
+        let content = export_to_string(
+            &conversation,
+            args.format,
+            &options,
+            args.pretty,
+            args.main_thread,
+            args.toc,
+            args.dark,
+        )?;
+
+        match arboard::Clipboard::new() {
+            Ok(mut clipboard) => {
+                if let Err(e) = clipboard.set_text(&content) {
+                    return Err(SnatchError::ExportError {
+                        message: format!("Failed to copy to clipboard: {e}"),
+                        source: None,
+                    });
+                }
+                if !cli.quiet {
+                    eprintln!("Copied {} entries to clipboard.", conversation.len());
+                }
+            }
+            Err(e) => {
+                return Err(SnatchError::ExportError {
+                    message: format!("Failed to access clipboard: {e}"),
+                    source: None,
+                });
+            }
+        }
+        return Ok(true);
     }
 
     // For file output, use atomic writes
@@ -794,11 +990,17 @@ fn export_session(
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
             ExportFormatArg::Html => {
-                let exporter = HtmlExporter::new();
+                let exporter = HtmlExporter::new()
+                    .with_toc(args.toc)
+                    .dark_theme(args.dark);
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
             ExportFormatArg::Sqlite => {
                 unreachable!("SQLite handled above");
+            }
+            ExportFormatArg::Otel => {
+                let exporter = OtelExporter::new();
+                exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
         }
 
@@ -842,13 +1044,19 @@ fn export_session(
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
             ExportFormatArg::Html => {
-                let exporter = HtmlExporter::new();
+                let exporter = HtmlExporter::new()
+                    .with_toc(args.toc)
+                    .dark_theme(args.dark);
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
             ExportFormatArg::Sqlite => {
                 return Err(SnatchError::export(
                     "SQLite export requires an output file (--output <path.db>)",
                 ));
+            }
+            ExportFormatArg::Otel => {
+                let exporter = OtelExporter::new();
+                exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
         }
 
@@ -869,6 +1077,7 @@ fn get_format_extension(format: ExportFormatArg) -> &'static str {
         ExportFormatArg::Xml => "xml",
         ExportFormatArg::Html => "html",
         ExportFormatArg::Sqlite => "db",
+        ExportFormatArg::Otel => "otlp.json",
     }
 }
 
@@ -954,6 +1163,151 @@ fn extract_entry_texts(entry: &LogEntry) -> Vec<&str> {
     }
 
     texts
+}
+
+// ============================================================================
+// GitHub Gist Upload Support
+// ============================================================================
+
+/// Check if the GitHub CLI (gh) is available.
+fn is_gh_cli_available() -> bool {
+    std::process::Command::new("gh")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Upload content to a GitHub Gist using the gh CLI.
+///
+/// Returns the gist URL on success.
+fn upload_to_gist(
+    content: &str,
+    filename: &str,
+    description: Option<&str>,
+    public: bool,
+) -> Result<String> {
+    use std::process::{Command, Stdio};
+
+    // Build the gh gist create command
+    let mut cmd = Command::new("gh");
+    cmd.arg("gist")
+        .arg("create")
+        .arg("--filename")
+        .arg(filename);
+
+    if let Some(desc) = description {
+        cmd.arg("--desc").arg(desc);
+    }
+
+    if public {
+        cmd.arg("--public");
+    }
+
+    // Pass content via stdin
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| SnatchError::ExportError {
+        message: format!("Failed to spawn gh CLI: {e}"),
+        source: Some(Box::new(e)),
+    })?;
+
+    // Write content to stdin
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(content.as_bytes()).map_err(|e| SnatchError::ExportError {
+            message: format!("Failed to write to gh stdin: {e}"),
+            source: Some(Box::new(e)),
+        })?;
+    }
+
+    let output = child.wait_with_output().map_err(|e| SnatchError::ExportError {
+        message: format!("Failed to wait for gh CLI: {e}"),
+        source: Some(Box::new(e)),
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(SnatchError::ExportError {
+            message: format!("gh gist create failed: {stderr}"),
+            source: None,
+        });
+    }
+
+    // Parse the gist URL from stdout
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    if url.is_empty() {
+        return Err(SnatchError::ExportError {
+            message: "gh gist create returned empty output".to_string(),
+            source: None,
+        });
+    }
+
+    Ok(url)
+}
+
+/// Export a conversation to a string for gist upload.
+fn export_to_string(
+    conversation: &Conversation,
+    format: ExportFormatArg,
+    options: &ExportOptions,
+    pretty: bool,
+    main_thread_only: bool,
+    toc: bool,
+    dark: bool,
+) -> Result<String> {
+    let mut buffer = Vec::new();
+
+    match format {
+        ExportFormatArg::Markdown | ExportFormatArg::Md => {
+            let exporter = MarkdownExporter::new();
+            exporter.export_conversation(conversation, &mut buffer, options)?;
+        }
+        ExportFormatArg::Json => {
+            let exporter = JsonExporter::new().pretty(pretty);
+            exporter.export_conversation(conversation, &mut buffer, options)?;
+        }
+        ExportFormatArg::JsonPretty => {
+            let exporter = JsonExporter::new().pretty(true);
+            exporter.export_conversation(conversation, &mut buffer, options)?;
+        }
+        ExportFormatArg::Text => {
+            let exporter = TextExporter::new();
+            exporter.export_conversation(conversation, &mut buffer, options)?;
+        }
+        ExportFormatArg::Jsonl => {
+            conversation_to_jsonl(conversation, &mut buffer, main_thread_only)?;
+        }
+        ExportFormatArg::Csv => {
+            let exporter = CsvExporter::new();
+            exporter.export_conversation(conversation, &mut buffer, options)?;
+        }
+        ExportFormatArg::Xml => {
+            let exporter = XmlExporter::new();
+            exporter.export_conversation(conversation, &mut buffer, options)?;
+        }
+        ExportFormatArg::Html => {
+            let exporter = HtmlExporter::new()
+                .with_toc(toc)
+                .dark_theme(dark);
+            exporter.export_conversation(conversation, &mut buffer, options)?;
+        }
+        ExportFormatArg::Sqlite => {
+            unreachable!("SQLite cannot be exported to string");
+        }
+        ExportFormatArg::Otel => {
+            let exporter = OtelExporter::new();
+            exporter.export_conversation(conversation, &mut buffer, options)?;
+        }
+    }
+
+    String::from_utf8(buffer).map_err(|e| SnatchError::ExportError {
+        message: format!("Invalid UTF-8 in export output: {e}"),
+        source: None,
+    })
 }
 
 #[cfg(test)]

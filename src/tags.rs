@@ -57,6 +57,38 @@ impl FromStr for SessionOutcome {
     }
 }
 
+/// A timestamped note/annotation for a session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionNote {
+    /// The note content.
+    pub text: String,
+    /// When the note was created.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Optional category/label for the note.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+impl SessionNote {
+    /// Create a new note with the current timestamp.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            created_at: chrono::Utc::now(),
+            label: None,
+        }
+    }
+
+    /// Create a note with a label.
+    pub fn with_label(text: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            created_at: chrono::Utc::now(),
+            label: Some(label.into()),
+        }
+    }
+}
+
 /// Statistics for session outcomes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OutcomeStats {
@@ -104,12 +136,19 @@ pub struct SessionMeta {
     /// Session outcome classification.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<SessionOutcome>,
+    /// Notes/annotations for the session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<SessionNote>,
 }
 
 impl SessionMeta {
-    /// Check if this metadata is empty (no name, tags, bookmark, or outcome).
+    /// Check if this metadata is empty (no name, tags, bookmark, outcome, or notes).
     pub fn is_empty(&self) -> bool {
-        self.name.is_none() && self.tags.is_empty() && !self.bookmarked && self.outcome.is_none()
+        self.name.is_none()
+            && self.tags.is_empty()
+            && !self.bookmarked
+            && self.outcome.is_none()
+            && self.notes.is_empty()
     }
 }
 
@@ -291,6 +330,88 @@ impl TagStore {
         stats
     }
 
+    /// Add a note to a session.
+    pub fn add_note(&mut self, session_id: &str, text: &str, label: Option<&str>) {
+        let meta = self.get_or_create(session_id);
+        let note = if let Some(label) = label {
+            SessionNote::with_label(text, label)
+        } else {
+            SessionNote::new(text)
+        };
+        meta.notes.push(note);
+    }
+
+    /// Remove a note from a session by index.
+    pub fn remove_note(&mut self, session_id: &str, index: usize) -> bool {
+        // Try exact match first
+        if let Some(meta) = self.sessions.get_mut(session_id) {
+            if index < meta.notes.len() {
+                meta.notes.remove(index);
+                self.cleanup_empty(session_id);
+                return true;
+            }
+            return false;
+        }
+
+        // Try prefix match
+        let full_id = self
+            .sessions
+            .keys()
+            .find(|k| k.starts_with(session_id))
+            .cloned();
+        if let Some(full_id) = full_id {
+            if let Some(meta) = self.sessions.get_mut(&full_id) {
+                if index < meta.notes.len() {
+                    meta.notes.remove(index);
+                    self.cleanup_empty(&full_id);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Clear all notes for a session.
+    pub fn clear_notes(&mut self, session_id: &str) {
+        if let Some(meta) = self.sessions.get_mut(session_id) {
+            meta.notes.clear();
+            self.cleanup_empty(session_id);
+            return;
+        }
+
+        // Try prefix match
+        let full_id = self
+            .sessions
+            .keys()
+            .find(|k| k.starts_with(session_id))
+            .cloned();
+        if let Some(full_id) = full_id {
+            if let Some(meta) = self.sessions.get_mut(&full_id) {
+                meta.notes.clear();
+                self.cleanup_empty(&full_id);
+            }
+        }
+    }
+
+    /// Get notes for a session.
+    pub fn get_notes(&self, session_id: &str) -> Option<&[SessionNote]> {
+        self.get(session_id).map(|m| m.notes.as_slice())
+    }
+
+    /// Get all sessions with notes.
+    pub fn sessions_with_notes(&self) -> Vec<&str> {
+        self.sessions
+            .iter()
+            .filter(|(_, m)| !m.notes.is_empty())
+            .map(|(id, _)| id.as_str())
+            .collect()
+    }
+
+    /// Count total notes across all sessions.
+    pub fn note_count(&self) -> usize {
+        self.sessions.values().map(|m| m.notes.len()).sum()
+    }
+
     /// Get all sessions with a specific tag.
     pub fn sessions_with_tag(&self, tag: &str) -> Vec<&str> {
         let tag = normalize_tag(tag);
@@ -308,7 +429,7 @@ impl TagStore {
             .values()
             .flat_map(|m| m.tags.iter().map(|s| s.as_str()))
             .collect();
-        tags.sort();
+        tags.sort_unstable();
         tags.dedup();
         tags
     }
@@ -580,5 +701,115 @@ mod tests {
         let loaded: TagStore = serde_json::from_str(&json).unwrap();
 
         assert_eq!(loaded.get("session1").unwrap().outcome, Some(SessionOutcome::Success));
+    }
+
+    #[test]
+    fn test_session_note_new() {
+        let note = SessionNote::new("Test note");
+        assert_eq!(note.text, "Test note");
+        assert!(note.label.is_none());
+    }
+
+    #[test]
+    fn test_session_note_with_label() {
+        let note = SessionNote::with_label("Test note", "todo");
+        assert_eq!(note.text, "Test note");
+        assert_eq!(note.label, Some("todo".to_string()));
+    }
+
+    #[test]
+    fn test_add_note() {
+        let mut store = TagStore::default();
+        let session_id = "test-session";
+
+        store.add_note(session_id, "First note", None);
+        store.add_note(session_id, "Second note", Some("important"));
+
+        let notes = store.get_notes(session_id).unwrap();
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].text, "First note");
+        assert!(notes[0].label.is_none());
+        assert_eq!(notes[1].text, "Second note");
+        assert_eq!(notes[1].label, Some("important".to_string()));
+    }
+
+    #[test]
+    fn test_remove_note() {
+        let mut store = TagStore::default();
+        let session_id = "test-session";
+
+        store.add_note(session_id, "First", None);
+        store.add_note(session_id, "Second", None);
+        store.add_note(session_id, "Third", None);
+
+        // Remove middle note
+        assert!(store.remove_note(session_id, 1));
+        let notes = store.get_notes(session_id).unwrap();
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].text, "First");
+        assert_eq!(notes[1].text, "Third");
+
+        // Invalid index
+        assert!(!store.remove_note(session_id, 10));
+    }
+
+    #[test]
+    fn test_clear_notes() {
+        let mut store = TagStore::default();
+        let session_id = "test-session";
+
+        store.add_note(session_id, "Note 1", None);
+        store.add_note(session_id, "Note 2", None);
+
+        store.clear_notes(session_id);
+        assert!(store.get(session_id).is_none()); // Entry should be cleaned up
+    }
+
+    #[test]
+    fn test_sessions_with_notes() {
+        let mut store = TagStore::default();
+
+        store.add_note("session1", "Note", None);
+        store.add_note("session2", "Note", None);
+        store.add_tag("session3", "no-notes");
+
+        let sessions = store.sessions_with_notes();
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.contains(&"session1"));
+        assert!(sessions.contains(&"session2"));
+    }
+
+    #[test]
+    fn test_note_count() {
+        let mut store = TagStore::default();
+
+        store.add_note("session1", "Note 1", None);
+        store.add_note("session1", "Note 2", None);
+        store.add_note("session2", "Note 3", None);
+
+        assert_eq!(store.note_count(), 3);
+    }
+
+    #[test]
+    fn test_notes_serialization() {
+        let mut store = TagStore::default();
+        store.add_note("session1", "Test note", Some("todo"));
+
+        let json = serde_json::to_string(&store).unwrap();
+        let loaded: TagStore = serde_json::from_str(&json).unwrap();
+
+        let notes = loaded.get_notes("session1").unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].text, "Test note");
+        assert_eq!(notes[0].label, Some("todo".to_string()));
+    }
+
+    #[test]
+    fn test_session_meta_is_empty_with_notes() {
+        let meta = SessionMeta {
+            notes: vec![SessionNote::new("test")],
+            ..Default::default()
+        };
+        assert!(!meta.is_empty());
     }
 }

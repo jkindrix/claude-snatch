@@ -147,25 +147,21 @@ fn print_text_output(data: &BeyondJsonlData, args: &ExtractArgs) -> Result<()> {
     }
 
     // Global commands (BJ-007)
-    if !data.global_commands.is_empty() {
-        if args.all || args.commands {
-            println!("[Global Commands]");
-            for cmd in &data.global_commands {
-                println!("  - /{}: {}", cmd.name, cmd.description.as_deref().unwrap_or(""));
-            }
-            println!();
+    if !data.global_commands.is_empty() && (args.all || args.commands) {
+        println!("[Global Commands]");
+        for cmd in &data.global_commands {
+            println!("  - /{}: {}", cmd.name, cmd.description.as_deref().unwrap_or(""));
         }
+        println!();
     }
 
     // Project commands (BJ-008)
-    if !data.project_commands.is_empty() {
-        if args.all || args.commands {
-            println!("[Project Commands]");
-            for cmd in &data.project_commands {
-                println!("  - /{}: {}", cmd.name, cmd.description.as_deref().unwrap_or(""));
-            }
-            println!();
+    if !data.project_commands.is_empty() && (args.all || args.commands) {
+        println!("[Project Commands]");
+        for cmd in &data.project_commands {
+            println!("  - /{}: {}", cmd.name, cmd.description.as_deref().unwrap_or(""));
         }
+        println!();
     }
 
     // Credentials (BJ-009)
@@ -179,18 +175,16 @@ fn print_text_output(data: &BeyondJsonlData, args: &ExtractArgs) -> Result<()> {
     }
 
     // Hooks (BJ-011)
-    if !data.hooks.is_empty() {
-        if args.all || args.hooks {
-            println!("[Hooks]");
-            for hook in &data.hooks {
-                let event_name = hook.event.as_deref()
-                    .or(hook.matcher.as_deref())
-                    .unwrap_or("unknown");
-                let cmd = hook.command.as_deref().unwrap_or("(no command)");
-                println!("  - {event_name}: {cmd}");
-            }
-            println!();
+    if !data.hooks.is_empty() && (args.all || args.hooks) {
+        println!("[Hooks]");
+        for hook in &data.hooks {
+            let event_name = hook.event.as_deref()
+                .or(hook.matcher.as_deref())
+                .unwrap_or("unknown");
+            let cmd = hook.command.as_deref().unwrap_or("(no command)");
+            println!("  - {event_name}: {cmd}");
         }
+        println!();
     }
 
     // Session retention (BJ-014)
@@ -224,36 +218,30 @@ fn print_text_output(data: &BeyondJsonlData, args: &ExtractArgs) -> Result<()> {
     }
 
     // Global rules (BJ-017)
-    if !data.global_rules.is_empty() {
-        if args.all || args.rules {
-            println!("[Global Rules]");
-            for rule in &data.global_rules {
-                println!("  - {}: {}", rule.name, rule.description.as_deref().unwrap_or(""));
-            }
-            println!();
+    if !data.global_rules.is_empty() && (args.all || args.rules) {
+        println!("[Global Rules]");
+        for rule in &data.global_rules {
+            println!("  - {}: {}", rule.name, rule.description.as_deref().unwrap_or(""));
         }
+        println!();
     }
 
     // Project rules (BJ-018)
-    if !data.project_rules.is_empty() {
-        if args.all || args.rules {
-            println!("[Project Rules]");
-            for rule in &data.project_rules {
-                println!("  - {}: {}", rule.name, rule.description.as_deref().unwrap_or(""));
-            }
-            println!();
+    if !data.project_rules.is_empty() && (args.all || args.rules) {
+        println!("[Project Rules]");
+        for rule in &data.project_rules {
+            println!("  - {}: {}", rule.name, rule.description.as_deref().unwrap_or(""));
         }
+        println!();
     }
 
     // Output styles (BJ-021)
-    if !data.output_styles.is_empty() {
-        if args.all {
-            println!("[Output Styles]");
-            for style in &data.output_styles {
-                println!("  - {}", style.name);
-            }
-            println!();
+    if !data.output_styles.is_empty() && args.all {
+        println!("[Output Styles]");
+        for style in &data.output_styles {
+            println!("  - {}", style.name);
         }
+        println!();
     }
 
     // File history (BJ-001)

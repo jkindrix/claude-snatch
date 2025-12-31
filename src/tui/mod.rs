@@ -11,6 +11,8 @@ mod app;
 mod components;
 mod events;
 mod highlight;
+#[cfg(feature = "image-preview")]
+pub mod image;
 mod state;
 mod theme;
 

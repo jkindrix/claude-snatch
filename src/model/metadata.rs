@@ -31,21 +31,16 @@ pub struct ThinkingMetadata {
 }
 
 /// Thinking budget level.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingLevel {
     /// High thinking budget.
     High,
     /// Medium thinking budget.
+    #[default]
     Medium,
     /// Low thinking budget.
     Low,
-}
-
-impl Default for ThinkingLevel {
-    fn default() -> Self {
-        Self::Medium
-    }
 }
 
 /// Workflow task item.

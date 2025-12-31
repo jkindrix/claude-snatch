@@ -5,6 +5,7 @@
 use crate::cli::{Cli, InfoArgs, OutputFormat};
 use crate::error::{Result, SnatchError};
 use crate::reconstruction::Conversation;
+use crate::tags::TagStore;
 
 use super::get_claude_dir;
 
@@ -48,6 +49,10 @@ fn show_session_info(
 ) -> Result<()> {
     let summary = session.summary()?;
 
+    // Load tags/bookmarks for this session
+    let tag_store = TagStore::load().unwrap_or_default();
+    let session_meta = tag_store.get(&summary.session_id);
+
     match cli.effective_output() {
         OutputFormat::Json => {
             println!("{}", serde_json::to_string_pretty(&SessionInfoOutput {
@@ -64,6 +69,10 @@ fn show_session_info(
                 state: format!("{:?}", summary.state),
                 version: summary.version.clone(),
                 path: session.path().to_string_lossy().to_string(),
+                name: session_meta.and_then(|m| m.name.clone()),
+                tags: session_meta.map(|m| m.tags.clone()).unwrap_or_default(),
+                bookmarked: session_meta.is_some_and(|m| m.bookmarked),
+                outcome: session_meta.and_then(|m| m.outcome.map(|o| o.to_string())),
             })?);
         }
         OutputFormat::Tsv => {
@@ -73,6 +82,20 @@ fn show_session_info(
             println!("subagent\t{}", summary.is_subagent);
             println!("entries\t{}", summary.entry_count);
             println!("size\t{}", summary.file_size);
+            if let Some(meta) = session_meta {
+                if let Some(name) = &meta.name {
+                    println!("name\t{}", name);
+                }
+                if !meta.tags.is_empty() {
+                    println!("tags\t{}", meta.tags.join(","));
+                }
+                if meta.bookmarked {
+                    println!("bookmarked\ttrue");
+                }
+                if let Some(outcome) = &meta.outcome {
+                    println!("outcome\t{}", outcome);
+                }
+            }
         }
         OutputFormat::Compact => {
             println!("{}:{}:{}",
@@ -128,16 +151,36 @@ fn show_session_info(
                 println!("Version:      {version}");
             }
 
+            // Show tags, bookmarks, name, and outcome if present
+            if let Some(meta) = session_meta {
+                let has_metadata = meta.name.is_some() || !meta.tags.is_empty() || meta.bookmarked || meta.outcome.is_some();
+                if has_metadata {
+                    println!();
+                    if let Some(name) = &meta.name {
+                        println!("Name:         {name}");
+                    }
+                    if meta.bookmarked {
+                        println!("Bookmarked:   Yes");
+                    }
+                    if let Some(outcome) = &meta.outcome {
+                        println!("Outcome:      {outcome}");
+                    }
+                    if !meta.tags.is_empty() {
+                        println!("Tags:         {}", meta.tags.join(", "));
+                    }
+                }
+            }
+
             // Show tree structure if requested
             if args.tree {
                 println!();
-                show_tree_structure(session)?;
+                show_tree_structure(session, cli.max_file_size)?;
             }
 
             // Show specific entry if requested
             if let Some(uuid) = &args.entry {
                 println!();
-                show_entry(session, uuid)?;
+                show_entry(session, uuid, cli.max_file_size)?;
             }
 
             // Show raw entries if requested
@@ -145,7 +188,7 @@ fn show_session_info(
                 println!();
                 println!("Raw Entries:");
                 println!("------------");
-                let entries = session.parse()?;
+                let entries = session.parse_with_options(cli.max_file_size)?;
                 for (i, entry) in entries.iter().enumerate() {
                     println!("[{}] {}: {}",
                         i,
@@ -161,8 +204,8 @@ fn show_session_info(
 }
 
 /// Show tree structure of a session.
-fn show_tree_structure(session: &crate::discovery::Session) -> Result<()> {
-    let entries = session.parse()?;
+fn show_tree_structure(session: &crate::discovery::Session, max_file_size: Option<u64>) -> Result<()> {
+    let entries = session.parse_with_options(max_file_size)?;
     let conversation = Conversation::from_entries(entries)?;
     let stats = conversation.statistics();
 
@@ -196,8 +239,8 @@ fn show_tree_structure(session: &crate::discovery::Session) -> Result<()> {
 }
 
 /// Show a specific entry.
-fn show_entry(session: &crate::discovery::Session, uuid: &str) -> Result<()> {
-    let entries = session.parse()?;
+fn show_entry(session: &crate::discovery::Session, uuid: &str, max_file_size: Option<u64>) -> Result<()> {
+    let entries = session.parse_with_options(max_file_size)?;
 
     for entry in &entries {
         if entry.uuid() == Some(uuid) || entry.uuid().map(|u| u.starts_with(uuid)).unwrap_or(false) {
@@ -362,6 +405,18 @@ struct SessionInfoOutput {
     state: String,
     version: Option<String>,
     path: String,
+    /// Human-readable name for the session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    /// Tags associated with the session.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    /// Whether this session is bookmarked.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    bookmarked: bool,
+    /// Outcome classification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<String>,
 }
 
 /// Project info for JSON output.
@@ -409,6 +464,10 @@ mod tests {
             state: "Complete".to_string(),
             version: Some("2.0.74".to_string()),
             path: "/home/user/.claude/projects/abc123.jsonl".to_string(),
+            name: Some("My Session".to_string()),
+            tags: vec!["feature".to_string(), "urgent".to_string()],
+            bookmarked: true,
+            outcome: Some("success".to_string()),
         };
 
         let json = serde_json::to_string(&output).unwrap();
@@ -416,6 +475,10 @@ mod tests {
         assert!(json.contains("\"is_subagent\":false"));
         assert!(json.contains("\"entry_count\":50"));
         assert!(json.contains("\"version\":\"2.0.74\""));
+        assert!(json.contains("\"name\":\"My Session\""));
+        assert!(json.contains("\"tags\":[\"feature\",\"urgent\"]"));
+        assert!(json.contains("\"bookmarked\":true"));
+        assert!(json.contains("\"outcome\":\"success\""));
     }
 
     #[test]
@@ -473,11 +536,20 @@ mod tests {
             state: "Unknown".to_string(),
             version: None,
             path: "/test".to_string(),
+            name: None,
+            tags: vec![],
+            bookmarked: false,
+            outcome: None,
         };
 
         let json = serde_json::to_string(&output).unwrap();
         assert!(json.contains("\"is_subagent\":true"));
         assert!(json.contains("\"start_time\":null"));
         assert!(json.contains("\"version\":null"));
+        // name, tags, bookmarked, and outcome should be skipped when empty/false/None
+        assert!(!json.contains("\"name\""));
+        assert!(!json.contains("\"tags\""));
+        assert!(!json.contains("\"bookmarked\""));
+        assert!(!json.contains("\"outcome\""));
     }
 }

@@ -34,6 +34,7 @@ mod csv;
 mod html;
 mod json;
 mod markdown;
+mod otel;
 pub mod schema;
 mod sqlite;
 mod text;
@@ -43,6 +44,7 @@ pub use csv::*;
 pub use html::*;
 pub use json::*;
 pub use markdown::*;
+pub use otel::*;
 pub use schema::{
     entry_schema, entry_schema_string, export_schema, export_schema_string,
     validate_entries, validate_export, SchemaValidator, ValidationResult,
@@ -54,6 +56,8 @@ pub use xml::*;
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
+
+use tracing::{debug, instrument};
 
 use crate::error::{Result, SnatchError};
 use crate::model::LogEntry;
@@ -793,7 +797,7 @@ impl ExportOptions {
     /// Check if minimization is enabled.
     #[must_use]
     pub fn has_minimization(&self) -> bool {
-        self.minimization.as_ref().map_or(false, |m| m.is_enabled())
+        self.minimization.as_ref().is_some_and(|m| m.is_enabled())
     }
 
     /// Apply minimization to a file path if configured.
@@ -817,25 +821,25 @@ impl ExportOptions {
     /// Check if git info should be stripped.
     #[must_use]
     pub fn should_strip_git_info(&self) -> bool {
-        self.minimization.as_ref().map_or(false, |m| m.strip_git_info)
+        self.minimization.as_ref().is_some_and(|m| m.strip_git_info)
     }
 
     /// Check if project info should be stripped.
     #[must_use]
     pub fn should_strip_project_info(&self) -> bool {
-        self.minimization.as_ref().map_or(false, |m| m.strip_project_info)
+        self.minimization.as_ref().is_some_and(|m| m.strip_project_info)
     }
 
     /// Check if CWD should be stripped.
     #[must_use]
     pub fn should_strip_cwd(&self) -> bool {
-        self.minimization.as_ref().map_or(false, |m| m.strip_cwd)
+        self.minimization.as_ref().is_some_and(|m| m.strip_cwd)
     }
 
     /// Check if model names should be stripped.
     #[must_use]
     pub fn should_strip_model(&self) -> bool {
-        self.minimization.as_ref().map_or(false, |m| m.strip_model_names)
+        self.minimization.as_ref().is_some_and(|m| m.strip_model_names)
     }
 
     /// Check if exclusive filtering is active.
@@ -968,6 +972,8 @@ pub enum ExportFormat {
     Xml,
     /// SQLite database.
     Sqlite,
+    /// OpenTelemetry (OTLP JSON format).
+    Otel,
 }
 
 impl ExportFormat {
@@ -982,6 +988,7 @@ impl ExportFormat {
             Self::Csv => "csv",
             Self::Xml => "xml",
             Self::Sqlite => "db",
+            Self::Otel => "otlp.json",
         }
     }
 
@@ -997,6 +1004,7 @@ impl ExportFormat {
             "csv" => Some(Self::Csv),
             "xml" => Some(Self::Xml),
             "sqlite" | "db" | "sql" => Some(Self::Sqlite),
+            "otel" | "otlp" | "opentelemetry" => Some(Self::Otel),
             _ => None,
         }
     }
@@ -1032,6 +1040,7 @@ pub trait Exporter {
 /// This function uses atomic file writes to ensure data integrity.
 /// Content is written to a temporary file first, then atomically
 /// renamed to the target path.
+#[instrument(skip(conversation, options), fields(path = %path.as_ref().display(), format = ?format))]
 pub fn export_to_file(
     conversation: &Conversation,
     path: impl AsRef<Path>,
@@ -1039,6 +1048,7 @@ pub fn export_to_file(
     options: &ExportOptions,
 ) -> Result<()> {
     let path = path.as_ref();
+    debug!(nodes = conversation.len(), "Exporting conversation to file");
 
     // SQLite handles its own file creation
     if matches!(format, ExportFormat::Sqlite) {
@@ -1079,6 +1089,10 @@ pub fn export_to_file(
             let exporter = XmlExporter::new();
             exporter.export_conversation(conversation, &mut writer, options)?;
         }
+        ExportFormat::Otel => {
+            let exporter = OtelExporter::new();
+            exporter.export_conversation(conversation, &mut writer, options)?;
+        }
         ExportFormat::Sqlite => {
             unreachable!("SQLite handled above");
         }
@@ -1099,11 +1113,13 @@ pub fn export_to_file(
 }
 
 /// Export a conversation to a string.
+#[instrument(skip(conversation, options), fields(format = ?format))]
 pub fn export_to_string(
     conversation: &Conversation,
     format: ExportFormat,
     options: &ExportOptions,
 ) -> Result<String> {
+    debug!(nodes = conversation.len(), "Exporting conversation to string");
     let mut buffer = Vec::new();
 
     match format {
@@ -1133,6 +1149,10 @@ pub fn export_to_string(
         }
         ExportFormat::Xml => {
             let exporter = XmlExporter::new();
+            exporter.export_conversation(conversation, &mut buffer, options)?;
+        }
+        ExportFormat::Otel => {
+            let exporter = OtelExporter::new();
             exporter.export_conversation(conversation, &mut buffer, options)?;
         }
         ExportFormat::Sqlite => {

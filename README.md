@@ -91,7 +91,9 @@ snatch tui
 | `export` | `x` | Export conversations to various formats |
 | `search` | `s`, `find` | Search across sessions |
 | `stats` | `stat` | Show usage statistics |
+| `standup` | `daily` | Generate standup/progress report |
 | `info` | `i`, `show` | Display detailed information |
+| `pick` | `browse` | Interactively pick a session using fuzzy search |
 | `tui` | `ui` | Launch interactive terminal UI |
 | `validate` | | Validate session files |
 | `watch` | | Watch for session changes |
@@ -156,6 +158,39 @@ snatch export <session-id> -f text -o output.txt
 | `--metadata` | false | Include metadata (UUIDs, etc.) |
 | `--main-thread` | true | Only export main thread (exclude branches) |
 | `--pretty` | false | Pretty-print JSON output |
+| `--gist` | false | Upload export to GitHub Gist (requires `gh` CLI) |
+| `--gist-public` | false | Make the gist public (default is secret) |
+| `--gist-description` | - | Description for the gist |
+| `--toc` | false | Include table of contents/navigation sidebar (HTML only) |
+| `--dark` | false | Use dark theme (HTML only) |
+| `--clipboard` | false | Copy export to clipboard instead of writing to file/stdout |
+
+## Stats Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--session`, `-s` | - | Show stats for specific session |
+| `--project`, `-p` | - | Show stats for specific project |
+| `--global` | false | Show global stats across all sessions |
+| `--blocks` | false | Show 5-hour billing window breakdown |
+| `--sparkline` | false | Show sparkline visualizations (▁▂▃▄▅▆▇█) |
+| `--tools` | false | Show tool usage breakdown |
+| `--models` | false | Show model usage breakdown |
+| `--costs` | false | Show cost breakdown by model |
+| `--all` | false | Show all available statistics |
+
+### Examples
+
+```bash
+# Show billing blocks with sparkline trends
+snatch stats --blocks --sparkline
+
+# Show global stats with all breakdowns
+snatch stats --global --all
+
+# Show session stats with tool usage
+snatch stats -s <session-id> --tools
+```
 
 ## TUI Navigation
 
@@ -235,6 +270,30 @@ cargo build
 cargo build --release
 ```
 
+### Optional Features
+
+Enable additional functionality with feature flags:
+
+```bash
+# MCP server mode for AI model integration
+cargo build --features mcp
+
+# Terminal image preview (sixel/kitty/iterm2/halfblocks)
+cargo build --features image-preview
+
+# Memory-mapped file parsing for very large JSONL files
+cargo build --features mmap
+
+# Enable all optional features
+cargo build --features "mcp,image-preview,mmap"
+```
+
+| Feature | Description |
+|---------|-------------|
+| `mcp` | MCP server mode exposing claude-snatch as tools for AI models |
+| `image-preview` | Terminal image rendering using sixel, kitty, or iterm2 protocols |
+| `mmap` | Memory-mapped file parsing for very large JSONL files |
+
 ### Running Tests
 
 ```bash
@@ -285,6 +344,8 @@ theme = "dark"
 
 ## Performance
 
+### Parsing Performance
+
 | File Size | Target | Typical |
 |-----------|--------|---------|
 | 1 MB | <50ms | ~30ms |
@@ -292,6 +353,27 @@ theme = "dark"
 | 100 MB | <5s | ~2s |
 
 Memory usage is typically <2x file size.
+
+### Benchmark Results
+
+Benchmarks run on `cargo bench`:
+
+| Operation | 10 entries | 100 entries | 1000 entries | 10000 entries |
+|-----------|------------|-------------|--------------|---------------|
+| Parse (parse_str) | 0.1 ms | 1.1 ms | 11 ms | ~295 MiB/s |
+| Tree reconstruction | 3.0 µs | 46 µs | 318 µs | - |
+
+| Export Format | Time (100 messages) |
+|---------------|---------------------|
+| Markdown | 2.3 µs |
+| Plain Text | 2.4 µs |
+| JSON | 5.1 µs |
+
+Run benchmarks locally:
+
+```bash
+cargo bench --bench parser_bench
+```
 
 ## License
 

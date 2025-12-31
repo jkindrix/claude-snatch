@@ -12,7 +12,7 @@ use crate::discovery::{ClaudeDirectory, HierarchyBuilder, Project, Session};
 use crate::error::Result;
 use crate::export::{
     CsvExporter, ExportFormat, ExportOptions, Exporter, HtmlExporter, JsonExporter,
-    MarkdownExporter, SqliteExporter, TextExporter, XmlExporter,
+    MarkdownExporter, OtelExporter, SqliteExporter, TextExporter, XmlExporter,
 };
 use crate::model::{ContentBlock, LogEntry};
 use crate::parser::JsonlParser;
@@ -478,6 +478,7 @@ impl ExportDialogState {
             ExportFormat::Csv => "CSV",
             ExportFormat::Xml => "XML",
             ExportFormat::Sqlite => "SQLite",
+            ExportFormat::Otel => "OTLP",
         }
     }
 }
@@ -1536,6 +1537,10 @@ impl AppState {
             ExportFormat::Sqlite => {
                 unreachable!("SQLite handled above");
             }
+            ExportFormat::Otel => {
+                let exporter = OtelExporter::new();
+                exporter.export_conversation(conversation, &mut writer, options)?;
+            }
         }
 
         // Flush BufWriter before finishing atomic write
@@ -1868,7 +1873,8 @@ impl AppState {
         }
 
         // Create temp file with meaningful name
-        let session_id = self.current_session.as_ref().unwrap();
+        // Safety: guard at function start ensures current_session is Some
+        let session_id = self.current_session.as_ref().expect("checked above");
         let short_id = if session_id.len() > 8 {
             &session_id[..8]
         } else {
@@ -2819,6 +2825,236 @@ mod tests {
             // Backspace on empty should be fine
             palette.backspace();
             assert!(palette.query.is_empty());
+        }
+    }
+
+    mod export_dialog_state {
+        use super::*;
+
+        #[test]
+        fn test_default_export_dialog() {
+            let dialog = ExportDialogState::default();
+            assert!(!dialog.active);
+            assert_eq!(dialog.format_index, 0);
+            assert!(!dialog.formats.is_empty());
+            assert!(dialog.include_thinking);
+            assert!(dialog.include_tools);
+            assert!(dialog.status_message.is_none());
+            assert!(!dialog.exporting);
+        }
+
+        #[test]
+        fn test_selected_format() {
+            let dialog = ExportDialogState::default();
+            // First format is Markdown
+            assert_eq!(dialog.selected_format(), ExportFormat::Markdown);
+        }
+
+        #[test]
+        fn test_next_format() {
+            let mut dialog = ExportDialogState::default();
+            let initial_len = dialog.formats.len();
+
+            dialog.next_format();
+            assert_eq!(dialog.format_index, 1);
+
+            // Keep cycling
+            for _ in 0..initial_len {
+                dialog.next_format();
+            }
+            // Should wrap around to 1 (after going through all + 1)
+            assert_eq!(dialog.format_index, 1);
+        }
+
+        #[test]
+        fn test_prev_format() {
+            let mut dialog = ExportDialogState::default();
+            let initial_len = dialog.formats.len();
+
+            // Should wrap to end
+            dialog.prev_format();
+            assert_eq!(dialog.format_index, initial_len - 1);
+
+            // Should go to second-to-last
+            dialog.prev_format();
+            assert_eq!(dialog.format_index, initial_len - 2);
+        }
+
+        #[test]
+        fn test_clear() {
+            let mut dialog = ExportDialogState {
+                active: true,
+                format_index: 2,
+                formats: vec![ExportFormat::Markdown, ExportFormat::Json, ExportFormat::Text],
+                include_thinking: false,
+                include_tools: false,
+                status_message: Some("Success".to_string()),
+                exporting: true,
+            };
+
+            dialog.clear();
+            assert!(!dialog.active);
+            assert!(dialog.status_message.is_none());
+            assert!(!dialog.exporting);
+            // Note: format_index and include_* are NOT reset by clear
+            assert_eq!(dialog.format_index, 2);
+        }
+
+        #[test]
+        fn test_format_name() {
+            let mut dialog = ExportDialogState::default();
+
+            // Test each format name
+            assert_eq!(dialog.format_name(), "Markdown");
+
+            dialog.next_format();
+            assert_eq!(dialog.format_name(), "JSON");
+
+            dialog.next_format();
+            assert_eq!(dialog.format_name(), "JSON (Pretty)");
+
+            dialog.next_format();
+            assert_eq!(dialog.format_name(), "HTML");
+
+            dialog.next_format();
+            assert_eq!(dialog.format_name(), "Plain Text");
+        }
+
+        #[test]
+        fn test_format_cycle_wraps_around() {
+            let mut dialog = ExportDialogState::default();
+            let len = dialog.formats.len();
+
+            // Go forward through all formats
+            for _ in 0..len {
+                dialog.next_format();
+            }
+            assert_eq!(dialog.format_index, 0);
+
+            // Go backward through all formats
+            for _ in 0..len {
+                dialog.prev_format();
+            }
+            assert_eq!(dialog.format_index, 0);
+        }
+    }
+
+    mod session_selection {
+        use super::*;
+
+        // Test selected_sessions HashSet directly since AppState requires file system
+        #[test]
+        fn test_hashset_selection_operations() {
+            let mut selected: HashSet<String> = HashSet::new();
+
+            // Initially empty
+            assert!(selected.is_empty());
+
+            // Add sessions
+            selected.insert("session-1".to_string());
+            selected.insert("session-2".to_string());
+            assert_eq!(selected.len(), 2);
+            assert!(selected.contains("session-1"));
+            assert!(selected.contains("session-2"));
+
+            // Remove a session
+            selected.remove("session-1");
+            assert_eq!(selected.len(), 1);
+            assert!(!selected.contains("session-1"));
+
+            // Clear all
+            selected.clear();
+            assert!(selected.is_empty());
+        }
+
+        #[test]
+        fn test_session_selection_toggle_logic() {
+            // Test the toggle logic without AppState
+            fn toggle_selection(selected: &mut HashSet<String>, session_id: &str) -> bool {
+                if selected.contains(session_id) {
+                    selected.remove(session_id);
+                    false
+                } else {
+                    selected.insert(session_id.to_string());
+                    true
+                }
+            }
+
+            let mut selected: HashSet<String> = HashSet::new();
+
+            // First toggle adds
+            assert!(toggle_selection(&mut selected, "session-1"));
+            assert!(selected.contains("session-1"));
+
+            // Second toggle removes
+            assert!(!toggle_selection(&mut selected, "session-1"));
+            assert!(!selected.contains("session-1"));
+
+            // Toggle on again
+            assert!(toggle_selection(&mut selected, "session-1"));
+            assert!(selected.contains("session-1"));
+        }
+
+        #[test]
+        fn test_select_all_logic() {
+            let sessions = vec![
+                ("session-1".to_string(), "Session 1".to_string()),
+                ("session-2".to_string(), "Session 2".to_string()),
+                ("session-3".to_string(), "Session 3".to_string()),
+            ];
+
+            let mut selected: HashSet<String> = HashSet::new();
+
+            // Select all
+            for (id, _) in &sessions {
+                selected.insert(id.clone());
+            }
+
+            assert_eq!(selected.len(), 3);
+            assert!(selected.contains("session-1"));
+            assert!(selected.contains("session-2"));
+            assert!(selected.contains("session-3"));
+        }
+
+        #[test]
+        fn test_is_session_selected_logic() {
+            let mut selected: HashSet<String> = HashSet::new();
+            selected.insert("session-2".to_string());
+
+            // Mimics is_session_selected
+            assert!(!selected.contains("session-1"));
+            assert!(selected.contains("session-2"));
+            assert!(!selected.contains("session-3"));
+        }
+
+        #[test]
+        fn test_tree_item_selected_logic() {
+            // Simulates tree_session_ids and selected_sessions interaction
+            let tree_session_ids = vec![
+                "session-1".to_string(),
+                "session-2".to_string(),
+                "session-3".to_string(),
+            ];
+
+            let mut selected: HashSet<String> = HashSet::new();
+            selected.insert("session-2".to_string());
+
+            // Mimics is_tree_item_selected
+            fn is_tree_item_selected(
+                idx: usize,
+                tree_session_ids: &[String],
+                selected: &HashSet<String>,
+            ) -> bool {
+                tree_session_ids
+                    .get(idx)
+                    .map(|id| selected.contains(id))
+                    .unwrap_or(false)
+            }
+
+            assert!(!is_tree_item_selected(0, &tree_session_ids, &selected));
+            assert!(is_tree_item_selected(1, &tree_session_ids, &selected));
+            assert!(!is_tree_item_selected(2, &tree_session_ids, &selected));
+            assert!(!is_tree_item_selected(99, &tree_session_ids, &selected)); // Out of bounds
         }
     }
 }

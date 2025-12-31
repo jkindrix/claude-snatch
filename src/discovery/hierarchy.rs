@@ -131,11 +131,7 @@ impl HierarchyBuilder {
                     if subagent_secs >= parent_secs.saturating_sub(self.time_window_secs)
                         && subagent_secs <= parent_secs.saturating_add(self.time_window_secs)
                     {
-                        let diff = if subagent_secs >= parent_secs {
-                            subagent_secs - parent_secs
-                        } else {
-                            parent_secs - subagent_secs
-                        };
+                        let diff = subagent_secs.abs_diff(parent_secs);
 
                         if diff < best_time_diff {
                             best_time_diff = diff;
@@ -211,8 +207,10 @@ pub struct AggregatedStats {
 impl AggregatedStats {
     /// Aggregate statistics from multiple session analytics.
     pub fn from_analytics(analytics: &[SessionAnalytics]) -> Self {
-        let mut stats = Self::default();
-        stats.total_sessions = analytics.len();
+        let mut stats = Self {
+            total_sessions: analytics.len(),
+            ..Default::default()
+        };
 
         for a in analytics {
             let summary = a.summary_report();
@@ -304,7 +302,8 @@ fn collect_entries_recursive(
     for entry in parsed_entries {
         // Use entry timestamp, defaulting to epoch if not available
         let timestamp = entry.timestamp().unwrap_or_else(|| {
-            chrono::DateTime::from_timestamp(0, 0).unwrap()
+            // Unix epoch (0, 0) is always a valid timestamp
+            chrono::DateTime::from_timestamp(0, 0).expect("unix epoch is valid")
         });
         entries.push((label.clone(), timestamp, session_id.to_string(), entry));
     }

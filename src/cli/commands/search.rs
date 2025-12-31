@@ -126,7 +126,8 @@ fn calculate_fuzzy_score(
 
     // Penalty for spread-out matches (prefer compact matches)
     if positions.len() > 1 {
-        let span = positions.last().unwrap() - positions.first().unwrap() + 1;
+        // Safety: positions.len() > 1 guarantees first/last return Some
+        let span = positions.last().expect("len > 1") - positions.first().expect("len > 1") + 1;
         let ideal_span = positions.len();
         let compactness = ideal_span as f64 / span as f64;
         score += (compactness - 0.5) * 10.0; // -5 to +5 adjustment
@@ -332,7 +333,7 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
 
     // Search each session
     for session in sessions {
-        let entries = match session.parse() {
+        let entries = match session.parse_with_options(cli.max_file_size) {
             Ok(e) => e,
             Err(_) => continue, // Skip unparseable sessions
         };

@@ -141,18 +141,96 @@ pub fn encode_project_path(path: &str) -> String {
 
 /// Decode an encoded project path.
 ///
-/// Example: `-home-user-my%2Dproject` → `/home/user/my-project`
+/// Claude Code's encoding is lossy: it replaces `/` with `-` without escaping
+/// existing hyphens. This makes decoding ambiguous - we can't distinguish between
+/// a hyphen that was originally a `/` vs one that was always a hyphen.
+///
+/// This function attempts to resolve the ambiguity by checking which paths
+/// actually exist on the filesystem. If no path exists, it falls back to the
+/// naive decode (all hyphens become slashes).
+///
+/// Example: `-home-user-my%2Dproject` → `/home/user/my-project` (if %2D encoded)
+/// Example: `-home-user-claude-snatch` → `/home/user/claude-snatch` (if path exists)
 #[must_use]
 pub fn decode_project_path(encoded: &str) -> String {
-    // Replace leading - with / and then all - with /
-    let path = if encoded.starts_with('-') {
-        encoded.replacen('-', "/", 1).replace('-', "/")
+    // First handle percent-encoded hyphens (from our own encoding or future Claude versions)
+    let working = encoded.replace("%2D", "\x00HYPHEN\x00");
+
+    // Try to find the best decode by checking filesystem
+    if let Some(best) = decode_with_filesystem_check(&working) {
+        return best.replace("\x00HYPHEN\x00", "-");
+    }
+
+    // Fallback: naive decode (all hyphens to slashes)
+    let path = if working.starts_with('-') {
+        working.replacen('-', "/", 1).replace('-', "/")
     } else {
-        encoded.replace('-', "/")
+        working.replace('-', "/")
     };
 
-    // Decode percent-encoded hyphens
-    path.replace("%2D", "-")
+    path.replace("\x00HYPHEN\x00", "-")
+}
+
+/// Try to decode by checking which paths exist on the filesystem.
+///
+/// Uses a greedy approach: starting from the root, at each hyphen position
+/// we prefer keeping it as a hyphen if that path segment exists on disk.
+fn decode_with_filesystem_check(encoded: &str) -> Option<String> {
+    use std::path::Path;
+
+    // Remove leading hyphen and split into segments
+    let content = encoded.strip_prefix('-').unwrap_or(encoded);
+    if content.is_empty() {
+        return Some("/".to_string());
+    }
+
+    let segments: Vec<&str> = content.split('-').collect();
+    if segments.is_empty() {
+        return Some("/".to_string());
+    }
+
+    // Build the path greedily, checking filesystem at each step
+    let mut current_path = String::from("/");
+    let mut i = 0;
+
+    while i < segments.len() {
+        let segment = segments[i];
+        i += 1;
+
+        // Try building longer segments by keeping hyphens
+        let mut best_segment = segment.to_string();
+        let mut best_j = i;
+
+        // Look ahead to see if joining segments with hyphens creates a valid path
+        for j in i..=segments.len() {
+            let test_segment = if j == i {
+                segment.to_string()
+            } else {
+                segments[i - 1..j].join("-")
+            };
+
+            let test_path = format!("{}{}", current_path, test_segment);
+
+            if Path::new(&test_path).exists() {
+                best_segment = test_segment;
+                best_j = j;
+            }
+        }
+
+        current_path.push_str(&best_segment);
+        i = best_j;
+
+        if i < segments.len() {
+            current_path.push('/');
+        }
+    }
+
+    // Only return if the path exists or we made meaningful progress
+    if Path::new(&current_path).exists() || current_path.contains('-') {
+        Some(current_path)
+    } else {
+        None
+    }
 }
 
 /// Validate that a decoded path looks reasonable.
@@ -251,10 +329,11 @@ pub fn is_session_file(path: &Path) -> bool {
 pub fn windows_to_wsl_path(windows_path: &str) -> String {
     // C:\Users\foo → /mnt/c/Users/foo
     if windows_path.len() >= 2 && windows_path.chars().nth(1) == Some(':') {
+        // Safety: len >= 2 guarantees at least one character
         let drive = windows_path
             .chars()
             .next()
-            .unwrap()
+            .expect("len >= 2")
             .to_ascii_lowercase();
         let rest = &windows_path[2..].replace('\\', "/");
         format!("/mnt/{drive}{rest}")
@@ -291,16 +370,21 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_project_path() {
-        assert_eq!(decode_project_path("-home-user-project"), "/home/user/project");
-        assert_eq!(decode_project_path("-"), "/");
-        assert_eq!(decode_project_path("-a-b-c"), "/a/b/c");
-        // Paths with percent-encoded hyphens are decoded
+    fn test_decode_project_path_with_percent_encoding() {
+        // Paths with percent-encoded hyphens are decoded correctly
         assert_eq!(decode_project_path("-home-user-my%2Dproject"), "/home/user/my-project");
     }
 
     #[test]
-    fn test_roundtrip() {
+    fn test_decode_project_path_simple() {
+        // Simple path without ambiguity (when fs check fails, falls back to naive decode)
+        // Note: In tests, paths don't exist so we get the fallback behavior
+        assert_eq!(decode_project_path("-"), "/");
+    }
+
+    #[test]
+    fn test_roundtrip_with_percent_encoding() {
+        // Round-trip works perfectly when we use our own encoding
         let paths = [
             "/home/user/project",
             "/",
@@ -313,6 +397,22 @@ mod tests {
             let decoded = decode_project_path(&encoded);
             assert_eq!(decoded, path, "Roundtrip failed for: {path}");
         }
+    }
+
+    #[test]
+    fn test_decode_with_filesystem_check_existing_path() {
+        use std::env;
+
+        // Test with a path we know exists - the temp directory
+        let temp_dir = env::temp_dir();
+        let temp_str = temp_dir.to_string_lossy();
+
+        // Encode the temp path
+        let encoded = encode_project_path(&temp_str);
+        let decoded = decode_project_path(&encoded);
+
+        // Should decode back to the original
+        assert_eq!(decoded, temp_str.as_ref());
     }
 
     #[test]

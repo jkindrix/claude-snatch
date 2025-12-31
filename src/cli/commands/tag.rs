@@ -337,6 +337,78 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                 }
             }
         }
+
+        TagAction::Note { session, text, label } => {
+            let session_id = resolve_session_id(cli, session)?;
+            store.add_note(&session_id, text, label.as_deref());
+            store.save()?;
+            let label_str = label.as_ref().map(|l| format!(" [{}]", l)).unwrap_or_default();
+            println!("Added note{} to session {}", label_str, short_id(&session_id));
+        }
+
+        TagAction::Notes { session } => {
+            let session_id = resolve_session_id(cli, session)?;
+            if let Some(notes) = store.get_notes(&session_id) {
+                if notes.is_empty() {
+                    println!("No notes for session {}.", short_id(&session_id));
+                    return Ok(());
+                }
+
+                match cli.effective_output() {
+                    OutputFormat::Json => {
+                        println!("{}", serde_json::to_string_pretty(&notes)?);
+                    }
+                    OutputFormat::Tsv => {
+                        println!("index\tlabel\tcreated\ttext");
+                        for (i, note) in notes.iter().enumerate() {
+                            println!(
+                                "{}\t{}\t{}\t{}",
+                                i,
+                                note.label.as_deref().unwrap_or(""),
+                                note.created_at.format("%Y-%m-%d %H:%M"),
+                                note.text.replace('\n', "\\n")
+                            );
+                        }
+                    }
+                    OutputFormat::Compact => {
+                        for note in notes {
+                            println!("{}", note.text.lines().next().unwrap_or(""));
+                        }
+                    }
+                    OutputFormat::Text => {
+                        println!("Notes for session {} ({} total):", short_id(&session_id), notes.len());
+                        println!();
+                        for (i, note) in notes.iter().enumerate() {
+                            let label_str = note.label.as_ref().map(|l| format!(" [{}]", l)).unwrap_or_default();
+                            println!("[{}]{} - {}", i, label_str, note.created_at.format("%Y-%m-%d %H:%M"));
+                            for line in note.text.lines() {
+                                println!("    {}", line);
+                            }
+                            println!();
+                        }
+                    }
+                }
+            } else {
+                println!("No notes for session {}.", short_id(&session_id));
+            }
+        }
+
+        TagAction::Unnote { session, index } => {
+            let session_id = resolve_session_id(cli, session)?;
+            if store.remove_note(&session_id, *index) {
+                store.save()?;
+                println!("Removed note {} from session {}", index, short_id(&session_id));
+            } else {
+                println!("No note at index {} for session {}", index, short_id(&session_id));
+            }
+        }
+
+        TagAction::ClearNotes { session } => {
+            let session_id = resolve_session_id(cli, session)?;
+            store.clear_notes(&session_id);
+            store.save()?;
+            println!("Cleared all notes from session {}", short_id(&session_id));
+        }
     }
 
     Ok(())

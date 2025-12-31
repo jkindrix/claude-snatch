@@ -220,7 +220,7 @@ impl WebFetchResult {
     /// Check if fetch succeeded (2xx status).
     #[must_use]
     pub fn succeeded(&self) -> bool {
-        self.code.map_or(false, |c| (200..300).contains(&c))
+        self.code.is_some_and(|c| (200..300).contains(&c))
     }
 }
 

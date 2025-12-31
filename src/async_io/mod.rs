@@ -233,7 +233,7 @@ pub async fn export_conversation_async<W: std::io::Write + Send + 'static>(
 ) -> Result<()> {
     use crate::export::{
         CsvExporter, ExportFormat, Exporter, HtmlExporter, JsonExporter,
-        MarkdownExporter, TextExporter, XmlExporter,
+        MarkdownExporter, OtelExporter, TextExporter, XmlExporter,
     };
 
     // Run the export in a blocking task
@@ -262,6 +262,10 @@ pub async fn export_conversation_async<W: std::io::Write + Send + 'static>(
             }
             ExportFormat::Xml => {
                 let exporter = XmlExporter::new();
+                exporter.export_conversation(&conversation, &mut writer, &options)
+            }
+            ExportFormat::Otel => {
+                let exporter = OtelExporter::new();
                 exporter.export_conversation(&conversation, &mut writer, &options)
             }
             ExportFormat::Sqlite => {
