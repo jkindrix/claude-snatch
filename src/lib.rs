@@ -73,6 +73,7 @@
 //! ```
 
 #![doc(html_root_url = "https://docs.rs/claude-snatch/0.1.0")]
+#![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(rustdoc::missing_crate_level_docs)]
 
