@@ -1113,25 +1113,87 @@ impl AppState {
         }
     }
 
-    /// Scroll up.
+    /// Scroll up in the currently focused panel.
     pub fn scroll_up(&mut self, amount: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+        match self.focus {
+            0 => {
+                // Tree panel: move selection up by amount
+                if let Some(selected) = self.tree_selected {
+                    self.tree_selected = Some(selected.saturating_sub(amount));
+                }
+            }
+            1 => {
+                // Conversation panel
+                self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+            }
+            2 => {
+                // Details panel
+                self.details_scroll = self.details_scroll.saturating_sub(amount);
+            }
+            _ => {}
+        }
     }
 
-    /// Scroll down.
+    /// Scroll down in the currently focused panel.
     pub fn scroll_down(&mut self, amount: usize) {
-        let max_scroll = self.conversation_lines.len().saturating_sub(10);
-        self.scroll_offset = (self.scroll_offset + amount).min(max_scroll);
+        match self.focus {
+            0 => {
+                // Tree panel: move selection down by amount
+                if let Some(selected) = self.tree_selected {
+                    let max_idx = self.tree_items.len().saturating_sub(1);
+                    self.tree_selected = Some((selected + amount).min(max_idx));
+                }
+            }
+            1 => {
+                // Conversation panel
+                let max_scroll = self.conversation_lines.len().saturating_sub(10);
+                self.scroll_offset = (self.scroll_offset + amount).min(max_scroll);
+            }
+            2 => {
+                // Details panel
+                let max_scroll = self.details_lines.len().saturating_sub(10);
+                self.details_scroll = (self.details_scroll + amount).min(max_scroll);
+            }
+            _ => {}
+        }
     }
 
-    /// Scroll to top.
+    /// Scroll to top of the currently focused panel.
     pub fn scroll_to_top(&mut self) {
-        self.scroll_offset = 0;
+        match self.focus {
+            0 => {
+                // Tree panel: select first item
+                if !self.tree_items.is_empty() {
+                    self.tree_selected = Some(0);
+                }
+            }
+            1 => {
+                self.scroll_offset = 0;
+            }
+            2 => {
+                self.details_scroll = 0;
+            }
+            _ => {}
+        }
     }
 
-    /// Scroll to bottom.
+    /// Scroll to bottom of the currently focused panel.
     pub fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = self.conversation_lines.len().saturating_sub(10);
+        match self.focus {
+            0 => {
+                // Tree panel: select last item
+                if !self.tree_items.is_empty() {
+                    self.tree_selected = Some(self.tree_items.len() - 1);
+                }
+            }
+            1 => {
+                self.scroll_offset = self.conversation_lines.len().saturating_sub(10);
+            }
+            2 => {
+                self.details_scroll = self.details_lines.len().saturating_sub(10);
+            }
+            _ => {}
+        }
     }
 
     /// Scroll to a specific line number.
@@ -2051,6 +2113,7 @@ impl AppState {
 
         self.update_conversation_display();
         self.scroll_offset = 0;
+        self.details_scroll = 0;
         self.focus = 1; // Focus conversation panel
 
         Ok(())
