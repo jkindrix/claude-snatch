@@ -15,6 +15,7 @@ pub mod info;
 pub mod list;
 pub mod pick;
 pub mod prompts;
+pub mod quickstart;
 pub mod search;
 pub mod standup;
 pub mod stats;

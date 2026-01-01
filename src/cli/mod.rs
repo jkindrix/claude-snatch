@@ -227,6 +227,10 @@ pub enum Commands {
     #[command(alias = "browse")]
     Pick(PickArgs),
 
+    /// Quick start guide for new users.
+    #[command(alias = "guide", alias = "examples")]
+    Quickstart(QuickstartArgs),
+
     /// Start MCP (Model Context Protocol) server mode.
     /// Requires the 'mcp' feature to be enabled.
     #[cfg(feature = "mcp")]
@@ -537,6 +541,12 @@ pub struct ExportArgs {
     /// Does not modify output, only displays warnings.
     #[arg(long)]
     pub warn_pii: bool,
+
+    /// Preview what would be redacted without actually removing data.
+    /// Shows sensitive data wrapped in [WOULD-REDACT:Type]...[/WOULD-REDACT] markers.
+    /// Use with --redact to see exactly what will be hidden before committing.
+    #[arg(long)]
+    pub redact_preview: bool,
 
     /// Upload export to GitHub Gist instead of writing to file.
     /// Requires the `gh` CLI to be installed and authenticated.
@@ -1393,6 +1403,40 @@ pub enum PickAction {
     Open,
 }
 
+/// Arguments for the quickstart command.
+#[derive(Debug, Parser)]
+pub struct QuickstartArgs {
+    /// Which topic to learn about.
+    #[arg(default_value = "overview")]
+    pub topic: QuickstartTopic,
+
+    /// Show more detailed examples.
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
+}
+
+/// Topics available in the quickstart guide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum QuickstartTopic {
+    /// Overview and 5-minute getting started guide.
+    #[default]
+    Overview,
+    /// Exploring sessions and projects.
+    Explore,
+    /// Exporting conversations in various formats.
+    Export,
+    /// Searching across sessions.
+    Search,
+    /// Understanding usage statistics.
+    Stats,
+    /// Interactive TUI browser.
+    Tui,
+    /// Common workflow recipes.
+    Workflows,
+    /// All topics in sequence.
+    All,
+}
+
 /// Arguments for the MCP server command.
 #[cfg(feature = "mcp")]
 #[derive(Debug, Parser)]
@@ -1539,6 +1583,7 @@ pub fn run() -> Result<()> {
         Commands::Prompts(args) => commands::prompts::run(&cli, args),
         Commands::Standup(args) => commands::standup::run(&cli, args),
         Commands::Pick(args) => commands::pick::run(&cli, args),
+        Commands::Quickstart(args) => commands::quickstart::run(&cli, args),
         #[cfg(feature = "mcp")]
         Commands::ServeMcp(_) => {
             // Run the MCP server

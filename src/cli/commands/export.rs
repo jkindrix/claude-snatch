@@ -181,6 +181,7 @@ fn export_session_to_gist(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
     let options = if args.lossless {
         let mut opts = ExportOptions::full();
         opts.redaction = redaction;
+        opts.redaction_preview = args.redact_preview;
         opts.only = only_filter;
         opts
     } else {
@@ -199,6 +200,7 @@ fn export_session_to_gist(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
             include_branches: !args.main_thread,
             main_thread_only: args.main_thread,
             redaction,
+            redaction_preview: args.redact_preview,
             minimization: None,
             only: only_filter,
         }
@@ -303,6 +305,7 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
     let options = if args.lossless {
         let mut opts = ExportOptions::full();
         opts.redaction = redaction;
+        opts.redaction_preview = args.redact_preview;
         opts.only = only_filter;
         opts
     } else {
@@ -321,6 +324,7 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
             include_branches: !args.main_thread,
             main_thread_only: args.main_thread,
             redaction,
+            redaction_preview: args.redact_preview,
             minimization: None,
             only: only_filter,
         }
@@ -869,6 +873,7 @@ fn export_session(
     let options = if args.lossless {
         let mut opts = ExportOptions::full();
         opts.redaction = redaction;
+        opts.redaction_preview = args.redact_preview;
         opts.only = only_filter;
         opts
     } else {
@@ -887,6 +892,7 @@ fn export_session(
             include_branches: !args.main_thread,
             main_thread_only: args.main_thread,
             redaction,
+            redaction_preview: args.redact_preview,
             minimization: None,
             only: only_filter,
         }

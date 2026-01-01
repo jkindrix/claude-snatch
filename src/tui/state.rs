@@ -857,6 +857,8 @@ pub struct AppState {
     pub details_scroll: usize,
     /// Show help overlay.
     pub show_help: bool,
+    /// Scroll offset for help overlay.
+    pub help_scroll: usize,
     /// Show thinking blocks.
     pub show_thinking: bool,
     /// Show tool outputs.
@@ -928,6 +930,7 @@ impl AppState {
             scroll_offset: 0,
             details_scroll: 0,
             show_help: false,
+            help_scroll: 0,
             show_thinking: true,
             show_tools: true,
             word_wrap: true,
@@ -1569,6 +1572,23 @@ impl AppState {
     /// Toggle help.
     pub fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
+        if self.show_help {
+            self.help_scroll = 0; // Reset scroll when opening
+        }
+    }
+
+    /// Scroll help overlay up.
+    pub fn help_scroll_up(&mut self) {
+        if self.help_scroll > 0 {
+            self.help_scroll = self.help_scroll.saturating_sub(1);
+        }
+    }
+
+    /// Scroll help overlay down.
+    pub fn help_scroll_down(&mut self, max_lines: usize, visible_lines: usize) {
+        if self.help_scroll + visible_lines < max_lines {
+            self.help_scroll += 1;
+        }
     }
 
     /// Toggle word wrap.

@@ -134,6 +134,10 @@ pub struct ExportOptions {
     pub main_thread_only: bool,
     /// Configuration for sensitive data redaction.
     pub redaction: Option<crate::util::RedactionConfig>,
+    /// Preview mode for redaction - highlights what would be redacted without actually redacting.
+    /// When true, sensitive data is wrapped in markers like [WOULD-REDACT:type]...[/WOULD-REDACT]
+    /// instead of being replaced with [REDACTED].
+    pub redaction_preview: bool,
     /// Data minimization settings for privacy-conscious exports.
     pub minimization: Option<DataMinimizationConfig>,
     /// Exclusive content filter - when non-empty, only these content types are included.
@@ -618,6 +622,7 @@ impl Default for ExportOptions {
             include_branches: false,
             main_thread_only: true,
             redaction: None,
+            redaction_preview: false,
             minimization: None,
             only: HashSet::new(),
         }
@@ -643,6 +648,7 @@ impl ExportOptions {
             include_branches: true,
             main_thread_only: false,
             redaction: None,
+            redaction_preview: false,
             minimization: None,
             only: HashSet::new(),
         }
@@ -666,6 +672,7 @@ impl ExportOptions {
             include_branches: false,
             main_thread_only: true,
             redaction: None,
+            redaction_preview: false,
             minimization: None,
             only: HashSet::new(),
         }
@@ -692,6 +699,7 @@ impl ExportOptions {
             include_branches: false,
             main_thread_only: true,
             redaction: Some(crate::util::RedactionConfig::security()),
+            redaction_preview: false,
             minimization: Some(DataMinimizationConfig::for_sharing()),
             only: HashSet::new(),
         }
@@ -761,14 +769,32 @@ impl ExportOptions {
         self
     }
 
+    /// Builder: enable redaction preview mode.
+    ///
+    /// In preview mode, sensitive data is highlighted with markers like
+    /// `[WOULD-REDACT:ApiKey]...[/WOULD-REDACT]` instead of being replaced.
+    /// This allows reviewing what would be redacted without losing the data.
+    #[must_use]
+    pub fn with_redaction_preview(mut self, preview: bool) -> Self {
+        self.redaction_preview = preview;
+        self
+    }
+
     /// Apply redaction to text if configured.
     ///
-    /// Returns the original text if no redaction is configured, otherwise
-    /// returns the redacted text.
+    /// Returns the original text if no redaction is configured.
+    /// In normal mode, returns the redacted text.
+    /// In preview mode, returns text with sensitive data highlighted.
     #[must_use]
     pub fn redact<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
         match &self.redaction {
-            Some(config) if config.is_enabled() => crate::util::redact_sensitive(text, config),
+            Some(config) if config.is_enabled() => {
+                if self.redaction_preview {
+                    crate::util::preview_redactions(text, config)
+                } else {
+                    crate::util::redact_sensitive(text, config)
+                }
+            }
             _ => std::borrow::Cow::Borrowed(text),
         }
     }

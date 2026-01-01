@@ -643,6 +643,160 @@ pub fn detect_sensitive(text: &str, config: &RedactionConfig) -> Vec<SensitiveDa
     detected
 }
 
+/// Preview redactions without actually removing data.
+///
+/// This function wraps detected sensitive data with preview markers instead of
+/// replacing it, allowing users to see what would be redacted.
+///
+/// # Arguments
+///
+/// * `text` - The text to analyze
+/// * `config` - Configuration specifying what types of data to detect
+///
+/// # Returns
+///
+/// The text with sensitive data wrapped in preview markers like:
+/// `[WOULD-REDACT:ApiKey]secret-value[/WOULD-REDACT]`
+///
+/// # Example
+///
+/// ```rust
+/// use claude_snatch::util::{preview_redactions, RedactionConfig};
+///
+/// let config = RedactionConfig::all();
+/// let text = "The api_key=sk-abc123xyz789abcd must be kept secret";
+/// let preview = preview_redactions(text, &config);
+/// assert!(preview.contains("[WOULD-REDACT:"));
+/// assert!(preview.contains("sk-abc123xyz789abcd")); // Value is still visible
+/// ```
+pub fn preview_redactions<'a>(text: &'a str, config: &RedactionConfig) -> Cow<'a, str> {
+    if !config.is_enabled() {
+        return Cow::Borrowed(text);
+    }
+
+    let mut result = text.to_string();
+    let mut had_match = false;
+
+    // Track positions to avoid double-wrapping overlapping matches
+    // We process patterns in order and wrap matches
+
+    // AWS keys (specific patterns)
+    if config.aws_keys {
+        if PATTERNS.aws_access_key.is_match(&result) {
+            result = PATTERNS.aws_access_key.replace_all(&result, |caps: &regex::Captures| {
+                format!("[WOULD-REDACT:AwsKey]{}[/WOULD-REDACT]", &caps[0])
+            }).to_string();
+            had_match = true;
+        }
+        if PATTERNS.aws_secret_key.is_match(&result) {
+            result = PATTERNS.aws_secret_key.replace_all(&result, |caps: &regex::Captures| {
+                format!("{}=[WOULD-REDACT:AwsSecret]{}[/WOULD-REDACT]", &caps[1], &caps[2])
+            }).to_string();
+            had_match = true;
+        }
+    }
+
+    // GitHub tokens
+    if config.api_keys && PATTERNS.github_token.is_match(&result) {
+        result = PATTERNS.github_token.replace_all(&result, |caps: &regex::Captures| {
+            format!("[WOULD-REDACT:GitHubToken]{}[/WOULD-REDACT]", &caps[0])
+        }).to_string();
+        had_match = true;
+    }
+
+    // URL credentials
+    if config.url_credentials && PATTERNS.url_credentials.is_match(&result) {
+        result = PATTERNS.url_credentials.replace_all(&result, |caps: &regex::Captures| {
+            format!("[WOULD-REDACT:UrlCredential]{}[/WOULD-REDACT]", &caps[0])
+        }).to_string();
+        had_match = true;
+    }
+
+    // Password patterns
+    if config.passwords && PATTERNS.password_env.is_match(&result) {
+        result = PATTERNS.password_env.replace_all(&result, |caps: &regex::Captures| {
+            format!("{}=[WOULD-REDACT:Password]{}[/WOULD-REDACT]", &caps[1], &caps[2])
+        }).to_string();
+        had_match = true;
+    }
+
+    // API keys and tokens
+    if config.api_keys {
+        if PATTERNS.bearer_token.is_match(&result) {
+            result = PATTERNS.bearer_token.replace_all(&result, |caps: &regex::Captures| {
+                format!("[WOULD-REDACT:BearerToken]{}[/WOULD-REDACT]", &caps[0])
+            }).to_string();
+            had_match = true;
+        }
+        if PATTERNS.api_key.is_match(&result) {
+            result = PATTERNS.api_key.replace_all(&result, |caps: &regex::Captures| {
+                format!("{}=[WOULD-REDACT:ApiKey]{}[/WOULD-REDACT]", &caps[1], &caps[2])
+            }).to_string();
+            had_match = true;
+        }
+        if PATTERNS.generic_secret.is_match(&result) {
+            result = PATTERNS.generic_secret.replace_all(&result, |caps: &regex::Captures| {
+                format!("{}=[WOULD-REDACT:Secret]{}[/WOULD-REDACT]", &caps[1], &caps[2])
+            }).to_string();
+            had_match = true;
+        }
+    }
+
+    // SSN
+    if config.ssn && PATTERNS.ssn.is_match(&result) {
+        result = PATTERNS.ssn.replace_all(&result, |caps: &regex::Captures| {
+            format!("[WOULD-REDACT:SSN]{}[/WOULD-REDACT]", &caps[0])
+        }).to_string();
+        had_match = true;
+    }
+
+    // Credit cards
+    if config.credit_cards && PATTERNS.credit_card.is_match(&result) {
+        result = PATTERNS.credit_card.replace_all(&result, |caps: &regex::Captures| {
+            format!("[WOULD-REDACT:CreditCard]{}[/WOULD-REDACT]", &caps[0])
+        }).to_string();
+        had_match = true;
+    }
+
+    // Email addresses
+    if config.emails && PATTERNS.email.is_match(&result) {
+        result = PATTERNS.email.replace_all(&result, |caps: &regex::Captures| {
+            format!("[WOULD-REDACT:Email]{}[/WOULD-REDACT]", &caps[0])
+        }).to_string();
+        had_match = true;
+    }
+
+    // IP addresses
+    if config.ip_addresses {
+        if PATTERNS.ipv4.is_match(&result) {
+            result = PATTERNS.ipv4.replace_all(&result, |caps: &regex::Captures| {
+                format!("[WOULD-REDACT:IPv4]{}[/WOULD-REDACT]", &caps[0])
+            }).to_string();
+            had_match = true;
+        }
+        if PATTERNS.ipv6.is_match(&result) {
+            result = PATTERNS.ipv6.replace_all(&result, |caps: &regex::Captures| {
+                format!("[WOULD-REDACT:IPv6]{}[/WOULD-REDACT]", &caps[0])
+            }).to_string();
+            had_match = true;
+        }
+    }
+
+    // Phone numbers
+    if config.phone_numbers && PATTERNS.phone.is_match(&result) {
+        result = PATTERNS.phone.replace_all(&result, |caps: &regex::Captures| {
+            format!("[WOULD-REDACT:Phone]{}[/WOULD-REDACT]", &caps[0])
+        }).to_string();
+        had_match = true;
+    }
+
+    if had_match {
+        Cow::Owned(result)
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
 /// Types of sensitive data that can be detected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SensitiveDataType {
@@ -1118,6 +1272,53 @@ mod tests {
         assert_eq!(SensitiveDataType::ApiKey.description(), "API key or token");
         assert_eq!(SensitiveDataType::Email.description(), "email address");
         assert_eq!(SensitiveDataType::Ssn.description(), "Social Security Number");
+    }
+
+    // Preview redaction tests
+
+    #[test]
+    fn test_preview_redactions_api_key() {
+        let config = RedactionConfig::none().with_api_keys(true);
+        let text = "api_key=sk-1234567890abcdefghij";
+        let preview = super::preview_redactions(text, &config);
+        assert!(preview.contains("[WOULD-REDACT:ApiKey]"));
+        assert!(preview.contains("[/WOULD-REDACT]"));
+        assert!(preview.contains("sk-1234567890abcdefghij")); // Value still visible
+    }
+
+    #[test]
+    fn test_preview_redactions_email() {
+        let config = RedactionConfig::none().with_emails(true);
+        let text = "Contact me at user@example.com for more info";
+        let preview = super::preview_redactions(text, &config);
+        assert!(preview.contains("[WOULD-REDACT:Email]"));
+        assert!(preview.contains("user@example.com")); // Value still visible
+    }
+
+    #[test]
+    fn test_preview_redactions_password() {
+        let config = RedactionConfig::all();
+        let text = "PASSWORD=supersecret123";
+        let preview = super::preview_redactions(text, &config);
+        assert!(preview.contains("[WOULD-REDACT:Password]"));
+        assert!(preview.contains("supersecret123")); // Value still visible
+    }
+
+    #[test]
+    fn test_preview_redactions_no_match() {
+        let config = RedactionConfig::all();
+        let text = "This is just normal text with no sensitive data.";
+        let preview = super::preview_redactions(text, &config);
+        assert_eq!(preview.as_ref(), text); // No changes
+        assert!(!preview.contains("[WOULD-REDACT"));
+    }
+
+    #[test]
+    fn test_preview_redactions_disabled() {
+        let config = RedactionConfig::none();
+        let text = "api_key=sk-1234567890abcdefghij";
+        let preview = super::preview_redactions(text, &config);
+        assert_eq!(preview.as_ref(), text); // No changes when disabled
     }
 
     // Sparkline tests

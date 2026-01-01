@@ -23,6 +23,9 @@ use super::events::{Event, EventHandler, KeyBindings};
 use super::state::AppState;
 use super::theme::available_themes;
 
+/// Total number of lines in the help overlay (used for scroll bounds).
+const HELP_LINE_COUNT: usize = 47;
+
 /// Run the TUI application.
 pub fn run(project: Option<&str>, session: Option<&str>) -> Result<()> {
     run_with_options(project, session, None, false)
@@ -238,6 +241,58 @@ fn run_loop(
                         // Character input
                         (KeyModifiers::NONE, KeyCode::Char(c)) => {
                             app.filter_input(c);
+                            continue;
+                        }
+                        _ => continue,
+                    }
+                }
+
+                // Handle help overlay input
+                if app.show_help {
+                    match (key.modifiers, key.code) {
+                        // Close help
+                        (KeyModifiers::NONE, KeyCode::Esc)
+                        | (KeyModifiers::NONE, KeyCode::Char('?'))
+                        | (KeyModifiers::NONE, KeyCode::Char('q')) => {
+                            app.toggle_help();
+                            continue;
+                        }
+                        // Scroll up
+                        (KeyModifiers::NONE, KeyCode::Up)
+                        | (KeyModifiers::NONE, KeyCode::Char('k')) => {
+                            app.help_scroll_up();
+                            continue;
+                        }
+                        // Scroll down
+                        (KeyModifiers::NONE, KeyCode::Down)
+                        | (KeyModifiers::NONE, KeyCode::Char('j')) => {
+                            // HELP_LINE_COUNT is the total number of lines in help text
+                            // We pass a reasonable visible height estimate
+                            app.help_scroll_down(HELP_LINE_COUNT, 30);
+                            continue;
+                        }
+                        // Page up
+                        (KeyModifiers::NONE, KeyCode::PageUp) => {
+                            for _ in 0..10 {
+                                app.help_scroll_up();
+                            }
+                            continue;
+                        }
+                        // Page down
+                        (KeyModifiers::NONE, KeyCode::PageDown) => {
+                            for _ in 0..10 {
+                                app.help_scroll_down(HELP_LINE_COUNT, 30);
+                            }
+                            continue;
+                        }
+                        // Scroll to top
+                        (KeyModifiers::NONE, KeyCode::Home) => {
+                            app.help_scroll = 0;
+                            continue;
+                        }
+                        // Scroll to bottom
+                        (KeyModifiers::NONE, KeyCode::End) => {
+                            app.help_scroll = HELP_LINE_COUNT.saturating_sub(30);
                             continue;
                         }
                         _ => continue,
@@ -538,7 +593,7 @@ fn draw_ui(f: &mut Frame, app: &AppState) {
 
     // Help overlay if active
     if app.show_help {
-        draw_help_overlay(f);
+        draw_help_overlay(f, app);
     }
 
     // Export dialog overlay if active
@@ -787,9 +842,11 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
         .render(f, area);
 }
 
-/// Draw help overlay.
-fn draw_help_overlay(f: &mut Frame) {
+/// Draw help overlay with scroll support.
+fn draw_help_overlay(f: &mut Frame, app: &AppState) {
     let area = centered_rect(60, 70, f.area());
+    // Calculate visible height (area height minus borders)
+    let visible_height = area.height.saturating_sub(2) as usize;
 
     let help_text = vec![
         Line::from(Span::styled("Keyboard Shortcuts", Style::default().add_modifier(Modifier::BOLD))),
@@ -800,7 +857,7 @@ fn draw_help_overlay(f: &mut Frame) {
         Line::from("  h/←       Focus left panel"),
         Line::from("  l/→       Focus right panel"),
         Line::from("  Enter     Select/expand"),
-        Line::from("  Esc       Go back"),
+        Line::from("  Esc       Go back/close help"),
         Line::from(""),
         Line::from("Panels:"),
         Line::from("  1         Focus tree panel"),
@@ -839,13 +896,28 @@ fn draw_help_overlay(f: &mut Frame) {
         Line::from("  ?         Toggle help"),
     ];
 
+    let total_lines = help_text.len();
+    let scroll = app.help_scroll.min(total_lines.saturating_sub(visible_height));
+
+    // Build title with scroll indicator
+    let title = if total_lines > visible_height {
+        format!(
+            " Help [{}/{}] ",
+            scroll + 1,
+            total_lines.saturating_sub(visible_height) + 1
+        )
+    } else {
+        " Help ".to_string()
+    };
+
     let paragraph = Paragraph::new(help_text)
         .block(
             Block::default()
-                .title(" Help ")
+                .title(title)
                 .borders(Borders::ALL)
                 .style(Style::default().bg(Color::Black)),
-        );
+        )
+        .scroll((scroll as u16, 0));
 
     f.render_widget(ratatui::widgets::Clear, area);
     f.render_widget(paragraph, area);
