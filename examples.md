@@ -321,6 +321,230 @@ snatch config show --json | head -30
 
 ---
 
+## Session 3: Comprehensive Flag Coverage
+
+### Export - Additional Options
+
+```bash
+# Lossless export (preserves all data including unknown fields)
+snatch export 29e7bbff --lossless | head -50
+
+# Combine parent with subagent transcripts (interleaved by time)
+snatch export 29e7bbff --combine-agents | head -100
+
+# Include timestamps and usage stats
+snatch export 29e7bbff --timestamps --usage | head -50
+
+# Main thread only (exclude branches)
+snatch export 29e7bbff --main-thread | head -50
+
+# Multiple content type filters
+snatch export 29e7bbff --only user,thinking | head -50
+
+# Missing formats
+snatch export 29e7bbff -f jsonl | head -20       # Original format
+snatch export 29e7bbff -f json-pretty | head -50 # Pretty JSON
+
+# Progress bar for large exports
+snatch export --all -p snatch --progress -O /tmp/all-snatch.md
+```
+
+### List - Additional Options
+
+```bash
+# Show full UUIDs
+snatch list --full-ids -n 5
+
+# Include subagent sessions
+snatch list --subagents -n 10
+
+# Different sort orders
+snatch list --sort oldest -n 5
+snatch list --sort size -n 5
+snatch list --sort name -n 5
+
+# Date range filter
+snatch list --since 2024-12-01 --until 2024-12-15
+
+# List everything
+snatch list all -n 10
+
+# Pipe through pager
+snatch list -n 0 --pager
+```
+
+### Search - Additional Options
+
+```bash
+# Search in thinking blocks
+snatch search "reasoning" --thinking -n 5
+
+# Search everywhere (user, assistant, thinking, tools)
+snatch search "error" --all -n 5
+
+# More context lines
+snatch search "bug" -C 5 -n 3
+
+# Count matches only
+snatch search "TODO" --count
+
+# Files only (like grep -l)
+snatch search "refactor" --files-only -n 10
+
+# Filter by token count
+snatch search "implementation" --min-tokens 100 -n 5
+
+# Filter by git branch
+snatch search "feature" --branch main -n 5
+
+# Only show errors
+snatch search "failed" --errors -n 5
+
+# Sort by relevance
+snatch search "performance" --sort -n 10
+```
+
+### Stats - Additional Options
+
+```bash
+# Cost breakdown
+snatch stats --costs
+
+# All detailed stats
+snatch stats -a
+
+# Stats for specific session
+snatch stats -s 29e7bbff
+```
+
+### Info - Additional Options
+
+```bash
+# Raw JSONL entries
+snatch info 29e7bbff --raw | head -20
+
+# Specific entry by UUID
+snatch info 29e7bbff --entry <uuid>
+
+# Show file paths
+snatch info 29e7bbff --paths
+```
+
+### Extract - Individual Flags
+
+```bash
+# Specific data types
+snatch extract --claude-md
+snatch extract --mcp
+snatch extract --commands
+snatch extract --rules
+snatch extract --hooks
+snatch extract --file-history
+
+# Project-specific
+snatch extract -p /home/user/project --all
+```
+
+### Config - Full Workflow
+
+```bash
+# Get specific value
+snatch config get cache.enabled
+
+# Set value
+snatch config set display.truncate_at 5000
+
+# Show config file path
+snatch config path
+
+# Initialize with defaults
+snatch config init
+
+# Reset to defaults
+snatch config reset
+```
+
+### Cache - Full Workflow
+
+```bash
+# Clear all cache
+snatch cache clear
+
+# Invalidate stale entries
+snatch cache invalidate
+
+# Enable/disable caching
+snatch cache status enable
+snatch cache status disable
+```
+
+### Index - Full Workflow
+
+```bash
+# Build index
+snatch index build
+
+# Rebuild from scratch
+snatch index rebuild
+
+# Clear index
+snatch index clear
+```
+
+### Prompts - Additional Options
+
+```bash
+# With session separators
+snatch prompts --all --separators | head -50
+
+# With timestamps
+snatch prompts 29e7bbff --timestamps
+
+# Numbered list
+snatch prompts 29e7bbff --numbered
+
+# Output to file
+snatch prompts --all -O prompts.txt
+```
+
+### Completions - All Shells
+
+```bash
+# Generate for different shells
+snatch completions zsh > ~/.zsh/completions/_snatch
+snatch completions fish > ~/.config/fish/completions/snatch.fish
+snatch completions powershell > snatch.ps1
+```
+
+### Tag - Additional Outcomes
+
+```bash
+# Other outcome types
+snatch tag outcome <session> partial
+snatch tag outcome <session> failed
+snatch tag outcome <session> abandoned
+```
+
+### Global Flags - Demonstrations
+
+```bash
+# Logging levels
+snatch list --log-level debug 2>&1 | head -20
+snatch list --log-level trace 2>&1 | head -20
+
+# Log to file
+snatch stats --global --log-file /tmp/snatch.log
+
+# Parallel processing
+snatch export --all -j 4 -O /tmp/export.md
+
+# Custom max file size
+snatch list --max-file-size 0         # Unlimited
+snatch list --max-file-size 52428800  # 50MB
+```
+
+---
+
 ## Commands That Failed (Expected)
 
 ```bash
