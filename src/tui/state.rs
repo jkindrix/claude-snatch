@@ -855,6 +855,22 @@ pub struct AppState {
     pub scroll_offset: usize,
     /// Scroll offset for details panel.
     pub details_scroll: usize,
+    /// Scroll offset for tree panel.
+    pub tree_scroll: usize,
+    /// Last mouse click time for double-click detection.
+    pub last_click_time: Option<std::time::Instant>,
+    /// Last mouse click position (column, row) for double-click detection.
+    pub last_click_pos: (u16, u16),
+    /// Whether user is currently dragging to select text.
+    pub is_selecting: bool,
+    /// Panel where selection started (0=tree, 1=conversation, 2=details).
+    pub selection_panel: Option<usize>,
+    /// Selection start position (column, row) in screen coordinates.
+    pub selection_start: Option<(u16, u16)>,
+    /// Selection end position (column, row) in screen coordinates.
+    pub selection_end: Option<(u16, u16)>,
+    /// The panel area bounds for constraining selection (x, y, width, height).
+    pub selection_panel_bounds: Option<(u16, u16, u16, u16)>,
     /// Show help overlay.
     pub show_help: bool,
     /// Scroll offset for help overlay.
@@ -935,6 +951,14 @@ impl AppState {
             details_lines: Vec::new(),
             scroll_offset: 0,
             details_scroll: 0,
+            tree_scroll: 0,
+            last_click_time: None,
+            last_click_pos: (0, 0),
+            is_selecting: false,
+            selection_panel: None,
+            selection_start: None,
+            selection_end: None,
+            selection_panel_bounds: None,
             show_help: false,
             help_scroll: 0,
             show_thinking: true,
@@ -982,16 +1006,29 @@ impl AppState {
     pub fn previous(&mut self) {
         if let Some(selected) = self.tree_selected {
             if selected > 0 {
-                self.tree_selected = Some(selected - 1);
+                let new_selected = selected - 1;
+                self.tree_selected = Some(new_selected);
+                // Keep selection visible
+                if new_selected < self.tree_scroll {
+                    self.tree_scroll = new_selected;
+                }
             }
         }
     }
 
     /// Move selection down.
-    pub fn next(&mut self) {
+    ///
+    /// The `visible_height` parameter is the inner height of the tree panel
+    /// (total height minus borders), used to determine when to scroll.
+    pub fn next(&mut self, visible_height: usize) {
         if let Some(selected) = self.tree_selected {
             if selected + 1 < self.tree_items.len() {
-                self.tree_selected = Some(selected + 1);
+                let new_selected = selected + 1;
+                self.tree_selected = Some(new_selected);
+                // Keep selection visible - scroll down if needed
+                if new_selected >= self.tree_scroll + visible_height {
+                    self.tree_scroll = new_selected.saturating_sub(visible_height) + 1;
+                }
             }
         }
     }
@@ -1048,7 +1085,7 @@ impl AppState {
     }
 
     /// Clear all selected sessions.
-    pub fn clear_selection(&mut self) {
+    pub fn clear_session_selection(&mut self) {
         self.selected_sessions.clear();
     }
 
@@ -1124,11 +1161,19 @@ impl AppState {
 
     /// Scroll up in the currently focused panel.
     pub fn scroll_up(&mut self, amount: usize) {
+        // Clear selection on scroll (screen coordinates become invalid)
+        self.clear_selection();
+
         match self.focus {
             0 => {
-                // Tree panel: move selection up by amount
+                // Tree panel: move selection up by amount and adjust scroll
                 if let Some(selected) = self.tree_selected {
-                    self.tree_selected = Some(selected.saturating_sub(amount));
+                    let new_selected = selected.saturating_sub(amount);
+                    self.tree_selected = Some(new_selected);
+                    // Keep selection visible by adjusting scroll
+                    if new_selected < self.tree_scroll {
+                        self.tree_scroll = new_selected;
+                    }
                 }
             }
             1 => {
@@ -1144,13 +1189,30 @@ impl AppState {
     }
 
     /// Scroll down in the currently focused panel.
+    ///
+    /// Uses a default visible height of 20 for the tree panel.
     pub fn scroll_down(&mut self, amount: usize) {
+        self.scroll_down_with_height(amount, 20);
+    }
+
+    /// Scroll down in the currently focused panel with explicit visible height.
+    ///
+    /// For tree panel, `visible_height` determines when to scroll the view.
+    pub fn scroll_down_with_height(&mut self, amount: usize, visible_height: usize) {
+        // Clear selection on scroll (screen coordinates become invalid)
+        self.clear_selection();
+
         match self.focus {
             0 => {
-                // Tree panel: move selection down by amount
+                // Tree panel: move selection down by amount and adjust scroll
                 if let Some(selected) = self.tree_selected {
                     let max_idx = self.tree_items.len().saturating_sub(1);
-                    self.tree_selected = Some((selected + amount).min(max_idx));
+                    let new_selected = (selected + amount).min(max_idx);
+                    self.tree_selected = Some(new_selected);
+                    // Keep selection visible by adjusting scroll
+                    if new_selected >= self.tree_scroll + visible_height {
+                        self.tree_scroll = new_selected.saturating_sub(visible_height) + 1;
+                    }
                 }
             }
             1 => {
@@ -1169,11 +1231,15 @@ impl AppState {
 
     /// Scroll to top of the currently focused panel.
     pub fn scroll_to_top(&mut self) {
+        // Clear selection on scroll (screen coordinates become invalid)
+        self.clear_selection();
+
         match self.focus {
             0 => {
-                // Tree panel: select first item
+                // Tree panel: select first item and scroll to top
                 if !self.tree_items.is_empty() {
                     self.tree_selected = Some(0);
+                    self.tree_scroll = 0;
                 }
             }
             1 => {
@@ -1188,11 +1254,19 @@ impl AppState {
 
     /// Scroll to bottom of the currently focused panel.
     pub fn scroll_to_bottom(&mut self) {
+        // Clear selection on scroll (screen coordinates become invalid)
+        self.clear_selection();
+
         match self.focus {
             0 => {
-                // Tree panel: select last item
+                // Tree panel: select last item and scroll to show it
                 if !self.tree_items.is_empty() {
-                    self.tree_selected = Some(self.tree_items.len() - 1);
+                    let last_idx = self.tree_items.len() - 1;
+                    self.tree_selected = Some(last_idx);
+                    // Scroll so last item is visible (use default height of 20)
+                    if last_idx >= 20 {
+                        self.tree_scroll = last_idx.saturating_sub(19);
+                    }
                 }
             }
             1 => {
@@ -2419,6 +2493,283 @@ impl AppState {
         )));
 
         Some(lines)
+    }
+
+    // ===== Text Selection Methods =====
+
+    /// Start a text selection at the given screen position.
+    ///
+    /// `panel` is 0=tree, 1=conversation, 2=details.
+    /// `bounds` is (x, y, width, height) of the panel area.
+    pub fn start_selection(&mut self, col: u16, row: u16, panel: usize, bounds: (u16, u16, u16, u16)) {
+        self.is_selecting = true;
+        self.selection_panel = Some(panel);
+        self.selection_start = Some((col, row));
+        self.selection_end = Some((col, row));
+        self.selection_panel_bounds = Some(bounds);
+    }
+
+    /// Update the selection end position during drag.
+    ///
+    /// Clamps to panel bounds.
+    pub fn update_selection(&mut self, col: u16, row: u16) {
+        if !self.is_selecting {
+            return;
+        }
+
+        // Clamp to panel bounds
+        if let Some((x, y, w, h)) = self.selection_panel_bounds {
+            let clamped_col = col.clamp(x, x + w.saturating_sub(1));
+            let clamped_row = row.clamp(y, y + h.saturating_sub(1));
+            self.selection_end = Some((clamped_col, clamped_row));
+        } else {
+            self.selection_end = Some((col, row));
+        }
+    }
+
+    /// End the current selection.
+    pub fn end_selection(&mut self) {
+        self.is_selecting = false;
+    }
+
+    /// Clear the current selection.
+    pub fn clear_selection(&mut self) {
+        self.is_selecting = false;
+        self.selection_panel = None;
+        self.selection_start = None;
+        self.selection_end = None;
+        self.selection_panel_bounds = None;
+    }
+
+    /// Check if there's an active selection.
+    #[must_use]
+    pub fn has_selection(&self) -> bool {
+        self.selection_start.is_some() && self.selection_end.is_some()
+    }
+
+    /// Get normalized selection (start before end).
+    #[must_use]
+    pub fn get_selection_range(&self) -> Option<((u16, u16), (u16, u16))> {
+        let start = self.selection_start?;
+        let end = self.selection_end?;
+
+        // Normalize so start is before end (top-to-bottom, left-to-right)
+        if start.1 < end.1 || (start.1 == end.1 && start.0 <= end.0) {
+            Some((start, end))
+        } else {
+            Some((end, start))
+        }
+    }
+
+    /// Get the selected text from the tree panel.
+    fn get_tree_selection_text(&self, bounds: (u16, u16, u16, u16)) -> String {
+        let Some(((start_col, start_row), (end_col, end_row))) = self.get_selection_range() else {
+            return String::new();
+        };
+
+        let (panel_x, panel_y, _panel_w, _panel_h) = bounds;
+        let mut result = String::new();
+
+        // Convert screen rows to item indices (accounting for border/title)
+        let content_start_row = panel_y + 1; // Skip title bar
+
+        for row in start_row..=end_row {
+            if row < content_start_row {
+                continue;
+            }
+
+            let item_idx = (row - content_start_row) as usize + self.tree_scroll;
+            if item_idx >= self.tree_items.len() {
+                continue;
+            }
+
+            let item_text = &self.tree_items[item_idx];
+            // Tree items have 2-char prefix ("● " or "  ")
+            let display_text = format!("  {}", item_text);
+
+            // Calculate which part of the text to include
+            let text_start_col = panel_x + 1; // Skip border
+            let rel_start = if row == start_row {
+                (start_col.saturating_sub(text_start_col)) as usize
+            } else {
+                0
+            };
+            let rel_end = if row == end_row {
+                (end_col.saturating_sub(text_start_col) + 1) as usize
+            } else {
+                display_text.len()
+            };
+
+            let chars: Vec<char> = display_text.chars().collect();
+            let selected: String = chars
+                .iter()
+                .skip(rel_start)
+                .take(rel_end.saturating_sub(rel_start))
+                .collect();
+
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(selected.trim_start());
+        }
+
+        result
+    }
+
+    /// Get the selected text from the conversation panel.
+    fn get_conversation_selection_text(&self, bounds: (u16, u16, u16, u16)) -> String {
+        let Some(((start_col, start_row), (end_col, end_row))) = self.get_selection_range() else {
+            return String::new();
+        };
+
+        let (panel_x, panel_y, _panel_w, _panel_h) = bounds;
+        let mut result = String::new();
+
+        let content_start_row = panel_y + 1; // Skip title bar
+
+        for row in start_row..=end_row {
+            if row < content_start_row {
+                continue;
+            }
+
+            let line_idx = (row - content_start_row) as usize + self.scroll_offset;
+            if line_idx >= self.conversation_lines.len() {
+                continue;
+            }
+
+            let line = &self.conversation_lines[line_idx];
+            let line_text: String = line.spans.iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+
+            let text_start_col = panel_x + 1; // Skip border
+            let rel_start = if row == start_row {
+                (start_col.saturating_sub(text_start_col)) as usize
+            } else {
+                0
+            };
+            let rel_end = if row == end_row {
+                (end_col.saturating_sub(text_start_col) + 1) as usize
+            } else {
+                line_text.len()
+            };
+
+            let chars: Vec<char> = line_text.chars().collect();
+            let selected: String = chars
+                .iter()
+                .skip(rel_start)
+                .take(rel_end.saturating_sub(rel_start))
+                .collect();
+
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(&selected);
+        }
+
+        result
+    }
+
+    /// Get the selected text from the details panel.
+    fn get_details_selection_text(&self, bounds: (u16, u16, u16, u16)) -> String {
+        let Some(((start_col, start_row), (end_col, end_row))) = self.get_selection_range() else {
+            return String::new();
+        };
+
+        let (panel_x, panel_y, _panel_w, _panel_h) = bounds;
+        let mut result = String::new();
+
+        let content_start_row = panel_y + 1; // Skip title bar
+
+        for row in start_row..=end_row {
+            if row < content_start_row {
+                continue;
+            }
+
+            let line_idx = (row - content_start_row) as usize + self.details_scroll;
+            if line_idx >= self.details_lines.len() {
+                continue;
+            }
+
+            let line = &self.details_lines[line_idx];
+            let line_text: String = line.spans.iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+
+            let text_start_col = panel_x + 1; // Skip border
+            let rel_start = if row == start_row {
+                (start_col.saturating_sub(text_start_col)) as usize
+            } else {
+                0
+            };
+            let rel_end = if row == end_row {
+                (end_col.saturating_sub(text_start_col) + 1) as usize
+            } else {
+                line_text.len()
+            };
+
+            let chars: Vec<char> = line_text.chars().collect();
+            let selected: String = chars
+                .iter()
+                .skip(rel_start)
+                .take(rel_end.saturating_sub(rel_start))
+                .collect();
+
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(&selected);
+        }
+
+        result
+    }
+
+    /// Get the selected text based on which panel has the selection.
+    #[must_use]
+    pub fn get_selected_text(&self) -> String {
+        let Some(panel) = self.selection_panel else {
+            return String::new();
+        };
+        let Some(bounds) = self.selection_panel_bounds else {
+            return String::new();
+        };
+
+        match panel {
+            0 => self.get_tree_selection_text(bounds),
+            1 => self.get_conversation_selection_text(bounds),
+            2 => self.get_details_selection_text(bounds),
+            _ => String::new(),
+        }
+    }
+
+    /// Copy the current selection to clipboard.
+    pub fn copy_selection(&mut self) -> Result<()> {
+        if !self.has_selection() {
+            return Ok(());
+        }
+
+        let text = self.get_selected_text();
+        if text.is_empty() {
+            self.status_message = Some("Selection is empty".to_string());
+            return Ok(());
+        }
+
+        match arboard::Clipboard::new() {
+            Ok(mut clipboard) => {
+                if let Err(e) = clipboard.set_text(&text) {
+                    self.status_message = Some(format!("Clipboard error: {e}"));
+                } else {
+                    let chars = text.chars().count();
+                    let lines = text.lines().count();
+                    self.status_message = Some(format!("Copied {} chars ({} lines)", chars, lines));
+                    self.clear_selection();
+                }
+            }
+            Err(e) => {
+                self.status_message = Some(format!("Clipboard not available: {e}"));
+            }
+        }
+        Ok(())
     }
 }
 

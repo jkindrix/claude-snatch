@@ -16,6 +16,13 @@ use ratatui::{
     Frame, Terminal,
 };
 
+/// Style for selected text (inverted colors).
+fn selection_style() -> Style {
+    Style::default()
+        .bg(Color::White)
+        .fg(Color::Black)
+}
+
 use crate::error::{Result, SnatchError};
 
 use super::components::{ScrollableText, StatusBar};
@@ -24,7 +31,7 @@ use super::state::AppState;
 use super::theme::available_themes;
 
 /// Total number of lines in the help overlay (used for scroll bounds).
-const HELP_LINE_COUNT: usize = 48;
+const HELP_LINE_COUNT: usize = 53;
 
 /// Run the TUI application.
 pub fn run(project: Option<&str>, session: Option<&str>) -> Result<()> {
@@ -310,7 +317,12 @@ fn run_loop(
                 }
 
                 if bindings.is_down(&key) {
-                    app.next();
+                    // Calculate visible height for tree panel scrolling
+                    // Tree panel height = terminal height - status bar (3 lines) - borders (2)
+                    let tree_height = terminal.size()
+                        .map(|s| s.height.saturating_sub(5) as usize)
+                        .unwrap_or(20);
+                    app.next(tree_height);
                     continue;
                 }
 
@@ -497,6 +509,13 @@ fn run_loop(
                         }
                     }
 
+                    // Yank (copy) text selection to clipboard (y - vim convention)
+                    (KeyModifiers::NONE, KeyCode::Char('y')) => {
+                        if app.has_selection() {
+                            let _ = app.copy_selection();
+                        }
+                    }
+
                     // Select all sessions (Ctrl+A)
                     (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
                         if app.focus == 0 && app.current_project.is_some() {
@@ -506,11 +525,14 @@ fn run_loop(
                         }
                     }
 
-                    // Clear selection (Escape when not in modal)
+                    // Clear text selection (Escape when not in modal)
                     (KeyModifiers::NONE, KeyCode::Esc) => {
-                        if app.selected_session_count() > 0 {
+                        if app.has_selection() {
                             app.clear_selection();
                             app.status_message = Some("Selection cleared".to_string());
+                        } else if app.selected_session_count() > 0 {
+                            app.clear_session_selection();
+                            app.status_message = Some("Session selection cleared".to_string());
                         }
                     }
 
@@ -533,17 +555,70 @@ fn run_loop(
                         app.scroll_down(3);
                     }
                     MouseEventKind::Down(MouseButton::Left) => {
-                        // Determine which panel was clicked based on x position
-                        let terminal_width = terminal.size().map(|s| s.width).unwrap_or(120);
-                        let panel_width = terminal_width / 4;
+                        // Check for double-click (within 500ms at same position)
+                        let now = std::time::Instant::now();
+                        let is_double_click = app.last_click_time
+                            .map(|t| now.duration_since(t).as_millis() < 500)
+                            .unwrap_or(false)
+                            && app.last_click_pos == (mouse.column, mouse.row);
 
-                        if mouse.column < panel_width {
-                            app.set_focus(0); // Projects panel
-                        } else if mouse.column < panel_width * 2 {
-                            app.set_focus(1); // Sessions panel
+                        // Update last click tracking
+                        app.last_click_time = Some(now);
+                        app.last_click_pos = (mouse.column, mouse.row);
+
+                        // Determine which panel was clicked based on x position
+                        // Layout is 25% / 50% / 25% (tree / conversation / details)
+                        let size = terminal.size().unwrap_or_default();
+                        let terminal_width = size.width;
+                        let terminal_height = size.height;
+                        let tree_width = terminal_width / 4;  // 25%
+                        let conversation_width = terminal_width / 2;  // 50%
+                        let conversation_end = tree_width + conversation_width;  // 75%
+
+                        // Status bar takes 3 lines at bottom
+                        let main_height = terminal_height.saturating_sub(3);
+
+                        // Clear any existing selection on new click
+                        app.clear_selection();
+
+                        if mouse.column < tree_width {
+                            app.set_focus(0); // Tree panel (left 25%)
+                            // Start text selection
+                            let bounds = (0, 0, tree_width, main_height);
+                            app.start_selection(mouse.column, mouse.row, 0, bounds);
+
+                            // Also select the clicked item if within bounds
+                            if mouse.row >= 1 && mouse.row < main_height {
+                                let clicked_item = (mouse.row as usize - 1) + app.tree_scroll;
+                                if clicked_item < app.tree_items.len() {
+                                    app.tree_selected = Some(clicked_item);
+                                    // Double-click acts like Enter (select/expand)
+                                    if is_double_click {
+                                        app.clear_selection(); // Don't start selection on double-click
+                                        let _ = app.select();
+                                    }
+                                }
+                            }
+                        } else if mouse.column < conversation_end {
+                            app.set_focus(1); // Conversation panel (middle 50%)
+                            // Start text selection
+                            let bounds = (tree_width, 0, conversation_width, main_height);
+                            app.start_selection(mouse.column, mouse.row, 1, bounds);
                         } else {
-                            app.set_focus(2); // Conversation panel
+                            app.set_focus(2); // Details panel (right 25%)
+                            // Start text selection
+                            let details_width = terminal_width.saturating_sub(conversation_end);
+                            let bounds = (conversation_end, 0, details_width, main_height);
+                            app.start_selection(mouse.column, mouse.row, 2, bounds);
                         }
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        // Update selection during drag
+                        app.update_selection(mouse.column, mouse.row);
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        // End selection (but keep it for copying)
+                        app.end_selection();
                     }
                     _ => {}
                 }
@@ -572,6 +647,7 @@ fn draw_ui(f: &mut Frame, app: &AppState) {
     // Focus mode: show only the conversation panel at full width
     if app.focus_mode {
         draw_conversation_panel(f, app, main_chunks[0]);
+        render_selection_overlay(f, app, main_chunks[0], 1);
     } else {
         // Normal mode: three columns
         let chunks = Layout::default()
@@ -585,12 +661,15 @@ fn draw_ui(f: &mut Frame, app: &AppState) {
 
         // Left panel: Project/Session tree
         draw_tree_panel(f, app, chunks[0]);
+        render_selection_overlay(f, app, chunks[0], 0);
 
         // Center panel: Conversation
         draw_conversation_panel(f, app, chunks[1]);
+        render_selection_overlay(f, app, chunks[1], 1);
 
         // Right panel: Details
         draw_details_panel(f, app, chunks[2]);
+        render_selection_overlay(f, app, chunks[2], 2);
     }
 
     // Search bar (if active)
@@ -650,10 +729,16 @@ fn draw_tree_panel(f: &mut Frame, app: &AppState, area: Rect) {
         app.theme.border_style()
     };
 
+    // Calculate visible area (subtract 2 for borders)
+    let visible_height = area.height.saturating_sub(2) as usize;
+
+    // Build only visible items using tree_scroll offset
     let items: Vec<ListItem> = app
         .tree_items
         .iter()
         .enumerate()
+        .skip(app.tree_scroll)
+        .take(visible_height)
         .map(|(i, item)| {
             let is_cursor = Some(i) == app.tree_selected;
             let is_selected = app.is_tree_item_selected(i);
@@ -907,6 +992,7 @@ fn draw_help_overlay(f: &mut Frame, app: &AppState) {
         Line::from("  e         Export session"),
         Line::from("  c         Copy message to clipboard"),
         Line::from("  C         Copy code block to clipboard"),
+        Line::from("  y         Yank (copy) text selection"),
         Line::from("  t         Toggle thinking blocks"),
         Line::from("  o         Toggle tool outputs"),
         Line::from("  w         Toggle word wrap"),
@@ -923,6 +1009,11 @@ fn draw_help_overlay(f: &mut Frame, app: &AppState) {
         Line::from("  [         Set date-from filter (YYYY-MM-DD)"),
         Line::from("  ]         Set date-to filter (YYYY-MM-DD)"),
         Line::from("  X         Clear all filters"),
+        Line::from(""),
+        Line::from("Selection:"),
+        Line::from("  Drag      Click and drag to select text"),
+        Line::from("  y         Yank (copy) selection to clipboard"),
+        Line::from("  Esc       Clear selection"),
         Line::from(""),
         Line::from("  q         Quit"),
         Line::from("  ?         Toggle help"),
@@ -1023,6 +1114,59 @@ fn draw_export_dialog(f: &mut Frame, app: &AppState) {
 
     f.render_widget(ratatui::widgets::Clear, area);
     f.render_widget(paragraph, area);
+}
+
+/// Render selection overlay on a panel.
+/// This modifies the buffer to highlight selected text.
+fn render_selection_overlay(f: &mut Frame, app: &AppState, area: Rect, panel: usize) {
+    // Only render if this panel has the selection
+    if app.selection_panel != Some(panel) {
+        return;
+    }
+    if !app.has_selection() {
+        return;
+    }
+
+    let Some(((start_col, start_row), (end_col, end_row))) = app.get_selection_range() else {
+        return;
+    };
+
+    // Get buffer for direct cell modification
+    let buf = f.buffer_mut();
+    let style = selection_style();
+
+    // Iterate through selection range and highlight cells
+    for row in start_row..=end_row {
+        // Skip rows outside the area
+        if row < area.y || row >= area.y + area.height {
+            continue;
+        }
+
+        // Determine column range for this row
+        let col_start = if row == start_row { start_col } else { area.x };
+        let col_end = if row == end_row { end_col } else { area.x + area.width.saturating_sub(1) };
+
+        // Clamp to area bounds
+        let col_start = col_start.max(area.x);
+        let col_end = col_end.min(area.x + area.width.saturating_sub(1));
+
+        for col in col_start..=col_end {
+            // Ensure we're within buffer bounds
+            if col < buf.area.x
+                || col >= buf.area.x + buf.area.width
+                || row < buf.area.y
+                || row >= buf.area.y + buf.area.height
+            {
+                continue;
+            }
+
+            // Get the cell and apply selection style
+            let cell = buf.cell_mut((col, row));
+            if let Some(cell) = cell {
+                cell.set_style(style);
+            }
+        }
+    }
 }
 
 /// Create a centered rectangle.
