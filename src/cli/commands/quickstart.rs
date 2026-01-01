@@ -468,6 +468,7 @@ DISPLAY
   o                 Toggle tool outputs
   w                 Toggle word wrap
   #                 Toggle line numbers
+  z                 Focus mode (hide panels)
   T                 Cycle theme
   ?                 Toggle help panel
 

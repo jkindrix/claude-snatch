@@ -15,6 +15,7 @@ snatch supports multiple export formats for conversation logs. Each format has s
 | XML | `.xml` | Enterprise integration |
 | SQLite | `.db` | Database queries, analysis |
 | JSONL | `.jsonl` | Line-by-line processing, streaming |
+| OpenTelemetry | `.json` | Observability pipelines, distributed tracing |
 
 ## Command Line Usage
 
@@ -219,6 +220,27 @@ Ideal for:
 - Large file handling
 - Log aggregation tools
 
+### OpenTelemetry (OTLP)
+
+Export conversations as OpenTelemetry traces for observability platforms.
+
+```bash
+snatch export <session-id> --format otel --output traces.json
+```
+
+Creates OTLP JSON format compatible with:
+- Jaeger
+- Grafana Tempo
+- Honeycomb
+- Datadog APM
+- Any OTLP-compatible backend
+
+Each message becomes a span with:
+- Timestamps as span start/end times
+- Message content as span attributes
+- Tool calls as child spans
+- Token usage as metrics
+
 ## Export Options
 
 ### Common Options
@@ -231,6 +253,31 @@ Ideal for:
 | `--main-thread` | Export only main thread |
 | `--no-timestamps` | Omit timestamps |
 | `--no-metadata` | Omit session metadata |
+
+### Privacy & Redaction Options
+
+| Option | Description |
+|--------|-------------|
+| `--redact security` | Redact API keys, passwords, tokens, secrets |
+| `--redact all` | Also redact emails, IP addresses, phone numbers |
+| `--redact-preview` | Preview what would be redacted without removing |
+| `--warn-pii` | Warn about potential PII without redacting |
+
+Example workflow for safe sharing:
+
+```bash
+# First, preview what will be redacted
+snatch export <session-id> --redact security --redact-preview
+
+# If satisfied, perform the actual redaction
+snatch export <session-id> --redact security --output safe-export.md
+```
+
+Redaction replaces sensitive data with type-specific placeholders:
+- `[REDACTED:API_KEY]`
+- `[REDACTED:PASSWORD]`
+- `[REDACTED:EMAIL]`
+- `[REDACTED:IP_ADDRESS]`
 
 ### Format-Specific Options
 

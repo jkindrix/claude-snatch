@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session outcome tagging with `snatch tag outcome`
 - Multi-session merged SQLite export with `--all` flag
 - Comprehensive TUI test coverage (events, state, components, theme, highlight)
+- `snatch quickstart` command with interactive help for new users
+- TUI focus mode (`z` key) for distraction-free conversation reading
+- TUI pagination indicator showing line position and entry count
+- TUI line numbers toggle (`#` key)
+- TUI help panel scroll support for long help text
+- `--redact-preview` flag to preview redactions without applying them
 
 ### Changed
 - Standardized `--subagents` flag across all commands (was `--include-agents` in some)

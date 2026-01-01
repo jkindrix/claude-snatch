@@ -8,7 +8,7 @@ High-performance CLI/TUI tool for extracting, analyzing, and exporting Claude Co
 ## Features
 
 - **Maximum Fidelity**: Extract all 77+ documented JSONL data elements
-- **Multiple Export Formats**: Markdown, JSON, HTML, Plain Text
+- **Multiple Export Formats**: Markdown, JSON, HTML, CSV, XML, SQLite, OpenTelemetry, and more
 - **Rust Performance**: Native speed, 10-100x faster than Python/Node alternatives
 - **Lossless Round-Trip**: Preserve unknown fields for forward compatibility
 - **Dual Interface**: CLI (scriptable) and TUI (interactive) modes
@@ -95,9 +95,18 @@ snatch tui
 | `info` | `i`, `show` | Display detailed information |
 | `pick` | `browse` | Interactively pick a session using fuzzy search |
 | `tui` | `ui` | Launch interactive terminal UI |
+| `diff` | | Compare two sessions or files |
+| `tag` | | Manage session tags, names, and bookmarks |
+| `prompts` | | Extract user prompts from sessions |
+| `extract` | | Extract beyond-JSONL data (settings, MCP, etc.) |
+| `index` | | Manage full-text search index |
+| `cache` | | Manage the session cache |
+| `cleanup` | | Clean up old or empty sessions |
+| `config` | | View and modify configuration |
 | `validate` | | Validate session files |
 | `watch` | | Watch for session changes |
 | `completions` | | Generate shell completions |
+| `quickstart` | | Interactive guide for new users |
 
 ## Global Options
 
@@ -145,6 +154,47 @@ Simple unformatted text output.
 snatch export <session-id> -f text -o output.txt
 ```
 
+### CSV
+
+Tabular format for spreadsheet analysis.
+
+```bash
+snatch export <session-id> -f csv -o output.csv
+```
+
+### SQLite
+
+Queryable database with full-text search support.
+
+```bash
+snatch export <session-id> -f sqlite -o output.db
+snatch export --all -f sqlite -o archive.db  # Multi-session archive
+```
+
+### XML
+
+Structured markup for data interchange.
+
+```bash
+snatch export <session-id> -f xml -o output.xml
+```
+
+### JSONL
+
+Original format preservation for backup or re-import.
+
+```bash
+snatch export <session-id> -f jsonl -o output.jsonl
+```
+
+### OpenTelemetry
+
+OTLP JSON format for observability pipelines.
+
+```bash
+snatch export <session-id> -f otel -o traces.json
+```
+
 ## Export Options
 
 | Option | Default | Description |
@@ -164,6 +214,8 @@ snatch export <session-id> -f text -o output.txt
 | `--toc` | false | Include table of contents/navigation sidebar (HTML only) |
 | `--dark` | false | Use dark theme (HTML only) |
 | `--clipboard` | false | Copy export to clipboard instead of writing to file/stdout |
+| `--redact` | - | Redact sensitive data (`security`, `all`) |
+| `--redact-preview` | false | Preview what would be redacted without removing |
 
 ## Stats Options
 

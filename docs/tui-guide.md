@@ -93,6 +93,8 @@ Search is case-insensitive by default and searches through all visible conversat
 | `t` | Toggle thinking blocks |
 | `o` | Toggle tool outputs |
 | `w` | Toggle word wrap |
+| `#` | Toggle line numbers |
+| `z` | Toggle focus mode (hide side panels) |
 | `T` | Cycle theme (dark/light/high-contrast) |
 
 ### Filters
@@ -172,10 +174,24 @@ Select any session to view its conversation. Subagent sessions show their parent
 - **Left click**: Select panel or item
 - **Scroll wheel**: Scroll conversation up/down
 
+## Status Bar
+
+The status bar at the bottom shows useful information:
+
+- **Mode indicator**: Current mode (TREE, CONVERSATION, DETAILS, SEARCH, etc.)
+- **Line position**: `L{current}/{total}` shows your position in the conversation
+- **Entry count**: `({n} entries)` shows how many log entries are in the session
+- **Filter indicator**: Shows active filters when enabled
+- **Session ID**: Short ID of the current session
+
+When focus mode is active, a `[ZEN]` indicator appears in the status bar.
+
 ## Tips
 
 1. **Large sessions**: Use `PageUp`/`PageDown` for faster scrolling
 2. **Finding code**: Use `/` to search for function names or keywords
 3. **Focused reading**: Toggle off thinking blocks (`t`) and tool outputs (`o`) for cleaner view
-4. **Quick export**: Press `e`, select format, press `Enter`
-5. **Date filtering**: Use `[` and `]` to narrow down to specific date ranges
+4. **Distraction-free mode**: Press `z` for focus mode to hide side panels and maximize conversation view
+5. **Quick export**: Press `e`, select format, press `Enter`
+6. **Date filtering**: Use `[` and `]` to narrow down to specific date ranges
+7. **Line numbers**: Toggle `#` to show line numbers for easier reference
