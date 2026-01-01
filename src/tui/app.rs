@@ -24,7 +24,7 @@ use super::state::AppState;
 use super::theme::available_themes;
 
 /// Total number of lines in the help overlay (used for scroll bounds).
-const HELP_LINE_COUNT: usize = 47;
+const HELP_LINE_COUNT: usize = 48;
 
 /// Run the TUI application.
 pub fn run(project: Option<&str>, session: Option<&str>) -> Result<()> {
@@ -429,6 +429,11 @@ fn run_loop(
                         app.toggle_line_numbers();
                     }
 
+                    // Focus mode (zen mode - hide side panels)
+                    (KeyModifiers::NONE, KeyCode::Char('z')) => {
+                        app.toggle_focus_mode();
+                    }
+
                     // Filter controls
                     (KeyModifiers::NONE, KeyCode::Char('f')) => {
                         app.toggle_filter();
@@ -564,24 +569,29 @@ fn draw_ui(f: &mut Frame, app: &AppState) {
         ])
         .split(f.area());
 
-    // Content area: three columns
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(25),
-            Constraint::Percentage(50),
-            Constraint::Percentage(25),
-        ])
-        .split(main_chunks[0]);
+    // Focus mode: show only the conversation panel at full width
+    if app.focus_mode {
+        draw_conversation_panel(f, app, main_chunks[0]);
+    } else {
+        // Normal mode: three columns
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(25),
+                Constraint::Percentage(50),
+                Constraint::Percentage(25),
+            ])
+            .split(main_chunks[0]);
 
-    // Left panel: Project/Session tree
-    draw_tree_panel(f, app, chunks[0]);
+        // Left panel: Project/Session tree
+        draw_tree_panel(f, app, chunks[0]);
 
-    // Center panel: Conversation
-    draw_conversation_panel(f, app, chunks[1]);
+        // Center panel: Conversation
+        draw_conversation_panel(f, app, chunks[1]);
 
-    // Right panel: Details
-    draw_details_panel(f, app, chunks[2]);
+        // Right panel: Details
+        draw_details_panel(f, app, chunks[2]);
+    }
 
     // Search bar (if active)
     if app.is_searching() {
@@ -812,9 +822,30 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
 
     let right_content = if let Some(session_id) = &app.current_session {
         let short_id = &session_id[..8.min(session_id.len())];
-        let mut content = vec![
-            Span::raw(format!("{} msgs ", app.conversation_lines.len())),
-        ];
+        let total_lines = app.conversation_lines.len();
+        let current_line = app.scroll_offset + 1;
+
+        let mut content = vec![];
+
+        // Show focus mode indicator
+        if app.focus_mode {
+            content.push(Span::styled(
+                "[ZEN] ",
+                Style::default().fg(app.theme.success).add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        // Show line position (current/total)
+        content.push(Span::raw(format!(
+            "L{}/{} ",
+            current_line.min(total_lines),
+            total_lines
+        )));
+
+        // Show entry count
+        if app.total_entries > 0 {
+            content.push(Span::raw(format!("({} entries) ", app.total_entries)));
+        }
 
         // Show active filter indicator
         if app.filter_state.is_filtering() {
@@ -880,6 +911,7 @@ fn draw_help_overlay(f: &mut Frame, app: &AppState) {
         Line::from("  o         Toggle tool outputs"),
         Line::from("  w         Toggle word wrap"),
         Line::from("  #         Toggle line numbers"),
+        Line::from("  z         Toggle focus mode (hide panels)"),
         Line::from(format!("  T         Cycle theme ({})", available_themes().join("/"))),
         Line::from(""),
         Line::from("Filters:"),

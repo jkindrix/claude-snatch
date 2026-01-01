@@ -889,6 +889,12 @@ pub struct AppState {
     pub command_palette: CommandPalette,
     /// Use ASCII-only characters (no Unicode box drawing).
     pub ascii_mode: bool,
+    /// Focus mode: hide side panels to maximize conversation view.
+    pub focus_mode: bool,
+    /// Total number of entries in conversation (for pagination display).
+    pub total_entries: usize,
+    /// Current visible entry index (for pagination display).
+    pub current_entry_index: usize,
 }
 
 impl AppState {
@@ -946,6 +952,9 @@ impl AppState {
             selected_sessions: HashSet::new(),
             command_palette: CommandPalette::default(),
             ascii_mode: false,
+            focus_mode: false,
+            total_entries: 0,
+            current_entry_index: 0,
         })
     }
 
@@ -1674,6 +1683,18 @@ impl AppState {
         self.update_conversation_display();
     }
 
+    /// Toggle focus mode (hide side panels to maximize conversation view).
+    pub fn toggle_focus_mode(&mut self) {
+        self.focus_mode = !self.focus_mode;
+        if self.focus_mode {
+            self.status_message = Some("Focus mode: ON (z to exit)".to_string());
+            // When entering focus mode, ensure conversation panel is focused
+            self.focus = 1;
+        } else {
+            self.status_message = Some("Focus mode: OFF".to_string());
+        }
+    }
+
     /// Toggle filter panel.
     pub fn toggle_filter(&mut self) {
         self.filter_state.active = !self.filter_state.active;
@@ -2115,6 +2136,10 @@ impl AppState {
         self.scroll_offset = 0;
         self.details_scroll = 0;
         self.focus = 1; // Focus conversation panel
+
+        // Update pagination tracking
+        self.total_entries = self.entries.len();
+        self.current_entry_index = if self.total_entries > 0 { 1 } else { 0 };
 
         Ok(())
     }

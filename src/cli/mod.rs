@@ -14,7 +14,7 @@ pub use commands::*;
 
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
 use crate::cache::init_global_cache;
@@ -29,12 +29,11 @@ use crate::export::ExportFormat;
 #[command(name = "snatch")]
 #[command(author, version, about, long_about = None)]
 #[command(propagate_version = true)]
-#[command(arg_required_else_help = true)]
 #[command(disable_help_flag = true)]
 pub struct Cli {
-    /// Subcommand to run.
+    /// Subcommand to run (defaults to TUI in interactive terminals).
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 
     /// Print short help (use --help for full details).
     #[arg(short = 'h', global = true, action = ArgAction::HelpShort)]
@@ -837,7 +836,7 @@ pub struct InfoArgs {
 }
 
 /// Arguments for the TUI command.
-#[derive(Debug, Parser)]
+#[derive(Debug, Default, Parser)]
 pub struct TuiArgs {
     /// Start with specific project.
     #[arg(short = 'p', long)]
@@ -1545,24 +1544,36 @@ pub fn run() -> Result<()> {
     init_global_cache(&config.cache);
 
     match &cli.command {
-        Commands::List(args) => commands::list::run(&cli, args),
-        Commands::Export(args) => commands::export::run(&cli, args),
-        Commands::Search(args) => commands::search::run(&cli, args),
-        Commands::Stats(args) => commands::stats::run(&cli, args),
-        Commands::Info(args) => commands::info::run(&cli, args),
-        Commands::Tui(args) => commands::tui::run(&cli, args),
-        Commands::Validate(args) => commands::validate::run(&cli, args),
-        Commands::Watch(args) => commands::watch::run(&cli, args),
-        Commands::Diff(args) => commands::diff::run(&cli, args),
-        Commands::Config(args) => commands::config::run(&cli, args),
-        Commands::Extract(args) => commands::extract::run(&cli, args),
-        Commands::Cache(args) => commands::cache::run(&cli, args),
-        Commands::Index(args) => commands::index::run(&cli, args),
-        Commands::Completions(args) => {
+        // No command provided - launch TUI if interactive, otherwise show help
+        None => {
+            if io::stdout().is_terminal() && io::stdin().is_terminal() {
+                let tui_args = TuiArgs::default();
+                commands::tui::run(&cli, &tui_args)
+            } else {
+                Cli::command().print_help().map_err(|e| {
+                    crate::error::SnatchError::io("Failed to print help", e)
+                })?;
+                Ok(())
+            }
+        }
+        Some(Commands::List(args)) => commands::list::run(&cli, args),
+        Some(Commands::Export(args)) => commands::export::run(&cli, args),
+        Some(Commands::Search(args)) => commands::search::run(&cli, args),
+        Some(Commands::Stats(args)) => commands::stats::run(&cli, args),
+        Some(Commands::Info(args)) => commands::info::run(&cli, args),
+        Some(Commands::Tui(args)) => commands::tui::run(&cli, args),
+        Some(Commands::Validate(args)) => commands::validate::run(&cli, args),
+        Some(Commands::Watch(args)) => commands::watch::run(&cli, args),
+        Some(Commands::Diff(args)) => commands::diff::run(&cli, args),
+        Some(Commands::Config(args)) => commands::config::run(&cli, args),
+        Some(Commands::Extract(args)) => commands::extract::run(&cli, args),
+        Some(Commands::Cache(args)) => commands::cache::run(&cli, args),
+        Some(Commands::Index(args)) => commands::index::run(&cli, args),
+        Some(Commands::Completions(args)) => {
             generate_completions(args.shell);
             Ok(())
         }
-        Commands::DynamicCompletions(args) => {
+        Some(Commands::DynamicCompletions(args)) => {
             // Convert to internal types
             let comp_type = match args.completion_type {
                 DynamicCompletionType::Sessions => commands::completions::CompletionType::Sessions,
@@ -1578,14 +1589,14 @@ pub fn run() -> Result<()> {
             };
             commands::completions::run(&cli, &internal_args)
         }
-        Commands::Cleanup(args) => commands::cleanup::run(&cli, args),
-        Commands::Tag(args) => commands::tag::run(&cli, args),
-        Commands::Prompts(args) => commands::prompts::run(&cli, args),
-        Commands::Standup(args) => commands::standup::run(&cli, args),
-        Commands::Pick(args) => commands::pick::run(&cli, args),
-        Commands::Quickstart(args) => commands::quickstart::run(&cli, args),
+        Some(Commands::Cleanup(args)) => commands::cleanup::run(&cli, args),
+        Some(Commands::Tag(args)) => commands::tag::run(&cli, args),
+        Some(Commands::Prompts(args)) => commands::prompts::run(&cli, args),
+        Some(Commands::Standup(args)) => commands::standup::run(&cli, args),
+        Some(Commands::Pick(args)) => commands::pick::run(&cli, args),
+        Some(Commands::Quickstart(args)) => commands::quickstart::run(&cli, args),
         #[cfg(feature = "mcp")]
-        Commands::ServeMcp(_) => {
+        Some(Commands::ServeMcp(_)) => {
             // Run the MCP server
             let rt = tokio::runtime::Runtime::new().map_err(|e| {
                 SnatchError::ExportError {
