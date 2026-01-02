@@ -9,6 +9,7 @@ use dialoguer::{theme::ColorfulTheme, FuzzySelect};
 use crate::cli::{Cli, PickAction, PickArgs};
 use crate::discovery::SessionFilter;
 use crate::error::{Result, SnatchError};
+use crate::util::truncate_path;
 
 use super::get_claude_dir;
 
@@ -35,11 +36,7 @@ fn format_session_item(
     // Project path (shortened)
     if show_project {
         let project = session.project_path();
-        let short_project = if project.len() > 40 {
-            format!("...{}", &project[project.len() - 37..])
-        } else {
-            project.to_string()
-        };
+        let short_project = truncate_path(project, 40);
         write!(line, " | {short_project}").unwrap();
     }
 
@@ -204,8 +201,6 @@ pub fn run(cli: &Cli, args: &PickArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_format_session_item_short() {
         // Basic test - just ensure formatting doesn't panic

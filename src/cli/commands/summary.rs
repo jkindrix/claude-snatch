@@ -10,6 +10,7 @@ use crate::cli::{Cli, OutputFormat, SummaryArgs};
 use crate::discovery::{format_count, format_number};
 use crate::error::{Result, SnatchError};
 use crate::reconstruction::Conversation;
+use crate::util::truncate_path;
 
 use super::get_claude_dir;
 
@@ -215,12 +216,7 @@ pub fn run(cli: &Cli, args: &SummaryArgs) -> Result<()> {
                 println!("Top Projects");
                 println!("------------");
                 for project in &top_projects {
-                    // Truncate long paths
-                    let display_path = if project.path.len() > 40 {
-                        format!("...{}", &project.path[project.path.len() - 37..])
-                    } else {
-                        project.path.clone()
-                    };
+                    let display_path = truncate_path(&project.path, 40);
                     println!("  {:40} {} sessions", display_path, project.sessions);
                 }
                 println!();

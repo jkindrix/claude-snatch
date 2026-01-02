@@ -6,6 +6,7 @@ use std::io::{self, Write};
 
 use crate::cli::Cli;
 use crate::error::Result;
+use crate::util::truncate_path;
 
 use super::get_claude_dir;
 
@@ -92,11 +93,7 @@ fn complete_sessions(cli: &Cli, prefix: Option<&str>, limit: Option<usize>) -> R
 
         // Include project info for context
         let project = session.project_path();
-        let short_project = if project.len() > 30 {
-            format!("...{}", &project[project.len() - 27..])
-        } else {
-            project.to_string()
-        };
+        let short_project = truncate_path(project, 40);
 
         // Output session ID with description (tab-separated for shell completions)
         if !write_completion(&format!("{}\t{}", session_id, short_project)) {

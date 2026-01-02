@@ -164,99 +164,149 @@ impl Cli {
 }
 
 /// CLI subcommands.
+///
+/// Commands are grouped by function:
+/// - **Discovery**: list, recent, info, pick - browse sessions and projects
+/// - **Search**: search - find content across sessions
+/// - **Analysis**: stats, summary, standup, diff - usage analytics and comparisons
+/// - **Export**: export, code, prompts - extract content in various formats
+/// - **Interactive**: tui, watch - live session viewing
+/// - **Management**: tag, cleanup, validate, cache, index - session maintenance
+/// - **Configuration**: config, extract, completions - settings and setup
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    // ═══════════════════════════════════════════════════════════════════════
+    // DISCOVERY - Browse sessions and projects
+    // ═══════════════════════════════════════════════════════════════════════
+
     /// List projects and sessions.
-    #[command(alias = "ls")]
+    #[command(alias = "ls", display_order = 1)]
     List(ListArgs),
 
-    /// Export conversations to various formats.
-    #[command(alias = "x")]
-    Export(ExportArgs),
+    /// List the most recent sessions (shorthand for list -n 5).
+    #[command(display_order = 2)]
+    Recent(RecentArgs),
 
-    /// Search across sessions.
-    #[command(alias = "s", alias = "find")]
-    Search(SearchArgs),
-
-    /// Show usage statistics.
-    #[command(alias = "stat")]
-    Stats(StatsArgs),
-
-    /// Display detailed information.
-    #[command(alias = "i", alias = "show")]
+    /// Display detailed information about a session or project.
+    #[command(alias = "i", alias = "show", display_order = 3)]
     Info(InfoArgs),
 
-    /// Launch interactive TUI.
-    #[command(alias = "ui")]
-    Tui(TuiArgs),
+    /// Interactively pick a session using fuzzy search.
+    #[command(alias = "browse", display_order = 4)]
+    Pick(PickArgs),
 
-    /// Validate session files.
-    Validate(ValidateArgs),
+    // ═══════════════════════════════════════════════════════════════════════
+    // SEARCH - Find content across sessions
+    // ═══════════════════════════════════════════════════════════════════════
 
-    /// Watch for session changes.
-    Watch(WatchArgs),
+    /// Search across sessions (regex and fuzzy matching).
+    #[command(alias = "s", alias = "find", display_order = 10)]
+    Search(SearchArgs),
 
-    /// Compare two sessions or files.
-    #[command(alias = "d")]
+    // ═══════════════════════════════════════════════════════════════════════
+    // ANALYSIS - Usage analytics and comparisons
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Show usage statistics and cost tracking.
+    #[command(alias = "stat", display_order = 20)]
+    Stats(StatsArgs),
+
+    /// Show a quick summary of Claude Code usage.
+    #[command(display_order = 21)]
+    Summary(SummaryArgs),
+
+    /// Generate a standup report of recent activity.
+    #[command(alias = "daily", display_order = 22)]
+    Standup(StandupArgs),
+
+    /// Compare two sessions or conversation versions.
+    #[command(alias = "d", display_order = 23)]
     Diff(DiffArgs),
 
-    /// View and modify configuration.
-    #[command(alias = "cfg")]
-    Config(ConfigArgs),
+    // ═══════════════════════════════════════════════════════════════════════
+    // EXPORT - Extract content in various formats
+    // ═══════════════════════════════════════════════════════════════════════
 
-    /// Extract Beyond-JSONL data (settings, CLAUDE.md, MCP, etc.).
-    #[command(alias = "ext")]
-    Extract(ExtractArgs),
+    /// Export conversations to various formats (markdown, json, html, etc.).
+    #[command(alias = "x", display_order = 30)]
+    Export(ExportArgs),
+
+    /// Extract code blocks from sessions.
+    #[command(display_order = 31)]
+    Code(CodeArgs),
+
+    /// Extract user prompts from sessions.
+    #[command(display_order = 32)]
+    Prompts(PromptsArgs),
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // INTERACTIVE - Live session viewing
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Launch interactive TUI browser.
+    #[command(alias = "ui", display_order = 40)]
+    Tui(TuiArgs),
+
+    /// Watch for session changes in real-time.
+    #[command(display_order = 41)]
+    Watch(WatchArgs),
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // MANAGEMENT - Session maintenance
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Manage session tags, names, and bookmarks.
+    #[command(display_order = 50)]
+    Tag(TagArgs),
+
+    /// Clean up old or empty sessions.
+    #[command(alias = "clean", display_order = 51)]
+    Cleanup(CleanupArgs),
+
+    /// Validate session file integrity.
+    #[command(display_order = 52)]
+    Validate(ValidateArgs),
 
     /// Manage the session cache.
+    #[command(display_order = 53)]
     Cache(CacheArgs),
 
     /// Manage the full-text search index.
-    #[command(alias = "idx")]
+    #[command(alias = "idx", display_order = 54)]
     Index(IndexArgs),
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // CONFIGURATION - Settings and setup
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// View and modify configuration.
+    #[command(alias = "cfg", display_order = 60)]
+    Config(ConfigArgs),
+
+    /// Extract Beyond-JSONL data (settings, CLAUDE.md, MCP, etc.).
+    #[command(alias = "ext", display_order = 61)]
+    Extract(ExtractArgs),
+
     /// Generate shell completions.
+    #[command(display_order = 62)]
     Completions(CompletionsArgs),
+
+    /// Quick start guide for new users.
+    #[command(alias = "guide", alias = "examples", display_order = 63)]
+    Quickstart(QuickstartArgs),
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ADVANCED / HIDDEN
+    // ═══════════════════════════════════════════════════════════════════════
 
     /// Generate dynamic completions (used by shell completion scripts).
     #[command(hide = true, name = "_complete")]
     DynamicCompletions(DynamicCompletionsArgs),
 
-    /// Clean up old or empty sessions.
-    #[command(alias = "clean")]
-    Cleanup(CleanupArgs),
-
-    /// Manage session tags and names.
-    Tag(TagArgs),
-
-    /// Extract code blocks from sessions.
-    Code(CodeArgs),
-
-    /// Extract user prompts from sessions.
-    Prompts(PromptsArgs),
-
-    /// Generate a standup report of recent activity.
-    #[command(alias = "daily")]
-    Standup(StandupArgs),
-
-    /// Interactively pick a session using fuzzy search.
-    #[command(alias = "browse")]
-    Pick(PickArgs),
-
-    /// Quick start guide for new users.
-    #[command(alias = "guide", alias = "examples")]
-    Quickstart(QuickstartArgs),
-
-    /// Show a quick summary of Claude Code usage.
-    Summary(SummaryArgs),
-
-    /// List the most recent sessions (shorthand for list -n 5).
-    Recent(RecentArgs),
-
     /// Start MCP (Model Context Protocol) server mode.
     /// Requires the 'mcp' feature to be enabled.
     #[cfg(feature = "mcp")]
-    #[command(alias = "mcp")]
+    #[command(alias = "mcp", display_order = 100)]
     ServeMcp(ServeMcpArgs),
 }
 
@@ -742,9 +792,13 @@ pub struct SearchArgs {
     #[arg(short = 'C', long, default_value = "2")]
     pub context: usize,
 
-    /// Maximum results.
-    #[arg(short = 'n', long)]
-    pub limit: Option<usize>,
+    /// Maximum results (default: 50, use --no-limit for all).
+    #[arg(short = 'n', long, default_value = "50")]
+    pub limit: usize,
+
+    /// Show all results without limit.
+    #[arg(long)]
+    pub no_limit: bool,
 
     /// Only show session IDs containing matches (like grep -l).
     #[arg(short = 'l', long)]
@@ -1679,6 +1733,7 @@ pub struct ServeMcpArgs {
 
 /// Initialize tracing/logging based on CLI options.
 fn init_logging(cli: &Cli) {
+    use std::io::IsTerminal;
     use tracing_subscriber::{
         fmt::{self, format::FmtSpan},
         layer::SubscriberExt,
@@ -1689,16 +1744,24 @@ fn init_logging(cli: &Cli) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(cli.log_level.to_filter_string()));
 
+    // Determine if ANSI colors should be used based on --color flag and terminal detection
+    let use_ansi = match cli.color {
+        Some(true) => true,
+        Some(false) => false,
+        None => std::io::stderr().is_terminal(),
+    };
+
     // Build subscriber based on log format
     let result = match cli.log_format {
         LogFormat::Json => {
-            // Structured JSON format for machine consumption
+            // Structured JSON format for machine consumption (never uses ANSI)
             let layer = fmt::layer()
                 .json()
                 .with_span_events(FmtSpan::CLOSE)
                 .with_thread_ids(true)
                 .with_file(true)
                 .with_line_number(true)
+                .with_ansi(false)
                 .with_writer(std::io::stderr);
             tracing_subscriber::registry()
                 .with(filter)
@@ -1710,6 +1773,7 @@ fn init_logging(cli: &Cli) {
             let layer = fmt::layer()
                 .compact()
                 .with_target(false)
+                .with_ansi(use_ansi)
                 .with_writer(std::io::stderr);
             tracing_subscriber::registry()
                 .with(filter)
@@ -1723,6 +1787,7 @@ fn init_logging(cli: &Cli) {
                 .with_thread_ids(true)
                 .with_file(true)
                 .with_line_number(true)
+                .with_ansi(use_ansi)
                 .with_writer(std::io::stderr);
             tracing_subscriber::registry()
                 .with(filter)
@@ -1731,7 +1796,9 @@ fn init_logging(cli: &Cli) {
         }
         LogFormat::Text => {
             // Default human-readable text format
-            let layer = fmt::layer().with_writer(std::io::stderr);
+            let layer = fmt::layer()
+                .with_ansi(use_ansi)
+                .with_writer(std::io::stderr);
             tracing_subscriber::registry()
                 .with(filter)
                 .with(layer)

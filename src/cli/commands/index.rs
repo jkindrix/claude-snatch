@@ -262,9 +262,6 @@ fn run_search(cli: &Cli, args: &crate::cli::IndexSearchArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
     #[test]
     fn test_run_status() {
         // Just verify the function compiles and can be called

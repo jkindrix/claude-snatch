@@ -3,7 +3,9 @@
 //! Searches across sessions for text patterns with optional filters.
 
 use std::collections::HashSet;
+use std::io::IsTerminal;
 
+use indicatif::{ProgressBar, ProgressStyle};
 use regex::{Regex, RegexBuilder};
 
 use crate::cli::{Cli, OutputFormat, SearchArgs};
@@ -331,8 +333,27 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
     let mut sessions_with_matches: HashSet<String> = HashSet::new();
     let mut match_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
+    // Create progress bar for interactive sessions with many sessions
+    let session_count = sessions.len();
+    let show_progress = session_count > 10 && std::io::stderr().is_terminal() && !cli.quiet;
+    let progress = if show_progress {
+        let pb = ProgressBar::new(session_count as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.cyan} [{bar:40.cyan/dim}] {pos}/{len} sessions searched")
+                .unwrap()
+                .progress_chars("█▓░"),
+        );
+        Some(pb)
+    } else {
+        None
+    };
+
     // Search each session
     for session in sessions {
+        if let Some(ref pb) = progress {
+            pb.inc(1);
+        }
         let entries = match session.parse_with_options(cli.max_file_size) {
             Ok(e) => e,
             Err(_) => continue, // Skip unparseable sessions
@@ -373,12 +394,16 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
                         all_results.push(result);
                     }
 
-                    if let Some(limit) = args.limit {
-                        if total_matches >= limit {
-                            break;
-                        }
+                    // Check limit (unless --no-limit is set)
+                    if !args.no_limit && total_matches >= args.limit {
+                        break;
                     }
                 }
+            }
+
+            // Check limit after processing entry (unless --no-limit is set)
+            if !args.no_limit && total_matches >= args.limit {
+                break;
             }
         }
 
@@ -386,11 +411,15 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
             match_counts.insert(session.session_id().to_string(), session_match_count);
         }
 
-        if let Some(limit) = args.limit {
-            if total_matches >= limit {
-                break;
-            }
+        // Check limit (unless --no-limit is set)
+        if !args.no_limit && total_matches >= args.limit {
+            break;
         }
+    }
+
+    // Finish progress bar
+    if let Some(pb) = progress {
+        pb.finish_and_clear();
     }
 
     // Sort results by relevance if requested
@@ -512,7 +541,15 @@ fn output_full_results(
                 return Ok(());
             }
 
-            println!("Found {} matches:", total_matches);
+            // Show appropriate message based on whether limit was applied
+            if !args.no_limit && total_matches >= args.limit {
+                println!(
+                    "Showing {} matches (limit: {}, use --no-limit for all):",
+                    total_matches, args.limit
+                );
+            } else {
+                println!("Found {} matches:", total_matches);
+            }
             println!();
 
             let mut current_session = String::new();

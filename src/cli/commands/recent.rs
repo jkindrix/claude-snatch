@@ -8,6 +8,7 @@ use crate::cli::{Cli, OutputFormat, RecentArgs};
 use crate::discovery::Session;
 use crate::error::Result;
 use crate::tags::TagStore;
+use crate::util::truncate_path;
 
 use super::get_claude_dir;
 
@@ -91,12 +92,7 @@ pub fn run(cli: &Cli, args: &RecentArgs) -> Result<()> {
                 let id = session.session_id();
                 let short_id = &id[..8.min(id.len())];
                 let project = session.project_path();
-                // Truncate project path
-                let display_project = if project.len() > 30 {
-                    format!("...{}", &project[project.len() - 27..])
-                } else {
-                    project.to_string()
-                };
+                let display_project = truncate_path(project, 40);
                 println!("{} {}", short_id, display_project);
             }
         }
@@ -136,12 +132,8 @@ fn print_session_line(session: &Session, tag_store: &TagStore) -> Result<()> {
         .and_then(|t| t.name.clone())
         .unwrap_or_else(|| session.project_path().to_string());
 
-    // Truncate if too long
-    let display_name = if name_or_project.len() > 45 {
-        format!("...{}", &name_or_project[name_or_project.len() - 42..])
-    } else {
-        name_or_project
-    };
+    // Truncate if too long (use consistent 45 char limit for text mode)
+    let display_name = truncate_path(&name_or_project, 45);
 
     // Modification time
     let time_str = session.modified_datetime()

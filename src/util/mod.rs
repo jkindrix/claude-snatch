@@ -951,6 +951,69 @@ pub mod pager {
 }
 
 // ============================================================================
+// Display Utilities
+// ============================================================================
+
+/// Truncate a path or string for display, keeping the end (most informative part).
+///
+/// If the string is longer than `max_len`, returns `...{last max_len-3 chars}`.
+/// This is useful for paths where the end (filename or project name) is most relevant.
+///
+/// # Arguments
+///
+/// * `text` - The string to truncate
+/// * `max_len` - Maximum display length (must be > 3)
+///
+/// # Example
+///
+/// ```
+/// use claude_snatch::util::truncate_path;
+///
+/// assert_eq!(truncate_path("/home/user/project", 30), "/home/user/project");
+/// assert_eq!(truncate_path("/home/user/very/long/project/path", 20), "...long/project/path");
+/// ```
+pub fn truncate_path(text: &str, max_len: usize) -> String {
+    if max_len <= 3 {
+        return text.chars().take(max_len).collect();
+    }
+
+    if text.len() <= max_len {
+        text.to_string()
+    } else {
+        format!("...{}", &text[text.len() - (max_len - 3)..])
+    }
+}
+
+/// Truncate a string for display, keeping the beginning.
+///
+/// If the string is longer than `max_len`, returns `{first max_len-3 chars}...`.
+///
+/// # Arguments
+///
+/// * `text` - The string to truncate
+/// * `max_len` - Maximum display length (must be > 3)
+///
+/// # Example
+///
+/// ```
+/// use claude_snatch::util::truncate_text;
+///
+/// assert_eq!(truncate_text("short text", 30), "short text");
+/// assert_eq!(truncate_text("this is a very long text that needs truncation", 20), "this is a very lo...");
+/// ```
+pub fn truncate_text(text: &str, max_len: usize) -> String {
+    if max_len <= 3 {
+        return text.chars().take(max_len).collect();
+    }
+
+    if text.len() <= max_len {
+        text.to_string()
+    } else {
+        format!("{}...", &text[..max_len - 3])
+    }
+}
+
+// ============================================================================
 // Sparkline Visualization
 // ============================================================================
 
@@ -1398,5 +1461,47 @@ mod tests {
         let values = [50.0, 51.0, 50.0, 49.0, 50.0];
         let spark = super::sparkline_with_trend(&values);
         assert!(spark.contains('→'));
+    }
+
+    // Display utility tests
+
+    #[test]
+    fn test_truncate_path_short() {
+        assert_eq!(super::truncate_path("/home/user/project", 30), "/home/user/project");
+    }
+
+    #[test]
+    fn test_truncate_path_long() {
+        let path = "/home/user/very/long/project/path/name";
+        let truncated = super::truncate_path(path, 20);
+        assert_eq!(truncated.len(), 20);
+        assert!(truncated.starts_with("..."));
+        assert!(truncated.ends_with("ath/name")); // "...oject/path/name" -> ends with "ath/name"
+    }
+
+    #[test]
+    fn test_truncate_path_exact() {
+        let path = "exactly20characters!";
+        assert_eq!(super::truncate_path(path, 20), path);
+    }
+
+    #[test]
+    fn test_truncate_text_short() {
+        assert_eq!(super::truncate_text("short text", 30), "short text");
+    }
+
+    #[test]
+    fn test_truncate_text_long() {
+        let text = "this is a very long text that needs truncation";
+        let truncated = super::truncate_text(text, 20);
+        assert_eq!(truncated.len(), 20);
+        assert!(truncated.ends_with("..."));
+        assert!(truncated.starts_with("this is a very lo"));
+    }
+
+    #[test]
+    fn test_truncate_text_exact() {
+        let text = "exactly20characters!";
+        assert_eq!(super::truncate_text(text, 20), text);
     }
 }

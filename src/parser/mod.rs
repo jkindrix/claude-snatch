@@ -194,10 +194,11 @@ impl JsonlParser {
             trace!(file_size, max_size = self.max_file_size, "Checking file size limit");
 
             if file_size > self.max_file_size {
-                warn!(
+                // Log at debug level since the error message already conveys this information
+                debug!(
                     file_size,
                     max_size = self.max_file_size,
-                    "File exceeds size limit. Use --max-file-size 0 to override."
+                    "File exceeds size limit, skipping"
                 );
                 return Err(SnatchError::validation(format!(
                     "File size ({}) exceeds maximum ({}). Use --max-file-size 0 for unlimited.",
