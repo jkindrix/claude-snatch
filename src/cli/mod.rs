@@ -215,6 +215,9 @@ pub enum Commands {
     /// Manage session tags and names.
     Tag(TagArgs),
 
+    /// Extract code blocks from sessions.
+    Code(CodeArgs),
+
     /// Extract user prompts from sessions.
     Prompts(PromptsArgs),
 
@@ -1413,6 +1416,53 @@ fn parse_outcome(s: &str) -> std::result::Result<crate::tags::SessionOutcome, St
     s.parse()
 }
 
+/// Arguments for the code command.
+#[derive(Debug, Parser)]
+pub struct CodeArgs {
+    /// Session ID to extract code from (supports short prefixes like "780893e4").
+    pub session: String,
+
+    /// Filter by programming language (e.g., "rust", "python", "typescript").
+    #[arg(short = 'l', long)]
+    pub lang: Option<String>,
+
+    /// Only extract code from assistant messages.
+    #[arg(long)]
+    pub assistant_only: bool,
+
+    /// Only extract code from user messages.
+    #[arg(long)]
+    pub user_only: bool,
+
+    /// Maximum number of code blocks to extract.
+    #[arg(short = 'n', long)]
+    pub limit: Option<usize>,
+
+    /// Only extract from main thread (exclude branches).
+    #[arg(long)]
+    pub main_thread: bool,
+
+    /// Include metadata (source, timestamp, index) with each block.
+    #[arg(short = 'm', long)]
+    pub metadata: bool,
+
+    /// Concatenate all code blocks into a single output.
+    #[arg(short = 'c', long)]
+    pub concatenate: bool,
+
+    /// Write each code block to a separate file.
+    #[arg(short = 'f', long)]
+    pub files: bool,
+
+    /// Output directory for files (with --files). Default: current directory.
+    #[arg(short = 'O', long)]
+    pub output_dir: Option<std::path::PathBuf>,
+
+    /// Suppress progress messages.
+    #[arg(short = 'q', long)]
+    pub quiet: bool,
+}
+
 /// Arguments for the prompts command.
 #[derive(Debug, Parser)]
 pub struct PromptsArgs {
@@ -1757,6 +1807,7 @@ pub fn run() -> Result<()> {
         }
         Some(Commands::Cleanup(args)) => commands::cleanup::run(&cli, args),
         Some(Commands::Tag(args)) => commands::tag::run(&cli, args),
+        Some(Commands::Code(args)) => commands::code::run(&cli, args),
         Some(Commands::Prompts(args)) => commands::prompts::run(&cli, args),
         Some(Commands::Standup(args)) => commands::standup::run(&cli, args),
         Some(Commands::Pick(args)) => commands::pick::run(&cli, args),

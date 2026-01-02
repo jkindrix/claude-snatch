@@ -746,18 +746,18 @@ fn format_stop_reason(reason: &StopReason) -> &'static str {
 }
 
 /// Extracted code block from text.
-#[derive(Debug)]
-struct CodeBlock {
+#[derive(Debug, Clone)]
+pub struct CodeBlock {
     /// Programming language (if specified).
-    language: Option<String>,
+    pub language: Option<String>,
     /// The code content.
-    code: String,
+    pub code: String,
 }
 
 /// Extract code blocks from markdown-formatted text.
 ///
 /// Looks for fenced code blocks (``` or ~~~) and extracts them.
-fn extract_code_blocks(text: &str) -> Vec<CodeBlock> {
+pub fn extract_code_blocks(text: &str) -> Vec<CodeBlock> {
     let mut blocks = Vec::new();
     let mut in_block = false;
     let mut current_language = None;

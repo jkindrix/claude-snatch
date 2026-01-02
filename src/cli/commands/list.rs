@@ -323,34 +323,70 @@ fn list_sessions<W: Write>(
     // Output
     match cli.effective_output() {
         OutputFormat::Json => {
-            let output: Vec<_> = sessions.iter().map(|s| SessionInfo::from(s)).collect();
+            let output: Vec<_> = sessions
+                .iter()
+                .map(|s| SessionInfo::from_session(s, &tag_store, args.context))
+                .collect();
             writeln!(writer, "{}", serde_json::to_string_pretty(&output)?)?;
         }
         OutputFormat::Tsv => {
-            writeln!(writer, "session_id\tproject\tsize\tmodified\tsubagent")?;
+            if args.context {
+                writeln!(writer, "session_id\tproject\tsize\tmodified\tsubagent\tname\tcontext")?;
+            } else {
+                writeln!(writer, "session_id\tproject\tsize\tmodified\tsubagent\tname")?;
+            }
             for session in &sessions {
                 let id = if args.full_ids {
                     session.session_id().to_string()
                 } else {
                     short_id(session.session_id())
                 };
-                writeln!(
-                    writer,
-                    "{}\t{}\t{}\t{}\t{}",
-                    id,
-                    session.project_path(),
-                    session.file_size(),
-                    session.modified_datetime().format("%Y-%m-%d %H:%M:%S UTC"),
-                    session.is_subagent()
-                )?;
+                let meta = tag_store.get(session.session_id());
+                let name = meta.and_then(|m| m.name.as_deref()).unwrap_or("");
+                if args.context {
+                    let context = get_session_context(session, 100).unwrap_or_default();
+                    // Escape tabs and newlines in context for TSV
+                    let context_escaped = context.replace('\t', " ").replace('\n', " ");
+                    writeln!(
+                        writer,
+                        "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                        id,
+                        session.project_path(),
+                        session.file_size(),
+                        session.modified_datetime().format("%Y-%m-%d %H:%M:%S UTC"),
+                        session.is_subagent(),
+                        name,
+                        context_escaped
+                    )?;
+                } else {
+                    writeln!(
+                        writer,
+                        "{}\t{}\t{}\t{}\t{}\t{}",
+                        id,
+                        session.project_path(),
+                        session.file_size(),
+                        session.modified_datetime().format("%Y-%m-%d %H:%M:%S UTC"),
+                        session.is_subagent(),
+                        name
+                    )?;
+                }
             }
         }
         OutputFormat::Compact => {
             for session in &sessions {
-                if args.full_ids {
-                    writeln!(writer, "{}", session.session_id())?;
+                let id = if args.full_ids {
+                    session.session_id().to_string()
                 } else {
-                    writeln!(writer, "{}", short_id(session.session_id()))?;
+                    short_id(session.session_id())
+                };
+                if args.context {
+                    if let Some(context) = get_session_context(session, 60) {
+                        writeln!(writer, "{}: {}", id, context)?;
+                    } else {
+                        writeln!(writer, "{}", id)?;
+                    }
+                } else {
+                    writeln!(writer, "{}", id)?;
                 }
             }
         }
@@ -514,16 +550,34 @@ struct SessionInfo {
     is_subagent: bool,
     file_size: u64,
     modified: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    bookmarked: bool,
 }
 
-impl From<&Session> for SessionInfo {
-    fn from(session: &Session) -> Self {
+impl SessionInfo {
+    fn from_session(session: &Session, tag_store: &TagStore, include_context: bool) -> Self {
+        let meta = tag_store.get(session.session_id());
+        let context = if include_context {
+            get_session_context(session, 100)
+        } else {
+            None
+        };
+
         Self {
             session_id: session.session_id().to_string(),
             project_path: session.project_path().to_string(),
             is_subagent: session.is_subagent(),
             file_size: session.file_size(),
             modified: session.modified_datetime().to_rfc3339(),
+            name: meta.and_then(|m| m.name.clone()),
+            context,
+            tags: meta.map(|m| m.tags.clone()).unwrap_or_default(),
+            bookmarked: meta.map(|m| m.bookmarked).unwrap_or(false),
         }
     }
 }

@@ -5,6 +5,7 @@
 
 pub mod cache;
 pub mod cleanup;
+pub mod code;
 pub mod completions;
 pub mod config;
 pub mod diff;
