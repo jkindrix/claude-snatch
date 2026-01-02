@@ -33,6 +33,7 @@ fn content_filter_to_type(filter: ContentFilter) -> ContentType {
         ContentFilter::ToolResults => ContentType::ToolResults,
         ContentFilter::System => ContentType::System,
         ContentFilter::Summary => ContentType::Summary,
+        ContentFilter::Code => ContentType::Code,
     }
 }
 

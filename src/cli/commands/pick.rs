@@ -158,6 +158,8 @@ pub fn run(cli: &Cli, args: &PickArgs) -> Result<()> {
                 raw: false,
                 entry: None,
                 paths: false,
+                messages: None,
+                files: false,
             };
             crate::cli::commands::info::run(cli, &info_args)?;
         }

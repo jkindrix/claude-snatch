@@ -2,8 +2,11 @@
 //!
 //! Displays detailed information about sessions and projects.
 
+use std::collections::{HashMap, HashSet};
+
 use crate::cli::{Cli, InfoArgs, OutputFormat};
 use crate::error::{Result, SnatchError};
+use crate::model::{ContentBlock, LogEntry};
 use crate::reconstruction::Conversation;
 use crate::tags::TagStore;
 
@@ -197,6 +200,22 @@ fn show_session_info(
                     );
                 }
             }
+
+            // Show message preview if requested
+            if let Some(n) = args.messages {
+                println!();
+                println!("Message Preview (first {n} messages):");
+                println!("-------------------------------");
+                show_message_preview(session, n, cli.max_file_size)?;
+            }
+
+            // Show files touched if requested
+            if args.files {
+                println!();
+                println!("Files Touched:");
+                println!("--------------");
+                show_files_touched(session, cli.max_file_size)?;
+            }
         }
     }
 
@@ -253,6 +272,169 @@ fn show_entry(session: &crate::discovery::Session, uuid: &str, max_file_size: Op
     }
 
     println!("Entry not found: {uuid}");
+    Ok(())
+}
+
+/// Show a preview of the first N messages.
+fn show_message_preview(session: &crate::discovery::Session, n: usize, max_file_size: Option<u64>) -> Result<()> {
+    let entries = session.parse_with_options(max_file_size)?;
+
+    let mut count = 0;
+    for entry in &entries {
+        if count >= n {
+            break;
+        }
+
+        match entry {
+            LogEntry::User(user_msg) => {
+                // Skip tool results
+                if user_msg.message.has_tool_results() {
+                    continue;
+                }
+
+                if let Some(text) = user_msg.message.as_text() {
+                    let preview = truncate_preview(text, 200);
+                    println!();
+                    println!("[{}] User:", count + 1);
+                    for line in preview.lines() {
+                        println!("  {}", line);
+                    }
+                    count += 1;
+                }
+            }
+            LogEntry::Assistant(asst_msg) => {
+                // Extract text from assistant response
+                let mut text_parts = Vec::new();
+                for block in &asst_msg.message.content {
+                    if let ContentBlock::Text(text_block) = block {
+                        text_parts.push(text_block.text.clone());
+                    }
+                }
+
+                if !text_parts.is_empty() {
+                    let combined = text_parts.join("\n");
+                    let preview = truncate_preview(&combined, 200);
+                    println!();
+                    println!("[{}] Assistant:", count + 1);
+                    for line in preview.lines() {
+                        println!("  {}", line);
+                    }
+                    count += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if count == 0 {
+        println!("No messages found.");
+    }
+
+    Ok(())
+}
+
+/// Truncate text for preview display.
+fn truncate_preview(text: &str, max_len: usize) -> String {
+    let cleaned: String = text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .take(5)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if cleaned.len() > max_len {
+        format!("{}...", &cleaned[..max_len])
+    } else {
+        cleaned
+    }
+}
+
+/// Show files touched during the session.
+fn show_files_touched(session: &crate::discovery::Session, max_file_size: Option<u64>) -> Result<()> {
+    let entries = session.parse_with_options(max_file_size)?;
+
+    let mut files_read: HashSet<String> = HashSet::new();
+    let mut files_written: HashSet<String> = HashSet::new();
+    let mut files_created: HashSet<String> = HashSet::new();
+    let mut _tool_counts: HashMap<String, usize> = HashMap::new();
+
+    for entry in &entries {
+        if let LogEntry::Assistant(asst_msg) = entry {
+            for block in &asst_msg.message.content {
+                if let ContentBlock::ToolUse(tool_use) = block {
+                    let tool_name = tool_use.name.as_str();
+                    *_tool_counts.entry(tool_name.to_string()).or_insert(0) += 1;
+
+                    // Extract file paths from tool inputs
+                    let input = &tool_use.input;
+                    match tool_name {
+                        "Read" => {
+                            if let Some(path) = input.get("file_path").and_then(serde_json::Value::as_str) {
+                                files_read.insert(path.to_string());
+                            }
+                        }
+                        "Write" => {
+                            if let Some(path) = input.get("file_path").and_then(serde_json::Value::as_str) {
+                                files_created.insert(path.to_string());
+                            }
+                        }
+                        "Edit" => {
+                            if let Some(path) = input.get("file_path").and_then(serde_json::Value::as_str) {
+                                files_written.insert(path.to_string());
+                            }
+                        }
+                        "Bash" => {
+                            // Could potentially extract file paths from bash commands
+                            // but it's complex to parse reliably
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    // Display summary
+    let total_files = files_read.len() + files_written.len() + files_created.len();
+    if total_files == 0 {
+        println!("No file operations detected.");
+        return Ok(());
+    }
+
+    if !files_read.is_empty() {
+        println!();
+        println!("Read ({}):", files_read.len());
+        for path in files_read.iter().take(20) {
+            println!("  {}", path);
+        }
+        if files_read.len() > 20 {
+            println!("  ... and {} more", files_read.len() - 20);
+        }
+    }
+
+    if !files_written.is_empty() {
+        println!();
+        println!("Modified ({}):", files_written.len());
+        for path in files_written.iter().take(20) {
+            println!("  {}", path);
+        }
+        if files_written.len() > 20 {
+            println!("  ... and {} more", files_written.len() - 20);
+        }
+    }
+
+    if !files_created.is_empty() {
+        println!();
+        println!("Created ({}):", files_created.len());
+        for path in files_created.iter().take(20) {
+            println!("  {}", path);
+        }
+        if files_created.len() > 20 {
+            println!("  ... and {} more", files_created.len() - 20);
+        }
+    }
+
     Ok(())
 }
 

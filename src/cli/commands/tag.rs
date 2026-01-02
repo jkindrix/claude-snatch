@@ -6,42 +6,97 @@ use crate::cli::{Cli, OutputFormat, TagAction, TagArgs};
 use crate::error::Result;
 use crate::tags::TagStore;
 
-use super::get_claude_dir;
+use super::{get_claude_dir, parse_date_filter};
 
 /// Run the tag command.
 pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
     let mut store = TagStore::load()?;
 
     match &args.action {
-        TagAction::Add { session, tag } => {
-            let session_id = resolve_session_id(cli, session)?;
-            if store.add_tag(&session_id, tag) {
-                store.save()?;
-                println!("Added tag '{}' to session {}", tag, short_id(&session_id));
+        TagAction::Add { tag, session, since, until, project, preview } => {
+            // If session is specified, use single-session mode
+            if let Some(session_prefix) = session {
+                let session_id = resolve_session_id(cli, session_prefix)?;
+                if *preview {
+                    println!("Would add tag '{}' to session {}", tag, short_id(&session_id));
+                } else if store.add_tag(&session_id, tag) {
+                    store.save()?;
+                    println!("Added tag '{}' to session {}", tag, short_id(&session_id));
+                } else {
+                    println!("Session {} already has tag '{}'", short_id(&session_id), tag);
+                }
+            } else if since.is_some() || until.is_some() || project.is_some() {
+                // Bulk mode with filters
+                let sessions = get_filtered_sessions(cli, since.as_deref(), until.as_deref(), project.as_deref())?;
+                if sessions.is_empty() {
+                    println!("No sessions match the specified filters.");
+                    return Ok(());
+                }
+
+                if *preview {
+                    println!("Would add tag '{}' to {} sessions:", tag, sessions.len());
+                    for id in &sessions {
+                        println!("  {}", short_id(id));
+                    }
+                } else {
+                    let mut added = 0;
+                    for session_id in &sessions {
+                        if store.add_tag(session_id, tag) {
+                            added += 1;
+                        }
+                    }
+                    store.save()?;
+                    println!("Added tag '{}' to {} sessions ({} already had it)", tag, added, sessions.len() - added);
+                }
             } else {
-                println!(
-                    "Session {} already has tag '{}'",
-                    short_id(&session_id),
-                    tag
-                );
+                eprintln!("Error: Either --session or date/project filters are required.");
+                eprintln!("Examples:");
+                eprintln!("  snatch tag add sprint-42 -s 24ce6088");
+                eprintln!("  snatch tag add sprint-42 --since 1week");
+                eprintln!("  snatch tag add sprint-42 --since 1week -p myproject");
             }
         }
 
-        TagAction::Remove { session, tag } => {
-            let session_id = resolve_session_id(cli, session)?;
-            if store.remove_tag(&session_id, tag) {
-                store.save()?;
-                println!(
-                    "Removed tag '{}' from session {}",
-                    tag,
-                    short_id(&session_id)
-                );
+        TagAction::Remove { tag, session, since, until, project, preview } => {
+            // If session is specified, use single-session mode
+            if let Some(session_prefix) = session {
+                let session_id = resolve_session_id(cli, session_prefix)?;
+                if *preview {
+                    println!("Would remove tag '{}' from session {}", tag, short_id(&session_id));
+                } else if store.remove_tag(&session_id, tag) {
+                    store.save()?;
+                    println!("Removed tag '{}' from session {}", tag, short_id(&session_id));
+                } else {
+                    println!("Session {} does not have tag '{}'", short_id(&session_id), tag);
+                }
+            } else if since.is_some() || until.is_some() || project.is_some() {
+                // Bulk mode with filters
+                let sessions = get_filtered_sessions(cli, since.as_deref(), until.as_deref(), project.as_deref())?;
+                if sessions.is_empty() {
+                    println!("No sessions match the specified filters.");
+                    return Ok(());
+                }
+
+                if *preview {
+                    println!("Would remove tag '{}' from {} sessions:", tag, sessions.len());
+                    for id in &sessions {
+                        println!("  {}", short_id(id));
+                    }
+                } else {
+                    let mut removed = 0;
+                    for session_id in &sessions {
+                        if store.remove_tag(session_id, tag) {
+                            removed += 1;
+                        }
+                    }
+                    store.save()?;
+                    println!("Removed tag '{}' from {} sessions ({} didn't have it)", tag, removed, sessions.len() - removed);
+                }
             } else {
-                println!(
-                    "Session {} does not have tag '{}'",
-                    short_id(&session_id),
-                    tag
-                );
+                eprintln!("Error: Either --session or date/project filters are required.");
+                eprintln!("Examples:");
+                eprintln!("  snatch tag remove sprint-42 -s 24ce6088");
+                eprintln!("  snatch tag remove sprint-42 --since 1week");
             }
         }
 
@@ -459,6 +514,51 @@ fn short_id(id: &str) -> String {
     } else {
         id.to_string()
     }
+}
+
+/// Get session IDs matching date/project filters for bulk operations.
+fn get_filtered_sessions(
+    cli: &Cli,
+    since: Option<&str>,
+    until: Option<&str>,
+    project: Option<&str>,
+) -> Result<Vec<String>> {
+    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
+    let sessions = claude_dir.all_sessions()?;
+
+    // Parse date filters
+    let since_time = since.map(parse_date_filter).transpose()?;
+    let until_time = until.map(parse_date_filter).transpose()?;
+
+    let filtered: Vec<String> = sessions
+        .iter()
+        .filter(|s| {
+            // Apply project filter
+            if let Some(ref proj) = project {
+                if !s.project_path().contains(proj) {
+                    return false;
+                }
+            }
+
+            // Apply date filters
+            let modified = s.modified_time();
+            if let Some(since) = since_time {
+                if modified < since {
+                    return false;
+                }
+            }
+            if let Some(until) = until_time {
+                if modified > until {
+                    return false;
+                }
+            }
+
+            true
+        })
+        .map(|s| s.session_id().to_string())
+        .collect();
+
+    Ok(filtered)
 }
 
 #[cfg(test)]

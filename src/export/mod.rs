@@ -85,6 +85,8 @@ pub enum ContentType {
     System,
     /// Summary entries.
     Summary,
+    /// Code blocks only (extracted from assistant responses).
+    Code,
 }
 
 impl ContentType {
@@ -99,6 +101,7 @@ impl ContentType {
             Self::ToolResults => "tool results",
             Self::System => "system messages",
             Self::Summary => "summary entries",
+            Self::Code => "code blocks only",
         }
     }
 }
@@ -899,6 +902,7 @@ impl ExportOptions {
                 ContentType::ToolResults => self.include_tool_results,
                 ContentType::System => self.include_system,
                 ContentType::Summary => true, // Include summaries by default
+                ContentType::Code => false, // Code extraction only when explicitly requested
             }
         }
     }
@@ -919,11 +923,12 @@ impl ExportOptions {
     pub fn should_include_assistant(&self) -> bool {
         if self.has_exclusive_filter() {
             // Include assistant entries if Assistant is in the filter,
-            // OR if any assistant content types (Thinking, ToolUse, ToolResults) are in the filter
+            // OR if any assistant content types (Thinking, ToolUse, ToolResults, Code) are in the filter
             self.only.contains(&ContentType::Assistant)
                 || self.only.contains(&ContentType::Thinking)
                 || self.only.contains(&ContentType::ToolUse)
                 || self.only.contains(&ContentType::ToolResults)
+                || self.only.contains(&ContentType::Code)
         } else {
             true
         }
@@ -976,6 +981,12 @@ impl ExportOptions {
         self.has_exclusive_filter()
             && self.only.contains(&ContentType::Prompts)
             && !self.only.contains(&ContentType::ToolResults)
+    }
+
+    /// Check if code-only mode is active (extract only code blocks).
+    #[must_use]
+    pub fn is_code_only(&self) -> bool {
+        self.has_exclusive_filter() && self.only.contains(&ContentType::Code)
     }
 }
 

@@ -8,6 +8,8 @@ use std::time::SystemTime;
 use crate::cli::{Cli, ListArgs, ListTarget, OutputFormat, SortOrder};
 use crate::discovery::{Project, Session, SessionFilter};
 use crate::error::Result;
+use crate::model::LogEntry;
+use crate::parser::JsonlParser;
 use crate::tags::TagStore;
 use crate::util::pager::PagerWriter;
 
@@ -421,6 +423,13 @@ fn list_sessions<W: Write>(
                         writeln!(writer, "    Status: {}", state.description())?;
                     }
                 }
+
+                // Show context (first user prompt) if requested
+                if args.context {
+                    if let Some(context) = get_session_context(session, 100) {
+                        writeln!(writer, "    Context: \"{}\"", context)?;
+                    }
+                }
             }
         }
     }
@@ -435,6 +444,45 @@ fn short_id(id: &str) -> String {
     } else {
         id.to_string()
     }
+}
+
+/// Extract the first user prompt from a session (for context display).
+fn get_session_context(session: &Session, max_len: usize) -> Option<String> {
+    let mut parser = JsonlParser::new().with_lenient(true);
+    let entries = parser.parse_file(session.path()).ok()?;
+
+    // Find the first user message with text content
+    for entry in entries {
+        if let LogEntry::User(user_msg) = entry {
+            // Skip tool results - we want actual human input
+            if user_msg.message.has_tool_results() {
+                continue;
+            }
+
+            // Get text content
+            if let Some(text) = user_msg.message.as_text() {
+                // Clean up the text - remove excessive whitespace
+                let cleaned: String = text
+                    .lines()
+                    .map(|l| l.trim())
+                    .filter(|l| !l.is_empty())
+                    .take(3) // Take first 3 non-empty lines
+                    .collect::<Vec<_>>()
+                    .join(" ");
+
+                if cleaned.is_empty() {
+                    continue;
+                }
+
+                // Truncate to max length
+                if cleaned.len() > max_len {
+                    return Some(format!("{}...", &cleaned[..max_len]));
+                }
+                return Some(cleaned);
+            }
+        }
+    }
+    None
 }
 
 /// Project info for JSON output.

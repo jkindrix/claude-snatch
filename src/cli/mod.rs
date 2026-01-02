@@ -404,6 +404,10 @@ pub struct ListArgs {
     /// Maximum file size filter (e.g., "10MB", "100KB").
     #[arg(long)]
     pub max_size: Option<String>,
+
+    /// Show session context (first user prompt preview).
+    #[arg(short = 'c', long)]
+    pub context: bool,
 }
 
 /// What to list.
@@ -453,6 +457,8 @@ pub enum ContentFilter {
     System,
     /// Summary entries.
     Summary,
+    /// Code blocks only (extracted from assistant responses).
+    Code,
 }
 
 impl ContentFilter {
@@ -467,6 +473,7 @@ impl ContentFilter {
             Self::ToolResults => "tool results",
             Self::System => "system messages",
             Self::Summary => "summary entries",
+            Self::Code => "code blocks only",
         }
     }
 }
@@ -603,7 +610,7 @@ pub struct ExportArgs {
     pub dark: bool,
 
     /// Copy export to clipboard instead of writing to file/stdout.
-    #[arg(long)]
+    #[arg(long, visible_alias = "copy")]
     pub clipboard: bool,
 }
 
@@ -867,6 +874,14 @@ pub struct InfoArgs {
     /// Show file paths and locations.
     #[arg(long)]
     pub paths: bool,
+
+    /// Preview first N messages from the session.
+    #[arg(short = 'm', long)]
+    pub messages: Option<usize>,
+
+    /// Show files touched in this session (created, modified, read).
+    #[arg(long)]
+    pub files: bool,
 }
 
 /// Arguments for the TUI command.
@@ -1199,20 +1214,56 @@ pub struct TagArgs {
 /// Tag subcommand actions.
 #[derive(Debug, Subcommand)]
 pub enum TagAction {
-    /// Add a tag to a session.
+    /// Add a tag to a session (or multiple sessions with filters).
     Add {
-        /// Session ID (supports short prefixes like "780893e4").
-        session: String,
         /// Tag to add.
         tag: String,
+
+        /// Session ID (supports short prefixes). Optional when using filters.
+        #[arg(short = 's', long)]
+        session: Option<String>,
+
+        /// Tag all sessions modified since this date (e.g., "1week", "3days").
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Tag all sessions modified until this date.
+        #[arg(long)]
+        until: Option<String>,
+
+        /// Filter to specific project (substring match).
+        #[arg(short = 'p', long)]
+        project: Option<String>,
+
+        /// Preview what would be tagged without making changes.
+        #[arg(long)]
+        preview: bool,
     },
 
-    /// Remove a tag from a session.
+    /// Remove a tag from a session (or multiple sessions with filters).
     Remove {
-        /// Session ID (supports short prefixes like "780893e4").
-        session: String,
         /// Tag to remove.
         tag: String,
+
+        /// Session ID (supports short prefixes). Optional when using filters.
+        #[arg(short = 's', long)]
+        session: Option<String>,
+
+        /// Remove from all sessions modified since this date.
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Remove from all sessions modified until this date.
+        #[arg(long)]
+        until: Option<String>,
+
+        /// Filter to specific project (substring match).
+        #[arg(short = 'p', long)]
+        project: Option<String>,
+
+        /// Preview what would be untagged without making changes.
+        #[arg(long)]
+        preview: bool,
     },
 
     /// Set a human-readable name for a session.

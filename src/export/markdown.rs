@@ -278,8 +278,16 @@ impl MarkdownExporter {
     ) -> Result<()> {
         match content {
             ContentBlock::Text(text) => {
-                // Use should_include() directly for text content to respect exclusive filter
-                if options.should_include(ContentType::Assistant) {
+                // Handle code-only mode - extract code blocks instead of full text
+                if options.is_code_only() {
+                    for code_block in extract_code_blocks(&text.text) {
+                        writeln!(writer, "```{}", code_block.language.as_deref().unwrap_or(""))?;
+                        writeln!(writer, "{}", code_block.code)?;
+                        writeln!(writer, "```")?;
+                        writeln!(writer)?;
+                    }
+                } else if options.should_include(ContentType::Assistant) {
+                    // Use should_include() directly for text content to respect exclusive filter
                     writeln!(writer, "{}", text.text)?;
                     writeln!(writer)?;
                 }
@@ -735,6 +743,67 @@ fn format_stop_reason(reason: &StopReason) -> &'static str {
         StopReason::MaxTokens => "max_tokens",
         StopReason::StopSequence => "stop_sequence",
     }
+}
+
+/// Extracted code block from text.
+#[derive(Debug)]
+struct CodeBlock {
+    /// Programming language (if specified).
+    language: Option<String>,
+    /// The code content.
+    code: String,
+}
+
+/// Extract code blocks from markdown-formatted text.
+///
+/// Looks for fenced code blocks (``` or ~~~) and extracts them.
+fn extract_code_blocks(text: &str) -> Vec<CodeBlock> {
+    let mut blocks = Vec::new();
+    let mut in_block = false;
+    let mut current_language = None;
+    let mut current_code = String::new();
+    let mut fence_char = '`';
+
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+
+        // Check for code fence start/end
+        if !in_block {
+            if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+                in_block = true;
+                fence_char = trimmed.chars().next().unwrap();
+                // Extract language from opening fence
+                let fence_pattern = if fence_char == '`' { "```" } else { "~~~" };
+                let lang = trimmed.strip_prefix(fence_pattern).unwrap_or("").trim();
+                current_language = if lang.is_empty() {
+                    None
+                } else {
+                    Some(lang.to_string())
+                };
+                current_code = String::new();
+            }
+        } else {
+            // Check for closing fence
+            let closing = if fence_char == '`' { "```" } else { "~~~" };
+            if trimmed.starts_with(closing) {
+                // End of code block
+                blocks.push(CodeBlock {
+                    language: current_language.take(),
+                    code: current_code.trim_end().to_string(),
+                });
+                in_block = false;
+                current_code = String::new();
+            } else {
+                // Inside code block, preserve original line (not trimmed)
+                if !current_code.is_empty() {
+                    current_code.push('\n');
+                }
+                current_code.push_str(line);
+            }
+        }
+    }
+
+    blocks
 }
 
 #[cfg(test)]
