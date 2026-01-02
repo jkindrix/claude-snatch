@@ -50,6 +50,11 @@ impl Default for Theme {
     }
 }
 
+/// Theme implementation providing constructors and style accessors.
+///
+/// Some style methods (e.g., `warning_style`, `success_style`) are not yet
+/// used in the TUI but are intentionally provided for completeness and
+/// future UI enhancements.
 #[allow(dead_code)]
 impl Theme {
     /// Create the default dark theme.

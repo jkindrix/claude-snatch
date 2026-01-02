@@ -101,19 +101,24 @@ impl<'a> StatusBar<'a> {
 
     /// Render the status bar.
     pub fn render(self, f: &mut Frame, area: Rect) {
-        // Create status line with left and right content
-        let left_text: String = self.left.iter().map(|s| s.content.as_ref()).collect();
-        let right_text: String = self.right.iter().map(|s| s.content.as_ref()).collect();
+        // Calculate text lengths for padding (use saturating_sub to prevent underflow)
+        let left_len: usize = self.left.iter().map(|s| s.content.chars().count()).sum();
+        let right_len: usize = self.right.iter().map(|s| s.content.chars().count()).sum();
+        let available_width = area.width as usize;
 
-        let padding = area.width as usize - left_text.len() - right_text.len();
-        let padding_str = " ".repeat(padding.max(1));
+        // Calculate padding between left and right content
+        let padding = available_width
+            .saturating_sub(left_len)
+            .saturating_sub(right_len)
+            .max(1);
+        let padding_str = " ".repeat(padding);
 
-        let line = Line::from(vec![
-            Span::raw(left_text),
-            Span::raw(padding_str),
-            Span::styled(right_text, Style::default().fg(Color::DarkGray)),
-        ]);
+        // Build the line preserving original styling
+        let mut spans: Vec<Span> = self.left;
+        spans.push(Span::raw(padding_str));
+        spans.extend(self.right);
 
+        let line = Line::from(spans);
         let paragraph = Paragraph::new(vec![line])
             .style(Style::default().bg(Color::DarkGray).fg(Color::White));
 

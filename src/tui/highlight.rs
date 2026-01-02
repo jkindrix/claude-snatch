@@ -251,4 +251,40 @@ mod tests {
         // Should have: "Here is code:", code block header, code line, code block footer, "Done."
         assert!(lines.len() >= 5);
     }
+
+    #[test]
+    fn test_unclosed_code_block() {
+        let highlighter = SyntaxHighlighter::new();
+        let text = "Here is code:\n```rust\nlet x = 1;\nlet y = 2;";
+        let lines = highlighter.highlight_markdown_text(text);
+        // Should handle unclosed block: "Here is code:", code block header, 2 code lines, code block footer
+        assert!(lines.len() >= 5);
+        // First line should be "Here is code:"
+        assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn test_unclosed_inline_code() {
+        let line = SyntaxHighlighter::highlight_inline_code("This is `incomplete");
+        // Should have two spans: "This is " and "`incomplete" (styled)
+        assert_eq!(line.spans.len(), 2);
+    }
+
+    #[test]
+    fn test_empty_code_block() {
+        let highlighter = SyntaxHighlighter::new();
+        let text = "Before\n```\n```\nAfter";
+        let lines = highlighter.highlight_markdown_text(text);
+        // Should handle empty code block gracefully
+        assert!(lines.len() >= 2);
+    }
+
+    #[test]
+    fn test_nested_backticks_in_code_block() {
+        let highlighter = SyntaxHighlighter::new();
+        let text = "```rust\nlet s = \"`test`\";\n```";
+        let lines = highlighter.highlight_markdown_text(text);
+        // Should render without crashing
+        assert!(!lines.is_empty());
+    }
 }

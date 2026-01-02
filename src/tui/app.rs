@@ -27,11 +27,12 @@ use crate::error::{Result, SnatchError};
 
 use super::components::{ScrollableText, StatusBar};
 use super::events::{Event, EventHandler, KeyBindings};
-use super::state::AppState;
+use super::state::{AppState, StatusLevel, StatusMessage};
 use super::theme::available_themes;
 
 /// Total number of lines in the help overlay (used for scroll bounds).
-const HELP_LINE_COUNT: usize = 53;
+/// Keep in sync with actual lines in draw_help_overlay help_text vec.
+const HELP_LINE_COUNT: usize = 54;
 
 /// Run the TUI application.
 pub fn run(project: Option<&str>, session: Option<&str>) -> Result<()> {
@@ -70,6 +71,11 @@ pub fn run_with_options(
     // Create app state with optional theme
     let mut app = AppState::with_theme(theme)?;
     app.ascii_mode = ascii_mode;
+
+    // Set initial tree visible height from terminal size
+    if let Ok(size) = terminal.size() {
+        app.tree_visible_height = (size.height as usize).saturating_sub(5).max(1);
+    }
 
     // Load initial data
     if let Some(session_id) = session {
@@ -161,7 +167,7 @@ fn run_loop(
                         // Execute selected command
                         (KeyModifiers::NONE, KeyCode::Enter) => {
                             if let Err(e) = app.execute_selected_command() {
-                                app.status_message = Some(format!("Error: {e}"));
+                                app.status_message = Some(StatusMessage::error(format!("Error: {e}")));
                             }
                             continue;
                         }
@@ -273,9 +279,11 @@ fn run_loop(
                         // Scroll down
                         (KeyModifiers::NONE, KeyCode::Down)
                         | (KeyModifiers::NONE, KeyCode::Char('j')) => {
-                            // HELP_LINE_COUNT is the total number of lines in help text
-                            // We pass a reasonable visible height estimate
-                            app.help_scroll_down(HELP_LINE_COUNT, 30);
+                            // Calculate visible height: 70% of terminal height minus 2 for borders
+                            let visible_height = terminal.size()
+                                .map(|s| ((s.height as f32 * 0.70) as usize).saturating_sub(2))
+                                .unwrap_or(30);
+                            app.help_scroll_down(HELP_LINE_COUNT, visible_height);
                             continue;
                         }
                         // Page up
@@ -287,8 +295,11 @@ fn run_loop(
                         }
                         // Page down
                         (KeyModifiers::NONE, KeyCode::PageDown) => {
+                            let visible_height = terminal.size()
+                                .map(|s| ((s.height as f32 * 0.70) as usize).saturating_sub(2))
+                                .unwrap_or(30);
                             for _ in 0..10 {
-                                app.help_scroll_down(HELP_LINE_COUNT, 30);
+                                app.help_scroll_down(HELP_LINE_COUNT, visible_height);
                             }
                             continue;
                         }
@@ -299,7 +310,10 @@ fn run_loop(
                         }
                         // Scroll to bottom
                         (KeyModifiers::NONE, KeyCode::End) => {
-                            app.help_scroll = HELP_LINE_COUNT.saturating_sub(30);
+                            let visible_height = terminal.size()
+                                .map(|s| ((s.height as f32 * 0.70) as usize).saturating_sub(2))
+                                .unwrap_or(30);
+                            app.help_scroll = HELP_LINE_COUNT.saturating_sub(visible_height);
                             continue;
                         }
                         _ => continue,
@@ -322,6 +336,8 @@ fn run_loop(
                     let tree_height = terminal.size()
                         .map(|s| s.height.saturating_sub(5) as usize)
                         .unwrap_or(20);
+                    // Update stored height for consistent scroll calculations
+                    app.tree_visible_height = tree_height;
                     app.next(tree_height);
                     continue;
                 }
@@ -501,7 +517,7 @@ fn run_loop(
                             if app.toggle_session_selection() {
                                 let count = app.selected_session_count();
                                 if count > 0 {
-                                    app.status_message = Some(format!("{} session{} selected", count, if count == 1 { "" } else { "s" }));
+                                    app.status_message = Some(StatusMessage::info(format!("{} session{} selected", count, if count == 1 { "" } else { "s" })));
                                 } else {
                                     app.status_message = None;
                                 }
@@ -521,7 +537,7 @@ fn run_loop(
                         if app.focus == 0 && app.current_project.is_some() {
                             app.select_all_sessions();
                             let count = app.selected_session_count();
-                            app.status_message = Some(format!("{} session{} selected", count, if count == 1 { "" } else { "s" }));
+                            app.status_message = Some(StatusMessage::info(format!("{} session{} selected", count, if count == 1 { "" } else { "s" })));
                         }
                     }
 
@@ -529,10 +545,10 @@ fn run_loop(
                     (KeyModifiers::NONE, KeyCode::Esc) => {
                         if app.has_selection() {
                             app.clear_selection();
-                            app.status_message = Some("Selection cleared".to_string());
+                            app.status_message = Some(StatusMessage::info("Selection cleared"));
                         } else if app.selected_session_count() > 0 {
                             app.clear_session_selection();
-                            app.status_message = Some("Session selection cleared".to_string());
+                            app.status_message = Some(StatusMessage::info("Session selection cleared"));
                         }
                     }
 
@@ -542,23 +558,33 @@ fn run_loop(
             Ok(Event::Tick) => {
                 // Tick event - could be used for animations or updates
             }
-            Ok(Event::Resize(_, _)) => {
-                // Terminal resize is handled automatically by ratatui
+            Ok(Event::Resize(_, height)) => {
+                // Update tree visible height on resize
+                // Tree panel height = terminal height - status bar (3 lines) - borders (2)
+                app.tree_visible_height = (height as usize).saturating_sub(5).max(1);
             }
             Ok(Event::Mouse(mouse)) => {
                 // Handle mouse events
                 match mouse.kind {
                     MouseEventKind::ScrollUp => {
+                        // Clear selection on scroll since it invalidates character positions
+                        if app.has_selection() {
+                            app.clear_selection();
+                        }
                         app.scroll_up(3);
                     }
                     MouseEventKind::ScrollDown => {
+                        // Clear selection on scroll since it invalidates character positions
+                        if app.has_selection() {
+                            app.clear_selection();
+                        }
                         app.scroll_down(3);
                     }
                     MouseEventKind::Down(MouseButton::Left) => {
-                        // Check for double-click (within 500ms at same position)
+                        // Check for double-click (within configured timeout at same position)
                         let now = std::time::Instant::now();
                         let is_double_click = app.last_click_time
-                            .map(|t| now.duration_since(t).as_millis() < 500)
+                            .map(|t| now.duration_since(t).as_millis() < app.double_click_timeout_ms)
                             .unwrap_or(false)
                             && app.last_click_pos == (mouse.column, mouse.row);
 
@@ -575,8 +601,16 @@ fn run_loop(
                         let conversation_width = terminal_width / 2;  // 50%
                         let conversation_end = tree_width + conversation_width;  // 75%
 
-                        // Status bar takes 3 lines at bottom
-                        let main_height = terminal_height.saturating_sub(3);
+                        // Calculate main content height (accounts for search bar and status bar)
+                        // Layout: main content + search bar (3 if active, 0 otherwise) + status bar (1)
+                        let search_height: u16 = if app.is_searching() { 3 } else { 0 };
+                        let bottom_reserved = search_height + 1; // search bar + status bar
+                        let main_height = terminal_height.saturating_sub(bottom_reserved);
+
+                        // Ignore clicks in search bar or status bar area
+                        if mouse.row >= main_height {
+                            continue;
+                        }
 
                         // Clear any existing selection on new click
                         app.clear_selection();
@@ -753,8 +787,10 @@ fn draw_tree_panel(f: &mut Frame, app: &AppState, area: Rect) {
             let style = if is_cursor {
                 app.theme.selection_style()
             } else if is_selected {
-                // Selected but not cursor - show with different style
-                Style::default().fg(app.theme.success)
+                // Selected but not cursor - show with green foreground and subtle background
+                Style::default()
+                    .fg(app.theme.success)
+                    .bg(Color::Rgb(20, 40, 20)) // Subtle dark green background
             } else {
                 Style::default()
             };
@@ -787,21 +823,21 @@ fn draw_conversation_panel(f: &mut Frame, app: &AppState, area: Rect) {
         " Conversation ".to_string()
     };
 
+    // Calculate visible height (excluding borders), using saturating_sub to prevent underflow
+    let visible_height = (area.height as usize).saturating_sub(2);
+
     let content = if app.conversation_lines.is_empty() {
         vec![Line::from("Select a session to view")]
     } else if app.show_line_numbers {
-        // Add line numbers to each line
-        let total_lines = app.conversation_lines.len();
-        let line_number_width = total_lines.to_string().len();
-
+        // Add line numbers to each line using cached width
         app.conversation_lines
             .iter()
             .enumerate()
             .skip(app.scroll_offset)
-            .take(area.height as usize - 2)
+            .take(visible_height)
             .map(|(i, line)| {
                 // Create line number span with dimmed style
-                let line_num = format!("{:>width$}│ ", i + 1, width = line_number_width);
+                let line_num = format!("{:>width$}│ ", i + 1, width = app.line_number_width);
                 let mut spans = vec![Span::styled(
                     line_num,
                     Style::default().fg(app.theme.secondary).add_modifier(Modifier::DIM),
@@ -815,7 +851,7 @@ fn draw_conversation_panel(f: &mut Frame, app: &AppState, area: Rect) {
         app.conversation_lines
             .iter()
             .skip(app.scroll_offset)
-            .take(area.height as usize - 2)
+            .take(visible_height)
             .cloned()
             .collect()
     };
@@ -889,11 +925,17 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
             Span::raw(format!(" ({}, Enter to confirm, Esc to cancel)", hint)),
         ]
     } else if let Some(ref msg) = app.status_message {
-        // Show status message if present
+        // Show status message with severity-appropriate color
+        let msg_color = match msg.level {
+            StatusLevel::Success => app.theme.success,
+            StatusLevel::Error => app.theme.error,
+            StatusLevel::Warning => app.theme.warning,
+            StatusLevel::Info => app.theme.secondary,
+        };
         vec![
             Span::styled(" snatch ", Style::default().fg(app.theme.primary).add_modifier(Modifier::BOLD)),
             Span::raw("│ "),
-            Span::styled(msg.as_str(), Style::default().fg(app.theme.success)),
+            Span::styled(msg.text.as_str(), Style::default().fg(msg_color)),
         ]
     } else {
         vec![
@@ -964,16 +1006,25 @@ fn draw_help_overlay(f: &mut Frame, app: &AppState) {
     // Calculate visible height (area height minus borders)
     let visible_height = area.height.saturating_sub(2) as usize;
 
-    let help_text = vec![
+    // Get key bindings for dynamic help text generation
+    let bindings = KeyBindings::default();
+    let nav_help = bindings.navigation_help();
+    let quit_help = bindings.quit_help();
+
+    // Build help text with dynamic navigation section
+    let mut help_text = vec![
         Line::from(Span::styled("Keyboard Shortcuts", Style::default().add_modifier(Modifier::BOLD))),
         Line::from(""),
         Line::from("Navigation:"),
-        Line::from("  j/↓       Move down"),
-        Line::from("  k/↑       Move up"),
-        Line::from("  h/←       Focus left panel"),
-        Line::from("  l/→       Focus right panel"),
-        Line::from("  Enter     Select/expand"),
-        Line::from("  Esc       Go back/close help"),
+    ];
+
+    // Add dynamically generated navigation bindings
+    for line in nav_help {
+        help_text.push(Line::from(line));
+    }
+
+    // Add remaining sections (hardcoded until their bindings become customizable)
+    help_text.extend(vec![
         Line::from(""),
         Line::from("Panels:"),
         Line::from("  1         Focus tree panel"),
@@ -1005,7 +1056,9 @@ fn draw_help_overlay(f: &mut Frame, app: &AppState) {
         Line::from("  F         Cycle message type filter (next)"),
         Line::from("  B         Cycle message type filter (prev)"),
         Line::from("  E         Toggle errors-only filter"),
-        Line::from("  M         Filter by model (e.g., sonnet, opus)"),
+        Line::from("  M         Filter by model (partial, case-insensitive)"),
+        Line::from("              e.g., 'sonnet', 'opus', 'haiku'"),
+        Line::from("              (shows only assistant messages with matching model)"),
         Line::from("  [         Set date-from filter (YYYY-MM-DD)"),
         Line::from("  ]         Set date-to filter (YYYY-MM-DD)"),
         Line::from("  X         Clear all filters"),
@@ -1015,9 +1068,9 @@ fn draw_help_overlay(f: &mut Frame, app: &AppState) {
         Line::from("  y         Yank (copy) selection to clipboard"),
         Line::from("  Esc       Clear selection"),
         Line::from(""),
-        Line::from("  q         Quit"),
+        Line::from(quit_help),
         Line::from("  ?         Toggle help"),
-    ];
+    ]);
 
     let total_lines = help_text.len();
     let scroll = app.help_scroll.min(total_lines.saturating_sub(visible_height));
@@ -1131,24 +1184,43 @@ fn render_selection_overlay(f: &mut Frame, app: &AppState, area: Rect, panel: us
         return;
     };
 
+    // Calculate content area (inside the border)
+    // Panels have a 1-char border on all sides
+    let content_x_start = area.x + 1;
+    let content_x_end = area.x + area.width.saturating_sub(2);
+    let content_y_start = area.y + 1;
+    let content_y_end = area.y + area.height.saturating_sub(2);
+
     // Get buffer for direct cell modification
     let buf = f.buffer_mut();
     let style = selection_style();
 
     // Iterate through selection range and highlight cells
     for row in start_row..=end_row {
-        // Skip rows outside the area
-        if row < area.y || row >= area.y + area.height {
+        // Skip rows outside the content area (not in border)
+        if row < content_y_start || row > content_y_end {
             continue;
         }
 
         // Determine column range for this row
-        let col_start = if row == start_row { start_col } else { area.x };
-        let col_end = if row == end_row { end_col } else { area.x + area.width.saturating_sub(1) };
+        // For first line: from start_col to end of content
+        // For middle lines: full content width
+        // For last line: from content start to end_col
+        let col_start = if row == start_row {
+            start_col.max(content_x_start)
+        } else {
+            content_x_start
+        };
+        let col_end = if row == end_row {
+            end_col.min(content_x_end)
+        } else {
+            content_x_end
+        };
 
-        // Clamp to area bounds
-        let col_start = col_start.max(area.x);
-        let col_end = col_end.min(area.x + area.width.saturating_sub(1));
+        // Ensure valid range
+        if col_start > col_end {
+            continue;
+        }
 
         for col in col_start..=col_end {
             // Ensure we're within buffer bounds

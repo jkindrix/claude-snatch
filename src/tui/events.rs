@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use crossterm::event::{self, Event as CrosstermEvent, KeyEvent, MouseEvent};
+use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 
 /// Application events.
 #[allow(dead_code)]
@@ -172,6 +172,70 @@ impl KeyBindings {
     /// Check if a key matches back binding.
     pub fn is_back(&self, key: &KeyEvent) -> bool {
         self.back.iter().any(|k| k.code == key.code && k.modifiers == key.modifiers)
+    }
+
+    /// Format a key event for display in help text.
+    fn format_key(key: &KeyEvent) -> String {
+        let mut parts = Vec::new();
+
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            parts.push("Ctrl+");
+        }
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            parts.push("Alt+");
+        }
+        if key.modifiers.contains(KeyModifiers::SHIFT) {
+            parts.push("Shift+");
+        }
+
+        let key_str = match key.code {
+            KeyCode::Char(c) => c.to_string(),
+            KeyCode::Enter => "Enter".to_string(),
+            KeyCode::Esc => "Esc".to_string(),
+            KeyCode::Up => "↑".to_string(),
+            KeyCode::Down => "↓".to_string(),
+            KeyCode::Left => "←".to_string(),
+            KeyCode::Right => "→".to_string(),
+            KeyCode::Tab => "Tab".to_string(),
+            KeyCode::Backspace => "Backspace".to_string(),
+            KeyCode::Delete => "Delete".to_string(),
+            KeyCode::Home => "Home".to_string(),
+            KeyCode::End => "End".to_string(),
+            KeyCode::PageUp => "PageUp".to_string(),
+            KeyCode::PageDown => "PageDown".to_string(),
+            KeyCode::F(n) => format!("F{n}"),
+            _ => "?".to_string(),
+        };
+
+        format!("{}{}", parts.join(""), key_str)
+    }
+
+    /// Format a list of key bindings as a combined string.
+    fn format_keys(keys: &[KeyEvent]) -> String {
+        keys.iter()
+            .map(Self::format_key)
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    /// Get formatted navigation help lines.
+    /// Returns lines like "  j/↓       Move down"
+    #[must_use]
+    pub fn navigation_help(&self) -> Vec<String> {
+        vec![
+            format!("  {:10} Move down", Self::format_keys(&self.down)),
+            format!("  {:10} Move up", Self::format_keys(&self.up)),
+            format!("  {:10} Focus left panel", Self::format_keys(&self.left)),
+            format!("  {:10} Focus right panel", Self::format_keys(&self.right)),
+            format!("  {:10} Select/expand", Self::format_keys(&self.select)),
+            format!("  {:10} Go back/close help", Self::format_keys(&self.back)),
+        ]
+    }
+
+    /// Get formatted quit help line.
+    #[must_use]
+    pub fn quit_help(&self) -> String {
+        format!("  {:10} Quit", Self::format_keys(&self.quit))
     }
 }
 

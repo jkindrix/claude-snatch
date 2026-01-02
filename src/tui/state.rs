@@ -299,22 +299,43 @@ impl FilterState {
     }
 
     /// Confirm date input and apply filter.
+    ///
+    /// Returns true if the date was valid and applied, false if parsing failed
+    /// or if the date range would be invalid (from > to).
     fn confirm_date_input(&mut self) -> bool {
         use chrono::NaiveDate;
 
         // Try to parse the date
-        if let Ok(date) = NaiveDate::parse_from_str(&self.input_buffer, "%Y-%m-%d") {
-            match self.input_mode {
-                InputMode::DateFrom => self.date_from = Some(date),
-                InputMode::DateTo => self.date_to = Some(date),
-                _ => {}
+        let Ok(date) = NaiveDate::parse_from_str(&self.input_buffer, "%Y-%m-%d") else {
+            return false;
+        };
+
+        // Validate date range consistency
+        match self.input_mode {
+            InputMode::DateFrom => {
+                // Check that new from date is not after existing to date
+                if let Some(to) = self.date_to {
+                    if date > to {
+                        return false;
+                    }
+                }
+                self.date_from = Some(date);
             }
-            self.input_mode = InputMode::None;
-            self.input_buffer.clear();
-            true
-        } else {
-            false
+            InputMode::DateTo => {
+                // Check that new to date is not before existing from date
+                if let Some(from) = self.date_from {
+                    if date < from {
+                        return false;
+                    }
+                }
+                self.date_to = Some(date);
+            }
+            _ => {}
         }
+
+        self.input_mode = InputMode::None;
+        self.input_buffer.clear();
+        true
     }
 
     /// Confirm model input and apply filter.
@@ -831,6 +852,66 @@ impl CommandPalette {
     }
 }
 
+/// Status message severity level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusLevel {
+    /// Successful operation (green).
+    Success,
+    /// Error condition (red).
+    Error,
+    /// Informational message (cyan/default).
+    Info,
+    /// Warning message (yellow).
+    Warning,
+}
+
+/// Status message with severity level.
+#[derive(Debug, Clone)]
+pub struct StatusMessage {
+    /// The message text.
+    pub text: String,
+    /// Severity level for coloring.
+    pub level: StatusLevel,
+}
+
+impl StatusMessage {
+    /// Create a success message.
+    #[must_use]
+    pub fn success(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            level: StatusLevel::Success,
+        }
+    }
+
+    /// Create an error message.
+    #[must_use]
+    pub fn error(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            level: StatusLevel::Error,
+        }
+    }
+
+    /// Create an info message.
+    #[must_use]
+    pub fn info(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            level: StatusLevel::Info,
+        }
+    }
+
+    /// Create a warning message.
+    #[must_use]
+    pub fn warning(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            level: StatusLevel::Warning,
+        }
+    }
+}
+
 /// Application state.
 pub struct AppState {
     /// Claude directory.
@@ -849,6 +930,12 @@ pub struct AppState {
     pub tree_selected: Option<usize>,
     /// Conversation display lines.
     pub conversation_lines: Vec<Line<'static>>,
+    /// Cached plain text of conversation lines for efficient searching.
+    /// Updated when conversation_lines changes.
+    conversation_plain_text: Vec<String>,
+    /// Cached width of line numbers (digits needed for largest line number).
+    /// Updated when conversation_lines changes.
+    pub line_number_width: usize,
     /// Details panel lines.
     pub details_lines: Vec<Line<'static>>,
     /// Scroll offset for conversation.
@@ -857,10 +944,15 @@ pub struct AppState {
     pub details_scroll: usize,
     /// Scroll offset for tree panel.
     pub tree_scroll: usize,
+    /// Visible height of tree panel (updated during render).
+    /// Used for consistent scroll calculations.
+    pub tree_visible_height: usize,
     /// Last mouse click time for double-click detection.
     pub last_click_time: Option<std::time::Instant>,
     /// Last mouse click position (column, row) for double-click detection.
     pub last_click_pos: (u16, u16),
+    /// Double-click timeout in milliseconds.
+    pub double_click_timeout_ms: u128,
     /// Whether user is currently dragging to select text.
     pub is_selecting: bool,
     /// Panel where selection started (0=tree, 1=conversation, 2=details).
@@ -895,8 +987,13 @@ pub struct AppState {
     pub filter_state: FilterState,
     /// Syntax highlighter for code blocks.
     highlighter: SyntaxHighlighter,
-    /// Status message to display.
-    pub status_message: Option<String>,
+    /// Cached highlighted lines per entry index.
+    /// Invalidated when entries, show_thinking, or show_tools change.
+    entry_display_cache: Vec<Vec<Line<'static>>>,
+    /// Display settings at cache build time (for invalidation check).
+    cache_settings: (bool, bool), // (show_thinking, show_tools)
+    /// Status message to display with severity level.
+    pub status_message: Option<StatusMessage>,
     /// Mapping from tree item index to session ID (for session view).
     tree_session_ids: Vec<String>,
     /// Set of selected session IDs (for multi-select export).
@@ -948,12 +1045,16 @@ impl AppState {
             tree_items,
             tree_selected,
             conversation_lines: Vec::new(),
+            conversation_plain_text: Vec::new(),
+            line_number_width: 1, // Minimum width for empty or single-line
             details_lines: Vec::new(),
             scroll_offset: 0,
             details_scroll: 0,
             tree_scroll: 0,
+            tree_visible_height: 20, // Default, updated during render
             last_click_time: None,
             last_click_pos: (0, 0),
+            double_click_timeout_ms: 500,
             is_selecting: false,
             selection_panel: None,
             selection_start: None,
@@ -971,6 +1072,8 @@ impl AppState {
             export_dialog: ExportDialogState::default(),
             filter_state: FilterState::default(),
             highlighter: SyntaxHighlighter::new(),
+            entry_display_cache: Vec::new(),
+            cache_settings: (true, true), // matches show_thinking, show_tools defaults
             status_message: None,
             tree_session_ids: Vec::new(),
             selected_sessions: HashSet::new(),
@@ -1148,7 +1251,10 @@ impl AppState {
         if self.current_session.is_some() {
             self.current_session = None;
             self.conversation_lines.clear();
+            self.conversation_plain_text.clear();
+            self.line_number_width = 1;
             self.entries.clear();
+            self.entry_display_cache.clear();
         } else if self.current_project.is_some() {
             self.current_project = None;
             self.tree_items = self.projects
@@ -1190,9 +1296,9 @@ impl AppState {
 
     /// Scroll down in the currently focused panel.
     ///
-    /// Uses a default visible height of 20 for the tree panel.
+    /// Uses the stored tree_visible_height for the tree panel.
     pub fn scroll_down(&mut self, amount: usize) {
-        self.scroll_down_with_height(amount, 20);
+        self.scroll_down_with_height(amount, self.tree_visible_height);
     }
 
     /// Scroll down in the currently focused panel with explicit visible height.
@@ -1263,9 +1369,9 @@ impl AppState {
                 if !self.tree_items.is_empty() {
                     let last_idx = self.tree_items.len() - 1;
                     self.tree_selected = Some(last_idx);
-                    // Scroll so last item is visible (use default height of 20)
-                    if last_idx >= 20 {
-                        self.tree_scroll = last_idx.saturating_sub(19);
+                    // Scroll so last item is visible using stored visible height
+                    if last_idx >= self.tree_visible_height {
+                        self.tree_scroll = last_idx.saturating_sub(self.tree_visible_height - 1);
                     }
                 }
             }
@@ -1280,15 +1386,24 @@ impl AppState {
     }
 
     /// Scroll to a specific line number.
+    /// Adds a margin of context lines above the target when possible.
     pub fn scroll_to_line(&mut self, line: usize) {
+        self.scroll_to_line_with_margin(line, 3);
+    }
+
+    /// Scroll to a specific line number with a custom margin.
+    /// The margin specifies how many context lines to show above the target.
+    pub fn scroll_to_line_with_margin(&mut self, line: usize, margin: usize) {
         if self.conversation_lines.is_empty() {
             return;
         }
         // Line numbers are 1-based for users, but 0-based internally
         let target = line.saturating_sub(1);
         let max = self.conversation_lines.len().saturating_sub(1);
-        self.scroll_offset = target.min(max);
-        self.status_message = Some(format!("Jumped to line {}", line));
+        // Show margin lines of context above the target when possible
+        let scroll_target = target.saturating_sub(margin);
+        self.scroll_offset = scroll_target.min(max);
+        self.status_message = Some(StatusMessage::success(format!("Jumped to line {}", line)));
     }
 
     /// Start go-to-line input mode.
@@ -1303,7 +1418,7 @@ impl AppState {
             if line > 0 {
                 self.scroll_to_line(line);
             } else {
-                self.status_message = Some("Invalid line number".to_string());
+                self.status_message = Some(StatusMessage::error("Invalid line number"));
             }
         }
         self.filter_state.input_mode = InputMode::None;
@@ -1339,16 +1454,18 @@ impl AppState {
     /// Move to next search result.
     pub fn search_next(&mut self) {
         self.search_state.next_result();
-        if let Some(line) = self.search_state.current_line() {
-            self.scroll_to_line(line);
+        if let Some(line_idx) = self.search_state.current_line() {
+            // Convert 0-based index to 1-based line number for scroll_to_line
+            self.scroll_to_line(line_idx + 1);
         }
     }
 
     /// Move to previous search result.
     pub fn search_prev(&mut self) {
         self.search_state.prev_result();
-        if let Some(line) = self.search_state.current_line() {
-            self.scroll_to_line(line);
+        if let Some(line_idx) = self.search_state.current_line() {
+            // Convert 0-based index to 1-based line number for scroll_to_line
+            self.scroll_to_line(line_idx + 1);
         }
     }
 
@@ -1367,12 +1484,11 @@ impl AppState {
             self.search_state.query.clone()
         };
 
-        for (i, line) in self.conversation_lines.iter().enumerate() {
-            let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        for (i, line_text) in self.conversation_plain_text.iter().enumerate() {
             let line_to_search = if self.search_state.case_insensitive {
                 line_text.to_lowercase()
             } else {
-                line_text
+                line_text.clone()
             };
 
             if line_to_search.contains(&query) {
@@ -1381,8 +1497,9 @@ impl AppState {
         }
 
         // Jump to first result
-        if let Some(line) = self.search_state.current_line() {
-            self.scroll_to_line(line);
+        if let Some(line_idx) = self.search_state.current_line() {
+            // Convert 0-based index to 1-based line number for scroll_to_line
+            self.scroll_to_line(line_idx + 1);
         }
     }
 
@@ -1740,9 +1857,9 @@ impl AppState {
     pub fn toggle_word_wrap(&mut self) {
         self.word_wrap = !self.word_wrap;
         if self.word_wrap {
-            self.status_message = Some("Word wrap: ON".to_string());
+            self.status_message = Some(StatusMessage::info("Word wrap: ON"));
         } else {
-            self.status_message = Some("Word wrap: OFF".to_string());
+            self.status_message = Some(StatusMessage::info("Word wrap: OFF"));
         }
     }
 
@@ -1750,9 +1867,9 @@ impl AppState {
     pub fn toggle_line_numbers(&mut self) {
         self.show_line_numbers = !self.show_line_numbers;
         if self.show_line_numbers {
-            self.status_message = Some("Line numbers: ON".to_string());
+            self.status_message = Some(StatusMessage::info("Line numbers: ON"));
         } else {
-            self.status_message = Some("Line numbers: OFF".to_string());
+            self.status_message = Some(StatusMessage::info("Line numbers: OFF"));
         }
         self.update_conversation_display();
     }
@@ -1761,11 +1878,11 @@ impl AppState {
     pub fn toggle_focus_mode(&mut self) {
         self.focus_mode = !self.focus_mode;
         if self.focus_mode {
-            self.status_message = Some("Focus mode: ON (z to exit)".to_string());
+            self.status_message = Some(StatusMessage::info("Focus mode: ON (z to exit)"));
             // When entering focus mode, ensure conversation panel is focused
             self.focus = 1;
         } else {
-            self.status_message = Some("Focus mode: OFF".to_string());
+            self.status_message = Some(StatusMessage::info("Focus mode: OFF"));
         }
     }
 
@@ -1773,59 +1890,59 @@ impl AppState {
     pub fn toggle_filter(&mut self) {
         self.filter_state.active = !self.filter_state.active;
         if self.filter_state.active {
-            self.status_message = Some(format!("Filter: {}", self.filter_state.summary()));
+            self.status_message = Some(StatusMessage::info(format!("Filter: {}", self.filter_state.summary())));
         } else {
-            self.status_message = Some("Filter panel closed".to_string());
+            self.status_message = Some(StatusMessage::info("Filter panel closed"));
         }
     }
 
     /// Cycle through message type filters (forward).
     pub fn cycle_message_filter(&mut self) {
         self.filter_state.message_type.next();
-        self.status_message = Some(format!("Filter: {}", self.filter_state.message_type.display_name()));
+        self.status_message = Some(StatusMessage::info(format!("Filter: {}", self.filter_state.message_type.display_name())));
         self.update_conversation_display();
     }
 
     /// Cycle through message type filters (backward).
     pub fn reverse_cycle_message_filter(&mut self) {
         self.filter_state.message_type.prev();
-        self.status_message = Some(format!("Filter: {}", self.filter_state.message_type.display_name()));
+        self.status_message = Some(StatusMessage::info(format!("Filter: {}", self.filter_state.message_type.display_name())));
         self.update_conversation_display();
     }
 
     /// Toggle errors-only filter.
     pub fn toggle_errors_filter(&mut self) {
         self.filter_state.errors_only = !self.filter_state.errors_only;
-        self.status_message = Some(format!(
+        self.status_message = Some(StatusMessage::info(format!(
             "Errors only: {}",
             if self.filter_state.errors_only { "ON" } else { "OFF" }
-        ));
+        )));
         self.update_conversation_display();
     }
 
     /// Clear all filters.
     pub fn clear_filters(&mut self) {
         self.filter_state.clear();
-        self.status_message = Some("Filters cleared".to_string());
+        self.status_message = Some(StatusMessage::info("Filters cleared"));
         self.update_conversation_display();
     }
 
     /// Start entering date-from filter.
     pub fn start_date_from_input(&mut self) {
         self.filter_state.start_date_input(InputMode::DateFrom);
-        self.status_message = Some("Enter start date (YYYY-MM-DD):".to_string());
+        self.status_message = Some(StatusMessage::info("Enter start date (YYYY-MM-DD):"));
     }
 
     /// Start entering date-to filter.
     pub fn start_date_to_input(&mut self) {
         self.filter_state.start_date_input(InputMode::DateTo);
-        self.status_message = Some("Enter end date (YYYY-MM-DD):".to_string());
+        self.status_message = Some(StatusMessage::info("Enter end date (YYYY-MM-DD):"));
     }
 
     /// Start entering model filter.
     pub fn start_model_input(&mut self) {
         self.filter_state.start_model_input();
-        self.status_message = Some("Enter model filter (e.g., 'sonnet', 'opus'):".to_string());
+        self.status_message = Some(StatusMessage::info("Enter model filter (e.g., 'sonnet', 'opus'):"));
     }
 
     /// Handle character input during filter entry.
@@ -1849,17 +1966,18 @@ impl AppState {
         }
 
         if self.filter_state.confirm_input() {
-            self.status_message = Some(format!("Filter: {}", self.filter_state.summary()));
+            self.status_message = Some(StatusMessage::info(format!("Filter: {}", self.filter_state.summary())));
             self.update_conversation_display();
         } else if matches!(mode, InputMode::DateFrom | InputMode::DateTo) {
-            self.status_message = Some("Invalid date format. Use YYYY-MM-DD".to_string());
+            // Error could be invalid format or invalid range (from > to)
+            self.status_message = Some(StatusMessage::error("Invalid date. Use YYYY-MM-DD and ensure 'from' ≤ 'to'"));
         }
     }
 
     /// Cancel filter input.
     pub fn cancel_filter_input(&mut self) {
         self.filter_state.cancel_input();
-        self.status_message = Some("Input cancelled".to_string());
+        self.status_message = Some(StatusMessage::info("Input cancelled"));
     }
 
     /// Check if currently entering any filter input.
@@ -1898,7 +2016,7 @@ impl AppState {
     /// Clear the model filter.
     pub fn clear_model_filter(&mut self) {
         self.filter_state.clear_model_filter();
-        self.status_message = Some("Model filter cleared".to_string());
+        self.status_message = Some(StatusMessage::info("Model filter cleared"));
         self.update_conversation_display();
     }
 
@@ -1924,21 +2042,21 @@ impl AppState {
     pub fn copy_message(&mut self) -> Result<()> {
         let text = self.get_current_message_text();
         if text.is_empty() {
-            self.status_message = Some("No message to copy".to_string());
+            self.status_message = Some(StatusMessage::warning("No message to copy"));
             return Ok(());
         }
 
         match arboard::Clipboard::new() {
             Ok(mut clipboard) => {
                 if let Err(e) = clipboard.set_text(&text) {
-                    self.status_message = Some(format!("Clipboard error: {e}"));
+                    self.status_message = Some(StatusMessage::error(format!("Clipboard error: {e}")));
                 } else {
                     let len = text.len();
-                    self.status_message = Some(format!("Copied {len} characters to clipboard"));
+                    self.status_message = Some(StatusMessage::success(format!("Copied {len} characters to clipboard")));
                 }
             }
             Err(e) => {
-                self.status_message = Some(format!("Clipboard not available: {e}"));
+                self.status_message = Some(StatusMessage::error(format!("Clipboard not available: {e}")));
             }
         }
         Ok(())
@@ -1970,7 +2088,7 @@ impl AppState {
         let code_blocks = self.extract_code_blocks();
 
         if code_blocks.is_empty() {
-            self.status_message = Some("No code blocks found".to_string());
+            self.status_message = Some(StatusMessage::warning("No code blocks found"));
             return Ok(());
         }
 
@@ -1980,14 +2098,14 @@ impl AppState {
         match arboard::Clipboard::new() {
             Ok(mut clipboard) => {
                 if let Err(e) = clipboard.set_text(text) {
-                    self.status_message = Some(format!("Clipboard error: {e}"));
+                    self.status_message = Some(StatusMessage::error(format!("Clipboard error: {e}")));
                 } else {
                     let lines = text.lines().count();
-                    self.status_message = Some(format!("Copied code block ({lines} lines)"));
+                    self.status_message = Some(StatusMessage::success(format!("Copied code block ({lines} lines)")));
                 }
             }
             Err(e) => {
-                self.status_message = Some(format!("Clipboard not available: {e}"));
+                self.status_message = Some(StatusMessage::error(format!("Clipboard not available: {e}")));
             }
         }
         Ok(())
@@ -2026,7 +2144,7 @@ impl AppState {
     /// Open current conversation in external editor.
     pub fn open_in_editor(&mut self) -> Result<()> {
         if self.current_session.is_none() {
-            self.status_message = Some("No session selected".to_string());
+            self.status_message = Some(StatusMessage::warning("No session selected"));
             return Ok(());
         }
 
@@ -2045,7 +2163,7 @@ impl AppState {
         // Create a temporary file with the conversation content
         let content = self.get_current_message_text();
         if content.is_empty() {
-            self.status_message = Some("No content to edit".to_string());
+            self.status_message = Some(StatusMessage::warning("No content to edit"));
             return Ok(());
         }
 
@@ -2073,13 +2191,13 @@ impl AppState {
         match status {
             Ok(exit_status) => {
                 if exit_status.success() {
-                    self.status_message = Some(format!("Editor closed ({})", editor));
+                    self.status_message = Some(StatusMessage::success(format!("Editor closed ({})", editor)));
                 } else {
-                    self.status_message = Some(format!("Editor exited with code: {:?}", exit_status.code()));
+                    self.status_message = Some(StatusMessage::warning(format!("Editor exited with code: {:?}", exit_status.code())));
                 }
             }
             Err(e) => {
-                self.status_message = Some(format!("Failed to open editor '{}': {}", editor, e));
+                self.status_message = Some(StatusMessage::error(format!("Failed to open editor '{}': {}", editor, e)));
             }
         }
 
@@ -2097,7 +2215,7 @@ impl AppState {
         let session_id = match &self.current_session {
             Some(id) => id.clone(),
             None => {
-                self.status_message = Some("No session selected".to_string());
+                self.status_message = Some(StatusMessage::warning("No session selected"));
                 return Ok(());
             }
         };
@@ -2121,10 +2239,10 @@ impl AppState {
                 std::thread::spawn(move || {
                     let _ = child.wait();
                 });
-                self.status_message = Some(format!("Launched Claude Code for session {}", &session_id[..8.min(session_id.len())]));
+                self.status_message = Some(StatusMessage::success(format!("Launched Claude Code for session {}", &session_id[..8.min(session_id.len())])));
             }
             Err(e) => {
-                self.status_message = Some(format!("Failed to launch Claude Code: {}. Is it installed?", e));
+                self.status_message = Some(StatusMessage::error(format!("Failed to launch Claude Code: {}. Is it installed?", e)));
             }
         }
 
@@ -2180,6 +2298,12 @@ impl AppState {
     fn load_session(&mut self, session: &Session) -> Result<()> {
         self.current_session = Some(session.session_id().to_string());
         self.entries = session.parse()?;
+
+        // Reset session-specific state
+        self.filter_state.clear();
+        self.search_state.clear();
+        self.clear_selection();
+        self.status_message = None;
 
         // Build conversation
         let conversation = Conversation::from_entries(self.entries.clone())?;
@@ -2313,73 +2437,109 @@ impl AppState {
     }
 
     /// Update conversation display based on current settings.
+    /// Uses caching to avoid expensive re-highlighting when only filters change.
     fn update_conversation_display(&mut self) {
-        self.conversation_lines.clear();
+        // Check if cache needs rebuilding:
+        // - Entry count changed (new session loaded)
+        // - Display settings (show_thinking, show_tools) changed
+        let current_settings = (self.show_thinking, self.show_tools);
+        let cache_invalid = self.entry_display_cache.len() != self.entries.len()
+            || self.cache_settings != current_settings;
 
-        for entry in &self.entries {
-            // Apply message type filter
+        if cache_invalid {
+            self.rebuild_entry_display_cache();
+            self.cache_settings = current_settings;
+        }
+
+        // Apply filters to cached entries
+        self.conversation_lines.clear();
+        for (idx, entry) in self.entries.iter().enumerate() {
             if !self.should_show_entry(entry) {
                 continue;
             }
+            // Use cached lines for this entry
+            if let Some(cached_lines) = self.entry_display_cache.get(idx) {
+                self.conversation_lines.extend(cached_lines.iter().cloned());
+            }
+        }
+
+        // Update cached line number width
+        self.line_number_width = self.conversation_lines.len().max(1).to_string().len();
+
+        // Update cached plain text for efficient searching
+        self.conversation_plain_text = self
+            .conversation_lines
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+    }
+
+    /// Rebuild the entry display cache with highlighted content.
+    /// Called when entries change or display settings (show_thinking, show_tools) change.
+    fn rebuild_entry_display_cache(&mut self) {
+        self.entry_display_cache.clear();
+        self.entry_display_cache.reserve(self.entries.len());
+
+        for entry in &self.entries {
+            let mut entry_lines = Vec::new();
 
             match entry {
                 LogEntry::User(user) => {
                     // Use formatted message header with timestamp
                     let timestamp = user.timestamp.format("%H:%M:%S").to_string();
-                    self.conversation_lines.push(format_message_header(
-                        MessageType::User,
-                        Some(&timestamp),
-                    ));
-                    self.conversation_lines.push(Line::from("────────────────────────────────────────"));
+                    entry_lines.push(format_message_header(MessageType::User, Some(&timestamp)));
+                    entry_lines.push(Line::from("────────────────────────────────────────"));
 
                     let text = match &user.message {
                         crate::model::UserContent::Simple(s) => s.content.clone(),
                         crate::model::UserContent::Blocks(b) => {
-                            b.content.iter().filter_map(|c| {
-                                match c {
+                            b.content
+                                .iter()
+                                .filter_map(|c| match c {
                                     crate::model::ContentBlock::Text(t) => Some(t.text.clone()),
                                     _ => None,
-                                }
-                            }).collect::<Vec<_>>().join("\n")
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n")
                         }
                     };
                     // Use syntax highlighting for user text
                     let highlighted = self.highlighter.highlight_markdown_text(&text);
-                    self.conversation_lines.extend(highlighted);
-                    self.conversation_lines.push(Line::from(""));
+                    entry_lines.extend(highlighted);
+                    entry_lines.push(Line::from(""));
                 }
                 LogEntry::Assistant(assistant) => {
                     // Use formatted message header with timestamp
                     let timestamp = assistant.timestamp.format("%H:%M:%S").to_string();
-                    self.conversation_lines.push(format_message_header(
+                    entry_lines.push(format_message_header(
                         MessageType::Assistant,
                         Some(&timestamp),
                     ));
-                    self.conversation_lines.push(Line::from("────────────────────────────────────────"));
+                    entry_lines.push(Line::from("────────────────────────────────────────"));
 
                     for block in &assistant.message.content {
                         match block {
                             ContentBlock::Text(text) => {
                                 // Use syntax highlighting for assistant text
-                                let highlighted = self.highlighter.highlight_markdown_text(&text.text);
-                                self.conversation_lines.extend(highlighted);
+                                let highlighted =
+                                    self.highlighter.highlight_markdown_text(&text.text);
+                                entry_lines.extend(highlighted);
                             }
                             ContentBlock::Thinking(thinking) if self.show_thinking => {
-                                self.conversation_lines.push(Line::from("┌─ 💭 Thinking ─────────────────────────"));
+                                entry_lines
+                                    .push(Line::from("┌─ 💭 Thinking ─────────────────────────"));
                                 for line in thinking.thinking.lines().take(10) {
-                                    self.conversation_lines.push(Line::from(format!("│ {line}")));
+                                    entry_lines.push(Line::from(format!("│ {line}")));
                                 }
                                 if thinking.thinking.lines().count() > 10 {
-                                    self.conversation_lines.push(Line::from("│ ..."));
+                                    entry_lines.push(Line::from("│ ..."));
                                 }
-                                self.conversation_lines.push(Line::from("└───────────────────────────────────────"));
+                                entry_lines
+                                    .push(Line::from("└───────────────────────────────────────"));
                             }
                             ContentBlock::ToolUse(tool) if self.show_tools => {
-                                self.conversation_lines.push(format_message_header(
-                                    MessageType::Tool,
-                                    None,
-                                ));
-                                self.conversation_lines.push(Line::from(format!(
+                                entry_lines.push(format_message_header(MessageType::Tool, None));
+                                entry_lines.push(Line::from(format!(
                                     "   {} ({})",
                                     tool.name,
                                     &tool.id[..8.min(tool.id.len())]
@@ -2388,15 +2548,13 @@ impl AppState {
                                 // Show diff view for Edit tool calls
                                 if tool.name == "Edit" {
                                     if let Some(diff_lines) = self.format_edit_diff(&tool.input) {
-                                        for line in diff_lines {
-                                            self.conversation_lines.push(line);
-                                        }
+                                        entry_lines.extend(diff_lines);
                                     }
                                 }
                             }
                             ContentBlock::ToolResult(result) if self.show_tools => {
                                 let status = if result.is_explicit_error() { "❌" } else { "✓" };
-                                self.conversation_lines.push(Line::from(format!(
+                                entry_lines.push(Line::from(format!(
                                     "   {status} Result for {}",
                                     &result.tool_use_id[..8.min(result.tool_use_id.len())]
                                 )));
@@ -2404,34 +2562,30 @@ impl AppState {
                             _ => {}
                         }
                     }
-                    self.conversation_lines.push(Line::from(""));
+                    entry_lines.push(Line::from(""));
                 }
                 LogEntry::System(system) => {
-                    self.conversation_lines.push(format_message_header(
-                        MessageType::System,
-                        None,
-                    ));
+                    entry_lines.push(format_message_header(MessageType::System, None));
                     if let Some(subtype) = &system.subtype {
-                        self.conversation_lines.push(Line::from(format!("   {subtype:?}")));
+                        entry_lines.push(Line::from(format!("   {subtype:?}")));
                     }
                 }
                 LogEntry::Summary(summary) => {
-                    self.conversation_lines.push(format_message_header(
-                        MessageType::Summary,
-                        None,
-                    ));
-                    self.conversation_lines.push(Line::from("────────────────────────────────────────"));
+                    entry_lines.push(format_message_header(MessageType::Summary, None));
+                    entry_lines.push(Line::from("────────────────────────────────────────"));
                     let text = &summary.summary;
                     for line in text.lines().take(5) {
-                        self.conversation_lines.push(Line::from(line.to_string()));
+                        entry_lines.push(Line::from(line.to_string()));
                     }
                     if text.lines().count() > 5 {
-                        self.conversation_lines.push(Line::from("..."));
+                        entry_lines.push(Line::from("..."));
                     }
-                    self.conversation_lines.push(Line::from(""));
+                    entry_lines.push(Line::from(""));
                 }
                 _ => {}
             }
+
+            self.entry_display_cache.push(entry_lines);
         }
     }
 
@@ -2759,23 +2913,23 @@ impl AppState {
 
         let text = self.get_selected_text();
         if text.is_empty() {
-            self.status_message = Some("Selection is empty".to_string());
+            self.status_message = Some(StatusMessage::warning("Selection is empty"));
             return Ok(());
         }
 
         match arboard::Clipboard::new() {
             Ok(mut clipboard) => {
                 if let Err(e) = clipboard.set_text(&text) {
-                    self.status_message = Some(format!("Clipboard error: {e}"));
+                    self.status_message = Some(StatusMessage::error(format!("Clipboard error: {e}")));
                 } else {
                     let chars = text.chars().count();
                     let lines = text.lines().count();
-                    self.status_message = Some(format!("Copied {} chars ({} lines)", chars, lines));
+                    self.status_message = Some(StatusMessage::success(format!("Copied {} chars ({} lines)", chars, lines)));
                     self.clear_selection();
                 }
             }
             Err(e) => {
-                self.status_message = Some(format!("Clipboard not available: {e}"));
+                self.status_message = Some(StatusMessage::error(format!("Clipboard not available: {e}")));
             }
         }
         Ok(())
