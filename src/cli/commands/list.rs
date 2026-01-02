@@ -8,9 +8,10 @@ use std::time::SystemTime;
 use crate::cli::{Cli, ListArgs, ListTarget, OutputFormat, SortOrder};
 use crate::discovery::{Project, Session, SessionFilter};
 use crate::error::Result;
+use crate::tags::TagStore;
 use crate::util::pager::PagerWriter;
 
-use super::{get_claude_dir, parse_date_filter};
+use super::{get_claude_dir, parse_date_filter, parse_size};
 
 /// Run the list command.
 pub fn run(cli: &Cli, args: &ListArgs) -> Result<()> {
@@ -196,6 +197,104 @@ fn list_sessions<W: Write>(
         });
     }
 
+    // Apply size filters
+    let min_size: Option<u64> = if let Some(ref size) = args.min_size {
+        Some(parse_size(size)?)
+    } else {
+        None
+    };
+
+    let max_size: Option<u64> = if let Some(ref size) = args.max_size {
+        Some(parse_size(size)?)
+    } else {
+        None
+    };
+
+    if min_size.is_some() || max_size.is_some() {
+        sessions.retain(|s| {
+            let size = s.file_size();
+            if let Some(min) = min_size {
+                if size < min {
+                    return false;
+                }
+            }
+            if let Some(max) = max_size {
+                if size > max {
+                    return false;
+                }
+            }
+            true
+        });
+    }
+
+    // Load TagStore for metadata-based filtering
+    let tag_store = TagStore::load().unwrap_or_default();
+
+    // Apply tag filters
+    let tag_filters: Vec<&str> = {
+        let mut tags = Vec::new();
+        if let Some(ref tag) = args.tag {
+            tags.push(tag.as_str());
+        }
+        if let Some(ref tag_list) = args.tags {
+            tags.extend(tag_list.split(',').map(str::trim));
+        }
+        tags
+    };
+
+    if !tag_filters.is_empty() {
+        sessions.retain(|s| {
+            if let Some(meta) = tag_store.get(s.session_id()) {
+                tag_filters.iter().any(|t| meta.tags.iter().any(|mt| mt.contains(t)))
+            } else {
+                false
+            }
+        });
+    }
+
+    // Apply bookmark filter
+    if args.bookmarked {
+        sessions.retain(|s| {
+            tag_store
+                .get(s.session_id())
+                .map(|m| m.bookmarked)
+                .unwrap_or(false)
+        });
+    }
+
+    // Apply outcome filter
+    if let Some(ref outcome_filter) = args.outcome {
+        let outcome_lower = outcome_filter.to_lowercase();
+        sessions.retain(|s| {
+            if let Some(meta) = tag_store.get(s.session_id()) {
+                if let Some(ref outcome) = meta.outcome {
+                    let outcome_str = format!("{:?}", outcome).to_lowercase();
+                    outcome_str.contains(&outcome_lower)
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        });
+    }
+
+    // Apply name filter
+    if let Some(ref name_filter) = args.by_name {
+        let name_lower = name_filter.to_lowercase();
+        sessions.retain(|s| {
+            if let Some(meta) = tag_store.get(s.session_id()) {
+                if let Some(ref name) = meta.name {
+                    name.to_lowercase().contains(&name_lower)
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        });
+    }
+
     // Sort sessions
     match args.sort {
         SortOrder::Modified => {
@@ -273,9 +372,28 @@ fn list_sessions<W: Write>(
                     short_id(session.session_id())
                 };
 
+                // Get metadata from TagStore
+                let meta = tag_store.get(session.session_id());
+                let bookmark_marker = if meta.map(|m| m.bookmarked).unwrap_or(false) {
+                    "★ "
+                } else {
+                    ""
+                };
+
                 let subagent_marker = if session.is_subagent() { " [subagent]" } else { "" };
 
-                write!(writer, "  {}{}", id, subagent_marker)?;
+                // Build outcome badge
+                let outcome_badge = meta
+                    .and_then(|m| m.outcome.as_ref())
+                    .map(|o| format!(" [{:?}]", o))
+                    .unwrap_or_default();
+
+                // Show custom name if available
+                if let Some(name) = meta.and_then(|m| m.name.as_ref()) {
+                    write!(writer, "  {}\"{}\" ({}){}{}", bookmark_marker, name, id, subagent_marker, outcome_badge)?;
+                } else {
+                    write!(writer, "  {}{}{}{}", bookmark_marker, id, subagent_marker, outcome_badge)?;
+                }
 
                 if show_sizes {
                     let size_str = session.file_size_human();
@@ -290,6 +408,13 @@ fn list_sessions<W: Write>(
                 writeln!(writer)?;
                 writeln!(writer, "    Project: {}", session.project_path())?;
                 writeln!(writer, "    Modified: {}", session.modified_datetime().format("%Y-%m-%d %H:%M:%S UTC"))?;
+
+                // Show tags if any
+                if let Some(m) = meta {
+                    if !m.tags.is_empty() {
+                        writeln!(writer, "    Tags: {}", m.tags.join(", "))?;
+                    }
+                }
 
                 if let Ok(state) = session.state() {
                     if state != crate::discovery::SessionState::Inactive {

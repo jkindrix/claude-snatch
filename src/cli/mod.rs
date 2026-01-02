@@ -370,6 +370,34 @@ pub struct ListArgs {
     /// Filter sessions modified until this date (YYYY-MM-DD or relative like "1week", "3days").
     #[arg(long)]
     pub until: Option<String>,
+
+    /// Filter sessions by tag.
+    #[arg(long)]
+    pub tag: Option<String>,
+
+    /// Filter sessions by multiple tags (comma-separated).
+    #[arg(long)]
+    pub tags: Option<String>,
+
+    /// Show only bookmarked sessions.
+    #[arg(long)]
+    pub bookmarked: bool,
+
+    /// Filter sessions by outcome (success, partial, failed, abandoned).
+    #[arg(long)]
+    pub outcome: Option<String>,
+
+    /// Filter sessions by custom name (substring match).
+    #[arg(long)]
+    pub by_name: Option<String>,
+
+    /// Minimum file size filter (e.g., "1KB", "1MB").
+    #[arg(long)]
+    pub min_size: Option<String>,
+
+    /// Maximum file size filter (e.g., "10MB", "100KB").
+    #[arg(long)]
+    pub max_size: Option<String>,
 }
 
 /// What to list.

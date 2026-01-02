@@ -102,3 +102,46 @@ pub fn parse_date_filter(s: &str) -> Result<SystemTime> {
     let target = Utc::now() - duration;
     Ok(SystemTime::from(target))
 }
+
+/// Parse a size filter string (e.g., "1KB", "10MB", "1.5GB").
+pub fn parse_size(s: &str) -> Result<u64> {
+    let s_trimmed = s.trim();
+    let s_upper = s_trimmed.to_uppercase();
+
+    // Find where the numeric part ends
+    let numeric_end = s_upper
+        .char_indices()
+        .find(|(_, c)| !c.is_ascii_digit() && *c != '.')
+        .map(|(i, _)| i)
+        .unwrap_or(s_upper.len());
+
+    if numeric_end == 0 {
+        return Err(SnatchError::InvalidArgument {
+            name: "size".to_string(),
+            reason: format!("Invalid size '{}'. Use format like '1KB', '10MB', '1GB'", s),
+        });
+    }
+
+    let amount: f64 = s_upper[..numeric_end].parse().map_err(|_| {
+        SnatchError::InvalidArgument {
+            name: "size".to_string(),
+            reason: format!("Invalid number in size filter: {}", &s_upper[..numeric_end]),
+        }
+    })?;
+
+    let unit = s_upper[numeric_end..].trim();
+    let multiplier: u64 = match unit {
+        "" | "B" => 1,
+        "K" | "KB" | "KIB" => 1024,
+        "M" | "MB" | "MIB" => 1024 * 1024,
+        "G" | "GB" | "GIB" => 1024 * 1024 * 1024,
+        _ => {
+            return Err(SnatchError::InvalidArgument {
+                name: "size".to_string(),
+                reason: format!("Unknown size unit '{}'. Use B, KB, MB, or GB", unit),
+            })
+        }
+    };
+
+    Ok((amount * multiplier as f64) as u64)
+}
