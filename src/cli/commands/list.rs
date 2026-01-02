@@ -51,6 +51,11 @@ fn list_projects<W: Write>(
         projects.retain(|p| p.decoded_path().contains(filter));
     }
 
+    // Filter out empty projects if requested
+    if args.hide_empty {
+        projects.retain(|p| p.sessions().map(|s| !s.is_empty()).unwrap_or(false));
+    }
+
     // Sort projects
     match args.sort {
         SortOrder::Modified => {

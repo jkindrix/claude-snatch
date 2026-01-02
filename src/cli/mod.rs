@@ -147,6 +147,20 @@ impl Cli {
             self.output
         }
     }
+
+    /// Check if colored output should be used.
+    ///
+    /// Returns true if:
+    /// - `--color=true` was explicitly set, OR
+    /// - `--color` was not set and stdout is a terminal
+    #[must_use]
+    pub fn effective_color(&self) -> bool {
+        match self.color {
+            Some(true) => true,
+            Some(false) => false,
+            None => std::io::stdout().is_terminal(),
+        }
+    }
 }
 
 /// CLI subcommands.
@@ -411,6 +425,10 @@ pub struct ListArgs {
     /// Show session context (first user prompt preview).
     #[arg(short = 'c', long)]
     pub context: bool,
+
+    /// Hide projects with 0 sessions (only applies to 'list projects').
+    #[arg(long)]
+    pub hide_empty: bool,
 }
 
 /// What to list.
@@ -1760,16 +1778,13 @@ pub fn run() -> Result<()> {
     init_global_cache(&config.cache);
 
     match &cli.command {
-        // No command provided - launch TUI if interactive, otherwise show help
+        // No command provided - launch TUI if interactive, otherwise show quick summary
         None => {
             if io::stdout().is_terminal() && io::stdin().is_terminal() {
                 let tui_args = TuiArgs::default();
                 commands::tui::run(&cli, &tui_args)
             } else {
-                Cli::command().print_help().map_err(|e| {
-                    crate::error::SnatchError::io("Failed to print help", e)
-                })?;
-                Ok(())
+                commands::summary::run_quick_summary(&cli)
             }
         }
         Some(Commands::List(args)) => commands::list::run(&cli, args),

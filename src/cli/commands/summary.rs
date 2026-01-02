@@ -237,3 +237,64 @@ pub fn run(cli: &Cli, args: &SummaryArgs) -> Result<()> {
 
     Ok(())
 }
+
+/// Run a quick summary for bare `snatch` command in non-interactive mode.
+///
+/// This provides a brief overview without requiring arguments, suitable for
+/// piping or scripting contexts where the full TUI isn't available.
+pub fn run_quick_summary(cli: &Cli) -> Result<()> {
+    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
+
+    // Use 24h default period
+    let duration = Duration::hours(24);
+    let cutoff = Utc::now() - duration;
+
+    // Get all sessions from the period
+    let all_sessions = claude_dir.all_sessions()?;
+    let total_sessions = all_sessions.len();
+    let recent_sessions: Vec<_> = all_sessions
+        .into_iter()
+        .filter(|s| s.modified_datetime() > cutoff)
+        .collect();
+
+    // Count projects
+    let mut project_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for session in &recent_sessions {
+        project_set.insert(session.project_path().to_string());
+    }
+
+    match cli.effective_output() {
+        OutputFormat::Json => {
+            let output = serde_json::json!({
+                "sessions_24h": recent_sessions.len(),
+                "projects_24h": project_set.len(),
+                "total_sessions": total_sessions,
+            });
+            println!("{}", serde_json::to_string(&output)?);
+        }
+        OutputFormat::Tsv => {
+            println!("sessions_24h\tprojects_24h\ttotal_sessions");
+            println!("{}\t{}\t{}", recent_sessions.len(), project_set.len(), total_sessions);
+        }
+        OutputFormat::Compact => {
+            println!(
+                "24h:{} sessions/{} projects | total:{} sessions",
+                recent_sessions.len(),
+                project_set.len(),
+                total_sessions
+            );
+        }
+        OutputFormat::Text => {
+            println!(
+                "claude-snatch: {} sessions in last 24h ({} projects), {} total",
+                recent_sessions.len(),
+                project_set.len(),
+                format_count(total_sessions)
+            );
+            println!();
+            println!("Run 'snatch --help' for commands, or 'snatch' interactively for TUI.");
+        }
+    }
+
+    Ok(())
+}

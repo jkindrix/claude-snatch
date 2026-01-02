@@ -1907,30 +1907,31 @@ fn output_budget_status(cli: &Cli) -> Result<()> {
                 println!("-------------");
 
                 // Show each configured limit
+                let use_color = cli.effective_color();
                 if let Some(ref daily) = status.daily {
                     let bar = progress_bar(daily.percent_used, 20);
                     println!("  Daily:   ${:>7.2} / ${:.2} [{bar}] {}",
-                        daily.spent, daily.limit, daily.colored_status());
+                        daily.spent, daily.limit, daily.colored_status(use_color));
                 }
 
                 if let Some(ref weekly) = status.weekly {
                     let bar = progress_bar(weekly.percent_used, 20);
                     println!("  Weekly:  ${:>7.2} / ${:.2} [{bar}] {}",
-                        weekly.spent, weekly.limit, weekly.colored_status());
+                        weekly.spent, weekly.limit, weekly.colored_status(use_color));
                 }
 
                 if let Some(ref monthly) = status.monthly {
                     let bar = progress_bar(monthly.percent_used, 20);
                     println!("  Monthly: ${:>7.2} / ${:.2} [{bar}] {}",
-                        monthly.spent, monthly.limit, monthly.colored_status());
+                        monthly.spent, monthly.limit, monthly.colored_status(use_color));
                 }
 
                 if status.any_exceeded() {
-                    println!();
-                    println!("  ⚠️  One or more budgets exceeded!");
+                    eprintln!();
+                    eprintln!("  ⚠️  One or more budgets exceeded!");
                 } else if status.any_warning() {
-                    println!();
-                    println!("  ⚠️  Approaching budget limit (>{:.0}% threshold)",
+                    eprintln!();
+                    eprintln!("  ⚠️  Approaching budget limit (>{:.0}% threshold)",
                         config.budget.warning_threshold * 100.0);
                 }
             }

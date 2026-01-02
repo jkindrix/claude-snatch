@@ -101,7 +101,7 @@ pub fn run(cli: &Cli, args: &CodeArgs) -> Result<()> {
                         println!();
                     }
                     if args.metadata {
-                        let lang = e.language.as_deref().unwrap_or("unknown");
+                        let lang = e.language.as_deref().unwrap_or("text");
                         println!("# --- Block {} ({}, {}) ---", e.index, lang, e.source);
                     }
                     println!("{}", e.code);
@@ -112,12 +112,13 @@ pub fn run(cli: &Cli, args: &CodeArgs) -> Result<()> {
             } else {
                 // Default: show summary and code
                 for e in &extracted {
-                    let lang = e.language.as_deref().unwrap_or("unknown");
+                    // Use "text" for unspecified languages (more meaningful than "unknown")
+                    let lang = e.language.as_deref().unwrap_or("text");
                     if args.metadata {
                         let ts = e
                             .timestamp
                             .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
-                            .unwrap_or_else(|| "unknown".to_string());
+                            .unwrap_or_else(|| "-".to_string());
                         println!("=== Block {} ===", e.index);
                         println!("Language: {}", lang);
                         println!("Source: {}", e.source);

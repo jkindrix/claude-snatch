@@ -421,13 +421,25 @@ impl BudgetAlert {
     }
 
     /// Get a colored status indicator (ANSI escape codes).
-    pub fn colored_status(&self) -> String {
+    ///
+    /// If `use_color` is false, returns plain text without ANSI codes.
+    pub fn colored_status(&self, use_color: bool) -> String {
         if self.exceeded {
-            "\x1b[1;31mEXCEEDED\x1b[0m".to_string()
+            if use_color {
+                "\x1b[1;31mEXCEEDED\x1b[0m".to_string()
+            } else {
+                "EXCEEDED".to_string()
+            }
         } else if self.warning {
-            "\x1b[1;33mWARNING\x1b[0m".to_string()
-        } else {
+            if use_color {
+                "\x1b[1;33mWARNING\x1b[0m".to_string()
+            } else {
+                "WARNING".to_string()
+            }
+        } else if use_color {
             "\x1b[32mOK\x1b[0m".to_string()
+        } else {
+            "OK".to_string()
         }
     }
 }

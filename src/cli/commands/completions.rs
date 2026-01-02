@@ -2,10 +2,23 @@
 //!
 //! Provides runtime completions for session IDs, project names, and other dynamic values.
 
+use std::io::{self, Write};
+
 use crate::cli::Cli;
 use crate::error::Result;
 
 use super::get_claude_dir;
+
+/// Write a line to stdout, silently ignoring broken pipe errors.
+/// This is common when shell completions are truncated.
+fn write_completion(line: &str) -> bool {
+    let stdout = io::stdout();
+    let mut handle = stdout.lock();
+    if writeln!(handle, "{}", line).is_err() {
+        return false; // Stop on broken pipe
+    }
+    true
+}
 
 /// Completion type requested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +99,9 @@ fn complete_sessions(cli: &Cli, prefix: Option<&str>, limit: Option<usize>) -> R
         };
 
         // Output session ID with description (tab-separated for shell completions)
-        println!("{}\t{}", session_id, short_project);
+        if !write_completion(&format!("{}\t{}", session_id, short_project)) {
+            break; // Stop on broken pipe
+        }
 
         count += 1;
         if count >= limit {
@@ -119,7 +134,9 @@ fn complete_projects(cli: &Cli, prefix: Option<&str>, limit: Option<usize>) -> R
         let session_count = project.sessions().map(|s| s.len()).unwrap_or(0);
         let desc = format!("{} sessions", session_count);
 
-        println!("{}\t{}", path, desc);
+        if !write_completion(&format!("{}\t{}", path, desc)) {
+            break; // Stop on broken pipe
+        }
 
         count += 1;
         if count >= limit {
@@ -171,7 +188,9 @@ fn complete_tools(cli: &Cli, prefix: Option<&str>, limit: Option<usize>) -> Resu
     tools.sort();
 
     for tool in tools {
-        println!("{}\tClaude Code tool", tool);
+        if !write_completion(&format!("{}\tClaude Code tool", tool)) {
+            break; // Stop on broken pipe
+        }
     }
 
     Ok(())
@@ -192,7 +211,9 @@ fn complete_formats(prefix: Option<&str>) -> Result<()> {
                 continue;
             }
         }
-        println!("{}\t{}", format, desc);
+        if !write_completion(&format!("{}\t{}", format, desc)) {
+            break; // Stop on broken pipe
+        }
     }
 
     Ok(())
@@ -214,7 +235,9 @@ fn complete_models(prefix: Option<&str>) -> Result<()> {
                 continue;
             }
         }
-        println!("{}\t{}", model, desc);
+        if !write_completion(&format!("{}\t{}", model, desc)) {
+            break; // Stop on broken pipe
+        }
     }
 
     Ok(())

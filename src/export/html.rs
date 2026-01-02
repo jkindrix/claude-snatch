@@ -127,7 +127,7 @@ impl HtmlExporter {
         writeln!(writer, "<head>")?;
         writeln!(writer, "  <meta charset=\"UTF-8\">")?;
         writeln!(writer, "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">")?;
-        writeln!(writer, "  <meta name=\"generator\" content=\"claude-snatch {}\"", crate::VERSION)?;
+        writeln!(writer, "  <meta name=\"generator\" content=\"claude-snatch {}\">", crate::VERSION)?;
         writeln!(writer, "  <title>{}</title>", escape_html(title))?;
 
         if self.inline_styles {
