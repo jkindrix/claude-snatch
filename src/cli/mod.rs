@@ -230,6 +230,12 @@ pub enum Commands {
     #[command(alias = "guide", alias = "examples")]
     Quickstart(QuickstartArgs),
 
+    /// Show a quick summary of Claude Code usage.
+    Summary(SummaryArgs),
+
+    /// List the most recent sessions (shorthand for list -n 5).
+    Recent(RecentArgs),
+
     /// Start MCP (Model Context Protocol) server mode.
     /// Requires the 'mcp' feature to be enabled.
     #[cfg(feature = "mcp")]
@@ -754,13 +760,13 @@ pub struct SearchArgs {
 /// Arguments for the stats command.
 #[derive(Debug, Parser)]
 pub struct StatsArgs {
+    /// Session ID to show stats for (supports short prefixes like "780893e4").
+    /// Optional - shows global stats if not specified.
+    pub session: Option<String>,
+
     /// Show stats for specific project.
     #[arg(short = 'p', long)]
     pub project: Option<String>,
-
-    /// Show stats for specific session (supports short prefixes like "780893e4").
-    #[arg(short = 's', long)]
-    pub session: Option<String>,
 
     /// Show global stats across all sessions.
     #[arg(long)]
@@ -973,6 +979,7 @@ pub struct ConfigArgs {
 #[derive(Debug, Subcommand)]
 pub enum ConfigAction {
     /// Show all configuration values.
+    #[command(alias = "list")]
     Show,
 
     /// Get a specific configuration value.
@@ -1464,6 +1471,27 @@ pub enum QuickstartTopic {
     All,
 }
 
+/// Arguments for the summary command.
+#[derive(Debug, Parser)]
+pub struct SummaryArgs {
+    /// Time period for the summary (e.g., "24h", "1d", "7d", "1w").
+    /// Default is 24 hours.
+    #[arg(long, short = 'p', default_value = "24h")]
+    pub period: String,
+}
+
+/// Arguments for the recent command.
+#[derive(Debug, Parser)]
+pub struct RecentArgs {
+    /// Number of recent sessions to show.
+    #[arg(short = 'n', long, default_value = "5")]
+    pub count: usize,
+
+    /// Filter to specific project (substring match).
+    #[arg(short = 'p', long)]
+    pub project: Option<String>,
+}
+
 /// Arguments for the MCP server command.
 #[cfg(feature = "mcp")]
 #[derive(Debug, Parser)]
@@ -1623,6 +1651,8 @@ pub fn run() -> Result<()> {
         Some(Commands::Standup(args)) => commands::standup::run(&cli, args),
         Some(Commands::Pick(args)) => commands::pick::run(&cli, args),
         Some(Commands::Quickstart(args)) => commands::quickstart::run(&cli, args),
+        Some(Commands::Summary(args)) => commands::summary::run(&cli, args),
+        Some(Commands::Recent(args)) => commands::recent::run(&cli, args),
         #[cfg(feature = "mcp")]
         Some(Commands::ServeMcp(_)) => {
             // Run the MCP server
