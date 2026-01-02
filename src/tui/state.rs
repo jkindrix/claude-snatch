@@ -247,6 +247,8 @@ pub enum InputMode {
     Model,
     /// Entering line number for navigation.
     LineNumber,
+    /// Entering session name.
+    SessionName,
 }
 
 impl FilterState {
@@ -336,6 +338,12 @@ impl FilterState {
                     self.input_buffer.push(c);
                 }
             }
+            InputMode::SessionName => {
+                // Allow most printable characters for session names
+                if !c.is_control() {
+                    self.input_buffer.push(c);
+                }
+            }
             InputMode::None => {}
         }
     }
@@ -350,8 +358,8 @@ impl FilterState {
         match self.input_mode {
             InputMode::DateFrom | InputMode::DateTo => self.confirm_date_input(),
             InputMode::Model => self.confirm_model_input(),
-            // LineNumber is handled by AppState.confirm_goto_line()
-            InputMode::LineNumber | InputMode::None => false,
+            // LineNumber and SessionName are handled by AppState
+            InputMode::LineNumber | InputMode::SessionName | InputMode::None => false,
         }
     }
 
@@ -593,6 +601,7 @@ pub enum CommandId {
     ToggleTools,
     ToggleWordWrap,
     ToggleLineNumbers,
+    ToggleFocusMode,
     CycleTheme,
     // Filters
     ToggleFilter,
@@ -602,6 +611,12 @@ pub enum CommandId {
     SetDateFrom,
     SetDateTo,
     SetModelFilter,
+    // Session list
+    CycleSortMode,
+    ToggleBookmarkFilter,
+    // Session actions
+    ToggleSessionBookmark,
+    SetSessionName,
     // Actions
     Refresh,
     Export,
@@ -715,6 +730,12 @@ impl Default for CommandPalette {
                 id: CommandId::ToggleLineNumbers,
             },
             PaletteCommand {
+                name: "Toggle Focus Mode",
+                description: "Hide side panels (zen mode)",
+                shortcut: "z",
+                id: CommandId::ToggleFocusMode,
+            },
+            PaletteCommand {
                 name: "Cycle Theme",
                 description: "Switch to next color theme",
                 shortcut: "T",
@@ -762,6 +783,31 @@ impl Default for CommandPalette {
                 description: "Filter by AI model name",
                 shortcut: "M",
                 id: CommandId::SetModelFilter,
+            },
+            // Session list
+            PaletteCommand {
+                name: "Cycle Sort Mode",
+                description: "Change session sort order",
+                shortcut: "s",
+                id: CommandId::CycleSortMode,
+            },
+            PaletteCommand {
+                name: "Toggle Bookmark Filter",
+                description: "Show only bookmarked sessions",
+                shortcut: "b",
+                id: CommandId::ToggleBookmarkFilter,
+            },
+            PaletteCommand {
+                name: "Toggle Session Bookmark",
+                description: "Bookmark/unbookmark current session",
+                shortcut: "*",
+                id: CommandId::ToggleSessionBookmark,
+            },
+            PaletteCommand {
+                name: "Set Session Name",
+                description: "Give current session a custom name",
+                shortcut: "\"",
+                id: CommandId::SetSessionName,
             },
             // Actions
             PaletteCommand {
@@ -1073,6 +1119,8 @@ pub struct AppState {
     pub total_entries: usize,
     /// Current visible entry index (for pagination display).
     pub current_entry_index: usize,
+    /// Session ID being named (when InputMode::SessionName is active).
+    naming_session_id: Option<String>,
 }
 
 impl AppState {
@@ -1151,6 +1199,7 @@ impl AppState {
             focus_mode: false,
             total_entries: 0,
             current_entry_index: 0,
+            naming_session_id: None,
         })
     }
 
@@ -1641,6 +1690,7 @@ impl AppState {
             CommandId::ToggleTools => self.toggle_tools(),
             CommandId::ToggleWordWrap => self.toggle_word_wrap(),
             CommandId::ToggleLineNumbers => self.toggle_line_numbers(),
+            CommandId::ToggleFocusMode => self.toggle_focus_mode(),
             CommandId::CycleTheme => self.cycle_theme(),
             // Filters
             CommandId::ToggleFilter => self.toggle_filter(),
@@ -1650,6 +1700,12 @@ impl AppState {
             CommandId::SetDateFrom => self.start_date_from_input(),
             CommandId::SetDateTo => self.start_date_to_input(),
             CommandId::SetModelFilter => self.toggle_model_filter(),
+            // Session list
+            CommandId::CycleSortMode => self.cycle_sort_mode(),
+            CommandId::ToggleBookmarkFilter => self.toggle_bookmark_filter(),
+            // Session actions
+            CommandId::ToggleSessionBookmark => self.toggle_session_bookmark(),
+            CommandId::SetSessionName => self.start_session_name_input(),
             // Actions
             CommandId::Refresh => {
                 self.refresh()?;
@@ -1933,6 +1989,165 @@ impl AppState {
         }
     }
 
+    /// Toggle bookmark status on the current session.
+    ///
+    /// Works when viewing a session (updates that session) or when viewing
+    /// the session list (updates the highlighted session).
+    pub fn toggle_session_bookmark(&mut self) {
+        // Determine which session to bookmark
+        let session_id = if let Some(ref id) = self.current_session {
+            // Currently viewing a session - bookmark it
+            Some(id.clone())
+        } else if let Some(selected) = self.tree_selected {
+            // In session list - bookmark the highlighted session
+            self.tree_session_ids.get(selected).cloned()
+        } else {
+            None
+        };
+
+        if let Some(session_id) = session_id {
+            // Get current bookmark status
+            let is_bookmarked = self
+                .tag_store
+                .get(&session_id)
+                .map(|m| m.bookmarked)
+                .unwrap_or(false);
+
+            // Toggle it
+            self.tag_store.set_bookmark(&session_id, !is_bookmarked);
+
+            // Save to disk
+            if let Err(e) = self.tag_store.save() {
+                self.status_message = Some(StatusMessage::error(format!("Failed to save bookmark: {}", e)));
+                return;
+            }
+
+            // Update display cache
+            if let Some(cache) = self.session_display_cache.get_mut(&session_id) {
+                cache.bookmarked = !is_bookmarked;
+            }
+
+            // Show feedback
+            let short_id = if session_id.len() > 8 {
+                &session_id[..8]
+            } else {
+                &session_id
+            };
+
+            if !is_bookmarked {
+                self.status_message = Some(StatusMessage::info(format!("★ Bookmarked {}", short_id)));
+            } else {
+                self.status_message = Some(StatusMessage::info(format!("Removed bookmark from {}", short_id)));
+            }
+
+            // Refresh tree if in session list view to update display
+            if self.current_session.is_none() {
+                if let Some(idx) = self.current_project {
+                    let _ = self.update_tree_for_project(idx);
+                }
+            }
+        } else {
+            self.status_message = Some(StatusMessage::warning("No session selected"));
+        }
+    }
+
+    /// Start session name input mode.
+    ///
+    /// Works when viewing a session or when viewing the session list.
+    pub fn start_session_name_input(&mut self) {
+        // Determine which session to name
+        let session_id = if let Some(ref id) = self.current_session {
+            Some(id.clone())
+        } else if let Some(selected) = self.tree_selected {
+            self.tree_session_ids.get(selected).cloned()
+        } else {
+            None
+        };
+
+        if let Some(session_id) = session_id {
+            // Pre-fill with current name if exists
+            let current_name = self
+                .tag_store
+                .get(&session_id)
+                .and_then(|m| m.name.clone())
+                .unwrap_or_default();
+
+            self.filter_state.input_mode = InputMode::SessionName;
+            self.filter_state.input_buffer = current_name;
+            self.naming_session_id = Some(session_id);
+
+            self.status_message = Some(StatusMessage::info("Enter session name (Enter to confirm, Esc to cancel)"));
+        } else {
+            self.status_message = Some(StatusMessage::warning("No session selected"));
+        }
+    }
+
+    /// Confirm session name input and save.
+    pub fn confirm_session_name(&mut self) {
+        let Some(session_id) = self.naming_session_id.take() else {
+            self.filter_state.input_mode = InputMode::None;
+            self.filter_state.input_buffer.clear();
+            return;
+        };
+
+        let name = self.filter_state.input_buffer.trim().to_string();
+        let name_opt = if name.is_empty() { None } else { Some(name.clone()) };
+
+        // Set the name
+        self.tag_store.set_name(&session_id, name_opt.clone());
+
+        // Save to disk
+        if let Err(e) = self.tag_store.save() {
+            self.status_message = Some(StatusMessage::error(format!("Failed to save name: {}", e)));
+            self.filter_state.input_mode = InputMode::None;
+            self.filter_state.input_buffer.clear();
+            return;
+        }
+
+        // Update display cache
+        if let Some(cache) = self.session_display_cache.get_mut(&session_id) {
+            cache.name = name_opt.clone();
+        }
+
+        // Show feedback
+        let short_id = if session_id.len() > 8 {
+            &session_id[..8]
+        } else {
+            &session_id
+        };
+
+        if let Some(ref n) = name_opt {
+            self.status_message = Some(StatusMessage::info(format!("Named {} as \"{}\"", short_id, n)));
+        } else {
+            self.status_message = Some(StatusMessage::info(format!("Cleared name for {}", short_id)));
+        }
+
+        // Clean up input state
+        self.filter_state.input_mode = InputMode::None;
+        self.filter_state.input_buffer.clear();
+
+        // Refresh tree if in session list view
+        if self.current_session.is_none() {
+            if let Some(idx) = self.current_project {
+                let _ = self.update_tree_for_project(idx);
+            }
+        }
+    }
+
+    /// Cancel session name input.
+    pub fn cancel_session_name(&mut self) {
+        self.naming_session_id = None;
+        self.filter_state.input_mode = InputMode::None;
+        self.filter_state.input_buffer.clear();
+        self.status_message = Some(StatusMessage::info("Naming cancelled"));
+    }
+
+    /// Check if currently entering a session name.
+    #[must_use]
+    pub fn is_naming_session(&self) -> bool {
+        self.filter_state.input_mode == InputMode::SessionName
+    }
+
     /// Toggle help.
     pub fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
@@ -2067,6 +2282,12 @@ impl AppState {
             return;
         }
 
+        // Handle session name input separately
+        if mode == InputMode::SessionName {
+            self.confirm_session_name();
+            return;
+        }
+
         if self.filter_state.confirm_input() {
             self.status_message = Some(StatusMessage::info(format!("Filter: {}", self.filter_state.summary())));
             self.update_conversation_display();
@@ -2078,6 +2299,11 @@ impl AppState {
 
     /// Cancel filter input.
     pub fn cancel_filter_input(&mut self) {
+        // Handle session name cancellation separately
+        if self.filter_state.input_mode == InputMode::SessionName {
+            self.cancel_session_name();
+            return;
+        }
         self.filter_state.cancel_input();
         self.status_message = Some(StatusMessage::info("Input cancelled"));
     }

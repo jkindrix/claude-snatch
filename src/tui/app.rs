@@ -472,6 +472,16 @@ fn run_loop(
                         app.toggle_bookmark_filter();
                     }
 
+                    // Toggle bookmark on current/highlighted session
+                    (KeyModifiers::SHIFT, KeyCode::Char('*')) | (KeyModifiers::NONE, KeyCode::Char('*')) => {
+                        app.toggle_session_bookmark();
+                    }
+
+                    // Set session name (Shift+" since " is for naming/quoting)
+                    (KeyModifiers::SHIFT, KeyCode::Char('"')) | (KeyModifiers::NONE, KeyCode::Char('"')) => {
+                        app.start_session_name_input();
+                    }
+
                     // Filter controls
                     (KeyModifiers::NONE, KeyCode::Char('f')) => {
                         app.toggle_filter();
@@ -942,6 +952,7 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
             InputMode::DateTo => ("To", "YYYY-MM-DD"),
             InputMode::Model => ("Model", "e.g., sonnet, opus"),
             InputMode::LineNumber => ("Go to line", "line number"),
+            InputMode::SessionName => ("Session name", "Enter to confirm, Esc to cancel"),
             InputMode::None => ("Input", ""),
         };
         vec![
@@ -1081,44 +1092,60 @@ fn draw_help_overlay(f: &mut Frame, app: &AppState) {
         Line::from("  1         Focus tree panel"),
         Line::from("  2         Focus conversation panel"),
         Line::from("  3         Focus details panel"),
+        Line::from("  z         Toggle focus mode (hide panels)"),
         Line::from(""),
         Line::from("Search:"),
         Line::from("  /         Start search"),
         Line::from("  n         Next search result"),
         Line::from("  N         Previous search result"),
+        Line::from("  Ctrl+G/G  Go to line number"),
         Line::from("  Enter     Confirm search"),
         Line::from("  Esc       Cancel search"),
         Line::from(""),
-        Line::from("Actions:"),
-        Line::from("  r         Refresh"),
-        Line::from("  e         Export session"),
-        Line::from("  c         Copy message to clipboard"),
-        Line::from("  C         Copy code block to clipboard"),
-        Line::from("  y         Yank (copy) text selection"),
+        Line::from("Session List (when viewing project):"),
+        Line::from("  s         Cycle sort mode (newest/oldest/size/msgs)"),
+        Line::from("  b         Toggle bookmark-only filter"),
+        Line::from("  *         Toggle bookmark on highlighted session"),
+        Line::from("  Space     Toggle session selection (multi-export)"),
+        Line::from("  Ctrl+A    Select all sessions in project"),
+        Line::from(""),
+        Line::from("Session Actions:"),
+        Line::from("  r         Refresh data from disk"),
+        Line::from("  e         Export session(s)"),
+        Line::from("  O         Open conversation in external editor"),
+        Line::from("  R         Resume session in Claude Code"),
+        Line::from("  *         Toggle bookmark on current session"),
+        Line::from("  \"         Set/edit session name"),
+        Line::from(""),
+        Line::from("Display:"),
         Line::from("  t         Toggle thinking blocks"),
         Line::from("  o         Toggle tool outputs"),
         Line::from("  w         Toggle word wrap"),
         Line::from("  #         Toggle line numbers"),
-        Line::from("  z         Toggle focus mode (hide panels)"),
         Line::from(format!("  T         Cycle theme ({})", available_themes().join("/"))),
         Line::from(""),
-        Line::from("Filters:"),
+        Line::from("Clipboard:"),
+        Line::from("  c         Copy message to clipboard"),
+        Line::from("  C         Copy code block to clipboard"),
+        Line::from("  y         Yank (copy) text selection"),
+        Line::from(""),
+        Line::from("Message Filters (conversation view):"),
         Line::from("  f         Toggle filter panel"),
         Line::from("  F         Cycle message type filter (next)"),
         Line::from("  B         Cycle message type filter (prev)"),
         Line::from("  E         Toggle errors-only filter"),
-        Line::from("  M         Filter by model (partial, case-insensitive)"),
-        Line::from("              e.g., 'sonnet', 'opus', 'haiku'"),
-        Line::from("              (shows only assistant messages with matching model)"),
+        Line::from("  M         Filter by model (e.g., 'sonnet', 'opus')"),
         Line::from("  [         Set date-from filter (YYYY-MM-DD)"),
         Line::from("  ]         Set date-to filter (YYYY-MM-DD)"),
         Line::from("  X         Clear all filters"),
         Line::from(""),
-        Line::from("Selection:"),
+        Line::from("Text Selection:"),
         Line::from("  Drag      Click and drag to select text"),
         Line::from("  y         Yank (copy) selection to clipboard"),
         Line::from("  Esc       Clear selection"),
         Line::from(""),
+        Line::from("Other:"),
+        Line::from("  Ctrl+P    Open command palette"),
         Line::from(quit_help),
         Line::from("  ?         Toggle help"),
     ]);
