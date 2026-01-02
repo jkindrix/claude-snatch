@@ -2541,17 +2541,26 @@ impl AppState {
         self.selection_panel_bounds = None;
     }
 
-    /// Check if there's an active selection.
+    /// Check if there's an active selection (start and end must differ).
     #[must_use]
     pub fn has_selection(&self) -> bool {
-        self.selection_start.is_some() && self.selection_end.is_some()
+        match (self.selection_start, self.selection_end) {
+            (Some(start), Some(end)) => start != end,
+            _ => false,
+        }
     }
 
     /// Get normalized selection (start before end).
+    /// Returns None if no selection or if start equals end (no actual drag).
     #[must_use]
     pub fn get_selection_range(&self) -> Option<((u16, u16), (u16, u16))> {
         let start = self.selection_start?;
         let end = self.selection_end?;
+
+        // No selection if start equals end (just a click, no drag)
+        if start == end {
+            return None;
+        }
 
         // Normalize so start is before end (top-to-bottom, left-to-right)
         if start.1 < end.1 || (start.1 == end.1 && start.0 <= end.0) {
