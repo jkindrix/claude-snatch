@@ -521,6 +521,8 @@ pub struct ExportTemplate {
     #[serde(default = "default_template_format")]
     pub format: String,
     /// Template content (uses Handlebars-like syntax).
+    /// Optional when using per-entry templates (user_template, assistant_template, etc.)
+    #[serde(default)]
     pub content: String,
     /// Header to prepend to output.
     #[serde(default)]
@@ -666,10 +668,19 @@ pub fn create_sample_template() -> Result<PathBuf> {
 
     let sample_content = r#"# Summary Export Template
 # This template creates a concise summary of the conversation
+#
+# Available variables:
+#   Header/Footer: {{session_id}}, {{project_path}}, {{timestamp}}, {{message_count}}, {{total_tokens}}
+#   User/Assistant/System: {{content}}
+#   Tool use: {{tool_name}}, {{tool_id}}, {{input}}
+#   Tool result: {{tool_id}}, {{content}}
+#   Thinking: {{content}}
 
 name = "summary"
 description = "Concise conversation summary with key points"
 format = "markdown"
+
+# Note: 'content' field is optional when using per-entry templates
 
 header = """
 # Session Summary
@@ -694,9 +705,9 @@ entry_separator = "\n"
 
 user_template = "**User:** {{content}}\n"
 assistant_template = "**Claude:** {{content}}\n"
-thinking_template = ""  # Skip thinking blocks in summary
+thinking_template = ""  # Empty string = skip thinking blocks in summary
 tool_use_template = "- Used tool: `{{tool_name}}`\n"
-tool_result_template = ""  # Skip tool results in summary
+tool_result_template = ""  # Empty string = skip tool results in summary
 "#;
 
     std::fs::write(&sample_path, sample_content).map_err(|e| {
