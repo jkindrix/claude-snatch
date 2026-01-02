@@ -1,8 +1,9 @@
 //! TUI application state.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::BufWriter;
 
+use chrono::{DateTime, Local, Utc};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use similar::{ChangeTag, TextDiff};
@@ -17,11 +18,67 @@ use crate::export::{
 use crate::model::{ContentBlock, LogEntry};
 use crate::parser::JsonlParser;
 use crate::reconstruction::Conversation;
+use crate::tags::TagStore;
 use crate::util::AtomicFile;
 
 use super::components::{format_message_header, MessageType};
 use super::highlight::SyntaxHighlighter;
 use super::theme::Theme;
+
+/// Cached display information for a session in the tree view.
+#[derive(Debug, Clone)]
+pub struct SessionDisplayInfo {
+    /// Custom name from TagStore (if set).
+    pub name: Option<String>,
+    /// Whether the session is bookmarked.
+    pub bookmarked: bool,
+    /// Session start timestamp.
+    pub start_time: Option<DateTime<Utc>>,
+    /// Total message count (user + assistant).
+    pub message_count: usize,
+    /// First line of summary (if available).
+    pub summary_preview: Option<String>,
+    /// File size in bytes (for sorting).
+    pub file_size: u64,
+}
+
+/// Session sort mode for the tree view.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SessionSortMode {
+    /// Newest sessions first (by start time).
+    #[default]
+    NewestFirst,
+    /// Oldest sessions first.
+    OldestFirst,
+    /// Largest sessions first (by file size).
+    LargestFirst,
+    /// Sessions with most messages first.
+    MostMessages,
+}
+
+impl SessionSortMode {
+    /// Cycle to the next sort mode.
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::NewestFirst => Self::OldestFirst,
+            Self::OldestFirst => Self::LargestFirst,
+            Self::LargestFirst => Self::MostMessages,
+            Self::MostMessages => Self::NewestFirst,
+        }
+    }
+
+    /// Get display name for the sort mode.
+    #[must_use]
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::NewestFirst => "Newest",
+            Self::OldestFirst => "Oldest",
+            Self::LargestFirst => "Largest",
+            Self::MostMessages => "Most Msgs",
+        }
+    }
+}
 
 /// Search mode state.
 #[derive(Debug, Clone, Default)]
@@ -998,6 +1055,14 @@ pub struct AppState {
     tree_session_ids: Vec<String>,
     /// Set of selected session IDs (for multi-select export).
     pub selected_sessions: HashSet<String>,
+    /// Tag store for session metadata (names, bookmarks, tags).
+    tag_store: TagStore,
+    /// Cached display information for sessions in tree view.
+    session_display_cache: HashMap<String, SessionDisplayInfo>,
+    /// Current sort mode for session list.
+    pub session_sort_mode: SessionSortMode,
+    /// Filter to show only bookmarked sessions.
+    pub show_bookmarked_only: bool,
     /// Command palette state.
     pub command_palette: CommandPalette,
     /// Use ASCII-only characters (no Unicode box drawing).
@@ -1077,6 +1142,10 @@ impl AppState {
             status_message: None,
             tree_session_ids: Vec::new(),
             selected_sessions: HashSet::new(),
+            tag_store: TagStore::load().unwrap_or_default(),
+            session_display_cache: HashMap::new(),
+            session_sort_mode: SessionSortMode::default(),
+            show_bookmarked_only: false,
             command_palette: CommandPalette::default(),
             ascii_mode: false,
             focus_mode: false,
@@ -1831,6 +1900,39 @@ impl AppState {
         self.update_conversation_display();
     }
 
+    /// Cycle to the next session sort mode.
+    pub fn cycle_sort_mode(&mut self) {
+        // Only meaningful when viewing a project's sessions
+        if self.current_project.is_some() && self.current_session.is_none() {
+            self.session_sort_mode = self.session_sort_mode.next();
+            self.status_message = Some(StatusMessage::info(format!(
+                "Sort: {}",
+                self.session_sort_mode.display_name()
+            )));
+            // Refresh the tree with new sort order
+            if let Some(idx) = self.current_project {
+                let _ = self.update_tree_for_project(idx);
+            }
+        }
+    }
+
+    /// Toggle bookmark filter for session list.
+    pub fn toggle_bookmark_filter(&mut self) {
+        // Only meaningful when viewing a project's sessions
+        if self.current_project.is_some() && self.current_session.is_none() {
+            self.show_bookmarked_only = !self.show_bookmarked_only;
+            if self.show_bookmarked_only {
+                self.status_message = Some(StatusMessage::info("Showing bookmarked only"));
+            } else {
+                self.status_message = Some(StatusMessage::info("Showing all sessions"));
+            }
+            // Refresh the tree with filter applied
+            if let Some(idx) = self.current_project {
+                let _ = self.update_tree_for_project(idx);
+            }
+        }
+    }
+
     /// Toggle help.
     pub fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
@@ -2253,10 +2355,35 @@ impl AppState {
     fn update_tree_for_project(&mut self, project_idx: usize) -> Result<()> {
         if let Some(project) = self.projects.get(project_idx) {
             // Build hierarchical view of sessions
-            let hierarchy = HierarchyBuilder::new().build_for_project(project)?;
+            let mut hierarchy = HierarchyBuilder::new().build_for_project(project)?;
 
             self.tree_items.clear();
             self.tree_session_ids.clear();
+            self.session_display_cache.clear();
+
+            // Pre-load display info for all sessions
+            for node in &hierarchy {
+                self.cache_session_display_info(node);
+            }
+
+            // Sort top-level sessions based on current sort mode
+            self.sort_hierarchy(&mut hierarchy);
+
+            // Filter by bookmark if enabled
+            let hierarchy: Vec<_> = if self.show_bookmarked_only {
+                hierarchy
+                    .into_iter()
+                    .filter(|node| {
+                        let id = node.session.session_id();
+                        self.session_display_cache
+                            .get(id)
+                            .map(|d| d.bookmarked)
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            } else {
+                hierarchy
+            };
 
             for node in hierarchy {
                 self.add_hierarchy_node_to_tree(&node);
@@ -2271,18 +2398,171 @@ impl AppState {
         Ok(())
     }
 
+    /// Sort hierarchy nodes based on current sort mode.
+    fn sort_hierarchy(&self, nodes: &mut [crate::discovery::AgentNode]) {
+        let cache = &self.session_display_cache;
+        let mode = self.session_sort_mode;
+
+        nodes.sort_by(|a, b| {
+            let a_info = cache.get(a.session.session_id());
+            let b_info = cache.get(b.session.session_id());
+
+            match mode {
+                SessionSortMode::NewestFirst => {
+                    let a_time = a_info.and_then(|i| i.start_time);
+                    let b_time = b_info.and_then(|i| i.start_time);
+                    b_time.cmp(&a_time) // Reverse for newest first
+                }
+                SessionSortMode::OldestFirst => {
+                    let a_time = a_info.and_then(|i| i.start_time);
+                    let b_time = b_info.and_then(|i| i.start_time);
+                    a_time.cmp(&b_time)
+                }
+                SessionSortMode::LargestFirst => {
+                    let a_size = a_info.map(|i| i.file_size).unwrap_or(0);
+                    let b_size = b_info.map(|i| i.file_size).unwrap_or(0);
+                    b_size.cmp(&a_size) // Reverse for largest first
+                }
+                SessionSortMode::MostMessages => {
+                    let a_msgs = a_info.map(|i| i.message_count).unwrap_or(0);
+                    let b_msgs = b_info.map(|i| i.message_count).unwrap_or(0);
+                    b_msgs.cmp(&a_msgs) // Reverse for most first
+                }
+            }
+        });
+    }
+
+    /// Cache display information for a session node (recursively).
+    fn cache_session_display_info(&mut self, node: &crate::discovery::AgentNode) {
+        let session_id = node.session.session_id().to_string();
+
+        // Get tag metadata (custom name, bookmark status)
+        let tag_meta = self.tag_store.get(&session_id);
+        let name = tag_meta.and_then(|m| m.name.clone());
+        let bookmarked = tag_meta.map(|m| m.bookmarked).unwrap_or(false);
+
+        // Get quick metadata (timestamp, message counts, file size)
+        let (start_time, message_count, summary_preview, file_size) =
+            if let Ok(meta) = node.session.quick_metadata_cached() {
+                let msg_count = meta.user_count + meta.assistant_count;
+                // Try to extract summary from first entry if available
+                let summary = self.extract_summary_preview(&node.session);
+                (meta.start_time, msg_count, summary, meta.file_size)
+            } else {
+                (None, 0, None, node.session.file_size())
+            };
+
+        self.session_display_cache.insert(
+            session_id,
+            SessionDisplayInfo {
+                name,
+                bookmarked,
+                start_time,
+                message_count,
+                summary_preview,
+                file_size,
+            },
+        );
+
+        // Cache children recursively
+        for child in &node.children {
+            self.cache_session_display_info(child);
+        }
+    }
+
+    /// Extract a summary preview from the first Summary entry in a session.
+    fn extract_summary_preview(&self, session: &Session) -> Option<String> {
+        // Try to get summary from the session's first Summary entry
+        // This is a lightweight check - we parse just enough to find it
+        if let Ok(entries) = session.parse() {
+            for entry in entries.iter().take(10) {
+                if let LogEntry::Summary(summary_msg) = entry {
+                    // Get first non-empty line of summary, truncated
+                    let preview = summary_msg
+                        .summary
+                        .lines()
+                        .find(|l: &&str| !l.trim().is_empty())
+                        .map(|l: &str| {
+                            let trimmed = l.trim();
+                            if trimmed.len() > 40 {
+                                format!("{}...", &trimmed[..37])
+                            } else {
+                                trimmed.to_string()
+                            }
+                        });
+                    if preview.is_some() {
+                        return preview;
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Format timestamp for display in tree view.
+    fn format_tree_timestamp(dt: &DateTime<Utc>) -> String {
+        let local: DateTime<Local> = dt.with_timezone(&Local);
+        local.format("%b %d %l:%M%P").to_string()
+    }
+
     /// Add a hierarchy node to the tree (recursively).
     fn add_hierarchy_node_to_tree(&mut self, node: &crate::discovery::AgentNode) {
         let id = node.session.session_id();
         let short_id = &id[..8.min(id.len())];
         let indent = "  ".repeat(node.depth);
 
+        // Get cached display info
+        let display_info = self.session_display_cache.get(id);
+
+        // Build label with rich context
         let label = if node.session.is_subagent() {
-            format!("{indent}└─ {short_id} [agent]")
-        } else if !node.children.is_empty() {
-            format!("{indent}{short_id} ({} agents)", node.children.len())
+            // Subagents show simpler format
+            let bookmark = if display_info.map(|d| d.bookmarked).unwrap_or(false) {
+                "★ "
+            } else {
+                ""
+            };
+            format!("{indent}└─ {bookmark}{short_id} [agent]")
         } else {
-            format!("{indent}{short_id}")
+            let bookmark = if display_info.map(|d| d.bookmarked).unwrap_or(false) {
+                "★ "
+            } else {
+                ""
+            };
+
+            // Priority: custom name > summary preview > just ID
+            let primary = if let Some(name) = display_info.and_then(|d| d.name.as_ref()) {
+                format!("\"{name}\"")
+            } else if let Some(summary) = display_info.and_then(|d| d.summary_preview.as_ref()) {
+                format!("{short_id} \"{summary}\"")
+            } else {
+                short_id.to_string()
+            };
+
+            // Add timestamp and message count
+            let timestamp = display_info
+                .and_then(|d| d.start_time.as_ref())
+                .map(Self::format_tree_timestamp)
+                .unwrap_or_default();
+
+            let msg_count = display_info.map(|d| d.message_count).unwrap_or(0);
+            let msg_suffix = if msg_count > 0 {
+                format!(" {msg_count} msgs")
+            } else {
+                String::new()
+            };
+
+            let agent_suffix = if !node.children.is_empty() {
+                format!(" ({} agents)", node.children.len())
+            } else {
+                String::new()
+            };
+
+            if timestamp.is_empty() {
+                format!("{indent}{bookmark}{primary}{agent_suffix}")
+            } else {
+                format!("{indent}{bookmark}{primary} [{timestamp}]{msg_suffix}{agent_suffix}")
+            }
         };
 
         self.tree_items.push(label);

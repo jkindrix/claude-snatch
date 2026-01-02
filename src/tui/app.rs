@@ -462,6 +462,16 @@ fn run_loop(
                         app.toggle_focus_mode();
                     }
 
+                    // Session sort mode (cycle through sort options)
+                    (KeyModifiers::NONE, KeyCode::Char('s')) => {
+                        app.cycle_sort_mode();
+                    }
+
+                    // Toggle bookmark filter (show only bookmarked sessions)
+                    (KeyModifiers::NONE, KeyCode::Char('b')) => {
+                        app.toggle_bookmark_filter();
+                    }
+
                     // Filter controls
                     (KeyModifiers::NONE, KeyCode::Char('f')) => {
                         app.toggle_filter();
@@ -798,10 +808,21 @@ fn draw_tree_panel(f: &mut Frame, app: &AppState, area: Rect) {
         })
         .collect();
 
+    // Dynamic title based on navigation level
+    let title = if let Some(idx) = app.current_project {
+        if let Some(project) = app.projects.get(idx) {
+            format!(" {} ", project.display_name())
+        } else {
+            " Sessions ".to_string()
+        }
+    } else {
+        " Projects ".to_string()
+    };
+
     let list = List::new(items)
         .block(
             Block::default()
-                .title(" Projects ")
+                .title(title)
                 .borders(Borders::ALL)
                 .border_style(border_style),
         );
@@ -880,7 +901,14 @@ fn draw_details_panel(f: &mut Frame, app: &AppState, area: Rect) {
         app.details_lines.clone()
     };
 
-    ScrollableText::new(" Details ")
+    // Dynamic title based on whether a session is selected
+    let title = if let Some(session_id) = &app.current_session {
+        format!(" Session: {} ", &session_id[..8.min(session_id.len())])
+    } else {
+        " Details ".to_string()
+    };
+
+    ScrollableText::new(&title)
         .content(content)
         .scroll(app.details_scroll)
         .focused(app.focus == 2)
@@ -985,6 +1013,29 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
 
         content.push(Span::raw(" │ "));
         content.push(Span::raw(format!("Session: {short_id} ")));
+        content
+    } else if app.current_project.is_some() {
+        // Viewing session list for a project
+        let mut content = vec![
+            Span::raw(format!("{} sessions ", app.tree_items.len())),
+        ];
+
+        // Show sort mode
+        content.push(Span::raw("│ "));
+        content.push(Span::styled(
+            format!("Sort: {} ", app.session_sort_mode.display_name()),
+            Style::default().fg(app.theme.secondary),
+        ));
+
+        // Show bookmark filter indicator
+        if app.show_bookmarked_only {
+            content.push(Span::styled(
+                "[★ only] ",
+                Style::default().fg(app.theme.warning),
+            ));
+        }
+
+        content.push(Span::raw("│ s=sort b=bookmarks "));
         content
     } else {
         vec![
