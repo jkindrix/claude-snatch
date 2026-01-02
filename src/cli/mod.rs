@@ -612,6 +612,16 @@ pub struct ExportArgs {
     /// Copy export to clipboard instead of writing to file/stdout.
     #[arg(long, visible_alias = "copy")]
     pub clipboard: bool,
+
+    /// Use a custom export template by name.
+    /// Templates are defined in config at ~/.config/claude-snatch/templates/
+    /// Use --template list to see available templates.
+    #[arg(long, value_name = "NAME")]
+    pub template: Option<String>,
+
+    /// List available export templates.
+    #[arg(long)]
+    pub list_templates: bool,
 }
 
 /// Export format argument.
@@ -1346,6 +1356,55 @@ pub enum TagAction {
     ClearNotes {
         /// Session ID (supports short prefixes like "780893e4").
         session: String,
+    },
+
+    /// Link two sessions together (marks them as continuations/related).
+    Link {
+        /// First session ID (supports short prefixes like "780893e4").
+        session_a: String,
+        /// Second session ID to link to.
+        session_b: String,
+    },
+
+    /// Unlink two sessions.
+    Unlink {
+        /// First session ID (supports short prefixes like "780893e4").
+        session_a: String,
+        /// Second session ID to unlink from.
+        session_b: String,
+    },
+
+    /// Show linked sessions for a session or list all linked sessions.
+    Links {
+        /// Session ID to show links for (optional - shows all if not specified).
+        session: Option<String>,
+    },
+
+    /// Find sessions similar to a given session.
+    Similar {
+        /// Session ID to find similar sessions for (supports short prefixes).
+        session: String,
+        /// Maximum number of similar sessions to show.
+        #[arg(short = 'n', long, default_value = "10")]
+        limit: usize,
+        /// Minimum similarity score (0-100, default 20).
+        #[arg(long, default_value = "20")]
+        threshold: u8,
+        /// Weight for tool overlap similarity (0-100).
+        #[arg(long, default_value = "30")]
+        tool_weight: u8,
+        /// Weight for project match similarity (0-100).
+        #[arg(long, default_value = "25")]
+        project_weight: u8,
+        /// Weight for time proximity similarity (0-100).
+        #[arg(long, default_value = "15")]
+        time_weight: u8,
+        /// Weight for tag overlap similarity (0-100).
+        #[arg(long, default_value = "20")]
+        tag_weight: u8,
+        /// Weight for token count similarity (0-100).
+        #[arg(long, default_value = "10")]
+        token_weight: u8,
     },
 }
 

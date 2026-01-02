@@ -10,6 +10,7 @@ use rayon::prelude::*;
 use crate::analytics::history::{CostDataPoint, CostHistory};
 use crate::analytics::{ProjectAnalytics, SessionAnalytics};
 use crate::cli::{Cli, OutputFormat, StatsArgs};
+use crate::config::Config;
 use crate::discovery::{format_count, format_number, Session};
 use crate::error::{Result, SnatchError};
 use crate::model::{ContentBlock, LogEntry};
@@ -376,9 +377,15 @@ pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
         let global_analytics = compute_stats_parallel(&all_sessions, cli.max_file_size);
 
         output_global_stats(cli, args, &global_analytics)?;
+
+        // Show budget status if configured
+        output_budget_status(cli)?;
     } else {
         // Default: show summary of all projects
         output_overview(cli, args, &claude_dir)?;
+
+        // Show budget status if configured
+        output_budget_status(cli)?;
     }
 
     Ok(())
@@ -1819,6 +1826,131 @@ fn output_token_graph(cli: &Cli, args: &StatsArgs, sessions: &[Session]) -> Resu
     }
 
     Ok(())
+}
+
+/// Display budget status if configured.
+fn output_budget_status(cli: &Cli) -> Result<()> {
+    let config = Config::load().unwrap_or_default();
+
+    if !config.budget.has_limits() || !config.budget.show_in_stats {
+        return Ok(());
+    }
+
+    // Load cost history to get current spending
+    let history = CostHistory::load()?;
+
+    // Get today's cost
+    let today = Utc::now().date_naive();
+    let today_cost = history.get(today).map(|p| p.cost).unwrap_or(0.0);
+
+    // Get this week's cost
+    let week_stats = history.stats_this_week();
+    let week_cost = week_stats.total_cost;
+
+    // Get this month's cost
+    let month_stats = history.stats_this_month();
+    let month_cost = month_stats.total_cost;
+
+    // Check against budgets
+    let status = config.budget.check(today_cost, week_cost, month_cost);
+
+    // Only display if there are any alerts or in text mode with limits
+    let has_alerts = status.any_exceeded() || status.any_warning();
+
+    match cli.effective_output() {
+        OutputFormat::Json => {
+            if has_alerts {
+                let alerts: Vec<_> = status.alerts().iter().map(|a| {
+                    serde_json::json!({
+                        "period": a.period,
+                        "spent": a.spent,
+                        "limit": a.limit,
+                        "percent_used": a.percent_used * 100.0,
+                        "remaining": a.remaining,
+                        "status": a.status_indicator(),
+                    })
+                }).collect();
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "budget_alerts": alerts
+                }))?);
+            }
+        }
+        OutputFormat::Tsv => {
+            if has_alerts {
+                println!("period\tspent\tlimit\tpercent_used\tstatus");
+                for alert in status.alerts() {
+                    println!("{}\t{:.2}\t{:.2}\t{:.1}\t{}",
+                        alert.period,
+                        alert.spent,
+                        alert.limit,
+                        alert.percent_used * 100.0,
+                        alert.status_indicator()
+                    );
+                }
+            }
+        }
+        OutputFormat::Compact => {
+            for alert in status.alerts() {
+                println!("{}:{} ${:.2}/${:.2} ({:.0}%)",
+                    alert.status_indicator(),
+                    alert.period.to_lowercase(),
+                    alert.spent,
+                    alert.limit,
+                    alert.percent_used * 100.0
+                );
+            }
+        }
+        OutputFormat::Text => {
+            if has_alerts || config.budget.has_limits() {
+                println!();
+                println!("Budget Status");
+                println!("-------------");
+
+                // Show each configured limit
+                if let Some(ref daily) = status.daily {
+                    let bar = progress_bar(daily.percent_used, 20);
+                    println!("  Daily:   ${:>7.2} / ${:.2} [{bar}] {}",
+                        daily.spent, daily.limit, daily.colored_status());
+                }
+
+                if let Some(ref weekly) = status.weekly {
+                    let bar = progress_bar(weekly.percent_used, 20);
+                    println!("  Weekly:  ${:>7.2} / ${:.2} [{bar}] {}",
+                        weekly.spent, weekly.limit, weekly.colored_status());
+                }
+
+                if let Some(ref monthly) = status.monthly {
+                    let bar = progress_bar(monthly.percent_used, 20);
+                    println!("  Monthly: ${:>7.2} / ${:.2} [{bar}] {}",
+                        monthly.spent, monthly.limit, monthly.colored_status());
+                }
+
+                if status.any_exceeded() {
+                    println!();
+                    println!("  ⚠️  One or more budgets exceeded!");
+                } else if status.any_warning() {
+                    println!();
+                    println!("  ⚠️  Approaching budget limit (>{:.0}% threshold)",
+                        config.budget.warning_threshold * 100.0);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Create a simple progress bar.
+fn progress_bar(percent: f64, width: usize) -> String {
+    let filled = ((percent.min(1.0)) * width as f64) as usize;
+    let empty = width.saturating_sub(filled);
+
+    if percent > 1.0 {
+        // Over budget - show overflow
+        format!("{}!", "█".repeat(width))
+    } else {
+        format!("{}{}", "█".repeat(filled), "░".repeat(empty))
+    }
 }
 
 #[cfg(test)]

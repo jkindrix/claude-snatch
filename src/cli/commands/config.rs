@@ -72,6 +72,26 @@ fn show_config(cli: &Cli) -> Result<()> {
                 format_duration_human(config.cache.ttl_seconds),
                 config.cache.ttl_seconds
             );
+            println!();
+
+            println!("[budget]");
+            if let Some(limit) = config.budget.daily_limit {
+                println!("  daily_limit = {:.2} # ${:.2} per day", limit, limit);
+            } else {
+                println!("  daily_limit = # not set");
+            }
+            if let Some(limit) = config.budget.weekly_limit {
+                println!("  weekly_limit = {:.2} # ${:.2} per week", limit, limit);
+            } else {
+                println!("  weekly_limit = # not set");
+            }
+            if let Some(limit) = config.budget.monthly_limit {
+                println!("  monthly_limit = {:.2} # ${:.2} per month", limit, limit);
+            } else {
+                println!("  monthly_limit = # not set");
+            }
+            println!("  warning_threshold = {:.0}%", config.budget.warning_threshold * 100.0);
+            println!("  show_in_stats = {}", config.budget.show_in_stats);
         }
     }
 
@@ -104,6 +124,18 @@ fn get_config_value(cli: &Cli, key: &str) -> Result<()> {
             .unwrap_or_else(|| "(auto-detect)".to_string()),
         "cache.max_size" => config.cache.max_size.to_string(),
         "cache.ttl_seconds" => config.cache.ttl_seconds.to_string(),
+
+        "budget.daily_limit" => config.budget.daily_limit
+            .map(|v| format!("{:.2}", v))
+            .unwrap_or_else(|| "(not set)".to_string()),
+        "budget.weekly_limit" => config.budget.weekly_limit
+            .map(|v| format!("{:.2}", v))
+            .unwrap_or_else(|| "(not set)".to_string()),
+        "budget.monthly_limit" => config.budget.monthly_limit
+            .map(|v| format!("{:.2}", v))
+            .unwrap_or_else(|| "(not set)".to_string()),
+        "budget.warning_threshold" => format!("{:.0}", config.budget.warning_threshold * 100.0),
+        "budget.show_in_stats" => config.budget.show_in_stats.to_string(),
 
         _ => return Err(SnatchError::ConfigError {
             message: format!("Unknown configuration key: {key}"),
@@ -177,6 +209,24 @@ fn set_config_value(_cli: &Cli, key: &str, value: &str) -> Result<()> {
         }
         "cache.ttl_seconds" => {
             config.cache.ttl_seconds = parse_u64(value)?;
+        }
+
+        "budget.daily_limit" => {
+            config.budget.daily_limit = parse_optional_f64(value)?;
+        }
+        "budget.weekly_limit" => {
+            config.budget.weekly_limit = parse_optional_f64(value)?;
+        }
+        "budget.monthly_limit" => {
+            config.budget.monthly_limit = parse_optional_f64(value)?;
+        }
+        "budget.warning_threshold" => {
+            let pct = parse_f64(value)?;
+            // Accept either 0-1 range or percentage (0-100)
+            config.budget.warning_threshold = if pct > 1.0 { pct / 100.0 } else { pct };
+        }
+        "budget.show_in_stats" => {
+            config.budget.show_in_stats = parse_bool(value)?;
         }
 
         _ => return Err(SnatchError::ConfigError {
@@ -253,6 +303,26 @@ fn parse_u64(s: &str) -> Result<u64> {
     s.parse().map_err(|_| SnatchError::ConfigError {
         message: format!("Invalid number: {s}"),
     })
+}
+
+/// Parse f64 value.
+fn parse_f64(s: &str) -> Result<f64> {
+    s.parse().map_err(|_| SnatchError::ConfigError {
+        message: format!("Invalid decimal number: {s}"),
+    })
+}
+
+/// Parse optional f64 value (supports "none", "unset", "clear" to remove).
+fn parse_optional_f64(s: &str) -> Result<Option<f64>> {
+    match s.to_lowercase().as_str() {
+        "none" | "unset" | "clear" | "0" | "" => Ok(None),
+        _ => {
+            let v = s.parse().map_err(|_| SnatchError::ConfigError {
+                message: format!("Invalid decimal number: {s}. Use a number like 100.00 or 'none' to clear."),
+            })?;
+            Ok(Some(v))
+        }
+    }
 }
 
 /// Format seconds as human-readable duration.

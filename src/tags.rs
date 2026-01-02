@@ -139,16 +139,20 @@ pub struct SessionMeta {
     /// Notes/annotations for the session.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<SessionNote>,
+    /// Linked/continuation sessions (session IDs this is related to).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_sessions: Vec<String>,
 }
 
 impl SessionMeta {
-    /// Check if this metadata is empty (no name, tags, bookmark, outcome, or notes).
+    /// Check if this metadata is empty (no name, tags, bookmark, outcome, notes, or links).
     pub fn is_empty(&self) -> bool {
         self.name.is_none()
             && self.tags.is_empty()
             && !self.bookmarked
             && self.outcome.is_none()
             && self.notes.is_empty()
+            && self.linked_sessions.is_empty()
     }
 }
 
@@ -453,6 +457,73 @@ impl TagStore {
             .keys()
             .find(|k| k.starts_with(short_id))
             .map(|s| s.as_str())
+    }
+
+    /// Link two sessions together (bidirectional relationship).
+    /// Returns true if the link was created, false if it already existed.
+    pub fn link_sessions(&mut self, session_a: &str, session_b: &str) -> bool {
+        // Add B to A's links
+        let meta_a = self.get_or_create(session_a);
+        let already_linked_a = meta_a.linked_sessions.contains(&session_b.to_string());
+        if !already_linked_a {
+            meta_a.linked_sessions.push(session_b.to_string());
+            meta_a.linked_sessions.sort();
+        }
+
+        // Add A to B's links
+        let meta_b = self.get_or_create(session_b);
+        let already_linked_b = meta_b.linked_sessions.contains(&session_a.to_string());
+        if !already_linked_b {
+            meta_b.linked_sessions.push(session_a.to_string());
+            meta_b.linked_sessions.sort();
+        }
+
+        // Return true if either link was new
+        !already_linked_a || !already_linked_b
+    }
+
+    /// Unlink two sessions (bidirectional).
+    /// Returns true if a link was removed, false if they weren't linked.
+    pub fn unlink_sessions(&mut self, session_a: &str, session_b: &str) -> bool {
+        let mut removed = false;
+
+        // Remove B from A's links
+        if let Some(meta_a) = self.sessions.get_mut(session_a) {
+            if let Some(pos) = meta_a.linked_sessions.iter().position(|s| s == session_b) {
+                meta_a.linked_sessions.remove(pos);
+                removed = true;
+            }
+        }
+
+        // Remove A from B's links
+        if let Some(meta_b) = self.sessions.get_mut(session_b) {
+            if let Some(pos) = meta_b.linked_sessions.iter().position(|s| s == session_a) {
+                meta_b.linked_sessions.remove(pos);
+                removed = true;
+            }
+        }
+
+        // Cleanup empty entries
+        self.cleanup_empty(session_a);
+        self.cleanup_empty(session_b);
+
+        removed
+    }
+
+    /// Get all sessions linked to a given session.
+    pub fn get_linked_sessions(&self, session_id: &str) -> Vec<&str> {
+        self.get(session_id)
+            .map(|m| m.linked_sessions.iter().map(|s| s.as_str()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Get all sessions that have any links.
+    pub fn sessions_with_links(&self) -> Vec<&str> {
+        self.sessions
+            .iter()
+            .filter(|(_, m)| !m.linked_sessions.is_empty())
+            .map(|(id, _)| id.as_str())
+            .collect()
     }
 }
 
@@ -811,5 +882,94 @@ mod tests {
             ..Default::default()
         };
         assert!(!meta.is_empty());
+    }
+
+    #[test]
+    fn test_session_meta_is_empty_with_links() {
+        let meta = SessionMeta {
+            linked_sessions: vec!["other-session".to_string()],
+            ..Default::default()
+        };
+        assert!(!meta.is_empty());
+    }
+
+    #[test]
+    fn test_link_sessions() {
+        let mut store = TagStore::default();
+
+        // Link two sessions
+        assert!(store.link_sessions("session1", "session2"));
+
+        // Check both directions
+        let linked1 = store.get_linked_sessions("session1");
+        assert!(linked1.contains(&"session2"));
+
+        let linked2 = store.get_linked_sessions("session2");
+        assert!(linked2.contains(&"session1"));
+    }
+
+    #[test]
+    fn test_link_sessions_already_linked() {
+        let mut store = TagStore::default();
+
+        // First link
+        assert!(store.link_sessions("session1", "session2"));
+
+        // Second link should return false (already linked)
+        assert!(!store.link_sessions("session1", "session2"));
+    }
+
+    #[test]
+    fn test_unlink_sessions() {
+        let mut store = TagStore::default();
+
+        // Link then unlink
+        store.link_sessions("session1", "session2");
+        assert!(store.unlink_sessions("session1", "session2"));
+
+        // Both should have no links
+        assert!(store.get_linked_sessions("session1").is_empty());
+        assert!(store.get_linked_sessions("session2").is_empty());
+
+        // Entries should be cleaned up
+        assert!(store.get("session1").is_none());
+        assert!(store.get("session2").is_none());
+    }
+
+    #[test]
+    fn test_unlink_sessions_not_linked() {
+        let mut store = TagStore::default();
+
+        // Try to unlink sessions that aren't linked
+        assert!(!store.unlink_sessions("session1", "session2"));
+    }
+
+    #[test]
+    fn test_sessions_with_links() {
+        let mut store = TagStore::default();
+
+        store.link_sessions("session1", "session2");
+        store.link_sessions("session1", "session3");
+        store.add_tag("session4", "no-links");
+
+        let with_links = store.sessions_with_links();
+        assert_eq!(with_links.len(), 3); // session1, session2, session3
+        assert!(with_links.contains(&"session1"));
+        assert!(with_links.contains(&"session2"));
+        assert!(with_links.contains(&"session3"));
+        assert!(!with_links.contains(&"session4"));
+    }
+
+    #[test]
+    fn test_link_serialization() {
+        let mut store = TagStore::default();
+        store.link_sessions("session1", "session2");
+        store.set_name("session1", Some("Test".to_string()));
+
+        let json = serde_json::to_string(&store).unwrap();
+        let loaded: TagStore = serde_json::from_str(&json).unwrap();
+
+        let linked = loaded.get_linked_sessions("session1");
+        assert!(linked.contains(&"session2"));
     }
 }

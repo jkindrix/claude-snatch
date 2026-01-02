@@ -6,9 +6,11 @@ use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
+use chrono::Utc;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::cli::{Cli, ContentFilter, ExportArgs, ExportFormatArg};
+use crate::config::{default_templates_dir, list_templates, load_template, create_sample_template, ExportTemplate};
 use crate::discovery::{Session, SessionFilter};
 use crate::error::{Result, SnatchError};
 use crate::export::{
@@ -44,6 +46,11 @@ fn build_only_filter(filters: &[ContentFilter]) -> HashSet<ContentType> {
 
 /// Run the export command.
 pub fn run(cli: &Cli, args: &ExportArgs) -> Result<()> {
+    // Handle --list-templates
+    if args.list_templates {
+        return handle_list_templates(cli);
+    }
+
     // Always validate date filters early to catch typos/errors immediately
     if let Some(ref since) = args.since {
         parse_date_filter(since)?; // Validate, but result is used later if needed
@@ -101,6 +108,20 @@ pub fn run(cli: &Cli, args: &ExportArgs) -> Result<()> {
         }
     }
 
+    // Handle --template init without session
+    if let Some(ref template_name) = args.template {
+        if template_name == "init" {
+            let sample_path = create_sample_template()?;
+            if !cli.quiet {
+                eprintln!("Created sample template at: {}", sample_path.display());
+                eprintln!();
+                eprintln!("Edit this file to customize, then use:");
+                eprintln!("  snatch export <session> --template summary");
+            }
+            return Ok(());
+        }
+    }
+
     // Validate arguments
     if args.all {
         // Export all sessions with optional filtering
@@ -132,6 +153,20 @@ fn export_single_session(cli: &Cli, args: &ExportArgs, session_id: &str) -> Resu
             session_id: session_id.to_string(),
         })?;
 
+    // Handle template initialization
+    if let Some(ref template_name) = args.template {
+        if template_name == "init" {
+            let sample_path = create_sample_template()?;
+            if !cli.quiet {
+                eprintln!("Created sample template at: {}", sample_path.display());
+                eprintln!();
+                eprintln!("Edit this file to customize, then use:");
+                eprintln!("  snatch export <session> --template summary");
+            }
+            return Ok(());
+        }
+    }
+
     // Handle combined agents export
     if args.combine_agents {
         return export_combined_agents(cli, args, &session);
@@ -140,6 +175,11 @@ fn export_single_session(cli: &Cli, args: &ExportArgs, session_id: &str) -> Resu
     // Handle gist upload
     if args.gist {
         return export_session_to_gist(cli, args, &session);
+    }
+
+    // Handle template-based export
+    if let Some(ref template_name) = args.template {
+        return export_session_with_template(cli, args, &session, template_name);
     }
 
     // Export the session
@@ -1315,6 +1355,301 @@ fn export_to_string(
         message: format!("Invalid UTF-8 in export output: {e}"),
         source: None,
     })
+}
+
+// ============================================================================
+// Template Export Support
+// ============================================================================
+
+/// Export a session using a custom template.
+fn export_session_with_template(
+    cli: &Cli,
+    args: &ExportArgs,
+    session: &Session,
+    template_name: &str,
+) -> Result<()> {
+    // Load the template
+    let template = load_template(template_name)?;
+
+    // Parse the session
+    let entries = session.parse_with_options(cli.max_file_size)?;
+
+    if entries.is_empty() {
+        if !cli.quiet {
+            eprintln!("Session has no entries to export");
+        }
+        return Ok(());
+    }
+
+    // Build conversation tree
+    let conversation = Conversation::from_entries(entries)?;
+
+    // Check for PII if requested
+    if args.warn_pii {
+        check_for_pii(&conversation, cli.quiet);
+    }
+
+    // Handle clipboard export
+    if args.clipboard {
+        let mut buffer = Vec::new();
+        export_with_template(&conversation, &template, session, &mut buffer)?;
+        let content = String::from_utf8(buffer).map_err(|e| SnatchError::ExportError {
+            message: format!("Invalid UTF-8 in template output: {e}"),
+            source: None,
+        })?;
+
+        match arboard::Clipboard::new() {
+            Ok(mut clipboard) => {
+                if let Err(e) = clipboard.set_text(&content) {
+                    return Err(SnatchError::ExportError {
+                        message: format!("Failed to copy to clipboard: {e}"),
+                        source: None,
+                    });
+                }
+                if !cli.quiet {
+                    eprintln!("Copied {} entries to clipboard using template '{}'.", conversation.len(), template_name);
+                }
+            }
+            Err(e) => {
+                return Err(SnatchError::ExportError {
+                    message: format!("Failed to access clipboard: {e}"),
+                    source: None,
+                });
+            }
+        }
+        return Ok(());
+    }
+
+    // For file output, use atomic writes
+    if let Some(ref path) = args.output_file {
+        let mut atomic = AtomicFile::create(path)?;
+        let mut writer = std::io::BufWriter::new(atomic.writer());
+        export_with_template(&conversation, &template, session, &mut writer)?;
+        writer.flush()?;
+        drop(writer);
+        atomic.finish()?;
+
+        if !cli.quiet {
+            eprintln!(
+                "Exported {} entries to {} using template '{}'",
+                conversation.len(),
+                path.display(),
+                template_name
+            );
+        }
+    } else {
+        // Write to stdout
+        let mut stdout = io::stdout().lock();
+        export_with_template(&conversation, &template, session, &mut stdout)?;
+        stdout.flush()?;
+    }
+
+    Ok(())
+}
+
+/// Handle --list-templates command.
+fn handle_list_templates(cli: &Cli) -> Result<()> {
+    let templates = list_templates()?;
+
+    if templates.is_empty() {
+        let templates_dir = default_templates_dir()?;
+        println!("No templates found.");
+        println!();
+        println!("Templates directory: {}", templates_dir.display());
+        println!();
+        println!("To create a sample template, run:");
+        println!("  snatch export --template init");
+        return Ok(());
+    }
+
+    if cli.json {
+        let data: Vec<_> = templates
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "format": t.format,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&data)?);
+    } else {
+        println!("Available export templates:");
+        println!();
+        for template in &templates {
+            if template.description.is_empty() {
+                println!("  {}", template.name);
+            } else {
+                println!("  {} - {}", template.name, template.description);
+            }
+        }
+        println!();
+        let templates_dir = default_templates_dir()?;
+        println!("Templates directory: {}", templates_dir.display());
+    }
+
+    Ok(())
+}
+
+/// Export a conversation using a custom template.
+pub fn export_with_template(
+    conversation: &Conversation,
+    template: &ExportTemplate,
+    session: &Session,
+    output: &mut dyn Write,
+) -> Result<()> {
+    // Build context for template variable substitution
+    let now = Utc::now();
+    let total_tokens: u64 = conversation
+        .chronological_entries()
+        .into_iter()
+        .filter_map(|e| {
+            if let LogEntry::Assistant(a) = e {
+                a.message.usage.as_ref().map(|u| u.total_tokens())
+            } else {
+                None
+            }
+        })
+        .sum();
+
+    // Write header if present
+    if let Some(ref header) = template.header {
+        let rendered = substitute_template_vars(
+            header,
+            session.session_id(),
+            session.project_path(),
+            &now.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+            conversation.len(),
+            total_tokens,
+        );
+        write!(output, "{}", rendered)?;
+    }
+
+    // Process each entry
+    let entries = conversation.chronological_entries();
+    for (i, entry) in entries.iter().enumerate() {
+        let rendered = render_entry(entry, template);
+        if !rendered.is_empty() {
+            write!(output, "{}", rendered)?;
+            if i < entries.len() - 1 && !template.entry_separator.is_empty() {
+                write!(output, "{}", template.entry_separator)?;
+            }
+        }
+    }
+
+    // Write footer if present
+    if let Some(ref footer) = template.footer {
+        let rendered = substitute_template_vars(
+            footer,
+            session.session_id(),
+            session.project_path(),
+            &now.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+            conversation.len(),
+            total_tokens,
+        );
+        write!(output, "{}", rendered)?;
+    }
+
+    Ok(())
+}
+
+/// Substitute template variables in a string.
+fn substitute_template_vars(
+    template: &str,
+    session_id: &str,
+    project_path: &str,
+    timestamp: &str,
+    message_count: usize,
+    total_tokens: u64,
+) -> String {
+    template
+        .replace("{{session_id}}", session_id)
+        .replace("{{project_path}}", project_path)
+        .replace("{{timestamp}}", timestamp)
+        .replace("{{message_count}}", &message_count.to_string())
+        .replace("{{total_tokens}}", &total_tokens.to_string())
+}
+
+/// Render a single entry using the template.
+fn render_entry(entry: &LogEntry, template: &ExportTemplate) -> String {
+    match entry {
+        LogEntry::User(user) => {
+            if let Some(ref tmpl) = template.user_template {
+                if tmpl.is_empty() {
+                    return String::new();
+                }
+                let content = user.message.as_text().unwrap_or("");
+                tmpl.replace("{{content}}", content)
+            } else {
+                format!("User: {}\n", user.message.as_text().unwrap_or(""))
+            }
+        }
+        LogEntry::Assistant(assistant) => {
+            let mut result = String::new();
+
+            for content in &assistant.message.content {
+                match content {
+                    ContentBlock::Text(t) => {
+                        if let Some(ref tmpl) = template.assistant_template {
+                            if !tmpl.is_empty() {
+                                result.push_str(&tmpl.replace("{{content}}", &t.text));
+                            }
+                        } else {
+                            result.push_str(&format!("Assistant: {}\n", t.text));
+                        }
+                    }
+                    ContentBlock::Thinking(th) => {
+                        if let Some(ref tmpl) = template.thinking_template {
+                            if !tmpl.is_empty() {
+                                result.push_str(&tmpl.replace("{{content}}", &th.thinking));
+                            }
+                        }
+                    }
+                    ContentBlock::ToolUse(tool) => {
+                        if let Some(ref tmpl) = template.tool_use_template {
+                            if !tmpl.is_empty() {
+                                let input_str = serde_json::to_string(&tool.input).unwrap_or_default();
+                                result.push_str(
+                                    &tmpl
+                                        .replace("{{tool_name}}", &tool.name)
+                                        .replace("{{tool_id}}", &tool.id)
+                                        .replace("{{input}}", &input_str),
+                                );
+                            }
+                        }
+                    }
+                    ContentBlock::ToolResult(tool_result) => {
+                        if let Some(ref tmpl) = template.tool_result_template {
+                            if !tmpl.is_empty() {
+                                let content = tool_result.content_as_string().unwrap_or_default();
+                                result.push_str(
+                                    &tmpl
+                                        .replace("{{tool_id}}", &tool_result.tool_use_id)
+                                        .replace("{{content}}", &content),
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            result
+        }
+        LogEntry::System(system) => {
+            if let Some(ref tmpl) = template.system_template {
+                if tmpl.is_empty() {
+                    return String::new();
+                }
+                let content = system.content.as_deref().unwrap_or("");
+                tmpl.replace("{{content}}", content)
+            } else {
+                String::new() // Skip system messages by default
+            }
+        }
+        _ => String::new(),
+    }
 }
 
 #[cfg(test)]
