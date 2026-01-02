@@ -98,6 +98,9 @@ snatch tui
 | `diff` | | Compare two sessions or files |
 | `tag` | | Manage session tags, names, and bookmarks |
 | `prompts` | | Extract user prompts from sessions |
+| `code` | | Extract code blocks from sessions |
+| `summary` | | Show quick summary of Claude Code usage |
+| `recent` | | List most recent sessions (shorthand for list -n 5) |
 | `extract` | | Extract beyond-JSONL data (settings, MCP, etc.) |
 | `index` | | Manage full-text search index |
 | `cache` | | Manage the session cache |

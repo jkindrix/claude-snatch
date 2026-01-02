@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `snatch code` command for extracting code blocks from sessions with language filtering
+- `snatch summary` command for quick usage overview (sessions, projects, activity)
+- `snatch recent` command as shorthand for `list -n 5` to show recent sessions
+- Session context preview in `snatch list` with `-c/--context` flag
+- `--hide-empty` flag to filter projects with zero sessions
+- Quick summary output for bare `snatch` command in non-interactive mode
 - Per-message token usage columns in SQLite export (input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens)
 - `is_sidechain` column for branch/subagent message detection in SQLite
 - `agent_hash` column to uniquely identify subagent sessions
@@ -29,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--main-thread` now defaults to false (exports all entries by default)
 
 ### Fixed
+- HTML export missing closing `>` on meta generator tag
+- Shell completions panic on broken pipe when output is truncated
+- Budget warnings now route to stderr instead of stdout
+- ANSI escape codes appearing in non-TTY output (respects `--color` flag)
+- Code blocks now show "text" instead of "unknown" for unspecified languages
 - Export data loss issue where only 13-75% of entries were captured
 - Empty sessions appearing in SQLite multi-session exports
 - Tool results extraction from user messages to SQLite
