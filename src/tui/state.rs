@@ -2143,7 +2143,10 @@ impl AppState {
     }
 
     /// Check if currently entering a session name.
+    ///
+    /// Used by tests and available for future UI enhancements.
     #[must_use]
+    #[allow(dead_code)]
     pub fn is_naming_session(&self) -> bool {
         self.filter_state.input_mode == InputMode::SessionName
     }
