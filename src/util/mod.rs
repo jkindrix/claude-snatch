@@ -954,34 +954,90 @@ pub mod pager {
 // Display Utilities
 // ============================================================================
 
-/// Truncate a path or string for display, keeping the end (most informative part).
+/// Truncate a path for display using smart middle truncation.
 ///
-/// If the string is longer than `max_len`, returns `...{last max_len-3 chars}`.
-/// This is useful for paths where the end (filename or project name) is most relevant.
+/// This function preserves both the beginning context (username, root) and
+/// the end (project/directory name) which are typically the most relevant parts.
+/// Middle segments are replaced with "..." when truncation is needed.
 ///
 /// # Arguments
 ///
-/// * `text` - The string to truncate
-/// * `max_len` - Maximum display length (must be > 3)
+/// * `text` - The path string to truncate
+/// * `max_len` - Maximum display length (must be > 5 for meaningful truncation)
 ///
 /// # Example
 ///
 /// ```
 /// use claude_snatch::util::truncate_path;
 ///
+/// // Short paths are unchanged
 /// assert_eq!(truncate_path("/home/user/project", 30), "/home/user/project");
-/// assert_eq!(truncate_path("/home/user/very/long/project/path", 20), "...long/project/path");
+///
+/// // Long paths use middle truncation to preserve both ends
+/// // The function preserves the first segment and as many end segments as fit
+/// assert_eq!(truncate_path("/home/user/dev/projects/my-project", 30), "/home/.../projects/my-project");
 /// ```
 pub fn truncate_path(text: &str, max_len: usize) -> String {
-    if max_len <= 3 {
+    // For very small limits, just take what we can
+    if max_len <= 5 {
         return text.chars().take(max_len).collect();
     }
 
+    // No truncation needed
     if text.len() <= max_len {
-        text.to_string()
-    } else {
-        format!("...{}", &text[text.len() - (max_len - 3)..])
+        return text.to_string();
     }
+
+    // Split path into segments
+    let segments: Vec<&str> = text.split('/').filter(|s| !s.is_empty()).collect();
+
+    // If we have very few segments, fall back to simple end truncation
+    if segments.len() <= 2 {
+        return format!("...{}", &text[text.len().saturating_sub(max_len - 3)..]);
+    }
+
+    // Try to preserve first segment and last segment(s)
+    // Format: first_segment/.../last_segments
+    let first = segments[0];
+    let ellipsis = "/...";
+
+    // Calculate available space for the end portion
+    // Account for leading slash if the original path had one
+    let has_leading_slash = text.starts_with('/');
+    let prefix = if has_leading_slash {
+        format!("/{first}")
+    } else {
+        first.to_string()
+    };
+
+    let prefix_with_ellipsis_len = prefix.len() + ellipsis.len();
+    let available_for_end = max_len.saturating_sub(prefix_with_ellipsis_len);
+
+    // Build the end portion from last segments, working backwards
+    let mut end_parts: Vec<&str> = Vec::new();
+    let mut end_len = 0;
+
+    for seg in segments.iter().rev() {
+        let seg_len = seg.len() + 1; // +1 for the leading /
+        if end_len + seg_len <= available_for_end {
+            end_parts.push(seg);
+            end_len += seg_len;
+        } else {
+            break;
+        }
+    }
+
+    // If we couldn't fit even one segment, fall back to simple end truncation
+    if end_parts.is_empty() {
+        return format!("...{}", &text[text.len().saturating_sub(max_len - 3)..]);
+    }
+
+    // Reverse to get correct order and join
+    end_parts.reverse();
+    let end_portion: String = end_parts.iter().map(|s| format!("/{s}")).collect();
+
+    // Construct the final truncated path
+    format!("{prefix}{ellipsis}{end_portion}")
 }
 
 /// Truncate a string for display, keeping the beginning.
@@ -1467,22 +1523,46 @@ mod tests {
 
     #[test]
     fn test_truncate_path_short() {
+        // Path fits within max length - no truncation
         assert_eq!(super::truncate_path("/home/user/project", 30), "/home/user/project");
     }
 
     #[test]
-    fn test_truncate_path_long() {
+    fn test_truncate_path_middle_truncation() {
+        // Long path gets middle truncation preserving first and last segments
+        let path = "/home/user/dev/projects/my-project";
+        let truncated = super::truncate_path(path, 25);
+        // Should preserve /home and /my-project with /... in middle
+        assert!(truncated.starts_with("/home"));
+        assert!(truncated.contains("/..."));
+        assert!(truncated.ends_with("/my-project"));
+        assert!(truncated.len() <= 25);
+    }
+
+    #[test]
+    fn test_truncate_path_very_long() {
+        // Very long path with multiple segments
         let path = "/home/user/very/long/project/path/name";
-        let truncated = super::truncate_path(path, 20);
-        assert_eq!(truncated.len(), 20);
-        assert!(truncated.starts_with("..."));
-        assert!(truncated.ends_with("ath/name")); // "...oject/path/name" -> ends with "ath/name"
+        let truncated = super::truncate_path(path, 25);
+        // Should preserve first segment and fit as many end segments as possible
+        assert!(truncated.starts_with("/home"));
+        assert!(truncated.contains("/..."));
+        assert!(truncated.len() <= 25);
     }
 
     #[test]
     fn test_truncate_path_exact() {
         let path = "exactly20characters!";
         assert_eq!(super::truncate_path(path, 20), path);
+    }
+
+    #[test]
+    fn test_truncate_path_few_segments() {
+        // Path with only 2 segments falls back to end truncation
+        let path = "/very-long-directory-name/filename";
+        let truncated = super::truncate_path(path, 20);
+        assert!(truncated.starts_with("..."));
+        assert!(truncated.len() <= 20);
     }
 
     #[test]

@@ -698,6 +698,12 @@ impl MarkdownExporter {
         match entry {
             LogEntry::User(user) => {
                 if options.should_include_user() {
+                    // Skip user messages that have no visible text content when using
+                    // exclusive filtering (--only user). This prevents empty entries
+                    // from tool results appearing in the output.
+                    if options.has_exclusive_filter() && !user.message.has_visible_text() {
+                        return Ok(());
+                    }
                     self.write_user_message(writer, user, options)?;
                 }
             }

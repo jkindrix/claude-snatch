@@ -1744,11 +1744,25 @@ fn init_logging(cli: &Cli) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(cli.log_level.to_filter_string()));
 
-    // Determine if ANSI colors should be used based on --color flag and terminal detection
+    // Determine if ANSI colors should be used based on:
+    // 1. Explicit --color flag (highest priority)
+    // 2. NO_COLOR environment variable (standard convention, see https://no-color.org/)
+    // 3. TERM=dumb (indicates a dumb terminal)
+    // 4. stderr terminal detection
     let use_ansi = match cli.color {
-        Some(true) => true,
-        Some(false) => false,
-        None => std::io::stderr().is_terminal(),
+        Some(explicit) => explicit,
+        None => {
+            // Check NO_COLOR environment variable (if set to any value, disable color)
+            if std::env::var("NO_COLOR").is_ok() {
+                false
+            // Check for dumb terminal
+            } else if std::env::var("TERM").map(|t| t == "dumb").unwrap_or(false) {
+                false
+            // Fall back to terminal detection
+            } else {
+                std::io::stderr().is_terminal()
+            }
+        }
     };
 
     // Build subscriber based on log format
@@ -1795,8 +1809,13 @@ fn init_logging(cli: &Cli) {
                 .try_init()
         }
         LogFormat::Text => {
-            // Default human-readable text format
+            // Default human-readable text format for CLI usage
+            // Uses a clean format without timestamps (which can contain ANSI codes)
+            // and without target/file info for simpler output
             let layer = fmt::layer()
+                .without_time()
+                .with_target(false)
+                .with_level(true)
                 .with_ansi(use_ansi)
                 .with_writer(std::io::stderr);
             tracing_subscriber::registry()

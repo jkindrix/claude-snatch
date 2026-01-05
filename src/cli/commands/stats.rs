@@ -371,8 +371,10 @@ pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
         let project_analytics = compute_stats_parallel(&sessions, cli.max_file_size);
 
         output_project_stats(cli, args, &project_analytics, project.decoded_path())?;
-    } else if args.global {
+    } else if args.global || args.models || args.costs || args.all {
         // Global stats across all sessions - parallel processing
+        // Also show global stats when --models, --costs, or --all is specified without a scope,
+        // since these flags require computing full statistics to be useful.
         let all_sessions = claude_dir.all_sessions()?;
         let global_analytics = compute_stats_parallel(&all_sessions, cli.max_file_size);
 

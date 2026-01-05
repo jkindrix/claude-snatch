@@ -398,6 +398,25 @@ impl UserContent {
         }
     }
 
+    /// Check if this content has any visible text (not just tool results).
+    ///
+    /// Returns true if:
+    /// - This is a Simple content with non-empty text, OR
+    /// - This is Blocks content with at least one Text block that has non-empty content
+    ///
+    /// Returns false if:
+    /// - This is a Simple content with empty text
+    /// - This is Blocks content with only tool results or images (no text)
+    #[must_use]
+    pub fn has_visible_text(&self) -> bool {
+        match self {
+            Self::Simple(s) => !s.content.trim().is_empty(),
+            Self::Blocks(b) => b.content.iter().any(|c| {
+                matches!(c, ContentBlock::Text(t) if !t.text.trim().is_empty())
+            }),
+        }
+    }
+
     /// Check if this contains tool results.
     #[must_use]
     pub fn has_tool_results(&self) -> bool {
