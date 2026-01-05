@@ -103,6 +103,7 @@ memmap2 = { version = "0.9", optional = true }
 [dev-dependencies]
 # Testing
 pretty_assertions = "1.4"
+rust-expect = "0.1"
 insta = { version = "1.41", features = ["json", "yaml", "filters"] }
 proptest = "1.5"
 criterion = { version = "0.5", features = ["async_tokio"] }
