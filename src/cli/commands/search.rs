@@ -331,7 +331,8 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
     let mut total_matches = 0;
     let mut all_results = Vec::new();
     let mut sessions_with_matches: HashSet<String> = HashSet::new();
-    let mut match_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    // Maps session_id -> (project_path, match_count)
+    let mut match_counts: std::collections::HashMap<String, (String, usize)> = std::collections::HashMap::new();
 
     // Create progress bar for interactive sessions with many sessions
     let session_count = sessions.len();
@@ -408,7 +409,10 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
         }
 
         if session_match_count > 0 {
-            match_counts.insert(session.session_id().to_string(), session_match_count);
+            match_counts.insert(
+                session.session_id().to_string(),
+                (session.project_path().to_string(), session_match_count),
+            );
         }
 
         // Check limit (unless --no-limit is set)
@@ -470,14 +474,27 @@ fn output_files_only(cli: &Cli, sessions: &HashSet<String>) -> Result<()> {
 /// Output match counts.
 fn output_count(
     cli: &Cli,
-    match_counts: &std::collections::HashMap<String, usize>,
+    match_counts: &std::collections::HashMap<String, (String, usize)>,
     total: usize,
 ) -> Result<()> {
     match cli.effective_output() {
         OutputFormat::Json => {
+            // Build a structured JSON with project info
+            let by_session: std::collections::HashMap<&str, serde_json::Value> = match_counts
+                .iter()
+                .map(|(session_id, (project, count))| {
+                    (
+                        session_id.as_str(),
+                        serde_json::json!({
+                            "project": project,
+                            "count": count
+                        }),
+                    )
+                })
+                .collect();
             let output = serde_json::json!({
                 "total": total,
-                "by_session": match_counts,
+                "by_session": by_session,
             });
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
@@ -486,12 +503,13 @@ fn output_count(
                 // Single session - just show count
                 println!("{}", total);
             } else {
-                // Multiple sessions - show per-session counts
-                let mut counts: Vec<(&String, &usize)> = match_counts.iter().collect();
-                counts.sort_by(|a, b| b.1.cmp(a.1));
+                // Multiple sessions - show per-session counts with project
+                let mut counts: Vec<(&String, &(String, usize))> = match_counts.iter().collect();
+                counts.sort_by(|a, b| (b.1).1.cmp(&(a.1).1));
 
-                for (session_id, count) in counts {
-                    println!("{}:{}", &session_id[..8.min(session_id.len())], count);
+                for (session_id, (project, count)) in counts {
+                    let short_id = &session_id[..8.min(session_id.len())];
+                    println!("{} ({}):{}", short_id, project, count);
                 }
                 println!();
                 println!("Total: {}", total);
@@ -528,8 +546,9 @@ fn output_full_results(
         }
         OutputFormat::Compact => {
             for result in all_results {
-                println!("{}:{}: {}",
+                println!("{} ({}):{}: {}",
                     &result.session_id[..8.min(result.session_id.len())],
+                    result.project,
                     result.location,
                     result.matched_text
                 );

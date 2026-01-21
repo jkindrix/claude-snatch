@@ -326,16 +326,28 @@ pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
                     session_id: session_id.clone(),
                 })?;
             vec![session]
-        } else if let Some(project_filter) = &args.project {
-            // Blocks for specific project
+        } else if let Some(project_filters) = &args.project {
+            // Blocks for specific project(s)
             let projects = claude_dir.projects()?;
-            let project = projects
+            let matching_projects: Vec<_> = projects
                 .iter()
-                .find(|p| p.decoded_path().contains(project_filter))
-                .ok_or_else(|| SnatchError::ProjectNotFound {
-                    project_path: project_filter.clone(),
-                })?;
-            project.sessions()?
+                .filter(|p| {
+                    let path = p.decoded_path();
+                    project_filters.iter().any(|filter| path.contains(filter))
+                })
+                .collect();
+
+            if matching_projects.is_empty() {
+                return Err(SnatchError::ProjectNotFound {
+                    project_path: project_filters.join(", "),
+                });
+            }
+
+            let mut all_sessions = Vec::new();
+            for project in matching_projects {
+                all_sessions.extend(project.sessions()?);
+            }
+            all_sessions
         } else {
             // Global blocks across all sessions
             claude_dir.all_sessions()?
@@ -357,20 +369,44 @@ pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
         let analytics = SessionAnalytics::from_conversation(&conversation);
 
         output_session_stats(cli, args, &analytics)?;
-    } else if let Some(project_filter) = &args.project {
-        // Stats for specific project
+    } else if let Some(project_filters) = &args.project {
+        // Stats for specific project(s)
         let projects = claude_dir.projects()?;
-        let project = projects
+
+        // Find all projects matching any of the filters
+        let matching_projects: Vec<_> = projects
             .iter()
-            .find(|p| p.decoded_path().contains(project_filter))
-            .ok_or_else(|| SnatchError::ProjectNotFound {
-                project_path: project_filter.clone(),
-            })?;
+            .filter(|p| {
+                let path = p.decoded_path();
+                project_filters.iter().any(|filter| path.contains(filter))
+            })
+            .collect();
 
-        let sessions = project.sessions()?;
-        let project_analytics = compute_stats_parallel(&sessions, cli.max_file_size);
+        if matching_projects.is_empty() {
+            return Err(SnatchError::ProjectNotFound {
+                project_path: project_filters.join(", "),
+            });
+        }
 
-        output_project_stats(cli, args, &project_analytics, project.decoded_path())?;
+        // Single project - use original behavior
+        if matching_projects.len() == 1 {
+            let project = matching_projects[0];
+            let sessions = project.sessions()?;
+            let project_analytics = compute_stats_parallel(&sessions, cli.max_file_size);
+            output_project_stats(cli, args, &project_analytics, project.decoded_path())?;
+        } else {
+            // Multiple projects - aggregate and show breakdown
+            let mut all_sessions: Vec<Session> = Vec::new();
+            let mut project_names: Vec<String> = Vec::new();
+
+            for project in &matching_projects {
+                all_sessions.extend(project.sessions()?);
+                project_names.push(project.decoded_path().to_string());
+            }
+
+            let aggregate_analytics = compute_stats_parallel(&all_sessions, cli.max_file_size);
+            output_multi_project_stats(cli, args, &aggregate_analytics, &project_names)?;
+        }
     } else if args.global || args.models || args.costs || args.all {
         // Global stats across all sessions - parallel processing
         // Also show global stats when --models, --costs, or --all is specified without a scope,
@@ -536,6 +572,138 @@ fn output_project_stats(
             println!("{}", "=".repeat(20 + project_path.len()));
             println!();
             println!("Sessions: {}", format_count(analytics.session_count));
+            println!();
+
+            // Duration
+            let total_secs = analytics.total_duration.num_seconds();
+            if total_secs > 0 {
+                println!("Total Duration: {}h {}m",
+                    total_secs / 3600,
+                    (total_secs % 3600) / 60
+                );
+                println!();
+            }
+
+            // Token usage
+            println!("Token Usage:");
+            println!("  Total: {} tokens", format_number(analytics.total_usage.usage.total_tokens()));
+            println!();
+
+            // Messages
+            println!("Messages:");
+            println!("  User:      {}", format_count(analytics.message_counts.user));
+            println!("  Assistant: {}", format_count(analytics.message_counts.assistant));
+            println!();
+
+            // Tools
+            if args.tools || args.all {
+                println!("Tool Usage:");
+                let mut tools: Vec<_> = analytics.tool_counts.iter().collect();
+                tools.sort_by(|a, b| b.1.cmp(a.1));
+                for (tool, count) in tools.iter().take(10) {
+                    println!("  {tool}: {}", format_count(**count));
+                }
+                println!();
+            }
+
+            // Models
+            if args.models || args.all {
+                println!("Model Usage:");
+                for (model, count) in &analytics.model_usage {
+                    let display_name = format_model_name(model);
+                    println!("  {display_name}: {} uses", format_number(*count));
+                }
+                println!();
+            }
+
+            // Cost breakdown
+            if args.costs || args.all {
+                println!("Cost Breakdown by Model:");
+                let mut total_cost = 0.0;
+                for (model, usage) in &analytics.total_usage.by_model {
+                    if let Some(pricing) = crate::model::ModelPricing::for_model(model) {
+                        let cost = pricing.calculate_cost(usage);
+                        total_cost += cost.total_cost;
+                        if cost.total_cost > 0.0 {
+                            let display_name = format_model_name(model);
+                            println!("  {display_name}:");
+                            println!("    Input:       ${:.4}", cost.input_cost);
+                            println!("    Output:      ${:.4}", cost.output_cost);
+                            println!("    Cache Write: ${:.4}", cost.cache_write_cost);
+                            println!("    Cache Read:  ${:.4}", cost.cache_read_cost);
+                            println!("    Subtotal:    ${:.4}", cost.total_cost);
+                        }
+                    }
+                }
+                println!();
+                println!("Estimated Total Cost: ${total_cost:.2}");
+            } else if let Some(cost) = analytics.total_usage.estimated_cost {
+                // Just show total cost without breakdown
+                println!("Estimated Cost: ${cost:.2}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Output statistics for multiple projects (aggregated).
+fn output_multi_project_stats(
+    cli: &Cli,
+    args: &StatsArgs,
+    analytics: &ProjectAnalytics,
+    project_names: &[String],
+) -> Result<()> {
+    let projects_label = format!("{} projects", project_names.len());
+
+    match cli.effective_output() {
+        OutputFormat::Json => {
+            // Include project list in JSON output
+            let mut output = serde_json::to_value(StatsOutput::from_project(analytics, &projects_label))?;
+            if let Some(obj) = output.as_object_mut() {
+                obj.insert("projects".to_string(), serde_json::json!(project_names));
+            }
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        OutputFormat::Tsv => {
+            println!("metric\tvalue");
+            println!("project_count\t{}", project_names.len());
+            println!("sessions\t{}", analytics.session_count);
+            println!("total_tokens\t{}", analytics.total_usage.usage.total_tokens());
+            println!("tool_invocations\t{}", analytics.message_counts.tool_uses);
+            if let Some(cost) = analytics.total_usage.estimated_cost {
+                println!("estimated_cost\t{cost:.4}");
+            }
+        }
+        OutputFormat::Compact => {
+            let cost = analytics.total_usage.estimated_cost.map(|c| format!("${c:.2}")).unwrap_or_else(|| "N/A".to_string());
+            println!(
+                "projects:{} sessions:{} tokens:{} cost:{}",
+                project_names.len(),
+                analytics.session_count,
+                analytics.total_usage.usage.total_tokens(),
+                cost
+            );
+        }
+        OutputFormat::Text => {
+            println!("Aggregate Statistics ({} projects)", project_names.len());
+            println!("{}", "=".repeat(35));
+            println!();
+
+            // List projects
+            println!("Projects:");
+            for name in project_names {
+                // Truncate long paths for display
+                let display_name = if name.len() > 60 {
+                    format!("...{}", &name[name.len().saturating_sub(57)..])
+                } else {
+                    name.clone()
+                };
+                println!("  - {display_name}");
+            }
+            println!();
+
+            println!("Total Sessions: {}", format_count(analytics.session_count));
             println!();
 
             // Duration

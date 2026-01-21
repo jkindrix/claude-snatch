@@ -330,7 +330,7 @@ fn list_sessions<W: Write>(
         OutputFormat::Json => {
             let output: Vec<_> = sessions
                 .iter()
-                .map(|s| SessionInfo::from_session(s, &tag_store, args.context))
+                .map(|s| SessionInfo::from_session(s, &tag_store, args.context, args.context_length))
                 .collect();
             writeln!(writer, "{}", serde_json::to_string_pretty(&output)?)?;
         }
@@ -349,7 +349,7 @@ fn list_sessions<W: Write>(
                 let meta = tag_store.get(session.session_id());
                 let name = meta.and_then(|m| m.name.as_deref()).unwrap_or("");
                 if args.context {
-                    let context = get_session_context(session, 100).unwrap_or_default();
+                    let context = get_session_context(session, args.context_length).unwrap_or_default();
                     // Escape tabs and newlines in context for TSV
                     let context_escaped = context.replace('\t', " ").replace('\n', " ");
                     writeln!(
@@ -467,7 +467,7 @@ fn list_sessions<W: Write>(
 
                 // Show context (first user prompt) if requested
                 if args.context {
-                    if let Some(context) = get_session_context(session, 100) {
+                    if let Some(context) = get_session_context(session, args.context_length) {
                         writeln!(writer, "    Context: \"{}\"", context)?;
                     }
                 }
@@ -565,10 +565,10 @@ struct SessionInfo {
 }
 
 impl SessionInfo {
-    fn from_session(session: &Session, tag_store: &TagStore, include_context: bool) -> Self {
+    fn from_session(session: &Session, tag_store: &TagStore, include_context: bool, context_length: usize) -> Self {
         let meta = tag_store.get(session.session_id());
         let context = if include_context {
-            get_session_context(session, 100)
+            get_session_context(session, context_length)
         } else {
             None
         };

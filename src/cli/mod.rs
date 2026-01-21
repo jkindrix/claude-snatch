@@ -87,8 +87,8 @@ pub struct Cli {
     #[arg(long, global = true, env = "SNATCH_CONFIG", hide_short_help = true)]
     pub config: Option<PathBuf>,
 
-    /// Maximum file size to parse in bytes (default: 100MB).
-    /// Use 0 for unlimited. Prevents memory exhaustion on large files.
+    /// Maximum file size to parse in bytes (default: unlimited).
+    /// Set a limit to prevent memory exhaustion on very large files.
     #[arg(long, global = true, env = "SNATCH_MAX_FILE_SIZE", value_name = "BYTES", hide_short_help = true)]
     pub max_file_size: Option<u64>,
 }
@@ -476,6 +476,12 @@ pub struct ListArgs {
     #[arg(short = 'c', long)]
     pub context: bool,
 
+    /// Maximum length for context preview (default: 100 characters).
+    ///
+    /// Only applies when --context is enabled.
+    #[arg(long, default_value = "100")]
+    pub context_length: usize,
+
     /// Hide projects with 0 sessions (only applies to 'list projects').
     #[arg(long)]
     pub hide_empty: bool,
@@ -856,9 +862,17 @@ pub struct StatsArgs {
     /// Optional - shows global stats if not specified.
     pub session: Option<String>,
 
-    /// Show stats for specific project.
-    #[arg(short = 'p', long)]
-    pub project: Option<String>,
+    /// Show stats for specific project(s).
+    ///
+    /// Accepts a single project name, comma-separated list, or can be repeated.
+    /// Uses substring matching, so "rust" matches "rust-expect", "my-rust-project", etc.
+    ///
+    /// Examples:
+    ///   --project rust-expect
+    ///   --project rust-expect,mcpkit,pgen
+    ///   --project rust-expect --project mcpkit
+    #[arg(short = 'p', long, value_delimiter = ',')]
+    pub project: Option<Vec<String>>,
 
     /// Show global stats across all sessions.
     #[arg(long)]
@@ -1065,6 +1079,20 @@ pub struct DiffArgs {
     /// Show semantic diff (compare by message structure). This is the default.
     #[arg(long, hide = true)]
     pub semantic: bool,
+
+    /// Compare only user prompts (shorthand for --type user).
+    ///
+    /// Filters comparison to only include user messages, ignoring assistant
+    /// responses, system messages, and tool results.
+    #[arg(long)]
+    pub prompts: bool,
+
+    /// Filter comparison to specific message type(s).
+    ///
+    /// Accepted values: user, assistant, system, summary.
+    /// Can be specified multiple times: --type user --type assistant
+    #[arg(long = "type", value_name = "TYPE")]
+    pub message_type: Vec<String>,
 }
 
 /// Arguments for the config command.
@@ -1584,6 +1612,78 @@ pub struct PromptsArgs {
     /// Number formatting style (plain text lines, or numbered).
     #[arg(long)]
     pub numbered: bool,
+
+    /// Filter prompts by content pattern (regex supported).
+    ///
+    /// Only prompts matching this pattern will be included in output.
+    /// Example: `--grep "implement.*feature"` or `--grep "TODO|FIXME"`
+    #[arg(short = 'g', long)]
+    pub grep: Option<String>,
+
+    /// Case-insensitive pattern matching (use with --grep).
+    #[arg(short = 'i', long)]
+    pub ignore_case: bool,
+
+    /// Invert match: exclude prompts matching the grep pattern.
+    ///
+    /// Similar to `grep -v`, this excludes matching prompts instead of including them.
+    /// Example: `--grep "interrupted|Caveat" --invert-match` excludes system messages.
+    #[arg(long = "invert-match")]
+    pub invert_match: bool,
+
+    /// Exclude common system messages from results.
+    ///
+    /// Filters out: [Request interrupted], Caveat:, <command-name>, <local-command-stdout>,
+    /// and other Claude Code system messages that pollute prompt analysis.
+    #[arg(long)]
+    pub exclude_system: bool,
+
+    /// Group prompts by content and show frequency counts.
+    ///
+    /// Output includes each unique prompt with its occurrence count,
+    /// sorted by frequency (most common first).
+    #[arg(short = 'f', long)]
+    pub frequency: bool,
+
+    /// Show statistics about prompts instead of the prompts themselves.
+    ///
+    /// Displays: total prompts, unique count, single-use count, average length,
+    /// character distribution, and top prompts by frequency.
+    #[arg(long)]
+    pub stats: bool,
+
+    /// Output only unique prompts (deduplicated).
+    ///
+    /// Removes duplicate prompts, keeping only one instance of each.
+    /// Useful for discovering distinct prompt patterns.
+    #[arg(short = 'u', long)]
+    pub unique: bool,
+
+    /// Sort frequency output by length instead of count.
+    ///
+    /// When used with --frequency, sorts by prompt length (longest first)
+    /// instead of occurrence count.
+    #[arg(long)]
+    pub sort_by_length: bool,
+
+    /// Show only prompts with count >= N (use with --frequency).
+    #[arg(long, value_name = "N")]
+    pub min_count: Option<usize>,
+
+    /// Don't truncate prompts in frequency/stats text output.
+    ///
+    /// By default, long prompts are truncated to ~80 chars for readability.
+    /// Use this flag to show full prompt text (may be very long).
+    #[arg(long)]
+    pub no_truncate: bool,
+
+    /// Count prompts containing a phrase (substring match).
+    ///
+    /// Reports how many prompts contain the given phrase.
+    /// Uses case-insensitive matching by default (or respects -i flag).
+    /// Example: `--contains "search online"` → "929 prompts (19.5%) contain 'search online'"
+    #[arg(long, value_name = "PHRASE")]
+    pub contains: Option<String>,
 }
 
 /// Arguments for the standup command.

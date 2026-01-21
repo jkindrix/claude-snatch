@@ -6,13 +6,53 @@
 use std::fs;
 use std::path::PathBuf;
 
+use std::collections::HashSet;
+
 use crate::cli::{Cli, DiffArgs, OutputFormat};
 use crate::error::{Result, SnatchError};
 use crate::export::JsonlDiff;
+use crate::model::LogEntry;
 use crate::parser::JsonlParser;
 use crate::reconstruction::Conversation;
 
 use super::get_claude_dir;
+
+/// Build the set of message types to include from args.
+/// Returns None if no filtering should be applied (include all types).
+fn build_type_filter(args: &DiffArgs) -> Option<HashSet<String>> {
+    let mut types = HashSet::new();
+
+    // --prompts is shorthand for --type user
+    if args.prompts {
+        types.insert("user".to_string());
+    }
+
+    // Add any explicitly specified types
+    for t in &args.message_type {
+        types.insert(t.to_lowercase());
+    }
+
+    // If no types specified, don't filter
+    if types.is_empty() {
+        None
+    } else {
+        Some(types)
+    }
+}
+
+/// Filter log entries by message type.
+fn filter_entries_by_type(entries: Vec<LogEntry>, type_filter: &Option<HashSet<String>>) -> Vec<LogEntry> {
+    match type_filter {
+        None => entries, // No filter, return all
+        Some(types) => entries
+            .into_iter()
+            .filter(|entry| {
+                let msg_type = entry.message_type().to_lowercase();
+                types.contains(&msg_type)
+            })
+            .collect(),
+    }
+}
 
 /// Run the diff command.
 pub fn run(cli: &Cli, args: &DiffArgs) -> Result<()> {
@@ -63,6 +103,11 @@ fn run_semantic_diff(cli: &Cli, args: &DiffArgs, first_path: &PathBuf, second_pa
     let first_entries = parser.parse_file(first_path)?;
     let second_entries = parser.parse_file(second_path)?;
 
+    // Apply message type filter if specified
+    let type_filter = build_type_filter(args);
+    let first_entries = filter_entries_by_type(first_entries, &type_filter);
+    let second_entries = filter_entries_by_type(second_entries, &type_filter);
+
     // Build conversation trees
     let first_conv = Conversation::from_entries(first_entries)?;
     let second_conv = Conversation::from_entries(second_entries)?;
@@ -72,8 +117,8 @@ fn run_semantic_diff(cli: &Cli, args: &DiffArgs, first_path: &PathBuf, second_pa
 
     // Output based on format
     match cli.effective_output() {
-        OutputFormat::Json => print_semantic_diff_json(&diff, first_path, second_path)?,
-        _ => print_semantic_diff_text(&diff, first_path, second_path, args)?,
+        OutputFormat::Json => print_semantic_diff_json(&diff, first_path, second_path, &type_filter)?,
+        _ => print_semantic_diff_text(&diff, first_path, second_path, args, &type_filter)?,
     }
 
     // Exit with appropriate code
@@ -202,15 +247,24 @@ fn print_line_diff_json(diff: &JsonlDiff, first: &PathBuf, second: &PathBuf) -> 
 }
 
 /// Print semantic diff output in text format.
-fn print_semantic_diff_text(diff: &ConversationDiff, first: &PathBuf, second: &PathBuf, args: &DiffArgs) -> Result<()> {
+fn print_semantic_diff_text(diff: &ConversationDiff, first: &PathBuf, second: &PathBuf, args: &DiffArgs, type_filter: &Option<HashSet<String>>) -> Result<()> {
     if diff.is_identical() {
-        println!("Conversations are semantically identical.");
+        if let Some(types) = type_filter {
+            let types_str: Vec<&str> = types.iter().map(String::as_str).collect();
+            println!("Conversations are semantically identical (filtered to: {}).", types_str.join(", "));
+        } else {
+            println!("Conversations are semantically identical.");
+        }
         return Ok(());
     }
 
     println!("Comparing (semantic):");
     println!("  A: {}", first.display());
     println!("  B: {}", second.display());
+    if let Some(types) = type_filter {
+        let types_str: Vec<&str> = types.iter().map(String::as_str).collect();
+        println!("  Filter: {} messages only", types_str.join(", "));
+    }
     println!();
 
     // Summary
@@ -243,12 +297,15 @@ fn print_semantic_diff_text(diff: &ConversationDiff, first: &PathBuf, second: &P
 }
 
 /// Print semantic diff output in JSON format.
-fn print_semantic_diff_json(diff: &ConversationDiff, first: &PathBuf, second: &PathBuf) -> Result<()> {
+fn print_semantic_diff_json(diff: &ConversationDiff, first: &PathBuf, second: &PathBuf, type_filter: &Option<HashSet<String>>) -> Result<()> {
+    let filter_types: Option<Vec<&String>> = type_filter.as_ref().map(|t| t.iter().collect());
+
     let output = serde_json::json!({
         "mode": "semantic",
         "identical": diff.is_identical(),
         "first": first.to_string_lossy(),
         "second": second.to_string_lossy(),
+        "filter": filter_types,
         "summary": {
             "first_message_count": diff.first_message_count,
             "second_message_count": diff.second_message_count,

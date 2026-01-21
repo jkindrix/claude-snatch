@@ -52,11 +52,11 @@ use std::path::Path;
 use crate::error::{Result, SnatchError};
 use crate::model::{LogEntry, SchemaVersion};
 
-/// Default maximum file size (100 MB).
+/// Default maximum file size (unlimited).
 ///
-/// This limit prevents memory exhaustion when parsing unexpectedly large files.
-/// Use `--max-file-size 0` for unlimited, or specify a custom limit in bytes.
-pub const DEFAULT_MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
+/// Previously defaulted to 100MB, but this caused friction for users who expect
+/// all their data to be included. Use `--max-file-size N` to set a limit in bytes.
+pub const DEFAULT_MAX_FILE_SIZE: u64 = 0;
 
 /// JSONL parser for Claude Code session logs.
 #[derive(Debug)]
