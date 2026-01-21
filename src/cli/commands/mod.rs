@@ -18,6 +18,7 @@ pub mod pick;
 pub mod prompts;
 pub mod quickstart;
 pub mod recent;
+pub mod recover;
 pub mod search;
 pub mod standup;
 pub mod stats;

@@ -239,6 +239,10 @@ pub enum Commands {
     #[command(display_order = 32)]
     Prompts(PromptsArgs),
 
+    /// Recover files from Write/Edit operations in a session.
+    #[command(alias = "restore", display_order = 33)]
+    Recover(RecoverArgs),
+
     // ═══════════════════════════════════════════════════════════════════════
     // INTERACTIVE - Live session viewing
     // ═══════════════════════════════════════════════════════════════════════
@@ -1563,6 +1567,52 @@ pub struct CodeArgs {
     pub quiet: bool,
 }
 
+/// Arguments for the recover command.
+#[derive(Debug, Parser)]
+pub struct RecoverArgs {
+    /// Session ID to recover files from (supports short prefixes like "780893e4").
+    pub session: String,
+
+    /// Output directory for recovered files.
+    /// Default: current directory.
+    #[arg(short = 'O', long, default_value = ".")]
+    pub output_dir: std::path::PathBuf,
+
+    /// Filter to files matching this pattern (glob syntax, e.g., "*.rs" or "src/**/*.ts").
+    #[arg(short = 'f', long)]
+    pub file: Option<String>,
+
+    /// Apply Edit operations in sequence to reconstruct final file state.
+    /// Without this flag, only the last Write for each file is recovered.
+    #[arg(long)]
+    pub apply_edits: bool,
+
+    /// Strip this prefix from absolute file paths when writing.
+    /// Example: --strip-prefix /home/user/project
+    #[arg(long)]
+    pub strip_prefix: Option<String>,
+
+    /// Preview what would be recovered without writing files.
+    #[arg(long, alias = "dry-run")]
+    pub preview: bool,
+
+    /// Overwrite existing files without prompting.
+    #[arg(long)]
+    pub overwrite: bool,
+
+    /// Only extract from main thread (exclude branches).
+    #[arg(long)]
+    pub main_thread: bool,
+
+    /// Suppress progress messages.
+    #[arg(short = 'q', long)]
+    pub quiet: bool,
+
+    /// Show detailed information about each recovered file.
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
+}
+
 /// Arguments for the prompts command.
 #[derive(Debug, Parser)]
 pub struct PromptsArgs {
@@ -2009,6 +2059,7 @@ pub fn run() -> Result<()> {
         Some(Commands::Cleanup(args)) => commands::cleanup::run(&cli, args),
         Some(Commands::Tag(args)) => commands::tag::run(&cli, args),
         Some(Commands::Code(args)) => commands::code::run(&cli, args),
+        Some(Commands::Recover(args)) => commands::recover::run(&cli, args),
         Some(Commands::Prompts(args)) => commands::prompts::run(&cli, args),
         Some(Commands::Standup(args)) => commands::standup::run(&cli, args),
         Some(Commands::Pick(args)) => commands::pick::run(&cli, args),
