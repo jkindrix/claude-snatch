@@ -222,6 +222,13 @@ impl Session {
             .as_deref()
             .map(SchemaVersion::from_version_string);
 
+        // Extract the working directory from the first entry that has it
+        // This is the authoritative project path from the JSONL file
+        let extracted_cwd = entries.iter().find_map(|e| e.cwd().map(String::from));
+
+        // Extract git branch from the first entry that has it
+        let git_branch = entries.iter().find_map(|e| e.git_branch().map(String::from));
+
         // Count message types
         let mut user_count = 0;
         let mut assistant_count = 0;
@@ -250,6 +257,8 @@ impl Session {
             end_time,
             version,
             schema_version,
+            extracted_cwd,
+            git_branch,
         })
     }
 
@@ -262,6 +271,8 @@ impl Session {
             session_id: self.session_id.clone(),
             is_subagent: self.is_subagent,
             project_path: self.project_path.clone(),
+            extracted_cwd: meta.extracted_cwd.clone(),
+            git_branch: meta.git_branch.clone(),
             file_size: self.file_size,
             file_size_human: self.file_size_human(),
             entry_count: meta.entry_count,
@@ -272,6 +283,16 @@ impl Session {
             state,
             version: meta.version,
         })
+    }
+
+    /// Get the authoritative project path.
+    ///
+    /// This method extracts the `cwd` from the JSONL file if available,
+    /// which is the actual working directory. Falls back to the decoded
+    /// directory name if the JSONL doesn't contain a `cwd` field.
+    pub fn authoritative_project_path(&self) -> Result<String> {
+        let meta = self.quick_metadata_cached()?;
+        Ok(meta.extracted_cwd.unwrap_or_else(|| self.project_path.clone()))
     }
 }
 
@@ -302,6 +323,13 @@ pub struct QuickSessionMetadata {
     pub version: Option<String>,
     /// Schema version.
     pub schema_version: Option<SchemaVersion>,
+    /// Working directory extracted from JSONL (authoritative project path).
+    /// This is the actual `cwd` field from the first message that has it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extracted_cwd: Option<String>,
+    /// Git branch extracted from JSONL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
 }
 
 impl QuickSessionMetadata {
@@ -341,8 +369,13 @@ pub struct SessionSummary {
     pub session_id: String,
     /// Whether this is a subagent session.
     pub is_subagent: bool,
-    /// Parent project path.
+    /// Parent project path (decoded from directory name, may be inaccurate).
     pub project_path: String,
+    /// Authoritative project path extracted from JSONL `cwd` field.
+    /// This is the actual working directory and should be preferred over `project_path`.
+    pub extracted_cwd: Option<String>,
+    /// Git branch extracted from JSONL.
+    pub git_branch: Option<String>,
     /// File size in bytes.
     pub file_size: u64,
     /// Human-readable file size.
@@ -502,6 +535,8 @@ mod tests {
             session_id: "40afc8a7-3fcb-4d29-b1ee-100b81b8c6c0".to_string(),
             is_subagent: false,
             project_path: "/test".to_string(),
+            extracted_cwd: Some("/actual/test/path".to_string()),
+            git_branch: Some("main".to_string()),
             file_size: 1000,
             file_size_human: "1 KB".to_string(),
             entry_count: 10,
@@ -514,5 +549,29 @@ mod tests {
         };
 
         assert_eq!(summary.short_id(), "40afc8a7");
+    }
+
+    #[test]
+    fn test_session_summary_prefers_extracted_cwd() {
+        let summary = SessionSummary {
+            session_id: "test".to_string(),
+            is_subagent: false,
+            project_path: "/decoded/path".to_string(),
+            extracted_cwd: Some("/actual/path".to_string()),
+            git_branch: None,
+            file_size: 0,
+            file_size_human: "0 B".to_string(),
+            entry_count: 0,
+            message_count: 0,
+            start_time: None,
+            end_time: None,
+            duration: None,
+            state: SessionState::Inactive,
+            version: None,
+        };
+
+        // The extracted_cwd should be preferred over project_path
+        assert_eq!(summary.extracted_cwd, Some("/actual/path".to_string()));
+        assert_eq!(summary.project_path, "/decoded/path");
     }
 }

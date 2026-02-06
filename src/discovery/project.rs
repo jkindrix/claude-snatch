@@ -198,6 +198,44 @@ impl Project {
         Ok(false)
     }
 
+    /// Get the authoritative project path from session JSONL data.
+    ///
+    /// This extracts the `cwd` field from the first main session that has it,
+    /// which is the actual working directory used when the session was created.
+    /// This is more reliable than decoding the encoded directory name.
+    ///
+    /// Falls back to `decoded_path()` if no session has a `cwd` field.
+    pub fn authoritative_path(&self) -> Result<String> {
+        // Try to get cwd from main sessions first (they're more likely to have it)
+        for session in self.main_sessions()? {
+            if let Ok(meta) = session.quick_metadata_cached() {
+                if let Some(cwd) = meta.extracted_cwd {
+                    return Ok(cwd);
+                }
+            }
+        }
+
+        // Fall back to subagent sessions
+        for session in self.subagent_sessions()? {
+            if let Ok(meta) = session.quick_metadata_cached() {
+                if let Some(cwd) = meta.extracted_cwd {
+                    return Ok(cwd);
+                }
+            }
+        }
+
+        // Final fallback to decoded path
+        Ok(self.decoded_path.clone())
+    }
+
+    /// Get the authoritative project path, or the decoded path if extraction fails.
+    ///
+    /// This is a non-failing version that always returns a path.
+    #[must_use]
+    pub fn best_path(&self) -> String {
+        self.authoritative_path().unwrap_or_else(|_| self.decoded_path.clone())
+    }
+
     /// Get project metadata summary.
     pub fn summary(&self) -> Result<ProjectSummary> {
         let sessions = self.sessions()?;

@@ -141,9 +141,14 @@ pub fn encode_project_path(path: &str) -> String {
 
 /// Decode an encoded project path.
 ///
-/// Claude Code's encoding is lossy: it replaces `/` with `-` without escaping
-/// existing hyphens. This makes decoding ambiguous - we can't distinguish between
-/// a hyphen that was originally a `/` vs one that was always a hyphen.
+/// Claude Code's encoding is lossy: it replaces multiple characters with `-`:
+/// - `/` (forward slash) → `-`
+/// - `_` (underscore) → `-`
+/// - `.` (period) → `-`
+/// - `-` (hyphen) → `-` (no escaping)
+///
+/// This creates ambiguity that can only be resolved by checking the filesystem.
+/// For example, `--` could represent `/_`, `/.`, or `//`.
 ///
 /// This function attempts to resolve the ambiguity by checking which paths
 /// actually exist on the filesystem. If no path exists, it falls back to the
@@ -151,6 +156,8 @@ pub fn encode_project_path(path: &str) -> String {
 ///
 /// Example: `-home-user-my%2Dproject` → `/home/user/my-project` (if %2D encoded)
 /// Example: `-home-user-claude-snatch` → `/home/user/claude-snatch` (if path exists)
+/// Example: `-mnt-c--dev` → `/mnt/c/_dev` (if path exists with underscore)
+/// Example: `-mnt-c--dev-CMA-Central` → `/mnt/c/_dev/CMA.Central` (if path exists)
 #[must_use]
 pub fn decode_project_path(encoded: &str) -> String {
     // First handle percent-encoded hyphens (from our own encoding or future Claude versions)
@@ -173,17 +180,32 @@ pub fn decode_project_path(encoded: &str) -> String {
 
 /// Try to decode by checking which paths exist on the filesystem.
 ///
-/// Uses a greedy approach: starting from the root, at each hyphen position
-/// we prefer keeping it as a hyphen if that path segment exists on disk.
+/// Claude Code's encoding converts multiple characters to `-`:
+/// - `/` → `-` (path separator)
+/// - `_` → `-` (underscore)
+/// - `.` → `-` (period)
+/// - `-` → `-` (hyphen, no escaping)
+///
+/// This means:
+/// - `--` could be `/_`, `/.`, or `//` (empty segment, rare)
+/// - A single `-` in a path segment could be `-`, `.`, or `_`
+///
+/// Uses a greedy approach with filesystem validation to find the correct path.
 fn decode_with_filesystem_check(encoded: &str) -> Option<String> {
     use std::path::Path;
 
-    // Remove leading hyphen and split into segments
+    // Remove leading hyphen and get content
     let content = encoded.strip_prefix('-').unwrap_or(encoded);
     if content.is_empty() {
         return Some("/".to_string());
     }
 
+    // First, try the smart decode that handles underscores and periods
+    if let Some(path) = decode_with_special_chars(content) {
+        return Some(path);
+    }
+
+    // Fall back to the original hyphen-preserving logic
     let segments: Vec<&str> = content.split('-').collect();
     if segments.is_empty() {
         return Some("/".to_string());
@@ -231,6 +253,317 @@ fn decode_with_filesystem_check(encoded: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Decode path handling underscores (--) and periods in path components.
+///
+/// This handles Claude Code's encoding where:
+/// - `/_` becomes `--` (slash followed by underscore)
+/// - `/.` becomes `--` (slash followed by period, less common)
+/// - `.` in path names becomes `-`
+fn decode_with_special_chars(content: &str) -> Option<String> {
+    use std::path::Path;
+
+    // Split on single dash, but track where double-dashes occur
+    // Double-dash indicates underscore or period after a slash
+    let mut result = String::from("/");
+    let mut chars = content.chars().peekable();
+    let mut current_segment = String::new();
+
+    while let Some(c) = chars.next() {
+        if c == '-' {
+            // Check for double-dash
+            if chars.peek() == Some(&'-') {
+                // Consume the second dash
+                chars.next();
+
+                // Double-dash: this is either /_ or /. or //
+                // First, complete the current segment if any
+                if !current_segment.is_empty() {
+                    result.push_str(&current_segment);
+                    current_segment.clear();
+                }
+
+                // Add path separator
+                if !result.ends_with('/') {
+                    result.push('/');
+                }
+
+                // Try underscore first (most common), then period
+                let test_with_underscore = format!("{}_", result);
+                let test_with_period = format!("{}.", result);
+
+                // Peek ahead to see what comes next to build test paths
+                let mut lookahead = String::new();
+                let mut temp_chars = chars.clone();
+                while let Some(&next_c) = temp_chars.peek() {
+                    if next_c == '-' {
+                        break;
+                    }
+                    lookahead.push(temp_chars.next().unwrap());
+                }
+
+                // Test which variant exists
+                let underscore_path = format!("{}{}", test_with_underscore, lookahead);
+                let period_path = format!("{}{}", test_with_period, lookahead);
+
+                if Path::new(&underscore_path).exists()
+                    || path_prefix_exists(&underscore_path)
+                {
+                    result.push('_');
+                } else if Path::new(&period_path).exists()
+                    || path_prefix_exists(&period_path)
+                {
+                    result.push('.');
+                } else {
+                    // Default to underscore as it's more common
+                    result.push('_');
+                }
+            } else {
+                // Single dash: this is a path separator
+                if !current_segment.is_empty() {
+                    // Complete the segment
+                    result.push_str(&current_segment);
+                    current_segment.clear();
+                }
+                result.push('/');
+            }
+        } else {
+            current_segment.push(c);
+        }
+    }
+
+    // Don't forget the last segment
+    if !current_segment.is_empty() {
+        result.push_str(&current_segment);
+    }
+
+    // Clean up any trailing slashes (except for root)
+    while result.len() > 1 && result.ends_with('/') {
+        result.pop();
+    }
+
+    // Now we have a basic decode, try to improve it by checking for periods in segments
+    let improved = improve_path_with_periods(&result);
+
+    if Path::new(&improved).exists() {
+        Some(improved)
+    } else if Path::new(&result).exists() {
+        Some(result)
+    } else {
+        // Return the improved version even if it doesn't exist
+        // (the path might have been deleted)
+        Some(improved)
+    }
+}
+
+/// Check if any path starting with this prefix exists.
+fn path_prefix_exists(prefix: &str) -> bool {
+    use std::path::Path;
+
+    let path = Path::new(prefix);
+
+    // Check if parent directory exists and might contain matching entries
+    if let Some(parent) = path.parent() {
+        if parent.exists() && parent.is_dir() {
+            if let Some(file_name) = path.file_name() {
+                let prefix_str = file_name.to_string_lossy();
+                if let Ok(entries) = std::fs::read_dir(parent) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        let name_str = name.to_string_lossy();
+                        if name_str.starts_with(prefix_str.as_ref()) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Try to improve a decoded path by combining adjacent segments with periods.
+///
+/// Claude Code encodes periods as dashes, which means a directory name like
+/// `CMA.Central` becomes `CMA-Central` and gets decoded as `CMA/Central`.
+/// This function tries to combine adjacent segments with periods to find
+/// the correct path.
+///
+/// Example: `/mnt/c/_dev/CMA/Central` might actually be `/mnt/c/_dev/CMA.Central`
+fn improve_path_with_periods(path: &str) -> String {
+    use std::path::Path;
+
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.len() <= 1 {
+        return path.to_string();
+    }
+
+    // Try to find the best path by combining adjacent segments with periods
+    let result = try_combine_segments_with_periods(&parts, 0, String::new());
+
+    if let Some(best_path) = result {
+        if Path::new(&best_path).exists() {
+            return best_path;
+        }
+    }
+
+    // Fall back to original path
+    path.to_string()
+}
+
+/// Recursively try combining segments with periods to find valid paths.
+fn try_combine_segments_with_periods(
+    parts: &[&str],
+    start: usize,
+    prefix: String,
+) -> Option<String> {
+    use std::path::Path;
+
+    if start >= parts.len() {
+        return Some(prefix);
+    }
+
+    // Handle empty parts (from leading slash)
+    if parts[start].is_empty() {
+        let new_prefix = if prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", prefix)
+        };
+        return try_combine_segments_with_periods(parts, start + 1, new_prefix);
+    }
+
+    let mut best_result: Option<String> = None;
+
+    // Try combining consecutive segments with periods (greedy - try longest first)
+    for end in (start + 1..=parts.len()).rev() {
+        // Build the combined segment
+        let combined = parts[start..end].join(".");
+
+        // Build the test path
+        let test_path = if prefix.is_empty() || prefix == "/" {
+            format!("/{}", combined)
+        } else if prefix.ends_with('/') {
+            format!("{}{}", prefix, combined)
+        } else {
+            format!("{}/{}", prefix, combined)
+        };
+
+        // Check if this path (or prefix) exists
+        let path_exists = Path::new(&test_path).exists();
+        let could_be_prefix = !path_exists && has_matching_prefix(&test_path);
+
+        if path_exists || could_be_prefix {
+            // Recursively try the rest
+            if let Some(result) =
+                try_combine_segments_with_periods(parts, end, test_path.clone())
+            {
+                // Verify the full result exists
+                if Path::new(&result).exists() {
+                    return Some(result);
+                }
+                // Keep as potential best if no better found
+                if best_result.is_none() {
+                    best_result = Some(result);
+                }
+            }
+        }
+    }
+
+    // If no combining worked, try the single segment as-is
+    let single = parts[start];
+    let test_path = if prefix.is_empty() || prefix == "/" {
+        format!("/{}", single)
+    } else if prefix.ends_with('/') {
+        format!("{}{}", prefix, single)
+    } else {
+        format!("{}/{}", prefix, single)
+    };
+
+    if let Some(result) = try_combine_segments_with_periods(parts, start + 1, test_path) {
+        if best_result.is_none() || Path::new(&result).exists() {
+            return Some(result);
+        }
+    }
+
+    best_result
+}
+
+/// Check if any directory entry starts with this path's filename.
+fn has_matching_prefix(path_str: &str) -> bool {
+    use std::path::Path;
+
+    let path = Path::new(path_str);
+    if let (Some(parent), Some(file_name)) = (path.parent(), path.file_name()) {
+        if parent.exists() && parent.is_dir() {
+            let prefix = file_name.to_string_lossy();
+            if let Ok(entries) = std::fs::read_dir(parent) {
+                for entry in entries.flatten() {
+                    if entry.file_name().to_string_lossy().starts_with(prefix.as_ref()) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Generate variants of a path segment by replacing hyphens with periods.
+///
+/// For a segment like "CMA-Apps-Bumblebee", generates:
+/// - "CMA.Apps.Bumblebee" (all periods)
+/// - "CMA.Apps-Bumblebee" (some periods)
+/// - etc.
+///
+/// Returns variants ordered by likelihood (all periods first, then mixed).
+#[cfg(test)]
+fn generate_segment_variants(segment: &str) -> Vec<String> {
+    let mut variants = Vec::new();
+
+    // Count hyphens
+    let hyphen_count = segment.chars().filter(|&c| c == '-').count();
+
+    if hyphen_count == 0 {
+        return vec![segment.to_string()];
+    }
+
+    // For segments with hyphens, prioritize:
+    // 1. All hyphens as periods (e.g., CMA.Apps.Bumblebee)
+    // 2. Original with hyphens (e.g., CMA-Apps-Bumblebee)
+    // 3. Mixed variants (less common)
+
+    // All periods
+    variants.push(segment.replace('-', "."));
+
+    // Original (all hyphens)
+    variants.push(segment.to_string());
+
+    // For small number of hyphens, generate all combinations
+    if hyphen_count <= 3 {
+        let positions: Vec<usize> = segment
+            .char_indices()
+            .filter_map(|(i, c)| if c == '-' { Some(i) } else { None })
+            .collect();
+
+        // Generate 2^n - 2 combinations (excluding all-hyphen and all-period)
+        for mask in 1..(1 << hyphen_count) - 1 {
+            let mut variant = segment.to_string();
+
+            for (bit_idx, &pos) in positions.iter().enumerate() {
+                if (mask >> bit_idx) & 1 == 1 {
+                    variant.replace_range(pos..pos + 1, ".");
+                }
+            }
+
+            if !variants.contains(&variant) {
+                variants.push(variant);
+            }
+        }
+    }
+
+    variants
 }
 
 /// Validate that a decoded path looks reasonable.
@@ -455,5 +788,138 @@ mod tests {
         assert!(is_valid_project_path("/home/user/project"));
         assert!(is_valid_project_path("C:/Users/foo")); // Windows with forward slash
         assert!(!is_valid_project_path("relative/path"));
+    }
+
+    #[test]
+    fn test_generate_segment_variants() {
+        // No hyphens
+        let variants = generate_segment_variants("simple");
+        assert_eq!(variants, vec!["simple"]);
+
+        // Single hyphen
+        let variants = generate_segment_variants("CMA-Central");
+        assert!(variants.contains(&"CMA.Central".to_string()));
+        assert!(variants.contains(&"CMA-Central".to_string()));
+
+        // Multiple hyphens
+        let variants = generate_segment_variants("CMA-Apps-Bumblebee");
+        assert!(variants.contains(&"CMA.Apps.Bumblebee".to_string()));
+        assert!(variants.contains(&"CMA-Apps-Bumblebee".to_string()));
+    }
+
+    #[test]
+    fn test_decode_double_dash_underscore() {
+        // Test that double-dash decodes to underscore when path exists
+        // This test uses /tmp which should exist on most systems
+        use std::fs;
+
+        let temp_dir = std::env::temp_dir();
+        let test_dir = temp_dir.join("_test_snatch_decode");
+
+        // Create a test directory with underscore prefix
+        if !test_dir.exists() {
+            let _ = fs::create_dir(&test_dir);
+        }
+
+        if test_dir.exists() {
+            // Simulate Claude Code's encoding: /tmp/_test_snatch_decode
+            // would be encoded as -tmp--test_snatch_decode (double dash for /_)
+
+            // Build the encoded path manually
+            let encoded = format!(
+                "-{}--test_snatch_decode",
+                temp_dir
+                    .to_string_lossy()
+                    .trim_start_matches('/')
+                    .replace('/', "-")
+            );
+
+            let decoded = decode_project_path(&encoded);
+
+            // The decoded path should have underscore, not double slash
+            assert!(
+                !decoded.contains("//"),
+                "Decoded path should not contain double slash: {decoded}"
+            );
+
+            // Clean up
+            let _ = fs::remove_dir(&test_dir);
+        }
+    }
+
+    #[test]
+    fn test_decode_special_chars_unit() {
+        // Unit test for decode_with_special_chars without filesystem dependency
+        // When no path exists, it should still not produce double slashes
+
+        // Simulated encoding of /mnt/c/_dev
+        let result = decode_with_special_chars("mnt-c--dev");
+        assert!(result.is_some());
+        let path = result.unwrap();
+        // Should decode to /mnt/c/_dev (with underscore), not /mnt/c//dev
+        assert!(
+            !path.contains("//"),
+            "Path should not contain double slash: {path}"
+        );
+        assert!(
+            path.contains("/_") || path.contains("/."),
+            "Path should contain underscore or period after slash: {path}"
+        );
+    }
+
+    #[test]
+    fn test_decode_periods_in_path_segment() {
+        // Test that periods in path segments are handled
+        // e.g., CMA.Apps.Bumblebee encoded as CMA-Apps-Bumblebee
+
+        // This tests the variant generation
+        let segment = "CMA-Apps-Bumblebee";
+        let variants = generate_segment_variants(segment);
+
+        // Should include the all-periods variant
+        assert!(
+            variants.contains(&"CMA.Apps.Bumblebee".to_string()),
+            "Should generate period variant"
+        );
+    }
+
+    #[test]
+    fn test_decode_preserves_existing_behavior() {
+        // Ensure we don't break existing behavior for simple paths
+
+        // Root path
+        assert_eq!(decode_project_path("-"), "/");
+
+        // Simple paths (when filesystem check fails, falls back to naive decode)
+        // These paths don't exist, so we get the fallback behavior
+        let decoded = decode_project_path("-nonexistent-path-here");
+        assert!(decoded.starts_with('/'));
+
+        // Percent-encoded hyphens should still work
+        assert_eq!(
+            decode_project_path("-home-user-my%2Dproject"),
+            "/home/user/my-project"
+        );
+    }
+
+    #[test]
+    fn test_path_prefix_exists() {
+        // Test the path_prefix_exists helper
+        let temp_dir = std::env::temp_dir();
+
+        // The temp directory itself should be found as a prefix
+        let parent = temp_dir.parent();
+        if let Some(p) = parent {
+            let partial_name = temp_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            if !partial_name.is_empty() && partial_name.len() > 2 {
+                let prefix_path = p.join(&partial_name[..2]);
+                // This might or might not find a match depending on directory contents
+                // Just ensure it doesn't panic
+                let _ = path_prefix_exists(&prefix_path.to_string_lossy());
+            }
+        }
     }
 }

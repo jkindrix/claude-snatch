@@ -154,6 +154,33 @@ impl LogEntry {
             Self::TurnEnd(_) => "turn_end",
         }
     }
+
+    /// Get the working directory (cwd) from this entry, if present.
+    ///
+    /// The `cwd` field contains the actual project working directory path
+    /// as it was when the session was created. This is the authoritative
+    /// source for the project path, more reliable than decoding the
+    /// encoded directory name.
+    #[must_use]
+    pub fn cwd(&self) -> Option<&str> {
+        match self {
+            Self::Assistant(m) => m.cwd.as_deref(),
+            Self::User(m) => m.cwd.as_deref(),
+            Self::System(m) => m.cwd.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Get the git branch from this entry, if present.
+    #[must_use]
+    pub fn git_branch(&self) -> Option<&str> {
+        match self {
+            Self::Assistant(m) => m.git_branch.as_deref(),
+            Self::User(m) => m.git_branch.as_deref(),
+            Self::System(m) => m.git_branch.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 /// Common fields present in most message types.

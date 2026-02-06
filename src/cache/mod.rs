@@ -816,6 +816,8 @@ mod tests {
             end_time: None,
             version: Some("2.0.74".to_string()),
             schema_version: None,
+            extracted_cwd: Some("/test/path".to_string()),
+            git_branch: Some("main".to_string()),
         };
 
         manager.cache_metadata(&session_file, metadata.clone());
@@ -859,6 +861,8 @@ mod tests {
                 end_time: None,
                 version: None,
                 schema_version: None,
+                extracted_cwd: None,
+                git_branch: None,
             };
             manager.cache_metadata(&session_file, metadata);
             manager.save_to_disk(&cache_dir).unwrap();

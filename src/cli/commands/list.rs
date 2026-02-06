@@ -47,8 +47,9 @@ fn list_projects<W: Write>(
     let mut projects = claude_dir.projects()?;
 
     // Filter by project path if specified
+    // Use best_path() which prefers the authoritative cwd from JSONL
     if let Some(filter) = &args.project {
-        projects.retain(|p| p.decoded_path().contains(filter));
+        projects.retain(|p| p.best_path().contains(filter) || p.decoded_path().contains(filter));
     }
 
     // Filter out empty projects if requested
@@ -65,7 +66,8 @@ fn list_projects<W: Write>(
             projects.reverse();
         }
         SortOrder::Name => {
-            projects.sort_by(|a, b| a.decoded_path().cmp(b.decoded_path()));
+            // Use best_path() for sorting to get consistent ordering with display
+            projects.sort_by(|a, b| a.best_path().cmp(&b.best_path()));
         }
         SortOrder::Size => {
             // Sort by total session size
@@ -94,12 +96,14 @@ fn list_projects<W: Write>(
             writeln!(writer, "path\tencoded\tsession_count")?;
             for project in &projects {
                 let session_count = project.sessions().map(|s| s.len()).unwrap_or(0);
-                writeln!(writer, "{}\t{}\t{}", project.decoded_path(), project.encoded_name(), session_count)?;
+                // Use best_path() which prefers the authoritative cwd from JSONL
+                writeln!(writer, "{}\t{}\t{}", project.best_path(), project.encoded_name(), session_count)?;
             }
         }
         OutputFormat::Compact => {
             for project in &projects {
-                writeln!(writer, "{}", project.decoded_path())?;
+                // Use best_path() which prefers the authoritative cwd from JSONL
+                writeln!(writer, "{}", project.best_path())?;
             }
         }
         OutputFormat::Text => {
@@ -117,7 +121,8 @@ fn list_projects<W: Write>(
 
             for project in &projects {
                 let session_count = project.sessions().map(|s| s.len()).unwrap_or(0);
-                writeln!(writer, "  {} ({} sessions)", project.decoded_path(), session_count)?;
+                // Use best_path() which prefers the authoritative cwd from JSONL
+                writeln!(writer, "  {} ({} sessions)", project.best_path(), session_count)?;
 
                 if args.sizes {
                     let total_size: u64 = project
@@ -529,7 +534,10 @@ fn get_session_context(session: &Session, max_len: usize) -> Option<String> {
 /// Project info for JSON output.
 #[derive(Debug, serde::Serialize)]
 struct ProjectInfo {
+    /// Authoritative project path (from JSONL cwd or decoded directory name)
     path: String,
+    /// Decoded path from directory name (may differ from authoritative path)
+    decoded_path: String,
     encoded_name: String,
     session_count: usize,
     total_size: u64,
@@ -539,7 +547,9 @@ impl From<&Project> for ProjectInfo {
     fn from(project: &Project) -> Self {
         let sessions = project.sessions().unwrap_or_default();
         Self {
-            path: project.decoded_path().to_string(),
+            // Use best_path() which prefers the authoritative cwd from JSONL
+            path: project.best_path(),
+            decoded_path: project.decoded_path().to_string(),
             encoded_name: project.encoded_name().to_string(),
             session_count: sessions.len(),
             total_size: sessions.iter().map(|s| s.file_size()).sum(),
