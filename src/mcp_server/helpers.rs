@@ -59,10 +59,16 @@ pub fn truncate_text(text: &str, max_len: usize) -> String {
         return text.to_string();
     }
 
-    // Find last space before max_len
-    let truncated = &text[..max_len];
+    // Find nearest char boundary at or before max_len
+    let mut end = max_len;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    // Find last space before the boundary for word-break
+    let truncated = &text[..end];
     if let Some(last_space) = truncated.rfind(' ') {
-        if last_space > max_len / 2 {
+        if last_space > end / 2 {
             return format!("{}...", &text[..last_space]);
         }
     }
