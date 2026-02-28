@@ -899,7 +899,9 @@ impl SnatchServer {
                 Err(_) => continue,
             };
 
-            for entry in conversation.main_thread_entries() {
+            // Search ALL entries (not just main thread) so branches,
+            // sidechains, and agent sub-conversations are included.
+            for entry in conversation.chronological_entries() {
                 if results.len() >= limit {
                     break;
                 }
