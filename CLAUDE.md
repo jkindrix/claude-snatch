@@ -29,13 +29,17 @@ This project provides an MCP server (`snatch serve-mcp`) that exposes 8 tools fo
 ### Detail Levels for get_session_messages
 
 - **overview**: User prompts only, truncated. Fast orientation.
+- **conversation**: User prompts + assistant text responses, skipping tool-only turns. Best for understanding the dialogue.
 - **standard**: User + assistant text, tool names listed. Good balance.
 - **full**: Includes tool call details (file paths, commands). For deep investigation.
 
 ### Usage Guidelines
 
 - Start with `get_project_history` or `list_sessions` to orient yourself
-- Use `detail="overview"` first, then drill down only if needed
+- Use `detail="conversation"` for reading the human-AI dialogue without tool noise
+- Use `detail="overview"` for quick orientation on what was asked
 - Always filter by project when possible to reduce noise
 - The `search_sessions` tool supports regex patterns
+- Timeline collapses consecutive tool-only turns automatically for cleaner output
 - Timeline is the best tool for understanding "what happened in order"
+- All tools see content across compaction boundaries (pre/post-compact messages are both visible)

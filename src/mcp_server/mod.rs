@@ -304,7 +304,7 @@ impl SnatchServer {
     /// Read conversation messages from a session at different detail levels.
     /// Use detail="overview" for user prompts only, "standard" for user+assistant
     /// text with tool names, or "full" for tool call details.
-    #[tool(description = "Read conversation messages from a session. Use detail='overview' for prompts only, 'standard' for user+assistant text, 'full' for tool details. Supports pagination with offset/limit.")]
+    #[tool(description = "Read conversation messages from a session. Use detail='overview' for prompts only, 'conversation' for user+assistant text (skipping tool-only turns), 'standard' for user+assistant text, 'full' for tool details. Supports pagination with offset/limit.")]
     async fn get_session_messages(&self, request: GetSessionMessagesRequest) -> ToolOutput {
         let resolved = match resolve_session(self, &request.session_id) {
             Ok(r) => r,
@@ -327,36 +327,54 @@ impl SnatchServer {
             _ => {} // "all" — keep everything
         }
 
-        // For overview, only keep user messages with visible text
-        if detail == "overview" {
-            entries.retain(|e| {
-                if let LogEntry::User(u) = e {
-                    u.message.has_visible_text()
-                } else {
-                    false
-                }
-            });
+        // Pre-filter entries based on detail level
+        match detail {
+            "overview" => {
+                // Only user messages with visible text
+                entries.retain(|e| {
+                    if let LogEntry::User(u) = e {
+                        u.message.has_visible_text()
+                    } else {
+                        false
+                    }
+                });
+            }
+            "conversation" => {
+                // User messages with visible text + assistant messages with text content
+                // Skips tool-only assistant turns and system messages
+                entries.retain(|e| match e {
+                    LogEntry::User(u) => u.message.has_visible_text(),
+                    LogEntry::Assistant(_) => extract_assistant_summary(e, 1).is_some(),
+                    _ => false,
+                });
+            }
+            _ => {} // standard/full: keep everything
         }
 
         let total_messages = entries.len();
 
+        // Build (original_index, entry) pairs so indices survive reordering
+        let mut indexed: Vec<(usize, &LogEntry)> =
+            entries.into_iter().enumerate().collect();
+
         if reverse {
-            entries.reverse();
+            indexed.reverse();
         }
 
         // Apply pagination
-        let paginated: Vec<&LogEntry> = entries.into_iter().skip(offset).take(limit).collect();
+        let paginated: Vec<(usize, &LogEntry)> =
+            indexed.into_iter().skip(offset).take(limit).collect();
 
         let truncate_len = match detail {
             "overview" => 200,
+            "conversation" => 500,
             "standard" => 500,
             _ => 1000,
         };
 
         let messages: Vec<MessageEntry> = paginated
             .iter()
-            .enumerate()
-            .filter_map(|(i, entry)| {
+            .filter_map(|(orig_idx, entry)| {
                 let msg_type = entry.message_type().to_string();
                 let timestamp = entry.timestamp().map(|t| t.to_rfc3339());
                 let git_branch = entry.git_branch().map(String::from);
@@ -366,12 +384,32 @@ impl SnatchServer {
                         let content = extract_user_prompt_text(entry)
                             .map(|t| truncate_text(&t, truncate_len));
                         Some(MessageEntry {
-                            index: offset + i,
+                            index: *orig_idx,
                             msg_type,
                             timestamp,
                             content,
                             git_branch,
                             model: None,
+                            tool_calls: None,
+                            tool_details: None,
+                            has_thinking: None,
+                        })
+                    }
+                    "conversation" => {
+                        // User prompts + assistant text, no tool details
+                        let content = match entry {
+                            LogEntry::User(_) => extract_user_prompt_text(entry)
+                                .map(|t| truncate_text(&t, truncate_len)),
+                            LogEntry::Assistant(_) => extract_assistant_summary(entry, truncate_len),
+                            _ => None,
+                        };
+                        Some(MessageEntry {
+                            index: *orig_idx,
+                            msg_type,
+                            timestamp,
+                            content,
+                            git_branch,
+                            model: get_model(entry),
                             tool_calls: None,
                             tool_details: None,
                             has_thinking: None,
@@ -387,7 +425,7 @@ impl SnatchServer {
                         };
                         let tool_names = extract_tool_names(entry);
                         Some(MessageEntry {
-                            index: offset + i,
+                            index: *orig_idx,
                             msg_type,
                             timestamp,
                             content,
@@ -433,7 +471,7 @@ impl SnatchServer {
                             vec![]
                         };
                         Some(MessageEntry {
-                            index: offset + i,
+                            index: *orig_idx,
                             msg_type,
                             timestamp,
                             content,
@@ -512,9 +550,9 @@ impl SnatchServer {
             .iter()
             .find_map(|e| e.git_branch().map(String::from));
 
-        let timeline: Vec<TimelineTurn> = turns
+        // Build raw timeline turns
+        let raw_turns: Vec<TimelineTurn> = turns
             .iter()
-            .take(limit)
             .enumerate()
             .map(|(i, turn)| {
                 let user_prompt = turn.user_message.and_then(|e| {
@@ -561,6 +599,68 @@ impl SnatchServer {
                 }
             })
             .collect();
+
+        // Collapse consecutive tool-only turns (no user_prompt AND no assistant_summary)
+        // into single grouped entries to reduce noise
+        let mut timeline: Vec<TimelineTurn> = Vec::new();
+        let mut i = 0;
+        while i < raw_turns.len() {
+            let turn = &raw_turns[i];
+            let is_tool_only =
+                turn.user_prompt.is_none() && turn.assistant_summary.is_none();
+
+            if is_tool_only {
+                // Collect consecutive tool-only turns
+                let start = i;
+                let mut all_tools = Vec::new();
+                let mut all_files = Vec::new();
+                let mut any_errors = false;
+                let first_timestamp = turn.timestamp.clone();
+
+                while i < raw_turns.len() {
+                    let t = &raw_turns[i];
+                    if t.user_prompt.is_some() || t.assistant_summary.is_some() {
+                        break;
+                    }
+                    all_tools.extend(t.tools_used.iter().cloned());
+                    all_files.extend(t.files_touched.iter().cloned());
+                    any_errors = any_errors || t.had_errors;
+                    i += 1;
+                }
+
+                let count = i - start;
+                // Deduplicate tools and files
+                let mut seen = HashSet::new();
+                all_tools.retain(|t| seen.insert(t.clone()));
+                let mut seen = HashSet::new();
+                all_files.retain(|f| seen.insert(f.clone()));
+
+                if count > 1 {
+                    // Collapse into single entry
+                    timeline.push(TimelineTurn {
+                        index: start,
+                        timestamp: first_timestamp,
+                        user_prompt: None,
+                        assistant_summary: Some(format!(
+                            "[{} tool-only turns collapsed]",
+                            count
+                        )),
+                        tools_used: all_tools,
+                        files_touched: all_files,
+                        had_errors: any_errors,
+                    });
+                } else {
+                    // Single tool-only turn, keep as-is
+                    timeline.push(raw_turns[start].clone());
+                }
+            } else {
+                timeline.push(raw_turns[i].clone());
+                i += 1;
+            }
+        }
+
+        // Apply limit after collapsing
+        timeline.truncate(limit);
 
         let response = SessionTimelineResponse {
             session_id: resolved.session_id,
@@ -709,6 +809,10 @@ impl SnatchServer {
                 total_tokens: tokens,
             });
         }
+
+        // Filter out empty sessions (no prompts and no tokens)
+        session_entries.retain(|s| s.user_prompt_count > 0 || s.total_tokens > 0);
+        let sessions_found = session_entries.len();
 
         let mut branches: Vec<String> = agg_branches.into_iter().collect();
         branches.sort();

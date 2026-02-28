@@ -92,6 +92,7 @@ pub struct GetSessionMessagesRequest {
     pub session_id: String,
 
     /// Detail level: "overview" (user prompts only, truncated),
+    /// "conversation" (user prompts + assistant text, skips tool-only turns),
     /// "standard" (user + assistant text, tool names only),
     /// "full" (includes tool call details).
     /// Default: "standard".
@@ -171,7 +172,7 @@ pub struct GetSessionTimelineRequest {
 }
 
 /// A turn in the session timeline.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TimelineTurn {
     pub index: usize,
     pub timestamp: Option<String>,

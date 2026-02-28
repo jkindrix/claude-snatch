@@ -119,7 +119,13 @@ impl Conversation {
         for entry in entries {
             if let Some(uuid) = entry.uuid() {
                 let uuid = uuid.to_string();
-                let parent_uuid = entry.parent_uuid().map(String::from);
+                // Use logicalParentUuid to bridge compaction boundaries:
+                // When parentUuid is null but logicalParentUuid exists (compact_boundary),
+                // use the logical parent to maintain a continuous main thread.
+                let parent_uuid = entry
+                    .parent_uuid()
+                    .or_else(|| entry.logical_parent_uuid())
+                    .map(String::from);
                 let depth = 0; // Will calculate in second pass
 
                 // Track message ID groups
@@ -468,7 +474,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use indexmap::IndexMap;
-    use crate::model::{UserContent, UserMessage, UserSimpleContent};
+    use crate::model::{SystemMessage, SystemSubtype, UserContent, UserMessage, UserSimpleContent};
 
     fn make_user_entry(uuid: &str, parent: Option<&str>) -> LogEntry {
         LogEntry::User(UserMessage {
@@ -527,5 +533,68 @@ mod tests {
         assert_eq!(conv.len(), 4);
         assert!(conv.has_branches());
         assert_eq!(conv.branch_points().len(), 1);
+    }
+
+    fn make_compact_boundary(uuid: &str, logical_parent: &str) -> LogEntry {
+        LogEntry::System(SystemMessage {
+            uuid: uuid.to_string(),
+            parent_uuid: None,
+            logical_parent_uuid: Some(logical_parent.to_string()),
+            subtype: Some(SystemSubtype::CompactBoundary),
+            content: Some("Conversation compacted".to_string()),
+            level: Some("info".to_string()),
+            is_meta: None,
+            timestamp: Utc::now(),
+            session_id: Some("test".to_string()),
+            version: None,
+            cwd: None,
+            git_branch: None,
+            is_sidechain: None,
+            user_type: None,
+            compact_metadata: None,
+            error: None,
+            retry_in_ms: None,
+            retry_attempt: None,
+            max_retries: None,
+            cause: None,
+            hook_count: None,
+            hook_infos: vec![],
+            has_output: None,
+            prevented_continuation: None,
+            stop_reason: None,
+            tool_use_id: None,
+            checkpoint_id: None,
+            target_uuid: None,
+            rewind_mode: None,
+            affected_files: vec![],
+            new_name: None,
+            old_name: None,
+            extra: IndexMap::new(),
+        })
+    }
+
+    #[test]
+    fn test_compaction_boundary_bridging() {
+        // Simulate: entries 1-3, then compaction boundary with logicalParentUuid=3,
+        // then entries 4-5 parented to the boundary.
+        let entries = vec![
+            make_user_entry("1", None),
+            make_user_entry("2", Some("1")),
+            make_user_entry("3", Some("2")),
+            make_compact_boundary("cb", "3"),
+            make_user_entry("4", Some("cb")),
+            make_user_entry("5", Some("4")),
+        ];
+
+        let conv = Conversation::from_entries(entries).unwrap();
+
+        // All 6 entries should be in the tree
+        assert_eq!(conv.len(), 6);
+        // Only one root (entry "1"), because the compact boundary used logicalParentUuid
+        assert_eq!(conv.roots().len(), 1);
+        // Main thread should span the entire conversation: 1 -> 2 -> 3 -> cb -> 4 -> 5
+        assert_eq!(conv.main_thread().len(), 6);
+        // All entries accessible via main_thread_entries
+        assert_eq!(conv.main_thread_entries().len(), 6);
     }
 }
