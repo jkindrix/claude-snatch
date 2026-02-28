@@ -13,14 +13,17 @@ cargo test                     # run tests
 
 ## Session History Recall (snatch MCP)
 
-This project provides an MCP server (`snatch serve-mcp`) that exposes 8 tools for querying Claude Code session history. When you need to recall what happened in previous sessions or understand the narrative of past work, use these tools:
+This project provides an MCP server (`snatch serve-mcp`) that exposes 9 tools for querying Claude Code session history. When you need to recall what happened in previous sessions or understand the narrative of past work, use these tools:
 
 | Need | Tool | Example |
 |------|------|---------|
 | What have we been working on? | `get_project_history` | project="claude-snatch", period="7d" |
 | What happened in a session? | `get_session_timeline` | session_id="abc123" |
 | Read specific messages | `get_session_messages` | session_id="abc123", detail="standard" |
+| Recover decision rationale | `get_session_messages` | session_id="abc123", include_thinking=true |
 | Find where X was discussed | `search_sessions` | pattern="authentication", project="myproject" |
+| Search reasoning/decisions | `search_sessions` | pattern="decided|because", scope="thinking" |
+| What went wrong & how fixed? | `get_session_lessons` | session_id="abc123" |
 | What files were changed? | `get_tool_calls` | session_id="abc123", tool_filter="Write,Edit" |
 | List all sessions | `list_sessions` | project="claude-snatch" |
 | Session metadata | `get_session_info` | session_id="abc123" |
@@ -33,13 +36,21 @@ This project provides an MCP server (`snatch serve-mcp`) that exposes 8 tools fo
 - **standard**: User + assistant text, tool names listed. Good balance.
 - **full**: Includes tool call details (file paths, commands). For deep investigation.
 
+### Thinking Block Recovery
+
+Compaction **always** drops thinking/reasoning blocks (100% loss rate). These contain decision rationale, evidence chains, and alternative evaluation. Two ways to recover them:
+
+- `get_session_messages` with `include_thinking=true` — returns thinking text alongside messages
+- `search_sessions` with `scope="thinking"` — search through reasoning blocks
+
 ### Usage Guidelines
 
 - Start with `get_project_history` or `list_sessions` to orient yourself
 - Use `detail="conversation"` for reading the human-AI dialogue without tool noise
 - Use `detail="overview"` for quick orientation on what was asked
 - Always filter by project when possible to reduce noise
-- The `search_sessions` tool supports regex patterns
+- The `search_sessions` tool supports regex patterns and scope="thinking" for reasoning
 - Timeline collapses consecutive tool-only turns automatically for cleaner output
 - Timeline is the best tool for understanding "what happened in order"
 - All tools see content across compaction boundaries (pre/post-compact messages are both visible)
+- Use `get_session_lessons` after compaction to recover operational gotchas and avoid retrying failed approaches

@@ -10,8 +10,9 @@
 //! - `get_session_messages` - Read conversation messages at different detail levels
 //! - `get_session_timeline` - Get turn-by-turn narrative of a session
 //! - `get_project_history` - Cross-session overview for a project
-//! - `search_sessions` - Regex search across sessions
+//! - `search_sessions` - Regex search across sessions (supports thinking blocks)
 //! - `get_tool_calls` - Extract tool invocations with summaries
+//! - `get_session_lessons` - Extract error→fix pairs and user corrections
 
 #![cfg(feature = "mcp")]
 
@@ -304,7 +305,7 @@ impl SnatchServer {
     /// Read conversation messages from a session at different detail levels.
     /// Use detail="overview" for user prompts only, "standard" for user+assistant
     /// text with tool names, or "full" for tool call details.
-    #[tool(description = "Read conversation messages from a session. Use detail='overview' for prompts only, 'conversation' for user+assistant text (skipping tool-only turns), 'standard' for user+assistant text, 'full' for tool details. Supports pagination with offset/limit.")]
+    #[tool(description = "Read conversation messages from a session. Use detail='overview' for prompts only, 'conversation' for user+assistant text (skipping tool-only turns), 'standard' for user+assistant text, 'full' for tool details. Set include_thinking=true to recover reasoning/decision rationale (always lost in compaction). Supports pagination with offset/limit.")]
     async fn get_session_messages(&self, request: GetSessionMessagesRequest) -> ToolOutput {
         let resolved = match resolve_session(self, &request.session_id) {
             Ok(r) => r,
@@ -316,6 +317,12 @@ impl SnatchServer {
         let limit = request.limit.unwrap_or(50);
         let offset = request.offset.unwrap_or(0);
         let reverse = request.reverse.unwrap_or(false);
+        let include_thinking = request.include_thinking.unwrap_or(false);
+        let thinking_max_len = match detail {
+            "overview" => 500,
+            "conversation" | "standard" => 1000,
+            _ => 2000,
+        };
 
         let mut entries: Vec<&LogEntry> = resolved.conversation.main_thread_entries();
 
@@ -393,6 +400,7 @@ impl SnatchServer {
                             tool_calls: None,
                             tool_details: None,
                             has_thinking: None,
+                            thinking_preview: None,
                         })
                     }
                     "conversation" => {
@@ -403,6 +411,11 @@ impl SnatchServer {
                             LogEntry::Assistant(_) => extract_assistant_summary(entry, truncate_len),
                             _ => None,
                         };
+                        let thinking = if include_thinking {
+                            extract_thinking_text(entry, thinking_max_len)
+                        } else {
+                            None
+                        };
                         Some(MessageEntry {
                             index: *orig_idx,
                             msg_type,
@@ -412,7 +425,8 @@ impl SnatchServer {
                             model: get_model(entry),
                             tool_calls: None,
                             tool_details: None,
-                            has_thinking: None,
+                            has_thinking: if has_thinking(entry) { Some(true) } else { None },
+                            thinking_preview: thinking,
                         })
                     }
                     "standard" => {
@@ -424,6 +438,11 @@ impl SnatchServer {
                             _ => None,
                         };
                         let tool_names = extract_tool_names(entry);
+                        let thinking = if include_thinking {
+                            extract_thinking_text(entry, thinking_max_len)
+                        } else {
+                            None
+                        };
                         Some(MessageEntry {
                             index: *orig_idx,
                             msg_type,
@@ -442,6 +461,7 @@ impl SnatchServer {
                             } else {
                                 None
                             },
+                            thinking_preview: thinking,
                         })
                     }
                     "full" | _ => {
@@ -470,6 +490,11 @@ impl SnatchServer {
                         } else {
                             vec![]
                         };
+                        let thinking = if include_thinking {
+                            extract_thinking_text(entry, thinking_max_len)
+                        } else {
+                            None
+                        };
                         Some(MessageEntry {
                             index: *orig_idx,
                             msg_type,
@@ -492,6 +517,7 @@ impl SnatchServer {
                             } else {
                                 None
                             },
+                            thinking_preview: thinking,
                         })
                     }
                 }
@@ -842,7 +868,7 @@ impl SnatchServer {
     // ========================================================================
 
     /// Search across sessions for text patterns using regex.
-    #[tool(description = "Search across sessions for text patterns (regex). Filter by project, session, scope (text/tools/all). Returns matching text with context. Use to find where something was discussed or done.")]
+    #[tool(description = "Search across sessions for text patterns (regex). Filter by project, session, scope (text/tools/thinking/all). Use scope='thinking' to search reasoning blocks (decision rationale, evidence chains). Returns matching text with context.")]
     async fn search_sessions(&self, request: SearchSessionsRequest) -> ToolOutput {
         let claude_dir = match get_claude_dir(self) {
             Ok(dir) => dir,
@@ -1077,6 +1103,184 @@ impl SnatchServer {
                 files_written: written,
                 files_edited: edited,
                 error_count,
+            },
+        };
+
+        match ToolOutput::json(&response) {
+            Ok(output) => output,
+            Err(e) => ToolOutput::error(format!("JSON serialization error: {e}")),
+        }
+    }
+
+    // ========================================================================
+    // New Tool: get_session_lessons
+    // ========================================================================
+
+    /// Extract operational lessons from a session: error→fix pairs and user corrections.
+    /// Targets the most expensive compaction failure mode (negative result amnesia).
+    #[tool(description = "Extract lessons from a session: error->fix pairs (what failed and how it was resolved) and user corrections (where the user corrected agent behavior). Use after compaction to recover operational gotchas and avoid retrying failed approaches.")]
+    async fn get_session_lessons(&self, request: GetSessionLessonsRequest) -> ToolOutput {
+        let resolved = match resolve_session(self, &request.session_id) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+
+        let category = request.category.as_deref().unwrap_or("all");
+        let limit = request.limit.unwrap_or(30);
+
+        let main_entries = resolved.conversation.main_thread_entries();
+
+        let mut error_fix_pairs: Vec<ErrorFixLesson> = Vec::new();
+        let mut user_corrections: Vec<UserCorrection> = Vec::new();
+
+        if category == "errors" || category == "all" {
+            // Find error→fix pairs: tool results with is_error=true,
+            // then look at the next assistant response for the resolution.
+
+            // Build map: tool_use_id → (tool_name, input, timestamp)
+            let mut tool_use_map: HashMap<String, (String, serde_json::Value, Option<String>)> =
+                HashMap::new();
+            for entry in &main_entries {
+                if let LogEntry::Assistant(a) = entry {
+                    let ts = entry.timestamp().map(|t| t.to_rfc3339());
+                    for tool in a.message.tool_uses() {
+                        tool_use_map.insert(
+                            tool.id.clone(),
+                            (tool.name.clone(), tool.input.clone(), ts.clone()),
+                        );
+                    }
+                }
+            }
+
+            // Walk entries looking for error results, then capture next assistant response
+            let mut i = 0;
+            while i < main_entries.len() && error_fix_pairs.len() < limit {
+                if let LogEntry::User(user) = main_entries[i] {
+                    for result in user.message.tool_results() {
+                        if result.is_error != Some(true) {
+                            continue;
+                        }
+                        if error_fix_pairs.len() >= limit {
+                            break;
+                        }
+
+                        let error_preview = result
+                            .content
+                            .as_ref()
+                            .map(|c| truncate_text(&format!("{c:?}"), 300))
+                            .unwrap_or_else(|| "(error with no content)".into());
+
+                        let (tool_name, input, timestamp) = tool_use_map
+                            .get(&result.tool_use_id)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                ("unknown".into(), serde_json::Value::Null, None)
+                            });
+
+                        let input_summary = extract_tool_input_summary(&tool_name, &input);
+
+                        // Look ahead for the next assistant message as resolution
+                        let mut resolution_summary = None;
+                        let mut resolution_tools = Vec::new();
+                        for j in (i + 1)..main_entries.len() {
+                            if let LogEntry::Assistant(a) = main_entries[j] {
+                                resolution_summary = {
+                                    let text = a.message.combined_text();
+                                    let trimmed = text.trim();
+                                    if trimmed.is_empty() {
+                                        None
+                                    } else {
+                                        Some(truncate_text(trimmed, 200))
+                                    }
+                                };
+                                resolution_tools = a
+                                    .message
+                                    .tool_uses()
+                                    .iter()
+                                    .map(|t| t.name.clone())
+                                    .collect();
+                                break;
+                            }
+                        }
+
+                        error_fix_pairs.push(ErrorFixLesson {
+                            timestamp,
+                            tool_name,
+                            input_summary,
+                            error_preview,
+                            resolution_summary,
+                            resolution_tools,
+                        });
+                    }
+                }
+                i += 1;
+            }
+        }
+
+        if category == "corrections" || category == "all" {
+            // Detect user corrections: user messages that contain correction
+            // signals (negative sentiment, imperatives after errors, explicit
+            // instructions to stop/change behavior).
+            let correction_pattern = regex::RegexBuilder::new(
+                r"(?:don'?t|stop|wrong|no[,.]|incorrect|that'?s not|instead|should have|why did you|already|again)"
+            )
+            .case_insensitive(true)
+            .build();
+
+            if let Ok(re) = correction_pattern {
+                let mut prev_assistant_summary: Option<String> = None;
+
+                for entry in &main_entries {
+                    if user_corrections.len() >= limit {
+                        break;
+                    }
+
+                    match entry {
+                        LogEntry::Assistant(a) => {
+                            let text = a.message.combined_text();
+                            let trimmed = text.trim();
+                            prev_assistant_summary = if trimmed.is_empty() {
+                                None
+                            } else {
+                                Some(truncate_text(trimmed, 200))
+                            };
+                        }
+                        LogEntry::User(_) => {
+                            if let Some(text) = extract_user_prompt_text(entry) {
+                                if re.is_match(&text) && text.len() > 10 {
+                                    user_corrections.push(UserCorrection {
+                                        timestamp: entry.timestamp().map(|t| t.to_rfc3339()),
+                                        user_text: truncate_text(&text, 300),
+                                        prior_assistant_summary: prev_assistant_summary.clone(),
+                                    });
+                                }
+                            }
+                            // Reset — user message is not an assistant message
+                            // (don't clear prev_assistant_summary, it's still valid)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Build summary
+        let mut tool_error_counts: HashMap<String, usize> = HashMap::new();
+        for pair in &error_fix_pairs {
+            *tool_error_counts.entry(pair.tool_name.clone()).or_default() += 1;
+        }
+        let mut most_error_prone: Vec<(String, usize)> = tool_error_counts.into_iter().collect();
+        most_error_prone.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let response = SessionLessonsResponse {
+            session_id: resolved.session_id,
+            project_path: resolved.project_path,
+            error_fix_pairs: error_fix_pairs.iter().take(limit).cloned().collect(),
+            user_corrections: user_corrections.iter().take(limit).cloned().collect(),
+            summary: LessonsSummary {
+                total_errors: error_fix_pairs.len(),
+                total_corrections: user_corrections.len(),
+                most_error_prone_tools: most_error_prone.into_iter().map(|(name, _)| name).collect(),
             },
         };
 

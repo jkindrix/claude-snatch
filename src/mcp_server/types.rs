@@ -111,6 +111,11 @@ pub struct GetSessionMessagesRequest {
     /// If true, return messages in reverse chronological order.
     /// Default: false.
     pub reverse: Option<bool>,
+
+    /// If true, include thinking/reasoning block content in assistant messages.
+    /// Thinking blocks contain decision rationale and evidence chains that
+    /// compaction always drops. Default: false.
+    pub include_thinking: Option<bool>,
 }
 
 /// A message in the session messages response.
@@ -132,6 +137,9 @@ pub struct MessageEntry {
     pub tool_details: Option<Vec<ToolDetail>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_thinking: Option<bool>,
+    /// Thinking/reasoning block content (only included when include_thinking=true).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_preview: Option<String>,
 }
 
 /// Tool call detail for "full" detail level.
@@ -291,7 +299,7 @@ pub struct SearchSessionsRequest {
     pub session_id: Option<String>,
 
     /// Search scope: "text" (user+assistant text), "tools" (tool I/O),
-    /// "all" (everything). Default: "text".
+    /// "thinking" (reasoning blocks), "all" (everything). Default: "text".
     pub scope: Option<String>,
 
     /// Case-insensitive search. Default: true.
@@ -375,4 +383,72 @@ pub struct ToolCallsResponse {
     pub returned: usize,
     pub tool_calls: Vec<ToolCallEntry>,
     pub summary: ToolCallsSummary,
+}
+
+// ============================================================================
+// New Tool Types: get_session_lessons
+// ============================================================================
+
+/// Request for session lessons extraction.
+#[derive(Debug, Deserialize, ToolInput)]
+pub struct GetSessionLessonsRequest {
+    /// Session ID (full or prefix).
+    pub session_id: String,
+
+    /// Lesson category filter: "errors" (error→fix pairs), "corrections"
+    /// (user corrections of agent behavior), "all". Default: "all".
+    pub category: Option<String>,
+
+    /// Maximum lessons to return. Default: 30.
+    pub limit: Option<usize>,
+}
+
+/// An error→fix lesson: a tool call that failed, and what happened next.
+#[derive(Debug, Clone, Serialize)]
+pub struct ErrorFixLesson {
+    /// When the error occurred.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    /// The tool that errored.
+    pub tool_name: String,
+    /// Key input fields for the failing call.
+    pub input_summary: std::collections::HashMap<String, String>,
+    /// Preview of the error message.
+    pub error_preview: String,
+    /// What the assistant did next (text summary of next response).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution_summary: Option<String>,
+    /// Tools used in the resolution attempt.
+    pub resolution_tools: Vec<String>,
+}
+
+/// A user correction: where the user corrected the agent's behavior.
+#[derive(Debug, Clone, Serialize)]
+pub struct UserCorrection {
+    /// When the correction was made.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    /// The user's correction text.
+    pub user_text: String,
+    /// What the assistant was doing before (summary of previous response).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prior_assistant_summary: Option<String>,
+}
+
+/// Response for get_session_lessons.
+#[derive(Debug, Serialize)]
+pub struct SessionLessonsResponse {
+    pub session_id: String,
+    pub project_path: String,
+    pub error_fix_pairs: Vec<ErrorFixLesson>,
+    pub user_corrections: Vec<UserCorrection>,
+    pub summary: LessonsSummary,
+}
+
+/// Summary of lessons found.
+#[derive(Debug, Serialize)]
+pub struct LessonsSummary {
+    pub total_errors: usize,
+    pub total_corrections: usize,
+    pub most_error_prone_tools: Vec<String>,
 }

@@ -146,6 +146,30 @@ pub fn has_thinking(entry: &LogEntry) -> bool {
     }
 }
 
+/// Extract combined thinking text from an Assistant message.
+pub fn extract_thinking_text(entry: &LogEntry, max_len: usize) -> Option<String> {
+    match entry {
+        LogEntry::Assistant(assistant) => {
+            let blocks = assistant.message.thinking_blocks();
+            if blocks.is_empty() {
+                return None;
+            }
+            let combined: String = blocks
+                .iter()
+                .map(|b| b.thinking.as_str())
+                .collect::<Vec<_>>()
+                .join("\n---\n");
+            let trimmed = combined.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(truncate_text(trimmed, max_len))
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Get the model from an Assistant message.
 pub fn get_model(entry: &LogEntry) -> Option<String> {
     match entry {
@@ -380,6 +404,13 @@ pub fn search_entry_text(
                 for tool in assistant.message.tool_uses() {
                     let input_str = tool.input.to_string();
                     search_text(&input_str);
+                }
+            }
+            if scope == "thinking" || scope == "all" {
+                for block in assistant.message.thinking_blocks() {
+                    if !block.thinking.is_empty() {
+                        search_text(&block.thinking);
+                    }
                 }
             }
         }
