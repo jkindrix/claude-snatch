@@ -185,7 +185,7 @@ impl Conversation {
             }
         }
 
-        // Third pass: calculate depths and identify main thread
+        // Third pass: calculate depths and identify branch points
         let mut main_thread = Vec::new();
         let mut branch_points = Vec::new();
 
@@ -209,7 +209,36 @@ impl Conversation {
             }
         }
 
-        // Build main thread (follow chronological order and deepest path)
+        // Compute subtree sizes bottom-up for main thread selection.
+        // At branch points, the main thread follows the child with the
+        // largest subtree, which naturally tracks the active conversation
+        // rather than dead-end streaming chunks or short side branches.
+        let mut subtree_sizes: HashMap<String, usize> = HashMap::new();
+        fn compute_subtree_size(
+            uuid: &str,
+            nodes: &IndexMap<String, ConversationNode>,
+            cache: &mut HashMap<String, usize>,
+        ) -> usize {
+            if let Some(&cached) = cache.get(uuid) {
+                return cached;
+            }
+            let size = if let Some(node) = nodes.get(uuid) {
+                1 + node
+                    .children
+                    .iter()
+                    .map(|c| compute_subtree_size(c, nodes, cache))
+                    .sum::<usize>()
+            } else {
+                0
+            };
+            cache.insert(uuid.to_string(), size);
+            size
+        }
+        for uuid in nodes.keys().cloned().collect::<Vec<_>>() {
+            compute_subtree_size(&uuid, &nodes, &mut subtree_sizes);
+        }
+
+        // Build main thread following the largest subtree at each branch
         if let Some(first_root) = roots.first() {
             let mut current = first_root.clone();
             main_thread.push(current.clone());
@@ -220,8 +249,12 @@ impl Conversation {
                         break;
                     }
 
-                    // Follow the chronologically first child (or latest for tie-break)
-                    let next = node.children.first().cloned();
+                    // Follow the child with the largest subtree
+                    let next = node
+                        .children
+                        .iter()
+                        .max_by_key(|c| subtree_sizes.get(*c).copied().unwrap_or(0))
+                        .cloned();
                     if let Some(next_uuid) = next {
                         main_thread.push(next_uuid.clone());
                         current = next_uuid;

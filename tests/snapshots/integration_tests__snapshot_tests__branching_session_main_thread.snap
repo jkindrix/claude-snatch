@@ -1,6 +1,5 @@
 ---
 source: tests/integration_tests.rs
-assertion_line: 948
 expression: markdown
 ---
 # Claude Code Conversation
@@ -31,17 +30,17 @@ That depends on your goals! Python is great for beginners and data science, whil
 
 *Tokens: 15 in, 35 out*
 
-## 👤 User *(2025-01-15 12:01:00 UTC)* 
+## 👤 User *(2025-01-15 12:01:05 UTC)* 
 
-Tell me more about Python
+Tell me more about Rust
 
-## 🤖 Assistant *(2025-01-15 12:01:10 UTC)* 
+## 🤖 Assistant *(2025-01-15 12:01:15 UTC)* 
 
-Python is a versatile, beginner-friendly language known for:
-- Clean, readable syntax
-- Extensive libraries for data science (NumPy, Pandas)
-- Great for web development (Django, Flask)
-- Strong community support
+Rust is a systems programming language known for:
+- Memory safety without garbage collection
+- Zero-cost abstractions
+- Excellent concurrency support
+- Growing ecosystem for web (Actix, Axum)
 
 
-*Tokens: 45 in, 60 out*
+*Tokens: 45 in, 55 out*

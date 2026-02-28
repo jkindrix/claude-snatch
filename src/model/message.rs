@@ -824,4 +824,17 @@ mod tests {
             panic!("Expected QueueOperation");
         }
     }
+
+    #[test]
+    fn test_system_turn_duration_parses() {
+        let json = r#"{"parentUuid":"2662d654-12a7","isSidechain":false,"userType":"external","cwd":"/tmp","sessionId":"test","version":"2.1.63","gitBranch":"main","slug":"test","type":"system","subtype":"turn_duration","durationMs":31226,"timestamp":"2026-02-28T12:29:40.051Z","uuid":"3c6c72db-test","isMeta":false}"#;
+        let result: Result<LogEntry, _> = serde_json::from_str(json);
+        match &result {
+            Ok(entry) => {
+                assert_eq!(entry.uuid(), Some("3c6c72db-test"));
+                assert_eq!(entry.message_type(), "system");
+            }
+            Err(e) => panic!("Failed to parse turn_duration system entry: {e}"),
+        }
+    }
 }
