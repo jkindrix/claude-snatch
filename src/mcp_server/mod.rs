@@ -1128,19 +1128,30 @@ impl SnatchServer {
         let category = request.category.as_deref().unwrap_or("all");
         let limit = request.limit.unwrap_or(30);
 
-        let main_entries = resolved.conversation.main_thread_entries();
+        // Use all entries (not just main thread) so lessons on branches
+        // and across compaction boundaries are visible.
+        let all_entries = resolved.conversation.chronological_entries();
 
         let mut error_fix_pairs: Vec<ErrorFixLesson> = Vec::new();
         let mut user_corrections: Vec<UserCorrection> = Vec::new();
 
+        // Soft error pattern: detect errors in tool result content even when
+        // is_error is not true (e.g., SIGSEGV, panics, assertion failures)
+        let soft_error_re = regex::RegexBuilder::new(
+            r"(?:Segmentation fault|SIGSEGV|SIGABRT|panic|stack overflow|assertion failed|fatal error|thread .* panicked|Exit code (?:[1-9]\d*|1\d\d)|error\[E\d+\]|cannot find|unresolved|undefined reference)"
+        )
+        .case_insensitive(true)
+        .build()
+        .ok();
+
         if category == "errors" || category == "all" {
-            // Find error→fix pairs: tool results with is_error=true,
-            // then look at the next assistant response for the resolution.
+            // Find error→fix pairs from both hard errors (is_error=true) and
+            // soft errors (tool results containing error signals in content).
 
             // Build map: tool_use_id → (tool_name, input, timestamp)
             let mut tool_use_map: HashMap<String, (String, serde_json::Value, Option<String>)> =
                 HashMap::new();
-            for entry in &main_entries {
+            for entry in &all_entries {
                 if let LogEntry::Assistant(a) = entry {
                     let ts = entry.timestamp().map(|t| t.to_rfc3339());
                     for tool in a.message.tool_uses() {
@@ -1154,20 +1165,37 @@ impl SnatchServer {
 
             // Walk entries looking for error results, then capture next assistant response
             let mut i = 0;
-            while i < main_entries.len() && error_fix_pairs.len() < limit {
-                if let LogEntry::User(user) = main_entries[i] {
+            while i < all_entries.len() && error_fix_pairs.len() < limit {
+                if let LogEntry::User(user) = all_entries[i] {
                     for result in user.message.tool_results() {
-                        if result.is_error != Some(true) {
-                            continue;
-                        }
                         if error_fix_pairs.len() >= limit {
                             break;
                         }
 
-                        let error_preview = result
+                        // Check for hard error (is_error=true) or soft error
+                        // (error patterns in content)
+                        let is_hard_error = result.is_error == Some(true);
+                        let content_text = result
                             .content
                             .as_ref()
-                            .map(|c| truncate_text(&format!("{c:?}"), 300))
+                            .map(|c| format!("{c:?}"));
+                        let is_soft_error = if !is_hard_error {
+                            if let (Some(ref re), Some(ref text)) = (&soft_error_re, &content_text) {
+                                re.is_match(text)
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+
+                        if !is_hard_error && !is_soft_error {
+                            continue;
+                        }
+
+                        let error_preview = content_text
+                            .as_deref()
+                            .map(|t| truncate_text(t, 300))
                             .unwrap_or_else(|| "(error with no content)".into());
 
                         let (tool_name, input, timestamp) = tool_use_map
@@ -1182,8 +1210,8 @@ impl SnatchServer {
                         // Look ahead for the next assistant message as resolution
                         let mut resolution_summary = None;
                         let mut resolution_tools = Vec::new();
-                        for j in (i + 1)..main_entries.len() {
-                            if let LogEntry::Assistant(a) = main_entries[j] {
+                        for j in (i + 1)..all_entries.len() {
+                            if let LogEntry::Assistant(a) = all_entries[j] {
                                 resolution_summary = {
                                     let text = a.message.combined_text();
                                     let trimmed = text.trim();
@@ -1218,11 +1246,12 @@ impl SnatchServer {
         }
 
         if category == "corrections" || category == "all" {
-            // Detect user corrections: user messages that contain correction
-            // signals (negative sentiment, imperatives after errors, explicit
-            // instructions to stop/change behavior).
+            // Detect user corrections: user messages containing frustration,
+            // behavioral correction, or explicit instructions to change approach.
+            // Broad pattern covering direct corrections, frustration signals,
+            // and demands to stop/change behavior.
             let correction_pattern = regex::RegexBuilder::new(
-                r"(?:don'?t|stop|wrong|no[,.]|incorrect|that'?s not|instead|should have|why did you|already|again)"
+                r"(?:don'?t|(?:^|\W)stop\b|wrong|no[,.\!]|incorrect|that'?s not|instead|should have|why did you|why are you|already|again|what the (?:hell|fuck)|are you ever|sick of|wasting time|same (?:thing|fucking)|over and over|keep (?:doing|searching|looking|trying)|you can'?t|how many times)"
             )
             .case_insensitive(true)
             .build();
@@ -1230,7 +1259,7 @@ impl SnatchServer {
             if let Ok(re) = correction_pattern {
                 let mut prev_assistant_summary: Option<String> = None;
 
-                for entry in &main_entries {
+                for entry in &all_entries {
                     if user_corrections.len() >= limit {
                         break;
                     }
@@ -1247,7 +1276,15 @@ impl SnatchServer {
                         }
                         LogEntry::User(_) => {
                             if let Some(text) = extract_user_prompt_text(entry) {
-                                if re.is_match(&text) && text.len() > 10 {
+                                // Match on correction pattern, require minimum length,
+                                // skip compaction summaries (long entries that quote
+                                // user text and would cause false positives), and skip
+                                // session continuation summaries
+                                let is_summary = text.len() > 3000
+                                    || text.contains("All User Messages:")
+                                    || text.contains("conversation that ran out of context")
+                                    || text.contains("Key Technical Concepts:");
+                                if re.is_match(&text) && text.len() > 10 && !is_summary {
                                     user_corrections.push(UserCorrection {
                                         timestamp: entry.timestamp().map(|t| t.to_rfc3339()),
                                         user_text: truncate_text(&text, 300),
@@ -1255,8 +1292,6 @@ impl SnatchServer {
                                     });
                                 }
                             }
-                            // Reset — user message is not an assistant message
-                            // (don't clear prev_assistant_summary, it's still valid)
                         }
                         _ => {}
                     }
