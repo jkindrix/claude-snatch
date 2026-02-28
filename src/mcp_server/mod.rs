@@ -328,7 +328,9 @@ impl SnatchServer {
 
         // Filter by message type
         match msg_type_filter {
-            "user" => entries.retain(|e| matches!(e, LogEntry::User(_))),
+            "user" => entries.retain(|e| {
+                matches!(e, LogEntry::User(u) if u.message.has_visible_text())
+            }),
             "assistant" => entries.retain(|e| matches!(e, LogEntry::Assistant(_))),
             "system" => entries.retain(|e| matches!(e, LogEntry::System(_))),
             _ => {} // "all" — keep everything
