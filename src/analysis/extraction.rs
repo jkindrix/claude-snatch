@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::model::content::ContentBlock;
-use crate::model::message::{LogEntry, UserContent};
+use crate::model::message::{LogEntry, SystemSubtype, UserContent};
 
 /// Truncate text at a word boundary with "..." suffix.
 pub fn truncate_text(text: &str, max_len: usize) -> String {
@@ -272,6 +272,48 @@ pub fn extract_error_preview(
         }
         None => Some("(error with no content)".into()),
     }
+}
+
+/// Check if an Assistant message has thinking blocks.
+pub fn has_thinking(entry: &LogEntry) -> bool {
+    match entry {
+        LogEntry::Assistant(assistant) => assistant.message.has_thinking(),
+        _ => false,
+    }
+}
+
+/// Get the model from an Assistant message.
+///
+/// Returns `None` if the entry is not an Assistant message or has an empty model string.
+pub fn get_model(entry: &LogEntry) -> Option<String> {
+    match entry {
+        LogEntry::Assistant(assistant) => {
+            let model = &assistant.message.model;
+            if model.is_empty() {
+                None
+            } else {
+                Some(model.clone())
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Detect compaction events in a conversation's main thread entries.
+///
+/// Returns a list of `(timestamp_rfc3339, optional_summary)` pairs.
+pub fn find_compaction_events(entries: &[&LogEntry]) -> Vec<(String, Option<String>)> {
+    let mut events = Vec::new();
+    for entry in entries {
+        if let LogEntry::System(sys) = entry {
+            if sys.subtype == Some(SystemSubtype::CompactBoundary) {
+                let ts = sys.timestamp.to_rfc3339();
+                let summary = sys.content.clone();
+                events.push((ts, summary));
+            }
+        }
+    }
+    events
 }
 
 #[cfg(test)]
