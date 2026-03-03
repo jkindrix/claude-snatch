@@ -223,6 +223,14 @@ pub enum Commands {
     #[command(alias = "d", display_order = 23)]
     Diff(DiffArgs),
 
+    /// Extract lessons (error→fix pairs, user corrections) from a session.
+    #[command(display_order = 24)]
+    Lessons(LessonsArgs),
+
+    /// Show turn-by-turn narrative timeline of a session.
+    #[command(display_order = 25)]
+    Timeline(TimelineArgs),
+
     // ═══════════════════════════════════════════════════════════════════════
     // EXPORT - Extract content in various formats
     // ═══════════════════════════════════════════════════════════════════════
@@ -1785,6 +1793,32 @@ pub enum StandupFormat {
     Json,
 }
 
+/// Arguments for the lessons command.
+#[derive(Debug, Parser)]
+pub struct LessonsArgs {
+    /// Session ID (full UUID or short prefix).
+    pub session_id: String,
+
+    /// Lesson category: errors, corrections, or all.
+    #[arg(short = 'c', long, default_value = "all")]
+    pub category: Option<String>,
+
+    /// Maximum lessons per category.
+    #[arg(short = 'l', long, default_value = "30")]
+    pub limit: usize,
+}
+
+/// Arguments for the timeline command.
+#[derive(Debug, Parser)]
+pub struct TimelineArgs {
+    /// Session ID (full UUID or short prefix).
+    pub session_id: String,
+
+    /// Maximum timeline entries.
+    #[arg(short = 'l', long, default_value = "50")]
+    pub limit: usize,
+}
+
 /// Arguments for the pick command.
 #[derive(Debug, Parser)]
 pub struct PickArgs {
@@ -2062,6 +2096,8 @@ pub fn run() -> Result<()> {
         Some(Commands::Recover(args)) => commands::recover::run(&cli, args),
         Some(Commands::Prompts(args)) => commands::prompts::run(&cli, args),
         Some(Commands::Standup(args)) => commands::standup::run(&cli, args),
+        Some(Commands::Lessons(args)) => commands::lessons::run(&cli, args),
+        Some(Commands::Timeline(args)) => commands::timeline::run(&cli, args),
         Some(Commands::Pick(args)) => commands::pick::run(&cli, args),
         Some(Commands::Quickstart(args)) => commands::quickstart::run(&cli, args),
         Some(Commands::Summary(args)) => commands::summary::run(&cli, args),
