@@ -533,6 +533,8 @@ pub struct SessionDigestResponse {
     pub session_id: String,
     pub project_path: String,
     pub key_prompts: Vec<String>,
+    pub recent_prompts: Vec<String>,
+    pub total_prompts: usize,
     pub files_touched: Vec<String>,
     pub top_tools: Vec<(String, usize)>,
     pub error_count: usize,

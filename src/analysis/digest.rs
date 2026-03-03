@@ -42,6 +42,10 @@ impl Default for DigestOptions {
 pub struct SessionDigest {
     /// Key human prompts (first N, truncated).
     pub key_prompts: Vec<String>,
+    /// Recent human prompts (last N, truncated). Shows where the session ended.
+    pub recent_prompts: Vec<String>,
+    /// Total number of human prompts in the session.
+    pub total_prompts: usize,
     /// Files touched by Write/Edit/Read tools.
     pub files_touched: Vec<String>,
     /// Tool usage counts (sorted by frequency).
@@ -68,18 +72,29 @@ const DECISION_PATTERNS: &[&str] = &[
 
 /// Build a session digest from conversation entries.
 pub fn build_digest(entries: &[&LogEntry], opts: &DigestOptions) -> SessionDigest {
-    // 1. Key prompts: first N human prompts, truncated
-    let mut key_prompts = Vec::new();
+    // 1. Collect all human prompts, then take first N and last N
+    let mut all_prompts = Vec::new();
     for entry in entries {
-        if key_prompts.len() >= opts.max_prompts {
-            break;
-        }
         if is_human_prompt(entry) {
             if let Some(text) = extract_user_prompt_text(entry) {
-                key_prompts.push(truncate_text(&text, 100));
+                all_prompts.push(truncate_text(&text, 100));
             }
         }
     }
+    let total_prompts = all_prompts.len();
+
+    let key_prompts: Vec<String> = all_prompts.iter().take(opts.max_prompts).cloned().collect();
+
+    // Last N prompts (excluding any that overlap with key_prompts)
+    let recent_prompts: Vec<String> = if total_prompts > opts.max_prompts {
+        all_prompts
+            .iter()
+            .skip(total_prompts.saturating_sub(opts.max_prompts))
+            .cloned()
+            .collect()
+    } else {
+        Vec::new() // All prompts already in key_prompts
+    };
 
     // 2. Files touched
     let mut files = extract_files_from_tools(entries);
@@ -143,6 +158,8 @@ pub fn build_digest(entries: &[&LogEntry], opts: &DigestOptions) -> SessionDiges
 
     SessionDigest {
         key_prompts,
+        recent_prompts,
+        total_prompts,
         files_touched: files,
         top_tools,
         error_count,
@@ -156,9 +173,17 @@ pub fn format_digest(digest: &SessionDigest, max_chars: usize) -> String {
     let mut lines = Vec::new();
 
     if !digest.key_prompts.is_empty() {
-        lines.push("Prompts:".to_string());
+        lines.push(format!("First prompts ({} total):", digest.total_prompts));
         for (i, p) in digest.key_prompts.iter().enumerate() {
             lines.push(format!("  {}. {p}", i + 1));
+        }
+    }
+
+    if !digest.recent_prompts.is_empty() {
+        let start = digest.total_prompts - digest.recent_prompts.len() + 1;
+        lines.push("Recent prompts:".to_string());
+        for (i, p) in digest.recent_prompts.iter().enumerate() {
+            lines.push(format!("  {}. {p}", start + i));
         }
     }
 
@@ -225,6 +250,8 @@ mod tests {
     fn test_format_digest_empty() {
         let digest = SessionDigest {
             key_prompts: vec![],
+            recent_prompts: vec![],
+            total_prompts: 0,
             files_touched: vec![],
             top_tools: vec![],
             error_count: 0,
@@ -239,6 +266,8 @@ mod tests {
     fn test_format_digest_full() {
         let digest = SessionDigest {
             key_prompts: vec!["Fix the auth bug".into(), "Add tests".into()],
+            recent_prompts: vec!["Ship it".into()],
+            total_prompts: 10,
             files_touched: vec!["auth.rs".into(), "tests.rs".into()],
             top_tools: vec![("Edit".into(), 5), ("Read".into(), 3)],
             error_count: 2,
@@ -246,8 +275,10 @@ mod tests {
             thinking_keywords: vec!["decided".into(), "because".into()],
         };
         let formatted = format_digest(&digest, 500);
-        assert!(formatted.contains("Prompts:"));
+        assert!(formatted.contains("First prompts (10 total):"));
         assert!(formatted.contains("Fix the auth bug"));
+        assert!(formatted.contains("Recent prompts:"));
+        assert!(formatted.contains("Ship it"));
         assert!(formatted.contains("Files: auth.rs, tests.rs"));
         assert!(formatted.contains("Tools: Edit(5), Read(3)"));
         assert!(formatted.contains("Errors: 2"));
@@ -256,9 +287,28 @@ mod tests {
     }
 
     #[test]
+    fn test_format_digest_no_recent_when_few_prompts() {
+        let digest = SessionDigest {
+            key_prompts: vec!["Only prompt".into()],
+            recent_prompts: vec![], // No recent when total <= max_prompts
+            total_prompts: 1,
+            files_touched: vec![],
+            top_tools: vec![],
+            error_count: 0,
+            compaction_count: 0,
+            thinking_keywords: vec![],
+        };
+        let formatted = format_digest(&digest, 500);
+        assert!(formatted.contains("First prompts (1 total):"));
+        assert!(!formatted.contains("Recent prompts:"));
+    }
+
+    #[test]
     fn test_format_digest_truncation() {
         let digest = SessionDigest {
             key_prompts: vec!["A very long prompt that goes on and on and on and on and on and on".into()],
+            recent_prompts: vec![],
+            total_prompts: 1,
             files_touched: vec!["a.rs".into(), "b.rs".into(), "c.rs".into(), "d.rs".into(), "e.rs".into()],
             top_tools: vec![("Edit".into(), 100)],
             error_count: 0,

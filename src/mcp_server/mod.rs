@@ -1236,6 +1236,8 @@ impl SnatchServer {
             session_id: resolved.session_id,
             project_path: resolved.project_path,
             key_prompts: digest.key_prompts,
+            recent_prompts: digest.recent_prompts,
+            total_prompts: digest.total_prompts,
             files_touched: digest.files_touched,
             top_tools: digest.top_tools,
             error_count: digest.error_count,
