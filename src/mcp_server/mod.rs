@@ -775,10 +775,6 @@ impl SnatchServer {
         let mut results = Vec::new();
 
         for session in &sessions {
-            if results.len() >= limit {
-                break;
-            }
-
             let entries = match session.parse_with_options(self.max_file_size) {
                 Ok(e) => e,
                 Err(_) => continue,
@@ -792,15 +788,8 @@ impl SnatchServer {
             // Search ALL entries (not just main thread) so branches,
             // sidechains, and agent sub-conversations are included.
             for entry in conversation.chronological_entries() {
-                if results.len() >= limit {
-                    break;
-                }
-
                 let matches = search_entry_text(entry, &regex, scope, 100);
                 for (matched, context) in matches {
-                    if results.len() >= limit {
-                        break;
-                    }
                     results.push(SearchMatch {
                         session_id: session.session_id().to_string(),
                         project_path: session.project_path().to_string(),
@@ -814,10 +803,12 @@ impl SnatchServer {
         }
 
         let total = results.len();
+        results.truncate(limit);
+        let returned = results.len();
         let response = SearchSessionsResponse {
             pattern: request.pattern,
             total_matches: total,
-            returned: total,
+            returned,
             results,
         };
 
