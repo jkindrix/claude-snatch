@@ -286,9 +286,7 @@ impl SnatchServer {
 
         // Filter by message type
         match msg_type_filter {
-            "user" => entries.retain(|e| {
-                matches!(e, LogEntry::User(u) if u.message.has_visible_text())
-            }),
+            "user" => entries.retain(|e| is_human_prompt(e)),
             "assistant" => entries.retain(|e| matches!(e, LogEntry::Assistant(_))),
             "system" => entries.retain(|e| matches!(e, LogEntry::System(_))),
             _ => {} // "all" — keep everything
@@ -297,20 +295,14 @@ impl SnatchServer {
         // Pre-filter entries based on detail level
         match detail {
             "overview" => {
-                // Only user messages with visible text
-                entries.retain(|e| {
-                    if let LogEntry::User(u) = e {
-                        u.message.has_visible_text()
-                    } else {
-                        false
-                    }
-                });
+                // Only human-authored prompts (excludes system noise)
+                entries.retain(|e| is_human_prompt(e));
             }
             "conversation" => {
-                // User messages with visible text + assistant messages with text content
-                // Skips tool-only assistant turns and system messages
+                // Human prompts + assistant messages with text content
+                // Skips tool-only assistant turns, system messages, and noise
                 entries.retain(|e| match e {
-                    LogEntry::User(u) => u.message.has_visible_text(),
+                    LogEntry::User(_) => is_human_prompt(e),
                     LogEntry::Assistant(_) => extract_assistant_summary(e, 1).is_some(),
                     _ => false,
                 });

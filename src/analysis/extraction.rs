@@ -31,6 +31,44 @@ pub fn truncate_text(text: &str, max_len: usize) -> String {
     format!("{truncated}...")
 }
 
+/// Check if a user entry is an actual human-authored prompt.
+///
+/// Returns `false` for system-generated user entries like `/compact` commands,
+/// `/mcp` reconnect messages, `local-command-caveat` wrappers,
+/// `local-command-stdout` outputs, and `[Request interrupted by user]`.
+pub fn is_human_prompt(entry: &LogEntry) -> bool {
+    let text = match extract_user_prompt_text(entry) {
+        Some(t) => t,
+        None => return false,
+    };
+    !is_noise_text(&text)
+}
+
+/// Check if text content is system-generated noise rather than human input.
+fn is_noise_text(text: &str) -> bool {
+    let trimmed = text.trim();
+
+    // XML-tagged system messages
+    if trimmed.starts_with('<') {
+        let noise_tags = [
+            "<local-command-caveat>",
+            "<local-command-stdout>",
+            "<command-name>",
+            "<system-reminder>",
+        ];
+        if noise_tags.iter().any(|tag| trimmed.starts_with(tag)) {
+            return true;
+        }
+    }
+
+    // Interrupt markers
+    if trimmed == "[Request interrupted by user]" {
+        return true;
+    }
+
+    false
+}
+
 /// Extract visible user prompt text from a [`LogEntry`].
 ///
 /// Returns `None` if the entry is not a User message or has no visible text
@@ -378,5 +416,32 @@ mod tests {
         let summary = extract_tool_input_summary("CustomTool", &input);
         // Should grab first 2 string fields
         assert!(summary.len() <= 2);
+    }
+
+    #[test]
+    fn test_is_noise_text_local_command() {
+        assert!(is_noise_text("<local-command-caveat>Caveat: blah</local-command-caveat>"));
+        assert!(is_noise_text("<local-command-stdout>Reconnected to snatch.</local-command-stdout>"));
+        assert!(is_noise_text("<command-name>/compact</command-name>"));
+        assert!(is_noise_text("<system-reminder>Some reminder</system-reminder>"));
+    }
+
+    #[test]
+    fn test_is_noise_text_interrupt() {
+        assert!(is_noise_text("[Request interrupted by user]"));
+    }
+
+    #[test]
+    fn test_is_noise_text_real_prompt() {
+        assert!(!is_noise_text("Fix the bug in auth.rs"));
+        assert!(!is_noise_text("commit and push"));
+        assert!(!is_noise_text("What files handle routing?"));
+    }
+
+    #[test]
+    fn test_is_noise_text_edge_cases() {
+        assert!(!is_noise_text("")); // empty is not noise (it's nothing)
+        assert!(!is_noise_text("<p>HTML paragraph</p>")); // random XML is not noise
+        assert!(!is_noise_text("[some bracketed text]")); // only the exact interrupt marker
     }
 }

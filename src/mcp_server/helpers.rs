@@ -18,7 +18,7 @@ pub use crate::analysis::extraction::{
     extract_assistant_summary, extract_error_preview, extract_files_from_tools,
     extract_thinking_text, extract_tool_input_summary, extract_tool_names,
     extract_user_prompt_text, find_compaction_events, get_model, has_thinking, has_tool_errors,
-    truncate_text,
+    is_human_prompt, truncate_text,
 };
 pub use crate::analysis::filters::{parse_period, period_cutoff};
 
