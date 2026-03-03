@@ -53,6 +53,7 @@ fn is_noise_text(text: &str) -> bool {
         let noise_tags = [
             "<local-command-caveat>",
             "<local-command-stdout>",
+            "<local-command-stderr>",
             "<command-name>",
             "<system-reminder>",
         ];
@@ -62,7 +63,7 @@ fn is_noise_text(text: &str) -> bool {
     }
 
     // Interrupt markers
-    if trimmed == "[Request interrupted by user]" {
+    if trimmed.starts_with("[Request interrupted") {
         return true;
     }
 
@@ -422,6 +423,7 @@ mod tests {
     fn test_is_noise_text_local_command() {
         assert!(is_noise_text("<local-command-caveat>Caveat: blah</local-command-caveat>"));
         assert!(is_noise_text("<local-command-stdout>Reconnected to snatch.</local-command-stdout>"));
+        assert!(is_noise_text("<local-command-stderr>error output</local-command-stderr>"));
         assert!(is_noise_text("<command-name>/compact</command-name>"));
         assert!(is_noise_text("<system-reminder>Some reminder</system-reminder>"));
     }
@@ -429,6 +431,7 @@ mod tests {
     #[test]
     fn test_is_noise_text_interrupt() {
         assert!(is_noise_text("[Request interrupted by user]"));
+        assert!(is_noise_text("[Request interrupted by user for tool use]"));
     }
 
     #[test]
@@ -442,6 +445,6 @@ mod tests {
     fn test_is_noise_text_edge_cases() {
         assert!(!is_noise_text("")); // empty is not noise (it's nothing)
         assert!(!is_noise_text("<p>HTML paragraph</p>")); // random XML is not noise
-        assert!(!is_noise_text("[some bracketed text]")); // only the exact interrupt marker
+        assert!(!is_noise_text("[some bracketed text]")); // only interrupt markers
     }
 }

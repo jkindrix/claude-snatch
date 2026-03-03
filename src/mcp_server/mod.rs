@@ -638,14 +638,18 @@ impl SnatchServer {
             let main_entries = conversation.main_thread_entries();
             let main_refs: Vec<&LogEntry> = main_entries.iter().copied().collect();
 
-            // Extract user prompts
+            // Extract user prompts (excluding system noise)
             let mut prompts: Vec<String> = Vec::new();
             let mut prompt_count = 0usize;
             for entry in &main_refs {
-                if let Some(text) = extract_user_prompt_text(entry) {
+                if is_human_prompt(entry) {
                     prompt_count += 1;
-                    if include_summaries && prompts.len() < 3 && text.len() > 20 {
-                        prompts.push(truncate_text(&text, 150));
+                    if include_summaries && prompts.len() < 3 {
+                        if let Some(text) = extract_user_prompt_text(entry) {
+                            if text.len() > 20 {
+                                prompts.push(truncate_text(&text, 150));
+                            }
+                        }
                     }
                 }
             }
