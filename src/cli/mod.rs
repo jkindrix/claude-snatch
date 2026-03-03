@@ -235,6 +235,14 @@ pub enum Commands {
     #[command(alias = "msgs", display_order = 26)]
     Messages(MessagesArgs),
 
+    /// Manage persistent goals for a project.
+    #[command(display_order = 27)]
+    Goals(GoalsArgs),
+
+    /// Show a compact digest of a session's key topics.
+    #[command(display_order = 28)]
+    Digest(DigestArgs),
+
     // ═══════════════════════════════════════════════════════════════════════
     // EXPORT - Extract content in various formats
     // ═══════════════════════════════════════════════════════════════════════
@@ -1812,6 +1820,44 @@ pub struct LessonsArgs {
     pub limit: usize,
 }
 
+/// Arguments for the goals command.
+#[derive(Debug, Parser)]
+pub struct GoalsArgs {
+    /// Operation: list, add, update, remove (default: list).
+    pub operation: Option<String>,
+
+    /// Project path filter (substring match).
+    #[arg(short = 'p', long)]
+    pub project: Option<String>,
+
+    /// Goal text (required for add).
+    #[arg(short = 't', long)]
+    pub text: Option<String>,
+
+    /// Goal ID (required for update, remove).
+    #[arg(long)]
+    pub id: Option<u64>,
+
+    /// Goal status: open, in_progress, done, abandoned.
+    #[arg(short = 's', long)]
+    pub status: Option<String>,
+
+    /// Progress notes.
+    #[arg(long)]
+    pub progress: Option<String>,
+}
+
+/// Arguments for the digest command.
+#[derive(Debug, Parser)]
+pub struct DigestArgs {
+    /// Session ID (full UUID or short prefix).
+    pub session_id: String,
+
+    /// Maximum key prompts to include.
+    #[arg(short = 'n', long, default_value = "3")]
+    pub max_prompts: usize,
+}
+
 /// Arguments for the timeline command.
 #[derive(Debug, Parser)]
 pub struct TimelineArgs {
@@ -2186,6 +2232,8 @@ pub fn run() -> Result<()> {
         Some(Commands::Prompts(args)) => commands::prompts::run(&cli, args),
         Some(Commands::Standup(args)) => commands::standup::run(&cli, args),
         Some(Commands::Lessons(args)) => commands::lessons::run(&cli, args),
+        Some(Commands::Goals(args)) => commands::goals::run(&cli, args),
+        Some(Commands::Digest(args)) => commands::digest::run(&cli, args),
         Some(Commands::Timeline(args)) => commands::timeline::run(&cli, args),
         Some(Commands::Messages(args)) => commands::messages::run(&cli, args),
         Some(Commands::Pick(args)) => commands::pick::run(&cli, args),

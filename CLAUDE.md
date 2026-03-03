@@ -13,18 +13,20 @@ cargo test                     # run tests
 
 ## Session History Recall (snatch MCP)
 
-This project provides an MCP server (`snatch serve-mcp`) that exposes 9 tools for querying Claude Code session history. When you need to recall what happened in previous sessions or understand the narrative of past work, use these tools:
+This project provides an MCP server (`snatch serve-mcp`) that exposes 11 tools for querying Claude Code session history. When you need to recall what happened in previous sessions or understand the narrative of past work, use these tools:
 
 | Need | Tool | Example |
 |------|------|---------|
 | What have we been working on? | `get_project_history` | project="claude-snatch", period="7d" |
 | What happened in a session? | `get_session_timeline` | session_id="abc123" |
+| Quick session overview | `get_session_digest` | session_id="abc123" |
 | Read specific messages | `get_session_messages` | session_id="abc123", detail="standard" |
 | Recover decision rationale | `get_session_messages` | session_id="abc123", include_thinking=true |
 | Find where X was discussed | `search_sessions` | pattern="authentication", project="myproject" |
 | Search reasoning/decisions | `search_sessions` | pattern="decided|because", scope="thinking" |
 | What went wrong & how fixed? | `get_session_lessons` | session_id="abc123" |
 | What files were changed? | `get_tool_calls` | session_id="abc123", tool_filter="Write,Edit" |
+| Track long-term goals | `manage_goals` | operation="list", project="snatch" |
 | List all sessions | `list_sessions` | project="claude-snatch" |
 | Session metadata | `get_session_info` | session_id="abc123" |
 | Usage statistics | `get_stats` | project="claude-snatch" |
@@ -42,6 +44,30 @@ Compaction **always** drops thinking/reasoning blocks (100% loss rate). These co
 
 - `get_session_messages` with `include_thinking=true` — returns thinking text alongside messages
 - `search_sessions` with `scope="thinking"` — search through reasoning blocks
+
+### Goal Persistence
+
+Goals survive compaction and sessions. Use `manage_goals` to track long-term intentions:
+
+- `manage_goals(operation="add", project="snatch", text="Build digest tool")` — add a goal
+- `manage_goals(operation="update", project="snatch", id=1, status="done", progress="Shipped")` — update progress
+- `manage_goals(operation="list", project="snatch")` — see all goals
+- `manage_goals(operation="remove", project="snatch", id=1)` — remove a goal
+
+Active goals are auto-injected by the SessionStart hook on startup and compaction.
+Status values: `open`, `in_progress`, `done`, `abandoned`.
+Storage: `~/.claude/projects/<project>/memory/goals.json`
+
+### Session Digest
+
+`get_session_digest` provides a compact summary for quick orientation:
+- Key human prompts (first 3)
+- Files touched (basenames from Write/Edit/Read)
+- Top tools by frequency
+- Error count and compaction count
+- Decision keywords from thinking blocks
+
+The digest is auto-injected after compaction via the SessionStart hook.
 
 ### Usage Guidelines
 

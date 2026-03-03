@@ -65,6 +65,50 @@ pub fn get_claude_dir(server: &SnatchServer) -> Result<ClaudeDirectory, ToolOutp
     server.get_claude_dir().map_err(ToolOutput::error)
 }
 
+/// Resolved project directory for goal operations.
+pub struct ResolvedProject {
+    /// The decoded project path (e.g., "/home/user/myproject").
+    pub project_path: String,
+    /// The project directory under ~/.claude/projects/.
+    pub project_dir: std::path::PathBuf,
+}
+
+/// Resolve a project filter string to a project directory.
+///
+/// Uses substring match against decoded project paths. Returns error if
+/// no match or ambiguous (multiple matches).
+pub fn resolve_project(server: &SnatchServer, project_filter: &str) -> Result<ResolvedProject, ToolOutput> {
+    let claude_dir = server.get_claude_dir().map_err(ToolOutput::error)?;
+    let projects = claude_dir
+        .projects()
+        .map_err(|e| ToolOutput::error(format!("Failed to list projects: {e}")))?;
+
+    let matches: Vec<_> = projects
+        .into_iter()
+        .filter(|p| {
+            p.decoded_path().contains(project_filter)
+                || p.encoded_name().contains(project_filter)
+        })
+        .collect();
+
+    match matches.len() {
+        0 => Err(ToolOutput::error(format!(
+            "No project matching '{project_filter}'"
+        ))),
+        1 => Ok(ResolvedProject {
+            project_path: matches[0].decoded_path().to_string(),
+            project_dir: matches[0].path().to_path_buf(),
+        }),
+        n => {
+            let names: Vec<_> = matches.iter().map(|p| p.decoded_path()).collect();
+            Err(ToolOutput::error(format!(
+                "Ambiguous project filter '{project_filter}' matches {n} projects: {}",
+                names.join(", ")
+            )))
+        }
+    }
+}
+
 /// Search a single entry for a regex pattern match.
 /// Returns the matched text and surrounding context if found.
 pub fn search_entry_text(

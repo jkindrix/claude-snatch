@@ -458,3 +458,85 @@ pub struct LessonsSummary {
     pub total_corrections: usize,
     pub most_error_prone_tools: Vec<(String, usize)>,
 }
+
+// ============================================================================
+// New Tool Types: manage_goals
+// ============================================================================
+
+/// Request for goal management operations.
+#[derive(Debug, Deserialize, ToolInput)]
+pub struct ManageGoalsRequest {
+    /// Operation: "list", "add", "update", "remove".
+    pub operation: String,
+
+    /// Project path filter (substring match). Required.
+    pub project: String,
+
+    /// Goal text (required for "add").
+    pub text: Option<String>,
+
+    /// Goal ID (required for "update" and "remove").
+    pub id: Option<u64>,
+
+    /// New status for "update": "open", "in_progress", "done", "abandoned".
+    pub status: Option<String>,
+
+    /// Progress notes for "add" or "update".
+    pub progress: Option<String>,
+}
+
+/// A goal entry in responses.
+#[derive(Debug, Serialize)]
+pub struct GoalEntry {
+    pub id: u64,
+    pub text: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<String>,
+}
+
+/// Response for manage_goals.
+#[derive(Debug, Serialize)]
+pub struct ManageGoalsResponse {
+    pub operation: String,
+    pub project_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goals: Option<Vec<GoalEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal: Option<GoalEntry>,
+}
+
+// ============================================================================
+// New Tool Types: get_session_digest
+// ============================================================================
+
+/// Request for session digest.
+#[derive(Debug, Deserialize, ToolInput)]
+pub struct GetSessionDigestRequest {
+    /// Session ID (full or prefix).
+    pub session_id: String,
+
+    /// Maximum key prompts to include. Default: 3.
+    pub max_prompts: Option<usize>,
+
+    /// Maximum files to include. Default: 10.
+    pub max_files: Option<usize>,
+}
+
+/// Response for get_session_digest.
+#[derive(Debug, Serialize)]
+pub struct SessionDigestResponse {
+    pub session_id: String,
+    pub project_path: String,
+    pub key_prompts: Vec<String>,
+    pub files_touched: Vec<String>,
+    pub top_tools: Vec<(String, usize)>,
+    pub error_count: usize,
+    pub compaction_count: usize,
+    pub thinking_keywords: Vec<String>,
+    pub formatted: String,
+}

@@ -12,6 +12,7 @@
 //! - [`search`]: Multi-scope regex search across conversation entries
 //! - [`timeline`]: Turn-by-turn narrative building with tool-only collapse
 
+pub mod digest;
 pub mod extraction;
 pub mod filters;
 pub mod lessons;

@@ -13,6 +13,8 @@
 //! - `search_sessions` - Regex search across sessions (supports thinking blocks)
 //! - `get_tool_calls` - Extract tool invocations with summaries
 //! - `get_session_lessons` - Extract error→fix pairs and user corrections
+//! - `manage_goals` - Persistent goal tracking across sessions and compactions
+//! - `get_session_digest` - Compact session summary for orientation after compaction
 
 #![cfg(feature = "mcp")]
 
@@ -1028,6 +1030,218 @@ impl SnatchServer {
                 total_corrections: result.summary.total_corrections,
                 most_error_prone_tools: result.summary.most_error_prone_tools,
             },
+        };
+
+        match ToolOutput::json(&response) {
+            Ok(output) => output,
+            Err(e) => ToolOutput::error(format!("JSON serialization error: {e}")),
+        }
+    }
+
+    // ========================================================================
+    // Goal Management
+    // ========================================================================
+
+    /// Manage persistent goals for a project. Goals survive compaction and sessions.
+    #[tool(description = "Manage persistent goals for a project. Operations: list, add, update, remove. Goals survive compaction and sessions.")]
+    async fn manage_goals(&self, request: ManageGoalsRequest) -> ToolOutput {
+        use crate::goals::{load_goals, save_goals, GoalStatus};
+
+        let resolved = match resolve_project(self, &request.project) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+
+        let mut store = match load_goals(&resolved.project_dir) {
+            Ok(s) => s,
+            Err(e) => return ToolOutput::error(format!("Failed to load goals: {e}")),
+        };
+
+        match request.operation.as_str() {
+            "list" => {
+                let goals: Vec<GoalEntry> = store
+                    .goals
+                    .iter()
+                    .map(|g| GoalEntry {
+                        id: g.id,
+                        text: g.text.clone(),
+                        status: g.status.to_string(),
+                        created_at: g.created_at.to_rfc3339(),
+                        updated_at: g.updated_at.to_rfc3339(),
+                        progress: g.progress.clone(),
+                    })
+                    .collect();
+
+                let response = ManageGoalsResponse {
+                    operation: "list".into(),
+                    project_path: resolved.project_path,
+                    message: Some(format!("{} goal(s)", goals.len())),
+                    goals: Some(goals),
+                    goal: None,
+                };
+
+                match ToolOutput::json(&response) {
+                    Ok(output) => output,
+                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+                }
+            }
+
+            "add" => {
+                let text = match request.text {
+                    Some(t) if !t.trim().is_empty() => t,
+                    _ => return ToolOutput::error("'text' is required for add operation"),
+                };
+
+                let id = store.add_goal(text.clone(), request.progress);
+
+                if let Err(e) = save_goals(&resolved.project_dir, &store) {
+                    return ToolOutput::error(format!("Failed to save goals: {e}"));
+                }
+
+                let goal = &store.goals.iter().find(|g| g.id == id).unwrap();
+                let response = ManageGoalsResponse {
+                    operation: "add".into(),
+                    project_path: resolved.project_path,
+                    message: Some(format!("Added goal #{id}")),
+                    goals: None,
+                    goal: Some(GoalEntry {
+                        id: goal.id,
+                        text: goal.text.clone(),
+                        status: goal.status.to_string(),
+                        created_at: goal.created_at.to_rfc3339(),
+                        updated_at: goal.updated_at.to_rfc3339(),
+                        progress: goal.progress.clone(),
+                    }),
+                };
+
+                match ToolOutput::json(&response) {
+                    Ok(output) => output,
+                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+                }
+            }
+
+            "update" => {
+                let id = match request.id {
+                    Some(id) => id,
+                    None => return ToolOutput::error("'id' is required for update operation"),
+                };
+
+                let status = match request.status.as_deref() {
+                    Some(s) => match GoalStatus::parse(s) {
+                        Some(status) => Some(status),
+                        None => return ToolOutput::error(format!(
+                            "Invalid status '{s}'. Use: open, in_progress, done, abandoned"
+                        )),
+                    },
+                    None => None,
+                };
+
+                if status.is_none() && request.progress.is_none() {
+                    return ToolOutput::error(
+                        "At least one of 'status' or 'progress' is required for update",
+                    );
+                }
+
+                if !store.update_goal(id, status, request.progress) {
+                    return ToolOutput::error(format!("Goal #{id} not found"));
+                }
+
+                if let Err(e) = save_goals(&resolved.project_dir, &store) {
+                    return ToolOutput::error(format!("Failed to save goals: {e}"));
+                }
+
+                let goal = store.goals.iter().find(|g| g.id == id).unwrap();
+                let response = ManageGoalsResponse {
+                    operation: "update".into(),
+                    project_path: resolved.project_path,
+                    message: Some(format!("Updated goal #{id}")),
+                    goals: None,
+                    goal: Some(GoalEntry {
+                        id: goal.id,
+                        text: goal.text.clone(),
+                        status: goal.status.to_string(),
+                        created_at: goal.created_at.to_rfc3339(),
+                        updated_at: goal.updated_at.to_rfc3339(),
+                        progress: goal.progress.clone(),
+                    }),
+                };
+
+                match ToolOutput::json(&response) {
+                    Ok(output) => output,
+                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+                }
+            }
+
+            "remove" => {
+                let id = match request.id {
+                    Some(id) => id,
+                    None => return ToolOutput::error("'id' is required for remove operation"),
+                };
+
+                if !store.remove_goal(id) {
+                    return ToolOutput::error(format!("Goal #{id} not found"));
+                }
+
+                if let Err(e) = save_goals(&resolved.project_dir, &store) {
+                    return ToolOutput::error(format!("Failed to save goals: {e}"));
+                }
+
+                let response = ManageGoalsResponse {
+                    operation: "remove".into(),
+                    project_path: resolved.project_path,
+                    message: Some(format!("Removed goal #{id}")),
+                    goals: None,
+                    goal: None,
+                };
+
+                match ToolOutput::json(&response) {
+                    Ok(output) => output,
+                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+                }
+            }
+
+            other => ToolOutput::error(format!(
+                "Unknown operation '{other}'. Use: list, add, update, remove"
+            )),
+        }
+    }
+
+    // ========================================================================
+    // Session Digest
+    // ========================================================================
+
+    /// Get a compact summary of a session's key topics, files, tools, and decisions.
+    #[tool(description = "Get a compact digest of a session: key prompts, files touched, top tools, errors, compaction events, and decision keywords from thinking blocks.")]
+    async fn get_session_digest(&self, request: GetSessionDigestRequest) -> ToolOutput {
+        use crate::analysis::digest::{build_digest, format_digest, DigestOptions};
+
+        let resolved = match resolve_session(self, &request.session_id) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+
+        let all_entries = resolved.conversation.chronological_entries();
+        let entry_refs: Vec<&LogEntry> = all_entries.iter().map(|e| *e).collect();
+
+        let opts = DigestOptions {
+            max_prompts: request.max_prompts.unwrap_or(3),
+            max_files: request.max_files.unwrap_or(10),
+            ..DigestOptions::default()
+        };
+
+        let digest = build_digest(&entry_refs, &opts);
+        let formatted = format_digest(&digest, opts.max_chars);
+
+        let response = SessionDigestResponse {
+            session_id: resolved.session_id,
+            project_path: resolved.project_path,
+            key_prompts: digest.key_prompts,
+            files_touched: digest.files_touched,
+            top_tools: digest.top_tools,
+            error_count: digest.error_count,
+            compaction_count: digest.compaction_count,
+            thinking_keywords: digest.thinking_keywords,
+            formatted,
         };
 
         match ToolOutput::json(&response) {
