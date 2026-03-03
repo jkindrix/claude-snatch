@@ -1,6 +1,6 @@
 //! Shared helper functions for MCP server tools.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use chrono::{Duration, Utc};
 use mcpkit::prelude::ToolOutput;
@@ -154,26 +154,7 @@ pub fn has_thinking(entry: &LogEntry) -> bool {
 
 /// Extract combined thinking text from an Assistant message.
 pub fn extract_thinking_text(entry: &LogEntry, max_len: usize) -> Option<String> {
-    match entry {
-        LogEntry::Assistant(assistant) => {
-            let blocks = assistant.message.thinking_blocks();
-            if blocks.is_empty() {
-                return None;
-            }
-            let combined: String = blocks
-                .iter()
-                .map(|b| b.thinking.as_str())
-                .collect::<Vec<_>>()
-                .join("\n---\n");
-            let trimmed = combined.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(truncate_text(trimmed, max_len))
-            }
-        }
-        _ => None,
-    }
+    crate::analysis::extraction::extract_thinking_text(entry, max_len)
 }
 
 /// Get the model from an Assistant message.
@@ -258,65 +239,18 @@ pub fn extract_tool_input_summary(tool_name: &str, input: &serde_json::Value) ->
 }
 
 /// Extract unique file paths from tool inputs across entries.
-/// Looks at Write and Edit tool calls for file_path fields.
 pub fn extract_files_from_tools(entries: &[&LogEntry]) -> Vec<String> {
-    let mut files = HashSet::new();
-
-    for entry in entries {
-        if let LogEntry::Assistant(assistant) = entry {
-            for tool_use in assistant.message.tool_uses() {
-                match tool_use.name.as_str() {
-                    "Write" | "Edit" | "Read" => {
-                        if let Some(fp) = tool_use
-                            .input
-                            .get("file_path")
-                            .and_then(|v| v.as_str())
-                        {
-                            // Use basename for brevity
-                            let basename = std::path::Path::new(fp)
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or(fp);
-                            files.insert(basename.to_string());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    let mut sorted: Vec<String> = files.into_iter().collect();
-    sorted.sort();
-    sorted
+    crate::analysis::extraction::extract_files_from_tools(entries)
 }
 
 /// Check if any tool results in a set of entries had errors.
 pub fn has_tool_errors(entries: &[&LogEntry]) -> bool {
-    for entry in entries {
-        if let LogEntry::User(user) = entry {
-            for result in user.message.tool_results() {
-                if result.is_error == Some(true) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+    crate::analysis::extraction::has_tool_errors(entries)
 }
 
 /// Extract the error preview text from a tool result.
 pub fn extract_error_preview(result: &crate::model::content::ToolResult, max_len: usize) -> Option<String> {
-    if result.is_error != Some(true) {
-        return None;
-    }
-    match &result.content {
-        Some(content) => {
-            let text = format!("{content:?}");
-            Some(truncate_text(&text, max_len))
-        }
-        None => Some("(error with no content)".into()),
-    }
+    crate::analysis::extraction::extract_error_preview(result, max_len)
 }
 
 /// Parse a period string like "24h", "7d", "30d" into a chrono::Duration.

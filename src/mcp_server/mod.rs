@@ -578,117 +578,27 @@ impl SnatchServer {
             .iter()
             .find_map(|e| e.git_branch().map(String::from));
 
-        // Build raw timeline turns
-        let raw_turns: Vec<TimelineTurn> = turns
-            .iter()
-            .enumerate()
-            .map(|(i, turn)| {
-                let user_prompt = turn.user_message.and_then(|e| {
-                    extract_user_prompt_text(e).map(|t| truncate_text(&t, 200))
-                });
+        // Build timeline using shared analysis module
+        let timeline_opts = crate::analysis::timeline::TimelineOptions {
+            limit,
+            prompt_max_len: 200,
+            summary_max_len: 200,
+        };
+        let analysis_timeline = crate::analysis::timeline::build_timeline(&turns, &timeline_opts);
 
-                let assistant_summary = turn
-                    .assistant_message
-                    .and_then(|e| extract_assistant_summary(e, 200));
-
-                let mut tools_used: Vec<String> = turn
-                    .tool_uses
-                    .iter()
-                    .map(|t| t.name.clone())
-                    .collect();
-                // Deduplicate tool names while preserving order
-                let mut seen = HashSet::new();
-                tools_used.retain(|t| seen.insert(t.clone()));
-
-                // Extract files from the assistant message's tool calls
-                let files_touched = if let Some(entry) = turn.assistant_message {
-                    let refs = vec![entry];
-                    extract_files_from_tools(&refs)
-                } else {
-                    vec![]
-                };
-
-                // Check for errors in the following user message's tool results
-                let had_errors = turn.tool_results.iter().any(|r| r.is_error == Some(true));
-
-                let timestamp = turn
-                    .user_message
-                    .or(turn.assistant_message)
-                    .and_then(|e| e.timestamp().map(|t| t.to_rfc3339()));
-
-                TimelineTurn {
-                    index: i,
-                    timestamp,
-                    user_prompt,
-                    assistant_summary,
-                    tools_used,
-                    files_touched,
-                    had_errors,
-                }
+        // Map analysis types to MCP response types
+        let timeline: Vec<TimelineTurn> = analysis_timeline
+            .into_iter()
+            .map(|t| TimelineTurn {
+                index: t.index,
+                timestamp: t.timestamp,
+                user_prompt: t.user_prompt,
+                assistant_summary: t.assistant_summary,
+                tools_used: t.tools_used,
+                files_touched: t.files_touched,
+                had_errors: t.had_errors,
             })
             .collect();
-
-        // Collapse consecutive tool-only turns (no user_prompt AND no assistant_summary)
-        // into single grouped entries to reduce noise
-        let mut timeline: Vec<TimelineTurn> = Vec::new();
-        let mut i = 0;
-        while i < raw_turns.len() {
-            let turn = &raw_turns[i];
-            let is_tool_only =
-                turn.user_prompt.is_none() && turn.assistant_summary.is_none();
-
-            if is_tool_only {
-                // Collect consecutive tool-only turns
-                let start = i;
-                let mut all_tools = Vec::new();
-                let mut all_files = Vec::new();
-                let mut any_errors = false;
-                let first_timestamp = turn.timestamp.clone();
-
-                while i < raw_turns.len() {
-                    let t = &raw_turns[i];
-                    if t.user_prompt.is_some() || t.assistant_summary.is_some() {
-                        break;
-                    }
-                    all_tools.extend(t.tools_used.iter().cloned());
-                    all_files.extend(t.files_touched.iter().cloned());
-                    any_errors = any_errors || t.had_errors;
-                    i += 1;
-                }
-
-                let count = i - start;
-                // Deduplicate tools and files
-                let mut seen = HashSet::new();
-                all_tools.retain(|t| seen.insert(t.clone()));
-                let mut seen = HashSet::new();
-                all_files.retain(|f| seen.insert(f.clone()));
-
-                if count > 1 {
-                    // Collapse into single entry
-                    timeline.push(TimelineTurn {
-                        index: start,
-                        timestamp: first_timestamp,
-                        user_prompt: None,
-                        assistant_summary: Some(format!(
-                            "[{} tool-only turns collapsed]",
-                            count
-                        )),
-                        tools_used: all_tools,
-                        files_touched: all_files,
-                        had_errors: any_errors,
-                    });
-                } else {
-                    // Single tool-only turn, keep as-is
-                    timeline.push(raw_turns[start].clone());
-                }
-            } else {
-                timeline.push(raw_turns[i].clone());
-                i += 1;
-            }
-        }
-
-        // Apply limit after collapsing
-        timeline.truncate(limit);
 
         let response = SessionTimelineResponse {
             session_id: resolved.session_id,
@@ -1122,6 +1032,8 @@ impl SnatchServer {
     /// Targets the most expensive compaction failure mode (negative result amnesia).
     #[tool(description = "Extract lessons from a session: error->fix pairs (what failed and how it was resolved) and user corrections (where the user corrected agent behavior). Use after compaction to recover operational gotchas and avoid retrying failed approaches.")]
     async fn get_session_lessons(&self, request: GetSessionLessonsRequest) -> ToolOutput {
+        use crate::analysis::lessons::{extract_lessons, LessonCategory, LessonOptions};
+
         let resolved = match resolve_session(self, &request.session_id) {
             Ok(r) => r,
             Err(e) => return e,
@@ -1133,191 +1045,50 @@ impl SnatchServer {
         // Use all entries (not just main thread) so lessons on branches
         // and across compaction boundaries are visible.
         let all_entries = resolved.conversation.chronological_entries();
+        let entry_refs: Vec<&LogEntry> = all_entries.iter().map(|e| *e).collect();
 
-        let mut error_fix_pairs: Vec<ErrorFixLesson> = Vec::new();
-        let mut user_corrections: Vec<UserCorrection> = Vec::new();
+        let opts = LessonOptions {
+            category: LessonCategory::from_str_loose(category),
+            limit,
+            ..LessonOptions::default()
+        };
 
-        // Soft error pattern: detect errors in tool result content even when
-        // is_error is not true (e.g., SIGSEGV, panics, assertion failures)
-        let soft_error_re = regex::RegexBuilder::new(
-            r"(?:Segmentation fault|SIGSEGV|SIGABRT|panic|stack overflow|assertion failed|fatal error|thread .* panicked|Exit code (?:[1-9]\d*|1\d\d)|error\[E\d+\]|cannot find|unresolved|undefined reference)"
-        )
-        .case_insensitive(true)
-        .build()
-        .ok();
+        let result = extract_lessons(&entry_refs, &opts);
 
-        if category == "errors" || category == "all" {
-            // Find error→fix pairs from both hard errors (is_error=true) and
-            // soft errors (tool results containing error signals in content).
-
-            // Build map: tool_use_id → (tool_name, input, timestamp)
-            let mut tool_use_map: HashMap<String, (String, serde_json::Value, Option<String>)> =
-                HashMap::new();
-            for entry in &all_entries {
-                if let LogEntry::Assistant(a) = entry {
-                    let ts = entry.timestamp().map(|t| t.to_rfc3339());
-                    for tool in a.message.tool_uses() {
-                        tool_use_map.insert(
-                            tool.id.clone(),
-                            (tool.name.clone(), tool.input.clone(), ts.clone()),
-                        );
-                    }
-                }
-            }
-
-            // Walk entries looking for error results, then capture next assistant response
-            let mut i = 0;
-            while i < all_entries.len() && error_fix_pairs.len() < limit {
-                if let LogEntry::User(user) = all_entries[i] {
-                    for result in user.message.tool_results() {
-                        if error_fix_pairs.len() >= limit {
-                            break;
-                        }
-
-                        // Check for hard error (is_error=true) or soft error
-                        // (error patterns in content)
-                        let is_hard_error = result.is_error == Some(true);
-                        let content_text = result
-                            .content
-                            .as_ref()
-                            .map(|c| format!("{c:?}"));
-                        let is_soft_error = if !is_hard_error {
-                            if let (Some(ref re), Some(ref text)) = (&soft_error_re, &content_text) {
-                                re.is_match(text)
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        };
-
-                        if !is_hard_error && !is_soft_error {
-                            continue;
-                        }
-
-                        let error_preview = content_text
-                            .as_deref()
-                            .map(|t| truncate_text(t, 300))
-                            .unwrap_or_else(|| "(error with no content)".into());
-
-                        let (tool_name, input, timestamp) = tool_use_map
-                            .get(&result.tool_use_id)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                ("unknown".into(), serde_json::Value::Null, None)
-                            });
-
-                        let input_summary = extract_tool_input_summary(&tool_name, &input);
-
-                        // Look ahead for the next assistant message as resolution
-                        let mut resolution_summary = None;
-                        let mut resolution_tools = Vec::new();
-                        for j in (i + 1)..all_entries.len() {
-                            if let LogEntry::Assistant(a) = all_entries[j] {
-                                resolution_summary = {
-                                    let text = a.message.combined_text();
-                                    let trimmed = text.trim();
-                                    if trimmed.is_empty() {
-                                        None
-                                    } else {
-                                        Some(truncate_text(trimmed, 200))
-                                    }
-                                };
-                                resolution_tools = a
-                                    .message
-                                    .tool_uses()
-                                    .iter()
-                                    .map(|t| t.name.clone())
-                                    .collect();
-                                break;
-                            }
-                        }
-
-                        error_fix_pairs.push(ErrorFixLesson {
-                            timestamp,
-                            tool_name,
-                            input_summary,
-                            error_preview,
-                            resolution_summary,
-                            resolution_tools,
-                        });
-                    }
-                }
-                i += 1;
-            }
-        }
-
-        if category == "corrections" || category == "all" {
-            // Detect user corrections: user messages containing frustration,
-            // behavioral correction, or explicit instructions to change approach.
-            // Broad pattern covering direct corrections, frustration signals,
-            // and demands to stop/change behavior.
-            let correction_pattern = regex::RegexBuilder::new(
-                r"(?:don'?t|(?:^|\W)stop\b|wrong|no[,.\!]|incorrect|that'?s not|instead|should have|why did you|why are you|already|again|what the (?:hell|fuck)|are you ever|sick of|wasting time|same (?:thing|fucking)|over and over|keep (?:doing|searching|looking|trying)|you can'?t|how many times)"
-            )
-            .case_insensitive(true)
-            .build();
-
-            if let Ok(re) = correction_pattern {
-                let mut prev_assistant_summary: Option<String> = None;
-
-                for entry in &all_entries {
-                    if user_corrections.len() >= limit {
-                        break;
-                    }
-
-                    match entry {
-                        LogEntry::Assistant(a) => {
-                            let text = a.message.combined_text();
-                            let trimmed = text.trim();
-                            prev_assistant_summary = if trimmed.is_empty() {
-                                None
-                            } else {
-                                Some(truncate_text(trimmed, 200))
-                            };
-                        }
-                        LogEntry::User(_) => {
-                            if let Some(text) = extract_user_prompt_text(entry) {
-                                // Match on correction pattern, require minimum length,
-                                // skip compaction summaries (long entries that quote
-                                // user text and would cause false positives), and skip
-                                // session continuation summaries
-                                let is_summary = text.len() > 3000
-                                    || text.contains("All User Messages:")
-                                    || text.contains("conversation that ran out of context")
-                                    || text.contains("Key Technical Concepts:");
-                                if re.is_match(&text) && text.len() > 10 && !is_summary {
-                                    user_corrections.push(UserCorrection {
-                                        timestamp: entry.timestamp().map(|t| t.to_rfc3339()),
-                                        user_text: truncate_text(&text, 300),
-                                        prior_assistant_summary: prev_assistant_summary.clone(),
-                                    });
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        // Build summary
-        let mut tool_error_counts: HashMap<String, usize> = HashMap::new();
-        for pair in &error_fix_pairs {
-            *tool_error_counts.entry(pair.tool_name.clone()).or_default() += 1;
-        }
-        let mut most_error_prone: Vec<(String, usize)> = tool_error_counts.into_iter().collect();
-        most_error_prone.sort_by(|a, b| b.1.cmp(&a.1));
-
+        // Convert from analysis types to MCP wire types
         let response = SessionLessonsResponse {
             session_id: resolved.session_id,
             project_path: resolved.project_path,
-            error_fix_pairs: error_fix_pairs.iter().take(limit).cloned().collect(),
-            user_corrections: user_corrections.iter().take(limit).cloned().collect(),
+            error_fix_pairs: result
+                .error_fix_pairs
+                .into_iter()
+                .map(|p| ErrorFixLesson {
+                    timestamp: p.timestamp,
+                    tool_name: p.tool_name,
+                    input_summary: p.input_summary,
+                    error_preview: p.error_preview,
+                    resolution_summary: p.resolution_summary,
+                    resolution_tools: p.resolution_tools,
+                })
+                .collect(),
+            user_corrections: result
+                .user_corrections
+                .into_iter()
+                .map(|c| UserCorrection {
+                    timestamp: c.timestamp,
+                    user_text: c.user_text,
+                    prior_assistant_summary: c.prior_assistant_summary,
+                })
+                .collect(),
             summary: LessonsSummary {
-                total_errors: error_fix_pairs.len(),
-                total_corrections: user_corrections.len(),
-                most_error_prone_tools: most_error_prone.into_iter().map(|(name, _)| name).collect(),
+                total_errors: result.summary.total_errors,
+                total_corrections: result.summary.total_corrections,
+                most_error_prone_tools: result
+                    .summary
+                    .most_error_prone_tools
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect(),
             },
         };
 
