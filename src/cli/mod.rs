@@ -1823,19 +1823,73 @@ pub struct TimelineArgs {
     pub limit: usize,
 }
 
+/// Detail level for messages output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum MessageDetail {
+    /// User prompts only, truncated.
+    Overview,
+    /// User prompts + assistant text, skipping tool-only turns.
+    Conversation,
+    /// User + assistant text with tool names listed.
+    #[default]
+    Standard,
+    /// Includes tool call details (file paths, commands).
+    Full,
+}
+
+impl MessageDetail {
+    /// Convert to the string key used by analysis functions.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Overview => "overview",
+            Self::Conversation => "conversation",
+            Self::Standard => "standard",
+            Self::Full => "full",
+        }
+    }
+}
+
+/// Message type filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum MessageTypeFilter {
+    /// Show all message types.
+    #[default]
+    All,
+    /// Show only user messages.
+    User,
+    /// Show only assistant messages.
+    Assistant,
+    /// Show only system messages.
+    System,
+}
+
+impl MessageTypeFilter {
+    /// Convert to the string key used by filtering logic.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::System => "system",
+        }
+    }
+}
+
 /// Arguments for the messages command.
 #[derive(Debug, Parser)]
 pub struct MessagesArgs {
     /// Session ID (full UUID or short prefix).
     pub session_id: String,
 
-    /// Detail level: overview, conversation, standard, or full.
-    #[arg(long, default_value = "standard")]
-    pub detail: Option<String>,
+    /// Detail level for message output.
+    #[arg(short = 'D', long, default_value = "standard")]
+    pub detail: MessageDetail,
 
-    /// Message type filter: user, assistant, system, or all.
-    #[arg(long, default_value = "all")]
-    pub message_type: Option<String>,
+    /// Message type filter.
+    #[arg(short = 't', long, default_value = "all")]
+    pub message_type: MessageTypeFilter,
 
     /// Maximum messages to return.
     #[arg(short = 'l', long, default_value = "50")]

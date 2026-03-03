@@ -5,7 +5,8 @@
 
 use crate::analysis::extraction::{
     extract_assistant_summary, extract_thinking_text, extract_tool_input_summary,
-    extract_tool_names, extract_user_prompt_text, get_model, has_thinking, truncate_text,
+    extract_tool_names, extract_user_prompt_text, get_model, has_thinking, is_human_prompt,
+    truncate_text,
 };
 use crate::cli::{Cli, MessagesArgs, OutputFormat};
 use crate::error::{Result, SnatchError};
@@ -33,6 +34,8 @@ struct MessageOutput {
     timestamp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -70,8 +73,8 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
     let entries = session.parse_with_options(cli.max_file_size)?;
     let conversation = Conversation::from_entries(entries)?;
 
-    let detail = args.detail.as_deref().unwrap_or("standard");
-    let msg_type_filter = args.message_type.as_deref().unwrap_or("all");
+    let detail = args.detail.as_str();
+    let msg_type_filter = args.message_type.as_str();
     let limit = args.limit;
     let offset = args.offset;
     let include_thinking = args.include_thinking;
@@ -92,9 +95,7 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
 
     // Filter by message type
     match msg_type_filter {
-        "user" => main_entries.retain(|e| {
-            matches!(e, LogEntry::User(u) if u.message.has_visible_text())
-        }),
+        "user" => main_entries.retain(|e| is_human_prompt(e)),
         "assistant" => main_entries.retain(|e| matches!(e, LogEntry::Assistant(_))),
         "system" => main_entries.retain(|e| matches!(e, LogEntry::System(_))),
         _ => {}
@@ -103,17 +104,11 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
     // Pre-filter by detail level
     match detail {
         "overview" => {
-            main_entries.retain(|e| {
-                if let LogEntry::User(u) = e {
-                    u.message.has_visible_text()
-                } else {
-                    false
-                }
-            });
+            main_entries.retain(|e| is_human_prompt(e));
         }
         "conversation" => {
             main_entries.retain(|e| match e {
-                LogEntry::User(u) => u.message.has_visible_text(),
+                LogEntry::User(_) => is_human_prompt(e),
                 LogEntry::Assistant(_) => extract_assistant_summary(e, 1).is_some(),
                 _ => false,
             });
@@ -204,6 +199,18 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                             LogEntry::System(sys) => sys.content.clone(),
                             _ => None,
                         };
+                        let tools = extract_tool_names(entry);
+                        let thinking = if include_thinking {
+                            extract_thinking_text(entry, thinking_max_len)
+                        } else {
+                            None
+                        };
+
+                        // Skip entries with nothing to show in text mode
+                        if content.is_none() && tools.is_empty() && thinking.is_none() {
+                            continue;
+                        }
+
                         let model_str = get_model(entry)
                             .map(|m| format!(" ({m})"))
                             .unwrap_or_default();
@@ -211,14 +218,11 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                         if let Some(text) = content {
                             println!("    {text}");
                         }
-                        let tools = extract_tool_names(entry);
                         if !tools.is_empty() {
                             println!("    tools: {}", tools.join(", "));
                         }
-                        if include_thinking {
-                            if let Some(thinking) = extract_thinking_text(entry, thinking_max_len) {
-                                println!("    thinking: {}", truncate_text(&thinking, 200));
-                            }
+                        if let Some(thinking) = thinking {
+                            println!("    thinking: {}", truncate_text(&thinking, 200));
                         }
                         println!();
                     }
@@ -231,6 +235,22 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                             LogEntry::System(sys) => sys.content.clone(),
                             _ => None,
                         };
+                        let tool_uses: Vec<_> = if let LogEntry::Assistant(a) = entry {
+                            a.message.tool_uses()
+                        } else {
+                            vec![]
+                        };
+                        let thinking = if include_thinking {
+                            extract_thinking_text(entry, thinking_max_len)
+                        } else {
+                            None
+                        };
+
+                        // Skip entries with nothing to show in text mode
+                        if content.is_none() && tool_uses.is_empty() && thinking.is_none() {
+                            continue;
+                        }
+
                         let model_str = get_model(entry)
                             .map(|m| format!(" ({m})"))
                             .unwrap_or_default();
@@ -238,21 +258,16 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                         if let Some(text) = content {
                             println!("    {text}");
                         }
-                        // Show tool details
-                        if let LogEntry::Assistant(a) = entry {
-                            for t in a.message.tool_uses() {
-                                let summary = extract_tool_input_summary(&t.name, &t.input);
-                                let detail_str: Vec<String> = summary
-                                    .iter()
-                                    .map(|(k, v)| format!("{k}={v}"))
-                                    .collect();
-                                println!("    > {} {}", t.name, detail_str.join(" "));
-                            }
+                        for t in &tool_uses {
+                            let summary = extract_tool_input_summary(&t.name, &t.input);
+                            let detail_str: Vec<String> = summary
+                                .iter()
+                                .map(|(k, v)| format!("{k}={v}"))
+                                .collect();
+                            println!("    > {} {}", t.name, detail_str.join(" "));
                         }
-                        if include_thinking {
-                            if let Some(thinking) = extract_thinking_text(entry, thinking_max_len) {
-                                println!("    thinking: {}", truncate_text(&thinking, 300));
-                            }
+                        if let Some(thinking) = thinking {
+                            println!("    thinking: {}", truncate_text(&thinking, 300));
                         }
                         println!();
                     }
@@ -275,6 +290,7 @@ fn build_message_output(
 ) -> Option<MessageOutput> {
     let msg_type = entry.message_type().to_string();
     let timestamp = entry.timestamp().map(|t| t.to_rfc3339());
+    let git_branch = entry.git_branch().map(|s| s.to_string());
 
     match detail {
         "overview" => {
@@ -285,6 +301,7 @@ fn build_message_output(
                 msg_type,
                 timestamp,
                 content,
+                git_branch,
                 model: None,
                 tool_calls: None,
                 tool_details: None,
@@ -309,6 +326,7 @@ fn build_message_output(
                 msg_type,
                 timestamp,
                 content,
+                git_branch,
                 model: get_model(entry),
                 tool_calls: None,
                 tool_details: None,
@@ -335,6 +353,7 @@ fn build_message_output(
                 msg_type,
                 timestamp,
                 content,
+                git_branch,
                 model: get_model(entry),
                 tool_calls: if tool_names.is_empty() { None } else { Some(tool_names) },
                 tool_details: None,
@@ -379,6 +398,7 @@ fn build_message_output(
                 msg_type,
                 timestamp,
                 content,
+                git_branch,
                 model: get_model(entry),
                 tool_calls: if tool_names.is_empty() { None } else { Some(tool_names) },
                 tool_details: if tool_details.is_empty() { None } else { Some(tool_details) },
