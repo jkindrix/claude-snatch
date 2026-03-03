@@ -250,13 +250,9 @@ pub fn extract_error_fix_pairs(
     let mut pairs = Vec::new();
     let mut i = 0;
 
-    while i < entries.len() && pairs.len() < opts.limit {
+    while i < entries.len() {
         if let LogEntry::User(user) = entries[i] {
             for result in user.message.tool_results() {
-                if pairs.len() >= opts.limit {
-                    break;
-                }
-
                 // Check for hard error (is_error=true)
                 let is_hard_error = result.is_error == Some(true);
 
@@ -353,10 +349,6 @@ pub fn extract_user_corrections(
     let mut prev_assistant_summary: Option<String> = None;
 
     for entry in entries {
-        if corrections.len() >= opts.limit {
-            break;
-        }
-
         match entry {
             LogEntry::Assistant(_) => {
                 prev_assistant_summary =
@@ -398,25 +390,35 @@ pub fn rank_error_prone_tools(pairs: &[ErrorFixPair]) -> Vec<(String, usize)> {
 ///
 /// This is the main entry point. It combines error→fix pair extraction,
 /// user correction detection, and summary statistics.
+///
+/// The summary reports **true totals** across the entire session, while
+/// the returned vectors are truncated to `opts.limit`.
 pub fn extract_lessons(entries: &[&LogEntry], opts: &LessonOptions) -> LessonResult {
-    let error_fix_pairs = if opts.category == LessonCategory::Corrections {
+    let mut error_fix_pairs = if opts.category == LessonCategory::Corrections {
         Vec::new()
     } else {
         extract_error_fix_pairs(entries, opts)
     };
 
-    let user_corrections = if opts.category == LessonCategory::Errors {
+    let mut user_corrections = if opts.category == LessonCategory::Errors {
         Vec::new()
     } else {
         extract_user_corrections(entries, opts)
     };
 
+    // Summary reflects true totals (ranked from all errors, not just the limited set)
+    let total_errors = error_fix_pairs.len();
+    let total_corrections = user_corrections.len();
     let most_error_prone_tools = rank_error_prone_tools(&error_fix_pairs);
+
+    // Truncate returned vectors to the requested limit
+    error_fix_pairs.truncate(opts.limit);
+    user_corrections.truncate(opts.limit);
 
     LessonResult {
         summary: LessonsSummary {
-            total_errors: error_fix_pairs.len(),
-            total_corrections: user_corrections.len(),
+            total_errors,
+            total_corrections,
             most_error_prone_tools,
         },
         error_fix_pairs,
@@ -598,8 +600,11 @@ mod tests {
             ..Default::default()
         };
 
-        let pairs = extract_error_fix_pairs(&refs, &opts);
-        assert_eq!(pairs.len(), 3);
+        let result = extract_lessons(&refs, &opts);
+        // Returned items are limited
+        assert_eq!(result.error_fix_pairs.len(), 3);
+        // But summary reflects true total
+        assert_eq!(result.summary.total_errors, 10);
     }
 
     #[test]
