@@ -858,7 +858,7 @@ impl SnatchServer {
                 for result in user.message.tool_results() {
                     let is_err = result.is_error == Some(true);
                     let err_text = if is_err {
-                        result.content.as_ref().map(|c| truncate_text(&format!("{c:?}"), 300))
+                        extract_error_preview(result, 300)
                     } else {
                         None
                     };
@@ -1026,12 +1026,7 @@ impl SnatchServer {
             summary: LessonsSummary {
                 total_errors: result.summary.total_errors,
                 total_corrections: result.summary.total_corrections,
-                most_error_prone_tools: result
-                    .summary
-                    .most_error_prone_tools
-                    .into_iter()
-                    .map(|(name, _)| name)
-                    .collect(),
+                most_error_prone_tools: result.summary.most_error_prone_tools,
             },
         };
 

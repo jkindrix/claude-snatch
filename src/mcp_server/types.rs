@@ -456,5 +456,5 @@ pub struct SessionLessonsResponse {
 pub struct LessonsSummary {
     pub total_errors: usize,
     pub total_corrections: usize,
-    pub most_error_prone_tools: Vec<String>,
+    pub most_error_prone_tools: Vec<(String, usize)>,
 }
