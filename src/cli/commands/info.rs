@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::analytics::SessionAnalytics;
 use crate::cli::{Cli, InfoArgs, OutputFormat};
 use crate::error::{Result, SnatchError};
 use crate::model::{ContentBlock, LogEntry};
@@ -58,6 +59,48 @@ fn show_session_info(
 
     match cli.effective_output() {
         OutputFormat::Json => {
+            // Compute analytics from conversation (the expensive part)
+            let analytics = match session.parse_with_options(cli.max_file_size) {
+                Ok(entries) => {
+                    let conversation = Conversation::from_entries(entries)?;
+                    Some(SessionAnalytics::from_conversation(&conversation))
+                }
+                Err(_) => None,
+            };
+
+            let (user_messages, assistant_messages, primary_model, tools_summary,
+                 estimated_cost, input_tokens, output_tokens,
+                 files_modified, files_created, lines_added, lines_removed) =
+                if let Some(ref a) = analytics {
+                    // Collect tool counts into a HashMap
+                    let tools: HashMap<String, usize> = a.tool_counts.iter()
+                        .map(|(k, v)| (k.clone(), *v))
+                        .collect();
+
+                    // Collect file paths: edited files vs created files
+                    let edited: Vec<String> = a.file_stats.files.keys()
+                        .cloned()
+                        .collect();
+                    // We don't have separate created-vs-edited file lists in FileModificationStats,
+                    // but we have the counts. Use the file list as "files_modified".
+
+                    (
+                        Some(a.message_counts.user),
+                        Some(a.message_counts.assistant),
+                        a.primary_model().map(|s| s.to_string()),
+                        if tools.is_empty() { None } else { Some(tools) },
+                        a.usage.estimated_cost,
+                        Some(a.usage.usage.input_tokens + a.usage.usage.cache_read_input_tokens.unwrap_or(0)),
+                        Some(a.usage.usage.output_tokens),
+                        if edited.is_empty() { None } else { Some(edited) },
+                        None::<Vec<String>>, // files_created not separately tracked at path level
+                        Some(a.file_stats.total_lines_added),
+                        Some(a.file_stats.total_lines_removed),
+                    )
+                } else {
+                    (None, None, None, None, None, None, None, None, None, None, None)
+                };
+
             println!("{}", serde_json::to_string_pretty(&SessionInfoOutput {
                 session_id: summary.session_id.clone(),
                 project_path: summary.project_path.clone(),
@@ -76,6 +119,17 @@ fn show_session_info(
                 tags: session_meta.map(|m| m.tags.clone()).unwrap_or_default(),
                 bookmarked: session_meta.is_some_and(|m| m.bookmarked),
                 outcome: session_meta.and_then(|m| m.outcome.map(|o| o.to_string())),
+                user_messages,
+                assistant_messages,
+                primary_model,
+                tools_summary,
+                estimated_cost,
+                input_tokens,
+                output_tokens,
+                files_modified,
+                files_created,
+                lines_added,
+                lines_removed,
             })?);
         }
         OutputFormat::Tsv => {
@@ -599,6 +653,42 @@ struct SessionInfoOutput {
     /// Outcome classification.
     #[serde(skip_serializing_if = "Option::is_none")]
     outcome: Option<String>,
+
+    // ── Analytics fields (computed on demand) ──
+
+    /// User message count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_messages: Option<usize>,
+    /// Assistant message count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    assistant_messages: Option<usize>,
+    /// Primary model used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    primary_model: Option<String>,
+    /// Tool usage counts (tool_name -> invocation_count).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools_summary: Option<HashMap<String, usize>>,
+    /// Estimated cost in USD.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    estimated_cost: Option<f64>,
+    /// Total input tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_tokens: Option<u64>,
+    /// Total output tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_tokens: Option<u64>,
+    /// Files modified during the session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    files_modified: Option<Vec<String>>,
+    /// Files created during the session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    files_created: Option<Vec<String>>,
+    /// Total lines added.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lines_added: Option<usize>,
+    /// Total lines removed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lines_removed: Option<usize>,
 }
 
 /// Project info for JSON output.
@@ -650,6 +740,17 @@ mod tests {
             tags: vec!["feature".to_string(), "urgent".to_string()],
             bookmarked: true,
             outcome: Some("success".to_string()),
+            user_messages: Some(12),
+            assistant_messages: Some(13),
+            primary_model: Some("claude-sonnet-4-20250514".to_string()),
+            tools_summary: Some(HashMap::from([("Read".to_string(), 5), ("Edit".to_string(), 3)])),
+            estimated_cost: Some(0.42),
+            input_tokens: Some(50000),
+            output_tokens: Some(10000),
+            files_modified: Some(vec!["src/main.rs".to_string()]),
+            files_created: None,
+            lines_added: Some(100),
+            lines_removed: Some(20),
         };
 
         let json = serde_json::to_string(&output).unwrap();
@@ -661,6 +762,10 @@ mod tests {
         assert!(json.contains("\"tags\":[\"feature\",\"urgent\"]"));
         assert!(json.contains("\"bookmarked\":true"));
         assert!(json.contains("\"outcome\":\"success\""));
+        assert!(json.contains("\"user_messages\":12"));
+        assert!(json.contains("\"primary_model\":\"claude-sonnet-4-20250514\""));
+        assert!(json.contains("\"estimated_cost\":0.42"));
+        assert!(json.contains("\"lines_added\":100"));
     }
 
     #[test]
@@ -722,16 +827,31 @@ mod tests {
             tags: vec![],
             bookmarked: false,
             outcome: None,
+            user_messages: None,
+            assistant_messages: None,
+            primary_model: None,
+            tools_summary: None,
+            estimated_cost: None,
+            input_tokens: None,
+            output_tokens: None,
+            files_modified: None,
+            files_created: None,
+            lines_added: None,
+            lines_removed: None,
         };
 
         let json = serde_json::to_string(&output).unwrap();
         assert!(json.contains("\"is_subagent\":true"));
         assert!(json.contains("\"start_time\":null"));
         assert!(json.contains("\"version\":null"));
-        // name, tags, bookmarked, and outcome should be skipped when empty/false/None
+        // Optional fields should be skipped when empty/false/None
         assert!(!json.contains("\"name\""));
         assert!(!json.contains("\"tags\""));
         assert!(!json.contains("\"bookmarked\""));
         assert!(!json.contains("\"outcome\""));
+        assert!(!json.contains("\"user_messages\""));
+        assert!(!json.contains("\"tools_summary\""));
+        assert!(!json.contains("\"estimated_cost\""));
+        assert!(!json.contains("\"files_modified\""));
     }
 }
