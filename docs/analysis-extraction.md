@@ -6,15 +6,15 @@
 
 **Target state:**
 ```
-src/analysis/          NEW shared module
-    mod.rs             re-exports
-    extraction.rs      conversation text extraction (user prompts, assistant text, tool names, input summaries)  [DONE]
+src/analysis/          shared module
+    mod.rs             re-exports                                                [DONE]
+    extraction.rs      conversation text extraction, metadata, compaction events  [DONE]
+    filters.rs         period parsing, session filtering                          [DONE]
     lessons.rs         error->fix pairs, user corrections, error-prone tool ranking  [DONE]
-    timeline.rs        turn-by-turn narrative building with tool-only collapse  [DONE]
-    search.rs          multi-scope regex search (text/tools/thinking)
-    filters.rs         period parsing, project filtering, session aggregation
+    search.rs          multi-scope regex search (text/tools/thinking)             [DONE]
+    timeline.rs        turn-by-turn narrative building with tool-only collapse    [DONE]
 
-src/mcp_server/        thin adapter: MCP request -> analysis -> MCP response  [lessons+timeline rewired]
+src/mcp_server/        thin adapter: MCP request -> analysis -> MCP response     [fully rewired]
 src/cli/commands/      thin adapter: CLI args -> analysis -> terminal/JSON output
 ```
 
@@ -55,11 +55,11 @@ src/cli/commands/      thin adapter: CLI args -> analysis -> terminal/JSON outpu
 
 | # | Operation | Source | Lines | Complexity | Tests | Status |
 |---|-----------|--------|-------|------------|-------|--------|
-| 16 | search_entry_text (multi-scope) | helpers.rs:369-434 | 66 | Medium | 0 | [ ] |
-| 17 | parse_period + period_cutoff | helpers.rs:324-350 | 25 | Small | 4 | [ ] |
-| 18 | find_compaction_events | helpers.rs:352-365 | 14 | Trivial | 0 | [ ] |
-| 19 | get_model | helpers.rs:180-192 | 13 | Trivial | 0 | [ ] |
-| 20 | has_thinking | helpers.rs:148-153 | 6 | Trivial | 0 | [ ] |
+| 16 | search_entry_text (multi-scope) | analysis/search.rs | 66 | Medium | 4 | [x] |
+| 17 | parse_period + period_cutoff | analysis/filters.rs | 25 | Small | 8 | [x] |
+| 18 | find_compaction_events | analysis/extraction.rs | 14 | Trivial | 0 | [x] |
+| 19 | get_model | analysis/extraction.rs | 13 | Trivial | 0 | [x] |
+| 20 | has_thinking | analysis/extraction.rs | 6 | Trivial | 0 | [x] |
 
 **Deliverable:** `snatch search <pattern> --json` CLI command, complete analysis module
 
@@ -67,12 +67,12 @@ src/cli/commands/      thin adapter: CLI args -> analysis -> terminal/JSON outpu
 
 ## Post-Extraction: CLI Commands to Add
 
-| Command | Analysis dependency | Fills recap gap |
-|---------|-------------------|-----------------|
+| Command | Analysis dependency | Fills recap gap | Status |
+|---------|-------------------|-----------------|--------|
 | `snatch lessons <id> --json` | Phase 1 (#1-4) | Lessons Learned | [x] |
 | `snatch timeline <id> --json` | Phase 1 (#7-8) | Accomplishments | [x] |
-| `snatch messages <id> --json` | Phase 2 (#5-6, 9-10) | Summaries | [ ] |
-| `snatch search <pattern> --json` | Phase 3 (#16) | General utility | [ ] |
+| `snatch messages <id> --json` | Phase 2 (#5-6, 9-10) | Summaries | [x] |
+| `snatch search <pattern> --json` | Phase 3 (#16) | General utility | [x] |
 
 ## Post-Extraction: recap Fixes (bash, no Rust)
 
@@ -99,5 +99,5 @@ src/cli/commands/      thin adapter: CLI args -> analysis -> terminal/JSON outpu
 - All extraction functions depend on `LogEntry` from `src/model/`
 - Lesson extraction + timeline depend on `Conversation` from `src/reconstruction/`
 - Session aggregation depends on `SessionAnalytics` from `src/analytics/`
-- `truncate_text` stays in MCP as presentation (or becomes a shared utility)
+- `truncate_text` is in shared `analysis/extraction.rs`
 - `resolve_session` stays in MCP (infrastructure wiring, not analysis)

@@ -231,6 +231,10 @@ pub enum Commands {
     #[command(display_order = 25)]
     Timeline(TimelineArgs),
 
+    /// Read conversation messages at different detail levels.
+    #[command(alias = "msgs", display_order = 26)]
+    Messages(MessagesArgs),
+
     // ═══════════════════════════════════════════════════════════════════════
     // EXPORT - Extract content in various formats
     // ═══════════════════════════════════════════════════════════════════════
@@ -1819,6 +1823,37 @@ pub struct TimelineArgs {
     pub limit: usize,
 }
 
+/// Arguments for the messages command.
+#[derive(Debug, Parser)]
+pub struct MessagesArgs {
+    /// Session ID (full UUID or short prefix).
+    pub session_id: String,
+
+    /// Detail level: overview, conversation, standard, or full.
+    #[arg(long, default_value = "standard")]
+    pub detail: Option<String>,
+
+    /// Message type filter: user, assistant, system, or all.
+    #[arg(long, default_value = "all")]
+    pub message_type: Option<String>,
+
+    /// Maximum messages to return.
+    #[arg(short = 'l', long, default_value = "50")]
+    pub limit: usize,
+
+    /// Skip first N messages.
+    #[arg(long, default_value = "0")]
+    pub offset: usize,
+
+    /// Reverse chronological order.
+    #[arg(short = 'r', long)]
+    pub reverse: bool,
+
+    /// Include thinking/reasoning blocks.
+    #[arg(long)]
+    pub include_thinking: bool,
+}
+
 /// Arguments for the pick command.
 #[derive(Debug, Parser)]
 pub struct PickArgs {
@@ -2098,6 +2133,7 @@ pub fn run() -> Result<()> {
         Some(Commands::Standup(args)) => commands::standup::run(&cli, args),
         Some(Commands::Lessons(args)) => commands::lessons::run(&cli, args),
         Some(Commands::Timeline(args)) => commands::timeline::run(&cli, args),
+        Some(Commands::Messages(args)) => commands::messages::run(&cli, args),
         Some(Commands::Pick(args)) => commands::pick::run(&cli, args),
         Some(Commands::Quickstart(args)) => commands::quickstart::run(&cli, args),
         Some(Commands::Summary(args)) => commands::summary::run(&cli, args),
