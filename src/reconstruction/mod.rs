@@ -171,7 +171,7 @@ impl Conversation {
             }
         }
 
-        // Second pass: build parent-child relationships
+        // Second pass: build parent-child relationships and promote orphans to roots
         let node_keys: Vec<String> = nodes.keys().cloned().collect();
         for uuid in &node_keys {
             if let Some(node) = nodes.get(uuid) {
@@ -180,6 +180,11 @@ impl Conversation {
                     let uuid = uuid.clone();
                     if let Some(parent_node) = nodes.get_mut(&parent_uuid) {
                         parent_node.children.push(uuid);
+                    } else {
+                        // Parent was skipped during parsing (e.g. unknown entry type
+                        // like "progress"). Promote this node to a root so it's
+                        // reachable in the tree.
+                        roots.push(uuid);
                     }
                 }
             }
@@ -604,6 +609,28 @@ mod tests {
             old_name: None,
             extra: IndexMap::new(),
         })
+    }
+
+    #[test]
+    fn test_orphaned_entries_promoted_to_roots() {
+        // Simulate entries whose parent UUID doesn't exist in the parsed nodes
+        // (e.g. parent was a "progress" entry that was skipped during parsing).
+        // These orphans should be promoted to roots so the tree is still reachable.
+        let entries = vec![
+            // No entry with UUID "missing-parent" — it was skipped
+            make_user_entry("2", Some("missing-parent")),
+            make_user_entry("3", Some("2")),
+            make_user_entry("4", Some("3")),
+        ];
+
+        let conv = Conversation::from_entries(entries).unwrap();
+
+        assert_eq!(conv.len(), 3);
+        // "2" should be promoted to a root since its parent doesn't exist
+        assert_eq!(conv.roots().len(), 1);
+        assert_eq!(conv.roots()[0], "2");
+        // Main thread should include all 3 entries
+        assert_eq!(conv.main_thread().len(), 3);
     }
 
     #[test]
