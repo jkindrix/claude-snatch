@@ -32,7 +32,7 @@ impl Default for DigestOptions {
             max_prompts: 3,
             max_files: 10,
             max_keywords: 5,
-            max_chars: 500,
+            max_chars: 1000,
         }
     }
 }
@@ -169,21 +169,35 @@ pub fn build_digest(entries: &[&LogEntry], opts: &DigestOptions) -> SessionDiges
 }
 
 /// Format a digest as compact text for hook injection.
+///
+/// Recent prompts are placed first because they are the most important
+/// context after compaction (showing where work ended). If truncation
+/// occurs, first prompts and metadata get cut rather than recent context.
 pub fn format_digest(digest: &SessionDigest, max_chars: usize) -> String {
     let mut lines = Vec::new();
 
-    if !digest.key_prompts.is_empty() {
-        lines.push(format!("First prompts ({} total):", digest.total_prompts));
-        for (i, p) in digest.key_prompts.iter().enumerate() {
-            lines.push(format!("  {}. {p}", i + 1));
+    // Recent prompts first — most important for post-compaction orientation
+    if !digest.recent_prompts.is_empty() {
+        let start = digest.total_prompts - digest.recent_prompts.len() + 1;
+        lines.push(format!(
+            "Recent prompts ({} total):",
+            digest.total_prompts
+        ));
+        for (i, p) in digest.recent_prompts.iter().enumerate() {
+            lines.push(format!("  {}. {p}", start + i));
         }
     }
 
-    if !digest.recent_prompts.is_empty() {
-        let start = digest.total_prompts - digest.recent_prompts.len() + 1;
-        lines.push("Recent prompts:".to_string());
-        for (i, p) in digest.recent_prompts.iter().enumerate() {
-            lines.push(format!("  {}. {p}", start + i));
+    // First prompts second — provide origin context
+    if !digest.key_prompts.is_empty() {
+        let header = if digest.recent_prompts.is_empty() {
+            format!("Prompts ({} total):", digest.total_prompts)
+        } else {
+            "First prompts:".to_string()
+        };
+        lines.push(header);
+        for (i, p) in digest.key_prompts.iter().enumerate() {
+            lines.push(format!("  {}. {p}", i + 1));
         }
     }
 
@@ -232,7 +246,7 @@ mod tests {
         assert_eq!(opts.max_prompts, 3);
         assert_eq!(opts.max_files, 10);
         assert_eq!(opts.max_keywords, 5);
-        assert_eq!(opts.max_chars, 500);
+        assert_eq!(opts.max_chars, 1000);
     }
 
     #[test]
@@ -274,11 +288,17 @@ mod tests {
             compaction_count: 1,
             thinking_keywords: vec!["decided".into(), "because".into()],
         };
-        let formatted = format_digest(&digest, 500);
-        assert!(formatted.contains("First prompts (10 total):"));
-        assert!(formatted.contains("Fix the auth bug"));
-        assert!(formatted.contains("Recent prompts:"));
+        let formatted = format_digest(&digest, 1000);
+        // Recent prompts come first (most important for post-compaction)
+        assert!(formatted.contains("Recent prompts (10 total):"));
         assert!(formatted.contains("Ship it"));
+        // First prompts come second
+        assert!(formatted.contains("First prompts:"));
+        assert!(formatted.contains("Fix the auth bug"));
+        // Recent appears before First in the output
+        let recent_pos = formatted.find("Recent prompts").unwrap();
+        let first_pos = formatted.find("First prompts").unwrap();
+        assert!(recent_pos < first_pos);
         assert!(formatted.contains("Files: auth.rs, tests.rs"));
         assert!(formatted.contains("Tools: Edit(5), Read(3)"));
         assert!(formatted.contains("Errors: 2"));
@@ -298,8 +318,9 @@ mod tests {
             compaction_count: 0,
             thinking_keywords: vec![],
         };
-        let formatted = format_digest(&digest, 500);
-        assert!(formatted.contains("First prompts (1 total):"));
+        let formatted = format_digest(&digest, 1000);
+        // When no recent prompts, key_prompts header includes total
+        assert!(formatted.contains("Prompts (1 total):"));
         assert!(!formatted.contains("Recent prompts:"));
     }
 
