@@ -566,6 +566,47 @@ impl AnalyticsSummary {
         }
     }
 
+    /// Aggregate multiple summaries by summing token counts, messages, tools, and cost.
+    ///
+    /// Duration and primary_model are not aggregated (they're per-session).
+    #[must_use]
+    pub fn aggregate(summaries: &[AnalyticsSummary]) -> AnalyticsSummary {
+        let mut agg = AnalyticsSummary {
+            duration: None,
+            total_messages: 0,
+            user_messages: 0,
+            assistant_messages: 0,
+            total_tokens: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            tool_invocations: 0,
+            unique_tools: 0,
+            thinking_blocks: 0,
+            error_count: 0,
+            cache_hit_rate: 0.0,
+            estimated_cost: None,
+            branch_count: 0,
+            primary_model: None,
+        };
+        let mut cost = 0.0f64;
+        for s in summaries {
+            agg.total_messages += s.total_messages;
+            agg.user_messages += s.user_messages;
+            agg.assistant_messages += s.assistant_messages;
+            agg.total_tokens += s.total_tokens;
+            agg.input_tokens += s.input_tokens;
+            agg.output_tokens += s.output_tokens;
+            agg.tool_invocations += s.tool_invocations;
+            agg.thinking_blocks += s.thinking_blocks;
+            agg.error_count += s.error_count;
+            cost += s.estimated_cost.unwrap_or(0.0);
+        }
+        if cost > 0.0 {
+            agg.estimated_cost = Some(cost);
+        }
+        agg
+    }
+
     /// Format duration as string.
     #[must_use]
     pub fn duration_string(&self) -> String {

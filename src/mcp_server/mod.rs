@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use mcpkit::prelude::*;
 use mcpkit::transport::stdio::StdioTransport;
 
-use crate::analytics::SessionAnalytics;
+use crate::analytics::{AnalyticsSummary, SessionAnalytics};
 use crate::discovery::ClaudeDirectory;
 use crate::model::message::LogEntry;
 use crate::reconstruction::Conversation;
@@ -209,86 +209,44 @@ impl SnatchServer {
                 tool_invocations: summary.tool_invocations,
                 estimated_cost: summary.estimated_cost,
             }
-        } else if let Some(project) = request.project {
-            let sessions = match claude_dir.all_sessions() {
-                Ok(s) => s,
-                Err(e) => return ToolOutput::error(format!("Failed to list sessions: {e}")),
-            };
-
-            let project_sessions: Vec<_> = sessions
-                .iter()
-                .filter(|s| s.project_path().contains(&project))
-                .collect();
-
-            let mut total_tokens = 0u64;
-            let mut input_tokens = 0u64;
-            let mut output_tokens = 0u64;
-            let mut messages = 0usize;
-            let mut tool_invocations = 0usize;
-            let mut cost = 0.0f64;
-
-            for session in &project_sessions {
-                if let Ok(entries) = session.parse_with_options(self.max_file_size) {
-                    if let Ok(conversation) = Conversation::from_entries(entries) {
-                        let analytics = SessionAnalytics::from_conversation(&conversation);
-                        let summary = analytics.summary_report();
-                        total_tokens += summary.total_tokens;
-                        input_tokens += summary.input_tokens;
-                        output_tokens += summary.output_tokens;
-                        messages += summary.total_messages;
-                        tool_invocations += summary.tool_invocations;
-                        cost += summary.estimated_cost.unwrap_or(0.0);
-                    }
-                }
-            }
-
-            StatsResponse {
-                scope: project,
-                sessions: Some(project_sessions.len()),
-                total_tokens,
-                input_tokens,
-                output_tokens,
-                messages,
-                tool_invocations,
-                estimated_cost: if cost > 0.0 { Some(cost) } else { None },
-            }
         } else {
             let sessions = match claude_dir.all_sessions() {
                 Ok(s) => s,
                 Err(e) => return ToolOutput::error(format!("Failed to list sessions: {e}")),
             };
 
-            let mut total_tokens = 0u64;
-            let mut input_tokens = 0u64;
-            let mut output_tokens = 0u64;
-            let mut messages = 0usize;
-            let mut tool_invocations = 0usize;
-            let mut cost = 0.0f64;
+            let (scope, target_sessions): (String, Vec<_>) =
+                if let Some(project) = request.project {
+                    let filtered: Vec<_> = sessions
+                        .iter()
+                        .filter(|s| s.project_path().contains(&project))
+                        .collect();
+                    (project, filtered)
+                } else {
+                    ("global".to_string(), sessions.iter().collect())
+                };
 
-            for session in &sessions {
-                if let Ok(entries) = session.parse_with_options(self.max_file_size) {
-                    if let Ok(conversation) = Conversation::from_entries(entries) {
-                        let analytics = SessionAnalytics::from_conversation(&conversation);
-                        let summary = analytics.summary_report();
-                        total_tokens += summary.total_tokens;
-                        input_tokens += summary.input_tokens;
-                        output_tokens += summary.output_tokens;
-                        messages += summary.total_messages;
-                        tool_invocations += summary.tool_invocations;
-                        cost += summary.estimated_cost.unwrap_or(0.0);
-                    }
-                }
-            }
+            let summaries: Vec<_> = target_sessions
+                .iter()
+                .filter_map(|session| {
+                    let entries = session.parse_with_options(self.max_file_size).ok()?;
+                    let conversation = Conversation::from_entries(entries).ok()?;
+                    let analytics = SessionAnalytics::from_conversation(&conversation);
+                    Some(analytics.summary_report())
+                })
+                .collect();
+
+            let agg = AnalyticsSummary::aggregate(&summaries);
 
             StatsResponse {
-                scope: "global".to_string(),
-                sessions: Some(sessions.len()),
-                total_tokens,
-                input_tokens,
-                output_tokens,
-                messages,
-                tool_invocations,
-                estimated_cost: if cost > 0.0 { Some(cost) } else { None },
+                scope,
+                sessions: Some(target_sessions.len()),
+                total_tokens: agg.total_tokens,
+                input_tokens: agg.input_tokens,
+                output_tokens: agg.output_tokens,
+                messages: agg.total_messages,
+                tool_invocations: agg.tool_invocations,
+                estimated_cost: agg.estimated_cost,
             }
         };
 
@@ -655,8 +613,6 @@ impl SnatchServer {
         if let Some(cutoff_time) = cutoff {
             sessions.retain(|s| s.modified_datetime() >= cutoff_time);
         }
-
-        let sessions_found = sessions.len();
 
         // Limit
         sessions.truncate(limit);
