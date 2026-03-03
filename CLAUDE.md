@@ -69,6 +69,27 @@ Storage: `~/.claude/projects/<project>/memory/goals.json`
 
 The digest is auto-injected after compaction via the SessionStart hook.
 
+### Proactive Goal Management
+
+**You MUST proactively manage goals.** Do not wait to be asked.
+
+**When to add a goal:**
+- User states a multi-step or multi-session intention ("build X", "fix all Y", "redesign Z")
+- You recognize work that will span beyond the current task
+- A compaction is likely before the work will finish
+
+**When to update a goal:**
+- You complete a significant milestone toward the goal
+- The approach changes materially
+- A goal is finished (`status="done"`) or abandoned
+
+**When to check goals:**
+- After compaction recovery (they're auto-injected, but verify they're still accurate)
+- Before ending a significant work session
+- When the user asks "what are we working on?" or "what's left?"
+
+This is not optional. Goal amnesia after compaction is the #1 pain point. If you forget to track goals, the next session starts blind.
+
 ### Usage Guidelines
 
 - Start with `get_project_history` or `list_sessions` to orient yourself
