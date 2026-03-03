@@ -10,7 +10,7 @@ use std::time::SystemTime;
 use chrono::{DateTime, Duration, Utc};
 
 use crate::analytics::SessionAnalytics;
-use crate::cli::{Cli, StandupArgs, StandupFormat};
+use crate::cli::{Cli, OutputFormat, StandupArgs, StandupFormat};
 use crate::discovery::{format_count, format_number};
 use crate::error::{Result, SnatchError};
 use crate::model::{ContentBlock, LogEntry, ToolUse};
@@ -398,8 +398,13 @@ pub fn run(cli: &Cli, args: &StandupArgs) -> Result<()> {
         tools,
     };
 
-    // Format and output
-    let output = format_report(&report, args.format)?;
+    // Format and output (global --json overrides --format)
+    let effective_format = if matches!(cli.effective_output(), OutputFormat::Json) {
+        StandupFormat::Json
+    } else {
+        args.format
+    };
+    let output = format_report(&report, effective_format)?;
 
     // Handle clipboard
     if args.clipboard {

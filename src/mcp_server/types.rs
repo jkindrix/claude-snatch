@@ -1,4 +1,10 @@
 //! Request/response types for MCP server tools.
+//!
+//! These are serialization-oriented structs with self-documenting field names.
+//! Doc comments are on the structs and request types; individual fields
+//! are clear from their names and serde attributes.
+// Serialization structs with self-documenting field names — suppress field-level doc warnings.
+#![allow(missing_docs)]
 
 use mcpkit::prelude::*;
 use serde::Serialize;

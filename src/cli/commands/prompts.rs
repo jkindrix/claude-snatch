@@ -11,6 +11,7 @@ use std::io::{self, BufWriter, Write};
 use regex::{Regex, RegexBuilder};
 use serde::Serialize;
 
+use crate::analysis::extraction::is_noise_text;
 use crate::cli::{Cli, OutputFormat, PromptsArgs};
 use crate::discovery::{Session, SessionFilter};
 use crate::error::{Result, SnatchError};
@@ -417,22 +418,28 @@ fn filter_prompts_by_grep(prompts: Vec<Prompt>, grep_regex: Option<&Regex>, inve
     }
 }
 
-/// Common system message patterns to exclude.
-const SYSTEM_MESSAGE_PATTERNS: &[&str] = &[
-    "[Request interrupted",
+/// Prompts-specific noise patterns beyond the shared `is_noise_text()`.
+///
+/// These are patterns that are useful to exclude from prompt frequency analysis
+/// but are arguably real user input (e.g., session continuation summaries that
+/// the user pastes, or caveat text that appears outside XML tags).
+const PROMPTS_EXTRA_NOISE: &[&str] = &[
     "Caveat: The messages below",
-    "<command-name>",
-    "<local-command-stdout>",
-    "<local-command-stderr>",
     "This session is being continued from a previous conversation",
 ];
 
 /// Filter out system messages that pollute prompt analysis.
+///
+/// Uses the shared `is_noise_text()` for common patterns (XML-tagged system
+/// messages, interrupt markers) plus prompts-specific extras.
 fn filter_system_messages(prompts: Vec<Prompt>) -> Vec<Prompt> {
     prompts
         .into_iter()
         .filter(|p| {
-            !SYSTEM_MESSAGE_PATTERNS.iter().any(|pattern| p.text.starts_with(pattern))
+            !is_noise_text(&p.text)
+                && !PROMPTS_EXTRA_NOISE
+                    .iter()
+                    .any(|pattern| p.text.starts_with(pattern))
         })
         .collect()
 }

@@ -24,9 +24,13 @@ pub use crate::analysis::filters::{parse_period, period_cutoff};
 
 /// Resolved session with parsed conversation and analytics.
 pub struct ResolvedSession {
+    /// The full session UUID.
     pub session_id: String,
+    /// Decoded project path for this session.
     pub project_path: String,
+    /// Reconstructed conversation tree.
     pub conversation: Conversation,
+    /// Computed analytics for the session.
     pub analytics: SessionAnalytics,
 }
 

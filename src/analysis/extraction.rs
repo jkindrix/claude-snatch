@@ -45,7 +45,7 @@ pub fn is_human_prompt(entry: &LogEntry) -> bool {
 }
 
 /// Check if text content is system-generated noise rather than human input.
-fn is_noise_text(text: &str) -> bool {
+pub fn is_noise_text(text: &str) -> bool {
     let trimmed = text.trim();
 
     // XML-tagged system messages
