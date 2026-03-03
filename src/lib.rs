@@ -79,6 +79,7 @@
 #![warn(missing_docs)]
 #![warn(rustdoc::missing_crate_level_docs)]
 
+pub mod analysis;
 pub mod analytics;
 pub mod api;
 pub mod async_io;
