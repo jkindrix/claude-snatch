@@ -32,8 +32,13 @@ pub struct SessionSummary {
     pub session_id: String,
     pub project_path: String,
     pub is_subagent: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
     pub modified_time: Option<String>,
     pub is_active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<String>,
+    pub compaction_count: usize,
 }
 
 /// Request to get session info.
@@ -49,9 +54,12 @@ pub struct SessionInfoResponse {
     pub session_id: String,
     pub project_path: String,
     pub is_subagent: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
     pub is_active: bool,
     pub modified_time: Option<String>,
     pub duration: Option<String>,
+    pub compaction_count: usize,
     pub primary_model: Option<String>,
     pub total_tokens: u64,
     pub input_tokens: u64,
@@ -249,12 +257,16 @@ pub struct GetProjectHistoryRequest {
 #[derive(Debug, Serialize)]
 pub struct ProjectSessionEntry {
     pub session_id: String,
+    pub is_subagent: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_time: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_time: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<String>,
+    pub compaction_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
     pub user_prompt_count: usize,

@@ -105,10 +105,12 @@ fn show_session_info(
                 session_id: summary.session_id.clone(),
                 project_path: summary.project_path.clone(),
                 is_subagent: summary.is_subagent,
+                parent_session_id: summary.parent_session_id.clone(),
                 file_size: summary.file_size,
                 file_size_human: summary.file_size_human.clone(),
                 entry_count: summary.entry_count,
                 message_count: summary.message_count,
+                compaction_count: summary.compaction_count,
                 start_time: summary.start_time.map(|t| t.to_rfc3339()),
                 end_time: summary.end_time.map(|t| t.to_rfc3339()),
                 duration_human: summary.duration_human(),
@@ -168,7 +170,13 @@ fn show_session_info(
             println!("Session ID:   {}", summary.session_id);
             println!("Project:      {}", summary.project_path);
             println!("Type:         {}", if summary.is_subagent { "Subagent" } else { "Main" });
+            if let Some(ref parent) = summary.parent_session_id {
+                println!("Parent:       {}", parent);
+            }
             println!("Status:       {:?}", summary.state);
+            if summary.compaction_count > 0 {
+                println!("Compactions:  {}", summary.compaction_count);
+            }
             println!();
 
             if args.paths {
@@ -179,6 +187,12 @@ fn show_session_info(
             println!("File Size:    {}", summary.file_size_human);
             println!("Entries:      {}", summary.entry_count);
             println!("Messages:     {}", summary.message_count);
+
+            // Show tool result artifacts info
+            let (tr_count, tr_size) = session.tool_result_stats();
+            if tr_count > 0 {
+                println!("Tool Results: {} files ({})", tr_count, crate::discovery::format_size(tr_size));
+            }
             println!();
 
             if let Some(start) = &summary.start_time {
@@ -631,10 +645,13 @@ struct SessionInfoOutput {
     session_id: String,
     project_path: String,
     is_subagent: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_session_id: Option<String>,
     file_size: u64,
     file_size_human: String,
     entry_count: usize,
     message_count: usize,
+    compaction_count: usize,
     start_time: Option<String>,
     end_time: Option<String>,
     duration_human: Option<String>,
@@ -726,10 +743,12 @@ mod tests {
             session_id: "abc123".to_string(),
             project_path: "/home/user/project".to_string(),
             is_subagent: false,
+            parent_session_id: None,
             file_size: 1024,
             file_size_human: "1 KB".to_string(),
             entry_count: 50,
             message_count: 25,
+            compaction_count: 2,
             start_time: Some("2025-01-01T00:00:00Z".to_string()),
             end_time: Some("2025-01-01T01:00:00Z".to_string()),
             duration_human: Some("1 hour".to_string()),
@@ -813,10 +832,12 @@ mod tests {
             session_id: "test".to_string(),
             project_path: "project".to_string(),
             is_subagent: true,
+            parent_session_id: Some("parent-uuid".to_string()),
             file_size: 0,
             file_size_human: "0 B".to_string(),
             entry_count: 0,
             message_count: 0,
+            compaction_count: 0,
             start_time: None,
             end_time: None,
             duration_human: None,

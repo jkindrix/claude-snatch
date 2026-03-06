@@ -101,12 +101,20 @@ impl SnatchServer {
 
         let summaries: Vec<SessionSummary> = sessions
             .iter()
-            .map(|s| SessionSummary {
-                session_id: s.session_id().to_string(),
-                project_path: s.project_path().to_string(),
-                is_subagent: s.is_subagent(),
-                modified_time: Some(s.modified_datetime().to_rfc3339()),
-                is_active: s.is_active().unwrap_or(false),
+            .map(|s| {
+                let (duration, compaction_count) = s.quick_metadata_cached()
+                    .map(|m| (m.duration_human(), m.compaction_count))
+                    .unwrap_or((None, 0));
+                SessionSummary {
+                    session_id: s.session_id().to_string(),
+                    project_path: s.project_path().to_string(),
+                    is_subagent: s.is_subagent(),
+                    parent_session_id: s.parent_session_id().map(String::from),
+                    modified_time: Some(s.modified_datetime().to_rfc3339()),
+                    is_active: s.is_active().unwrap_or(false),
+                    duration,
+                    compaction_count,
+                }
             })
             .collect();
 
@@ -147,13 +155,19 @@ impl SnatchServer {
         let analytics = SessionAnalytics::from_conversation(&conversation);
         let summary = analytics.summary_report();
 
+        let compaction_count = session.quick_metadata_cached()
+            .map(|m| m.compaction_count)
+            .unwrap_or(0);
+
         let info = SessionInfoResponse {
             session_id: session.session_id().to_string(),
             project_path: session.project_path().to_string(),
             is_subagent: session.is_subagent(),
+            parent_session_id: session.parent_session_id().map(String::from),
             is_active: session.is_active().unwrap_or(false),
             modified_time: Some(session.modified_datetime().to_rfc3339()),
             duration: analytics.duration_string(),
+            compaction_count,
             primary_model: analytics.primary_model().map(String::from),
             total_tokens: summary.total_tokens,
             input_tokens: summary.input_tokens,
@@ -687,11 +701,18 @@ impl SnatchServer {
             agg_cost += cost.unwrap_or(0.0);
             agg_prompts += prompt_count;
 
+            let compaction_count = session.quick_metadata_cached()
+                .map(|m| m.compaction_count)
+                .unwrap_or(0);
+
             session_entries.push(ProjectSessionEntry {
                 session_id: session.session_id().to_string(),
+                is_subagent: session.is_subagent(),
+                parent_session_id: session.parent_session_id().map(String::from),
                 start_time,
                 end_time,
                 duration,
+                compaction_count,
                 git_branch: branch,
                 user_prompt_count: prompt_count,
                 first_prompt,

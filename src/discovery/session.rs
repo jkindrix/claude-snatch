@@ -11,7 +11,7 @@ use tracing::{debug, instrument, trace};
 
 use crate::cache::global_cache;
 use crate::error::{Result, SnatchError};
-use crate::model::{LogEntry, SchemaVersion};
+use crate::model::{LogEntry, SchemaVersion, SystemSubtype};
 use crate::parser::{JsonlParser, StreamingParser};
 
 use super::paths::parse_session_filename;
@@ -34,6 +34,10 @@ pub struct Session {
     modified_time: SystemTime,
     /// Parent project path (decoded).
     project_path: String,
+    /// Parent session ID for subagent sessions (extracted from directory structure).
+    /// When a subagent session lives at `<parent-uuid>/subagents/agent-*.jsonl`,
+    /// this field contains the parent UUID.
+    parent_session_id: Option<String>,
 }
 
 impl Session {
@@ -76,6 +80,22 @@ impl Session {
             "Session loaded"
         );
 
+        // Extract parent session ID from directory structure.
+        // Subagent files live at <parent-uuid>/subagents/agent-*.jsonl
+        let parent_session_id = if file_info.is_subagent {
+            path.parent() // subagents/
+                .and_then(|p| p.parent()) // <parent-uuid>/
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .filter(|name| {
+                    // Validate it looks like a UUID (8-4-4-4-12 format)
+                    name.len() == 36 && name.chars().filter(|&c| c == '-').count() == 4
+                })
+                .map(String::from)
+        } else {
+            None
+        };
+
         Ok(Self {
             path,
             session_id: file_info.session_id,
@@ -84,6 +104,7 @@ impl Session {
             file_size: metadata.len(),
             modified_time,
             project_path: project_path.to_string(),
+            parent_session_id,
         })
     }
 
@@ -99,16 +120,44 @@ impl Session {
         &self.session_id
     }
 
-    /// Check if this is a subagent session.
+    /// Check if this is a subagent session (based on filename).
+    ///
+    /// For a more accurate check that also considers content (parentUuid),
+    /// use `effective_is_subagent()`.
     #[must_use]
     pub fn is_subagent(&self) -> bool {
         self.is_subagent
+    }
+
+    /// Check if this is a subagent session, considering both filename and content.
+    ///
+    /// Returns true if the filename indicates a subagent OR if the JSONL content
+    /// has a non-null parentUuid on the first entry (handles UUID-named subagents).
+    /// Falls back to filename-based classification if metadata isn't cached.
+    #[must_use]
+    pub fn effective_is_subagent(&self) -> bool {
+        if self.is_subagent {
+            return true;
+        }
+        // Check content-based classification from cached metadata
+        global_cache()
+            .get_metadata(&self.path)
+            .map(|m| m.content_is_subagent)
+            .unwrap_or(false)
     }
 
     /// Get the agent hash if this is a subagent session.
     #[must_use]
     pub fn agent_hash(&self) -> Option<&str> {
         self.agent_hash.as_deref()
+    }
+
+    /// Get the parent session ID for subagent sessions.
+    ///
+    /// Extracted from the directory structure: `<parent-uuid>/subagents/agent-*.jsonl`.
+    #[must_use]
+    pub fn parent_session_id(&self) -> Option<&str> {
+        self.parent_session_id.as_deref()
     }
 
     /// Get the file size in bytes.
@@ -229,18 +278,31 @@ impl Session {
         // Extract git branch from the first entry that has it
         let git_branch = entries.iter().find_map(|e| e.git_branch().map(String::from));
 
-        // Count message types
+        // Check if content indicates this is a subagent (parentUuid on first entry)
+        let content_is_subagent = entries.first()
+            .and_then(|e| e.parent_uuid())
+            .is_some();
+
+        // Count message types and compaction events
         let mut user_count = 0;
         let mut assistant_count = 0;
         let mut system_count = 0;
         let mut other_count = 0;
+        let mut compaction_count = 0;
 
         for entry in &entries {
-            match entry.message_type() {
-                "user" => user_count += 1,
-                "assistant" => assistant_count += 1,
-                "system" => system_count += 1,
-                _ => other_count += 1,
+            match entry {
+                LogEntry::System(sys) => {
+                    system_count += 1;
+                    if sys.subtype == Some(SystemSubtype::CompactBoundary) {
+                        compaction_count += 1;
+                    }
+                }
+                _ => match entry.message_type() {
+                    "user" => user_count += 1,
+                    "assistant" => assistant_count += 1,
+                    _ => other_count += 1,
+                },
             }
         }
 
@@ -259,6 +321,12 @@ impl Session {
             schema_version,
             extracted_cwd,
             git_branch,
+            compaction_count,
+            content_is_subagent,
+            // Left at 0 to avoid expensive filesystem scans during metadata computation.
+            // Use Session::tool_result_stats() directly when needed.
+            tool_result_count: 0,
+            tool_result_size: 0,
         })
     }
 
@@ -270,6 +338,7 @@ impl Session {
         Ok(SessionSummary {
             session_id: self.session_id.clone(),
             is_subagent: self.is_subagent,
+            parent_session_id: self.parent_session_id.clone(),
             project_path: self.project_path.clone(),
             extracted_cwd: meta.extracted_cwd.clone(),
             git_branch: meta.git_branch.clone(),
@@ -277,12 +346,50 @@ impl Session {
             file_size_human: self.file_size_human(),
             entry_count: meta.entry_count,
             message_count: meta.user_count + meta.assistant_count,
+            compaction_count: meta.compaction_count,
             start_time: meta.start_time,
             end_time: meta.end_time,
             duration: meta.duration(),
             state,
             version: meta.version,
         })
+    }
+
+    /// Get the tool-results directory for this session, if it exists.
+    ///
+    /// For main sessions at `<project>/<uuid>.jsonl`, looks at `<project>/<uuid>/tool-results/`.
+    /// For subagent sessions at `<project>/<parent>/subagents/agent-*.jsonl`,
+    /// looks at `<project>/<parent>/tool-results/`.
+    #[must_use]
+    pub fn tool_results_dir(&self) -> Option<PathBuf> {
+        let parent = self.path.parent()?;
+        let dir = if self.is_subagent {
+            // subagents/ -> <parent-uuid>/ -> tool-results/
+            parent.parent()?.join("tool-results")
+        } else {
+            // <project>/ -> <uuid>/ -> tool-results/
+            let stem = self.path.file_stem()?.to_str()?;
+            parent.join(stem).join("tool-results")
+        };
+        if dir.is_dir() { Some(dir) } else { None }
+    }
+
+    /// Count external tool result files and their total size.
+    pub fn tool_result_stats(&self) -> (usize, u64) {
+        let Some(dir) = self.tool_results_dir() else {
+            return (0, 0);
+        };
+        let mut count = 0usize;
+        let mut size = 0u64;
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if entry.path().extension().and_then(|e| e.to_str()) == Some("txt") {
+                    count += 1;
+                    size += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                }
+            }
+        }
+        (count, size)
     }
 
     /// Get the authoritative project path.
@@ -330,6 +437,18 @@ pub struct QuickSessionMetadata {
     /// Git branch extracted from JSONL.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
+    /// Number of compaction events in this session.
+    pub compaction_count: usize,
+    /// Whether this session is a subagent based on content analysis.
+    /// True when the first entry has a non-null parentUuid (even if filename
+    /// looks like a main session UUID).
+    pub content_is_subagent: bool,
+    /// Number of external tool result files (in tool-results/ directory).
+    #[serde(default)]
+    pub tool_result_count: usize,
+    /// Total size of external tool result files in bytes.
+    #[serde(default)]
+    pub tool_result_size: u64,
 }
 
 impl QuickSessionMetadata {
@@ -369,6 +488,8 @@ pub struct SessionSummary {
     pub session_id: String,
     /// Whether this is a subagent session.
     pub is_subagent: bool,
+    /// Parent session ID for subagent sessions.
+    pub parent_session_id: Option<String>,
     /// Parent project path (decoded from directory name, may be inaccurate).
     pub project_path: String,
     /// Authoritative project path extracted from JSONL `cwd` field.
@@ -384,6 +505,8 @@ pub struct SessionSummary {
     pub entry_count: usize,
     /// User + Assistant message count.
     pub message_count: usize,
+    /// Number of compaction events in this session.
+    pub compaction_count: usize,
     /// First timestamp.
     pub start_time: Option<DateTime<Utc>>,
     /// Last timestamp.
@@ -432,6 +555,8 @@ impl SessionSummary {
 pub struct SessionFilter {
     /// Include subagent sessions.
     pub include_subagents: bool,
+    /// Only include subagent sessions (excludes main sessions).
+    pub subagents_only: bool,
     /// Only include sessions modified after this time.
     pub modified_after: Option<SystemTime>,
     /// Only include sessions modified before this time.
@@ -461,6 +586,14 @@ impl SessionFilter {
         self
     }
 
+    /// Only include subagent sessions.
+    #[must_use]
+    pub fn subagents_only(mut self) -> Self {
+        self.subagents_only = true;
+        self.include_subagents = true;
+        self
+    }
+
     /// Filter by modification time range.
     #[must_use]
     pub fn modified_between(mut self, after: SystemTime, before: SystemTime) -> Self {
@@ -485,8 +618,16 @@ impl SessionFilter {
 
     /// Check if a session matches this filter.
     pub fn matches(&self, session: &Session) -> Result<bool> {
+        // Use effective_is_subagent which considers both filename and content
+        let is_sub = session.effective_is_subagent();
+
         // Check subagent filter
-        if !self.include_subagents && session.is_subagent() {
+        if !self.include_subagents && is_sub {
+            return Ok(false);
+        }
+
+        // Check subagents-only filter
+        if self.subagents_only && !is_sub {
             return Ok(false);
         }
 
@@ -534,6 +675,7 @@ mod tests {
         let summary = SessionSummary {
             session_id: "40afc8a7-3fcb-4d29-b1ee-100b81b8c6c0".to_string(),
             is_subagent: false,
+            parent_session_id: None,
             project_path: "/test".to_string(),
             extracted_cwd: Some("/actual/test/path".to_string()),
             git_branch: Some("main".to_string()),
@@ -541,6 +683,7 @@ mod tests {
             file_size_human: "1 KB".to_string(),
             entry_count: 10,
             message_count: 5,
+            compaction_count: 0,
             start_time: None,
             end_time: None,
             duration: None,
@@ -556,6 +699,7 @@ mod tests {
         let summary = SessionSummary {
             session_id: "test".to_string(),
             is_subagent: false,
+            parent_session_id: None,
             project_path: "/decoded/path".to_string(),
             extracted_cwd: Some("/actual/path".to_string()),
             git_branch: None,
@@ -563,6 +707,7 @@ mod tests {
             file_size_human: "0 B".to_string(),
             entry_count: 0,
             message_count: 0,
+            compaction_count: 0,
             start_time: None,
             end_time: None,
             duration: None,

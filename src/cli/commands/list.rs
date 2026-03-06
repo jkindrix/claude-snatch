@@ -166,7 +166,9 @@ fn list_sessions<W: Write>(
 
     // Apply filter
     let filter = SessionFilter::new();
-    let filter = if args.subagents {
+    let filter = if args.subagents_only {
+        filter.subagents_only()
+    } else if args.subagents {
         filter
     } else {
         filter.main_only()
@@ -236,6 +238,15 @@ fn list_sessions<W: Write>(
                 }
             }
             true
+        });
+    }
+
+    // Apply compacted filter (requires parsing session metadata)
+    if args.compacted {
+        sessions.retain(|s| {
+            s.quick_metadata_cached()
+                .map(|m| m.compaction_count > 0)
+                .unwrap_or(false)
         });
     }
 
@@ -457,6 +468,21 @@ fn list_sessions<W: Write>(
                 writeln!(writer, "    Project: {}", session.project_path())?;
                 writeln!(writer, "    Modified: {}", session.modified_datetime().format("%Y-%m-%d %H:%M:%S UTC"))?;
 
+                // Show duration if available
+                if let Ok(meta) = session.quick_metadata_cached() {
+                    if let Some(duration) = meta.duration_human() {
+                        writeln!(writer, "    Duration: {duration}")?;
+                    }
+                    if meta.compaction_count > 0 {
+                        writeln!(writer, "    Compactions: {}", meta.compaction_count)?;
+                    }
+                }
+
+                // Show parent session for subagents
+                if let Some(parent) = session.parent_session_id() {
+                    writeln!(writer, "    Parent: {}", &parent[..8.min(parent.len())])?;
+                }
+
                 // Show tags if any
                 if let Some(m) = meta {
                     if !m.tags.is_empty() {
@@ -563,8 +589,13 @@ struct SessionInfo {
     session_id: String,
     project_path: String,
     is_subagent: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_session_id: Option<String>,
     file_size: u64,
     modified: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration: Option<String>,
+    compaction_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -583,12 +614,19 @@ impl SessionInfo {
             None
         };
 
+        let (duration, compaction_count) = session.quick_metadata_cached()
+            .map(|m| (m.duration_human(), m.compaction_count))
+            .unwrap_or((None, 0));
+
         Self {
             session_id: session.session_id().to_string(),
             project_path: session.project_path().to_string(),
             is_subagent: session.is_subagent(),
+            parent_session_id: session.parent_session_id().map(String::from),
             file_size: session.file_size(),
             modified: session.modified_datetime().to_rfc3339(),
+            duration,
+            compaction_count,
             name: meta.and_then(|m| m.name.clone()),
             context,
             tags: meta.map(|m| m.tags.clone()).unwrap_or_default(),

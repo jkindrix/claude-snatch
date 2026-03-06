@@ -818,6 +818,10 @@ mod tests {
             schema_version: None,
             extracted_cwd: Some("/test/path".to_string()),
             git_branch: Some("main".to_string()),
+            compaction_count: 0,
+            content_is_subagent: false,
+            tool_result_count: 0,
+            tool_result_size: 0,
         };
 
         manager.cache_metadata(&session_file, metadata.clone());
@@ -863,6 +867,10 @@ mod tests {
                 schema_version: None,
                 extracted_cwd: None,
                 git_branch: None,
+                compaction_count: 0,
+                content_is_subagent: false,
+                tool_result_count: 0,
+                tool_result_size: 0,
             };
             manager.cache_metadata(&session_file, metadata);
             manager.save_to_disk(&cache_dir).unwrap();
