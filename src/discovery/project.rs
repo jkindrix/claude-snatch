@@ -103,7 +103,7 @@ impl Project {
             })?;
 
             let path = entry.path();
-            if is_session_file(&path) {
+            if is_session_file(&path) && has_content(&path) {
                 match Session::from_path(&path, &self.decoded_path) {
                     Ok(session) => sessions.push(session),
                     Err(_) => continue,
@@ -115,7 +115,7 @@ impl Project {
                     if let Ok(sub_entries) = std::fs::read_dir(&subagents_dir) {
                         for sub_entry in sub_entries.flatten() {
                             let sub_path = sub_entry.path();
-                            if is_session_file(&sub_path) {
+                            if is_session_file(&sub_path) && has_content(&sub_path) {
                                 match Session::from_path(&sub_path, &self.decoded_path) {
                                     Ok(session) => sessions.push(session),
                                     Err(_) => continue,
@@ -127,8 +127,12 @@ impl Project {
             }
         }
 
-        // Sort by modification time (newest first)
+        // Deduplicate by session ID (same agent hash can appear under multiple
+        // parent session subagents/ dirs with different content). Keep the most
+        // recently modified instance.
         sessions.sort_by_key(|s| std::cmp::Reverse(s.modified_time()));
+        let mut seen = std::collections::HashSet::new();
+        sessions.retain(|s| seen.insert(s.session_id().to_string()));
 
         Ok(sessions)
     }
@@ -389,6 +393,11 @@ impl ProjectFilter {
 
         Ok(true)
     }
+}
+
+/// Check if a file has any content (non-zero size).
+fn has_content(path: &Path) -> bool {
+    path.metadata().map(|m| m.len() > 0).unwrap_or(false)
 }
 
 #[cfg(test)]

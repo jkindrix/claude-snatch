@@ -2178,15 +2178,18 @@ fn init_logging(cli: &Cli) {
 
 /// Initialize rayon thread pool with custom thread count if specified.
 fn init_thread_pool(threads: Option<usize>) {
+    let mut builder = rayon::ThreadPoolBuilder::new()
+        // 8MB stack per thread — default 2MB overflows when parsing
+        // large session files with deep JSON structures
+        .stack_size(8 * 1024 * 1024);
+
     if let Some(num_threads) = threads {
         if num_threads > 0 {
-            // Configure rayon's global thread pool
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(num_threads)
-                .build_global()
-                .ok(); // Ignore error if already initialized
+            builder = builder.num_threads(num_threads);
         }
     }
+
+    builder.build_global().ok(); // Ignore error if already initialized
 }
 
 /// Run the CLI application.
