@@ -440,9 +440,17 @@ pub struct ListArgs {
     #[arg(long)]
     pub subagents: bool,
 
+    /// Show only subagent sessions (excludes main sessions).
+    #[arg(long, conflicts_with = "subagents")]
+    pub subagents_only: bool,
+
     /// Only show active sessions.
     #[arg(long)]
     pub active: bool,
+
+    /// Only show sessions that have been compacted at least once.
+    #[arg(long)]
+    pub compacted: bool,
 
     /// Sort order.
     #[arg(short = 's', long, default_value = "modified")]
@@ -795,8 +803,8 @@ impl From<ExportFormatArg> for ExportFormat {
 /// Arguments for the search command.
 #[derive(Debug, Parser)]
 pub struct SearchArgs {
-    /// Search pattern (regex supported).
-    pub pattern: String,
+    /// Search pattern(s) (regex supported). Multiple patterns run in a single pass.
+    pub pattern: Vec<String>,
 
     /// Search in specific project.
     #[arg(short = 'p', long)]
@@ -810,9 +818,15 @@ pub struct SearchArgs {
     #[arg(short = 'i', long)]
     pub ignore_case: bool,
 
-    /// Also search in thinking blocks (by default only user/assistant text is searched).
+    /// Also search in thinking blocks (additive: user + assistant + thinking).
     #[arg(long)]
     pub thinking: bool,
+
+    /// Search ONLY thinking blocks (exclusive: no user/assistant text).
+    /// Use this instead of --thinking when you want to measure internal
+    /// reasoning without output text contamination.
+    #[arg(long, conflicts_with = "thinking")]
+    pub thinking_only: bool,
 
     /// Also search in tool outputs (by default only user/assistant text is searched).
     #[arg(long)]
@@ -881,6 +895,14 @@ pub struct SearchArgs {
     /// Sort results by relevance score (descending).
     #[arg(long)]
     pub sort: bool,
+
+    /// Read patterns from a TSV file with per-pattern scopes.
+    ///
+    /// TSV format: category<TAB>subcategory<TAB>label<TAB>scope<TAB>pattern
+    /// Scopes: --thinking, --thinking-only, -t assistant, -t user, --tools, -a
+    /// Implies --count --no-limit. Runs all patterns in a single pass.
+    #[arg(long, value_name = "FILE")]
+    pub patterns_tsv: Option<std::path::PathBuf>,
 }
 
 /// Arguments for the stats command.

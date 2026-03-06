@@ -278,9 +278,401 @@ fn is_error_message(entry: &LogEntry) -> bool {
     }
 }
 
+// ─── Batch (multi-pattern) types and helpers ────────────────────────────────
+
+/// Which parts of a log entry to search in batch mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BatchScope {
+    /// Default: user text + assistant text (no flags).
+    Default,
+    /// Additive: user text + assistant text + thinking blocks (--thinking).
+    Thinking,
+    /// Thinking blocks only, exclusive (--thinking-only).
+    ThinkingOnly,
+    /// Assistant text only (-t assistant).
+    Assistant,
+    /// User text only (-t user).
+    User,
+    /// Tool use/result blocks (--tools).
+    Tools,
+    /// Everything (-a / --all).
+    All,
+}
+
+impl BatchScope {
+    fn from_tsv_flag(s: &str) -> Result<Self> {
+        match s.trim() {
+            "--thinking" => Ok(Self::Thinking),
+            "--thinking-only" => Ok(Self::ThinkingOnly),
+            "-t assistant" => Ok(Self::Assistant),
+            "-t user" => Ok(Self::User),
+            "--tools" => Ok(Self::Tools),
+            "-a" | "--all" => Ok(Self::All),
+            _ => Err(SnatchError::InvalidArgument {
+                name: "scope".to_string(),
+                reason: format!(
+                    "Unknown scope '{}'. Expected --thinking, --thinking-only, -t assistant, -t user, --tools, or -a",
+                    s
+                ),
+            }),
+        }
+    }
+
+    /// Build from SearchArgs flags (for positional multi-pattern).
+    fn from_search_args(args: &SearchArgs) -> Self {
+        if args.all {
+            Self::All
+        } else if args.thinking_only {
+            Self::ThinkingOnly
+        } else if args.thinking && args.tools {
+            Self::All
+        } else if args.thinking {
+            Self::Thinking
+        } else if args.tools {
+            Self::Tools
+        } else if let Some(ref t) = args.message_type {
+            match t.as_str() {
+                "user" => Self::User,
+                "assistant" => Self::Assistant,
+                _ => Self::Default,
+            }
+        } else {
+            Self::Default
+        }
+    }
+}
+
+/// A pattern with its own scope for batch processing.
+struct BatchPattern {
+    label: String,
+    regex: Regex,
+    scope: BatchScope,
+}
+
+/// Extract searchable text from an entry for a given scope.
+fn extract_text_for_scope<'a>(entry: &'a LogEntry, scope: &BatchScope) -> Vec<&'a str> {
+    match (entry, scope) {
+        // Default scope: user text + assistant text
+        (LogEntry::User(user), BatchScope::Default | BatchScope::User | BatchScope::All) => {
+            match &user.message {
+                crate::model::UserContent::Simple(s) => vec![s.content.as_str()],
+                crate::model::UserContent::Blocks(b) => {
+                    b.content.iter().filter_map(|c| {
+                        if let ContentBlock::Text(t) = c { Some(t.text.as_str()) } else { None }
+                    }).collect()
+                }
+            }
+        }
+        // Thinking (additive): user text is included
+        (LogEntry::User(user), BatchScope::Thinking) => {
+            match &user.message {
+                crate::model::UserContent::Simple(s) => vec![s.content.as_str()],
+                crate::model::UserContent::Blocks(b) => {
+                    b.content.iter().filter_map(|c| {
+                        if let ContentBlock::Text(t) = c { Some(t.text.as_str()) } else { None }
+                    }).collect()
+                }
+            }
+        }
+        (LogEntry::Assistant(assistant), BatchScope::Default | BatchScope::Assistant | BatchScope::All) => {
+            assistant.message.content.iter().filter_map(|block| {
+                if let ContentBlock::Text(t) = block { Some(t.text.as_str()) } else { None }
+            }).collect()
+        }
+        // Thinking (additive): assistant text + thinking blocks
+        (LogEntry::Assistant(assistant), BatchScope::Thinking) => {
+            assistant.message.content.iter().filter_map(|block| {
+                match block {
+                    ContentBlock::Text(t) => Some(t.text.as_str()),
+                    ContentBlock::Thinking(t) => Some(t.thinking.as_str()),
+                    _ => None,
+                }
+            }).collect()
+        }
+        // ThinkingOnly (exclusive): thinking blocks only
+        (LogEntry::Assistant(assistant), BatchScope::ThinkingOnly) => {
+            assistant.message.content.iter().filter_map(|block| {
+                if let ContentBlock::Thinking(t) = block { Some(t.thinking.as_str()) } else { None }
+            }).collect()
+        }
+        // Tools scope tool-use inputs are owned strings — handled separately
+        (LogEntry::Assistant(_), BatchScope::Tools) => vec![],
+        (LogEntry::System(sys), BatchScope::Default | BatchScope::Thinking | BatchScope::All) => {
+            sys.content.as_deref().into_iter().collect()
+        }
+        (LogEntry::Summary(summary), BatchScope::Default | BatchScope::Thinking | BatchScope::All) => {
+            vec![summary.summary.as_str()]
+        }
+        _ => vec![],
+    }
+}
+
+/// Count regex matches across text chunks.
+fn count_regex_in_texts(regex: &Regex, texts: &[&str]) -> usize {
+    texts.iter().map(|t| regex.find_iter(t).count()).sum()
+}
+
+/// Count matches in tool-use/tool-result blocks (needs owned strings).
+fn count_tool_matches(entry: &LogEntry, regex: &Regex) -> usize {
+    match entry {
+        LogEntry::Assistant(assistant) => {
+            let mut count = 0;
+            for block in &assistant.message.content {
+                match block {
+                    ContentBlock::ToolUse(tool) => {
+                        let input_str = serde_json::to_string(&tool.input).unwrap_or_default();
+                        count += regex.find_iter(&input_str).count();
+                    }
+                    ContentBlock::ToolResult(result) => {
+                        if let Some(content) = &result.content {
+                            if let crate::model::content::ToolResultContent::String(text) = content {
+                                count += regex.find_iter(text).count();
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            count
+        }
+        // Note: single-pattern search_entry does NOT search User tool results,
+        // only Assistant ToolUse/ToolResult blocks. Keep batch path consistent.
+        _ => 0,
+    }
+}
+
+/// Count all matches for one pattern against one entry.
+fn count_pattern_matches(entry: &LogEntry, pattern: &BatchPattern) -> usize {
+    let texts = extract_text_for_scope(entry, &pattern.scope);
+    let mut count = count_regex_in_texts(&pattern.regex, &texts);
+
+    // Tool content requires owned strings, handled separately
+    if pattern.scope == BatchScope::Tools || pattern.scope == BatchScope::All {
+        count += count_tool_matches(entry, &pattern.regex);
+    }
+
+    // All scope on assistant also includes thinking
+    if pattern.scope == BatchScope::All {
+        if let LogEntry::Assistant(assistant) = entry {
+            for block in &assistant.message.content {
+                if let ContentBlock::Thinking(t) = block {
+                    count += pattern.regex.find_iter(&t.thinking).count();
+                }
+            }
+        }
+    }
+
+    count
+}
+
+/// Parse a TSV patterns file into batch patterns.
+fn parse_patterns_tsv(path: &std::path::Path) -> Result<Vec<BatchPattern>> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| SnatchError::io(format!("reading patterns file {}", path.display()), e))?;
+
+    let mut patterns = Vec::new();
+    for (line_num, line) in content.lines().enumerate() {
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.first() == Some(&"category") {
+            continue; // header
+        }
+        if fields.len() < 5 {
+            return Err(SnatchError::InvalidArgument {
+                name: "patterns_tsv".to_string(),
+                reason: format!(
+                    "Line {} has {} fields, expected 5 (category, subcategory, label, scope, pattern)",
+                    line_num + 1, fields.len()
+                ),
+            });
+        }
+        let scope = BatchScope::from_tsv_flag(fields[3])?;
+        let regex = RegexBuilder::new(fields[4])
+            .build()
+            .map_err(|e| SnatchError::InvalidArgument {
+                name: "pattern".to_string(),
+                reason: format!("Line {}: invalid regex '{}': {}", line_num + 1, fields[4], e),
+            })?;
+        patterns.push(BatchPattern {
+            label: format!("{}\t{}\t{}", fields[0], fields[1], fields[2]),
+            regex,
+            scope,
+        });
+    }
+    Ok(patterns)
+}
+
+/// Run the batch (multi-pattern, single-pass) search and output counts.
+fn run_batch(cli: &Cli, args: &SearchArgs, patterns: Vec<BatchPattern>) -> Result<()> {
+    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
+
+    let sessions = if let Some(session_id) = &args.session {
+        let session = claude_dir
+            .find_session(session_id)?
+            .ok_or_else(|| SnatchError::SessionNotFound {
+                session_id: session_id.clone(),
+            })?;
+        vec![session]
+    } else if let Some(project_filter) = &args.project {
+        let projects = claude_dir.projects()?;
+        let mut sessions = Vec::new();
+        for project in projects {
+            if project.decoded_path().contains(project_filter) {
+                sessions.extend(project.sessions()?);
+            }
+        }
+        sessions
+    } else {
+        claude_dir.all_sessions()?
+    };
+
+    let mut counts: Vec<usize> = vec![0; patterns.len()];
+
+    let session_count = sessions.len();
+    let show_progress = session_count > 10 && std::io::stderr().is_terminal() && !cli.quiet;
+    let progress = if show_progress {
+        let pb = ProgressBar::new(session_count as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.cyan} [{bar:40.cyan/dim}] {pos}/{len} sessions ({eta} remaining)")
+                .unwrap()
+                .progress_chars("█▓░"),
+        );
+        Some(pb)
+    } else {
+        None
+    };
+
+    for session in &sessions {
+        if let Some(ref pb) = progress {
+            pb.inc(1);
+        }
+        let entries = match session.parse_with_options(cli.max_file_size) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in &entries {
+            for (i, pattern) in patterns.iter().enumerate() {
+                counts[i] += count_pattern_matches(entry, pattern);
+            }
+        }
+    }
+
+    if let Some(pb) = progress {
+        pb.finish_and_clear();
+    }
+
+    // Output
+    let is_tsv_mode = args.patterns_tsv.is_some();
+    match cli.effective_output() {
+        OutputFormat::Json => {
+            if is_tsv_mode {
+                // Structured output with TSV metadata
+                let entries: Vec<serde_json::Value> = patterns.iter().enumerate().map(|(i, p)| {
+                    let parts: Vec<&str> = p.label.splitn(3, '\t').collect();
+                    serde_json::json!({
+                        "category": parts.first().unwrap_or(&""),
+                        "subcategory": parts.get(1).unwrap_or(&""),
+                        "label": parts.get(2).unwrap_or(&""),
+                        "count": counts[i],
+                    })
+                }).collect();
+                println!("{}", serde_json::to_string_pretty(&entries)?);
+            } else {
+                // Simple pattern -> count mapping
+                let map: Vec<serde_json::Value> = patterns.iter().enumerate().map(|(i, p)| {
+                    serde_json::json!({
+                        "pattern": p.label,
+                        "count": counts[i],
+                    })
+                }).collect();
+                println!("{}", serde_json::to_string_pretty(&map)?);
+            }
+        }
+        OutputFormat::Tsv => {
+            if is_tsv_mode {
+                println!("category\tsubcategory\tlabel\tcount");
+                for (i, p) in patterns.iter().enumerate() {
+                    println!("{}\t{}", p.label, counts[i]);
+                }
+            } else {
+                println!("pattern\tcount");
+                for (i, p) in patterns.iter().enumerate() {
+                    println!("{}\t{}", p.label, counts[i]);
+                }
+            }
+        }
+        _ => {
+            if is_tsv_mode {
+                let mut prev_cat = String::new();
+                for (i, p) in patterns.iter().enumerate() {
+                    let parts: Vec<&str> = p.label.splitn(3, '\t').collect();
+                    let cat = parts.first().unwrap_or(&"");
+                    let label = parts.get(2).unwrap_or(&"");
+                    if *cat != prev_cat {
+                        if !prev_cat.is_empty() { println!(); }
+                        println!("=== {} ===", cat.to_uppercase());
+                        prev_cat = cat.to_string();
+                    }
+                    println!("{:<7} {}", counts[i], label);
+                }
+            } else {
+                // Multi-pattern positional: just label=pattern text
+                for (i, p) in patterns.iter().enumerate() {
+                    println!("{:<7} {}", counts[i], p.label);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ─── Main entry point ───────────────────────────────────────────────────────
+
 /// Run the search command.
 pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
-    // Reject empty search patterns - they would match everything and aren't useful
+    // ── TSV batch mode ──────────────────────────────────────────────────
+    // Design note: --patterns-tsv changes search's semantics from "find and display results"
+    // to "batch count across heterogeneous queries." This is coherent for counting but may not
+    // remain coherent if analytical features are needed (ratios, trend comparison, aggregation).
+    // Revisit signal: if this path needs output modes or processing logic that conflicts with
+    // search's primary purpose, extract to a dedicated `snatch analyze` command.
+    if let Some(ref tsv_path) = args.patterns_tsv {
+        let patterns = parse_patterns_tsv(tsv_path)?;
+        if patterns.is_empty() {
+            println!("No patterns found in {}", tsv_path.display());
+            return Ok(());
+        }
+        return run_batch(cli, args, patterns);
+    }
+
+    // ── Multi-pattern positional mode (single-pass batch) ───────────────
+    // Multi-pattern positional: general-purpose single-pass batch search.
+    // All patterns share the same scope flags from the CLI.
+    if args.pattern.len() > 1 {
+        let scope = BatchScope::from_search_args(args);
+        let mut patterns = Vec::new();
+        for pat_str in &args.pattern {
+            let regex = RegexBuilder::new(pat_str)
+                .case_insensitive(args.ignore_case)
+                .build()
+                .map_err(|e| SnatchError::InvalidArgument {
+                    name: "pattern".to_string(),
+                    reason: format!("invalid regex '{}': {}", pat_str, e),
+                })?;
+            patterns.push(BatchPattern {
+                label: pat_str.clone(),
+                regex,
+                scope: scope.clone(),
+            });
+        }
+        return run_batch(cli, args, patterns);
+    }
+
+    // ── Single-pattern mode (original behavior) ─────────────────────────
     if args.pattern.is_empty() {
         return Err(SnatchError::InvalidArgument {
             name: "pattern".to_string(),
@@ -288,8 +680,9 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
         });
     }
 
-    // Reject whitespace-only patterns (also not useful)
-    if args.pattern.trim().is_empty() {
+    let pattern = &args.pattern[0];
+
+    if pattern.trim().is_empty() {
         return Err(SnatchError::InvalidArgument {
             name: "pattern".to_string(),
             reason: "search pattern cannot be whitespace-only".to_string(),
@@ -299,7 +692,7 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
 
     // Build regex
-    let regex = RegexBuilder::new(&args.pattern)
+    let regex = RegexBuilder::new(pattern)
         .case_insensitive(args.ignore_case)
         .build()
         .map_err(|e| SnatchError::InvalidArgument {
@@ -350,6 +743,19 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
         None
     };
 
+    // In count mode, use occurrence-based counting (consistent with batch path).
+    // Build a BatchPattern to reuse the same counting logic.
+    let count_mode_pattern = if args.count {
+        let scope = BatchScope::from_search_args(args);
+        Some(BatchPattern {
+            label: pattern.clone(),
+            regex: regex.clone(),
+            scope,
+        })
+    } else {
+        None
+    };
+
     // Search each session
     for session in sessions {
         if let Some(ref pb) = progress {
@@ -368,36 +774,46 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
                 continue;
             }
 
-            let matches = search_entry(entry, &regex, args);
+            if let Some(ref bp) = count_mode_pattern {
+                // Count mode: use occurrence-based counting (same as batch path)
+                let entry_count = count_pattern_matches(entry, bp);
+                if entry_count > 0 {
+                    sessions_with_matches.insert(session.session_id().to_string());
+                    total_matches += entry_count;
+                    session_match_count += entry_count;
+                }
+            } else {
+                // Normal mode: use line-based matching with context
+                let matches = search_entry(entry, &regex, args);
 
-            if !matches.is_empty() {
-                sessions_with_matches.insert(session.session_id().to_string());
+                if !matches.is_empty() {
+                    sessions_with_matches.insert(session.session_id().to_string());
 
-                for m in matches {
-                    total_matches += 1;
-                    session_match_count += 1;
+                    for m in matches {
+                        total_matches += 1;
+                        session_match_count += 1;
 
-                    // For files_only or count mode, we don't need to store full results
-                    if !args.files_only && !args.count {
-                        let result = SearchResult {
-                            session_id: session.session_id().to_string(),
-                            project: session.project_path().to_string(),
-                            uuid: entry.uuid().unwrap_or("").to_string(),
-                            entry_type: entry.message_type().to_string(),
-                            location: m.location,
-                            line: m.line,
-                            context_before: m.context_before,
-                            matched_text: m.matched_text,
-                            context_after: m.context_after,
-                            score: m.score,
-                        };
+                        if !args.files_only {
+                            let result = SearchResult {
+                                session_id: session.session_id().to_string(),
+                                project: session.project_path().to_string(),
+                                uuid: entry.uuid().unwrap_or("").to_string(),
+                                entry_type: entry.message_type().to_string(),
+                                location: m.location,
+                                line: m.line,
+                                context_before: m.context_before,
+                                matched_text: m.matched_text,
+                                context_after: m.context_after,
+                                score: m.score,
+                            };
 
-                        all_results.push(result);
-                    }
+                            all_results.push(result);
+                        }
 
-                    // Check limit (unless --no-limit is set)
-                    if !args.no_limit && total_matches >= args.limit {
-                        break;
+                        // Check limit (unless --no-limit is set)
+                        if !args.no_limit && total_matches >= args.limit {
+                            break;
+                        }
                     }
                 }
             }
@@ -665,9 +1081,10 @@ impl Matcher<'_> {
 /// Search an entry for matches.
 fn search_entry(entry: &LogEntry, regex: &Regex, args: &SearchArgs) -> Vec<Match> {
     // Create the appropriate matcher
+    // Safety: search_entry is only called from the single-pattern path
     let matcher = if args.fuzzy {
         Matcher::Fuzzy {
-            pattern: &args.pattern,
+            pattern: &args.pattern[0],
             ignore_case: args.ignore_case,
             threshold: args.fuzzy_threshold,
         }
@@ -678,8 +1095,8 @@ fn search_entry(entry: &LogEntry, regex: &Regex, args: &SearchArgs) -> Vec<Match
     let mut matches = Vec::new();
 
     match entry {
-        LogEntry::User(user) => {
-            // Search user content
+        LogEntry::User(user) if !args.thinking_only => {
+            // Search user content (skip when --thinking-only is set)
             let text = match &user.message {
                 crate::model::UserContent::Simple(s) => s.content.clone(),
                 crate::model::UserContent::Blocks(b) => {
@@ -699,23 +1116,24 @@ fn search_entry(entry: &LogEntry, regex: &Regex, args: &SearchArgs) -> Vec<Match
         LogEntry::Assistant(assistant) => {
             for block in &assistant.message.content {
                 match block {
-                    ContentBlock::Text(text) => {
+                    ContentBlock::Text(text) if !args.thinking_only => {
+                        // Skip assistant text when --thinking-only is set
                         if matcher.is_match(&text.text) {
                             matches.extend(matcher.find_matches_in(&text.text, "assistant text", args.context));
                         }
                     }
-                    ContentBlock::Thinking(thinking) if args.thinking || args.all => {
+                    ContentBlock::Thinking(thinking) if args.thinking || args.thinking_only || args.all => {
                         if matcher.is_match(&thinking.thinking) {
                             matches.extend(matcher.find_matches_in(&thinking.thinking, "thinking", args.context));
                         }
                     }
-                    ContentBlock::ToolUse(tool) if args.tools || args.all => {
+                    ContentBlock::ToolUse(tool) if !args.thinking_only && (args.tools || args.all) => {
                         let input_str = serde_json::to_string(&tool.input).unwrap_or_default();
                         if matcher.is_match(&input_str) {
                             matches.extend(matcher.find_matches_in(&input_str, &format!("tool:{}", tool.name), args.context));
                         }
                     }
-                    ContentBlock::ToolResult(result) if args.tools || args.all => {
+                    ContentBlock::ToolResult(result) if !args.thinking_only && (args.tools || args.all) => {
                         if let Some(content) = &result.content {
                             if let crate::model::content::ToolResultContent::String(text) = content {
                                 if matcher.is_match(text) {
@@ -728,14 +1146,14 @@ fn search_entry(entry: &LogEntry, regex: &Regex, args: &SearchArgs) -> Vec<Match
                 }
             }
         }
-        LogEntry::System(system) => {
+        LogEntry::System(system) if !args.thinking_only => {
             if let Some(content) = &system.content {
                 if matcher.is_match(content) {
                     matches.extend(matcher.find_matches_in(content, "system", args.context));
                 }
             }
         }
-        LogEntry::Summary(summary) => {
+        LogEntry::Summary(summary) if !args.thinking_only => {
             if matcher.is_match(&summary.summary) {
                 matches.extend(matcher.find_matches_in(&summary.summary, "summary", args.context));
             }
