@@ -13,7 +13,7 @@ cargo test                     # run tests
 
 ## Session History Recall (snatch MCP)
 
-This project provides an MCP server (`snatch serve-mcp`) that exposes 11 tools for querying Claude Code session history. When you need to recall what happened in previous sessions or understand the narrative of past work, use these tools:
+This project provides an MCP server (`snatch serve-mcp`) that exposes 12 tools for querying Claude Code session history. When you need to recall what happened in previous sessions or understand the narrative of past work, use these tools:
 
 | Need | Tool | Example |
 |------|------|---------|
@@ -27,6 +27,7 @@ This project provides an MCP server (`snatch serve-mcp`) that exposes 11 tools f
 | What went wrong & how fixed? | `get_session_lessons` | session_id="abc123" |
 | What files were changed? | `get_tool_calls` | session_id="abc123", tool_filter="Write,Edit" |
 | Track long-term goals | `manage_goals` | operation="list", project="snatch" |
+| Capture tactical work state | `manage_notes` | operation="add", project="snatch", text="..." |
 | List all sessions | `list_sessions` | project="claude-snatch" |
 | Session metadata | `get_session_info` | session_id="abc123" |
 | Usage statistics | `get_stats` | project="claude-snatch" |
@@ -57,6 +58,18 @@ Goals survive compaction and sessions. Use `manage_goals` to track long-term int
 Active goals are auto-injected by the SessionStart hook on startup and compaction.
 Status values: `open`, `in_progress`, `done`, `abandoned`.
 Storage: `~/.claude/projects/<project>/memory/goals.json`
+
+### Tactical Notes
+
+Notes capture mid-work state that survives compaction. Unlike goals (strategic, multi-session), notes are tactical ("tried X, failed because Y, now doing Z").
+
+- `manage_notes(operation="add", project="snatch", text="Tried redis caching, failed due to connection pooling")` — add a note
+- `manage_notes(operation="list", project="snatch")` — see all notes
+- `manage_notes(operation="remove", project="snatch", id=1)` — remove a specific note
+- `manage_notes(operation="clear", project="snatch")` — clear all notes
+
+Notes are auto-injected by the SessionStart hook on startup and compaction.
+Storage: `~/.claude/projects/<project>/memory/notes.json`
 
 ### Session Digest
 
@@ -89,6 +102,23 @@ The digest is auto-injected after compaction via the SessionStart hook.
 - When the user asks "what are we working on?" or "what's left?"
 
 This is not optional. Goal amnesia after compaction is the #1 pain point. If you forget to track goals, the next session starts blind.
+
+### Proactive Note-Taking
+
+**Use tactical notes to capture work state that would be lost on compaction.**
+
+**When to add a note:**
+- You've tried an approach that failed — record what failed and why
+- You're mid-way through a multi-step task — record current step and next steps
+- You've discovered a non-obvious constraint or gotcha
+- You're about to do something complex where losing context would force restart
+
+**When to clear notes:**
+- After a significant work unit is complete and committed
+- When notes are stale and no longer relevant
+- At the start of a fundamentally new task
+
+Notes are lightweight and disposable. Don't overthink them — just write what future-you needs to know.
 
 ### Usage Guidelines
 
