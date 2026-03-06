@@ -85,6 +85,10 @@ impl Project {
     }
 
     /// List all sessions in this project.
+    ///
+    /// Scans the top-level project directory for session files, and also
+    /// checks `<session-uuid>/subagents/` subdirectories for subagent sessions
+    /// stored in the newer Claude Code layout.
     pub fn sessions(&self) -> Result<Vec<Session>> {
         let mut sessions = Vec::new();
 
@@ -102,7 +106,23 @@ impl Project {
             if is_session_file(&path) {
                 match Session::from_path(&path, &self.decoded_path) {
                     Ok(session) => sessions.push(session),
-                    Err(_) => continue, // Skip invalid session files
+                    Err(_) => continue,
+                }
+            } else if path.is_dir() {
+                // Check for <session-uuid>/subagents/ subdirectory
+                let subagents_dir = path.join("subagents");
+                if subagents_dir.is_dir() {
+                    if let Ok(sub_entries) = std::fs::read_dir(&subagents_dir) {
+                        for sub_entry in sub_entries.flatten() {
+                            let sub_path = sub_entry.path();
+                            if is_session_file(&sub_path) {
+                                match Session::from_path(&sub_path, &self.decoded_path) {
+                                    Ok(session) => sessions.push(session),
+                                    Err(_) => continue,
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

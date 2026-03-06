@@ -584,12 +584,16 @@ pub fn is_valid_project_path(decoded: &str) -> bool {
 
 /// Parse a session filename to extract the UUID.
 ///
-/// Session files are named `<uuid>.jsonl` or `agent-<hash>.jsonl`.
+/// Session files are named `<uuid>.jsonl` or `agent-<variant>-<hash>.jsonl`.
+/// Variants include `agent-<hash>` and `agent-acompact-<hash>` (compacted subagents).
 #[must_use]
 pub fn parse_session_filename(filename: &str) -> Option<SessionFileInfo> {
     let name = filename.strip_suffix(".jsonl")?;
 
-    if let Some(hash) = name.strip_prefix("agent-") {
+    if let Some(rest) = name.strip_prefix("agent-") {
+        // Accept any agent- prefix: "agent-<hash>", "agent-acompact-<hash>", etc.
+        // The last segment is the hash for display purposes.
+        let hash = rest.rsplit('-').next().unwrap_or(rest);
         Some(SessionFileInfo {
             session_id: name.to_string(),
             is_subagent: true,
@@ -759,6 +763,17 @@ mod tests {
         let info = parse_session_filename("agent-3e533ee.jsonl").unwrap();
         assert!(info.is_subagent);
         assert_eq!(info.agent_hash, Some("3e533ee".to_string()));
+
+        // Compacted subagent session
+        let info = parse_session_filename("agent-acompact-648b08b7a5dc4d35.jsonl").unwrap();
+        assert!(info.is_subagent);
+        assert_eq!(info.session_id, "agent-acompact-648b08b7a5dc4d35");
+        assert_eq!(info.agent_hash, Some("648b08b7a5dc4d35".to_string()));
+
+        // Short compacted subagent
+        let info = parse_session_filename("agent-acompact-3d4e81.jsonl").unwrap();
+        assert!(info.is_subagent);
+        assert_eq!(info.agent_hash, Some("3d4e81".to_string()));
 
         // Invalid
         assert!(parse_session_filename("not-a-session.txt").is_none());
