@@ -17,6 +17,7 @@ pub mod index;
 pub mod info;
 pub mod lessons;
 pub mod list;
+pub mod notes;
 pub mod messages;
 pub mod pick;
 pub mod prompts;

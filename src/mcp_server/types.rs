@@ -542,3 +542,49 @@ pub struct SessionDigestResponse {
     pub thinking_keywords: Vec<String>,
     pub formatted: String,
 }
+
+// ============================================================================
+// New Tool Types: manage_notes
+// ============================================================================
+
+/// Request for tactical note management operations.
+#[derive(Debug, Deserialize, ToolInput)]
+pub struct ManageNotesRequest {
+    /// Operation: "list", "add", "remove", "clear".
+    pub operation: String,
+
+    /// Project path filter (substring match). Required.
+    pub project: String,
+
+    /// Note text (required for "add").
+    pub text: Option<String>,
+
+    /// Session ID to tag the note with (optional, for "add").
+    pub session_id: Option<String>,
+
+    /// Note ID (required for "remove").
+    pub id: Option<u64>,
+}
+
+/// A note entry in responses.
+#[derive(Debug, Serialize)]
+pub struct NoteEntry {
+    pub id: u64,
+    pub text: String,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+/// Response for manage_notes.
+#[derive(Debug, Serialize)]
+pub struct ManageNotesResponse {
+    pub operation: String,
+    pub project_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<Vec<NoteEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<NoteEntry>,
+}

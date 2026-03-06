@@ -93,6 +93,7 @@ pub mod extraction;
 pub mod git;
 pub mod goals;
 pub mod index;
+pub mod notes;
 pub mod model;
 pub mod parser;
 pub mod reconstruction;

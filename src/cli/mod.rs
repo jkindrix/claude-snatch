@@ -243,6 +243,10 @@ pub enum Commands {
     #[command(display_order = 28)]
     Digest(DigestArgs),
 
+    /// Manage tactical session notes for a project.
+    #[command(display_order = 29)]
+    Notes(NotesArgs),
+
     // ═══════════════════════════════════════════════════════════════════════
     // EXPORT - Extract content in various formats
     // ═══════════════════════════════════════════════════════════════════════
@@ -1858,6 +1862,29 @@ pub struct DigestArgs {
     pub max_prompts: usize,
 }
 
+/// Arguments for the notes command.
+#[derive(Debug, Parser)]
+pub struct NotesArgs {
+    /// Operation: list, add, remove, clear (default: list).
+    pub operation: Option<String>,
+
+    /// Project path filter (substring match).
+    #[arg(short = 'p', long)]
+    pub project: Option<String>,
+
+    /// Note text (required for add).
+    #[arg(short = 't', long)]
+    pub text: Option<String>,
+
+    /// Note ID (required for remove).
+    #[arg(long)]
+    pub id: Option<u64>,
+
+    /// Session ID to tag the note with.
+    #[arg(long)]
+    pub session_id: Option<String>,
+}
+
 /// Arguments for the timeline command.
 #[derive(Debug, Parser)]
 pub struct TimelineArgs {
@@ -2234,6 +2261,7 @@ pub fn run() -> Result<()> {
         Some(Commands::Lessons(args)) => commands::lessons::run(&cli, args),
         Some(Commands::Goals(args)) => commands::goals::run(&cli, args),
         Some(Commands::Digest(args)) => commands::digest::run(&cli, args),
+        Some(Commands::Notes(args)) => commands::notes::run(&cli, args),
         Some(Commands::Timeline(args)) => commands::timeline::run(&cli, args),
         Some(Commands::Messages(args)) => commands::messages::run(&cli, args),
         Some(Commands::Pick(args)) => commands::pick::run(&cli, args),

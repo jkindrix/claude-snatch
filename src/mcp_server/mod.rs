@@ -15,6 +15,7 @@
 //! - `get_session_lessons` - Extract error→fix pairs and user corrections
 //! - `manage_goals` - Persistent goal tracking across sessions and compactions
 //! - `get_session_digest` - Compact session summary for orientation after compaction
+//! - `manage_notes` - Tactical session notes that survive compaction
 
 #![cfg(feature = "mcp")]
 
@@ -1249,6 +1250,139 @@ impl SnatchServer {
         match ToolOutput::json(&response) {
             Ok(output) => output,
             Err(e) => ToolOutput::error(format!("JSON serialization error: {e}")),
+        }
+    }
+
+    // ========================================================================
+    // Tactical Notes
+    // ========================================================================
+
+    /// Manage tactical session notes for a project. Notes capture work state that survives compaction.
+    #[tool(description = "Manage tactical session notes for a project. Notes capture mid-work state (\"tried X, failed because Y\") that survives compaction. Operations: list, add, remove, clear.")]
+    async fn manage_notes(&self, request: ManageNotesRequest) -> ToolOutput {
+        use crate::notes::{load_notes, save_notes};
+
+        let resolved = match resolve_project(self, &request.project) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+
+        let mut store = match load_notes(&resolved.project_dir) {
+            Ok(s) => s,
+            Err(e) => return ToolOutput::error(format!("Failed to load notes: {e}")),
+        };
+
+        match request.operation.as_str() {
+            "list" => {
+                let notes: Vec<NoteEntry> = store
+                    .notes
+                    .iter()
+                    .map(|n| NoteEntry {
+                        id: n.id,
+                        text: n.text.clone(),
+                        created_at: n.created_at.to_rfc3339(),
+                        session_id: n.session_id.clone(),
+                    })
+                    .collect();
+
+                let response = ManageNotesResponse {
+                    operation: "list".into(),
+                    project_path: resolved.project_path,
+                    message: Some(format!("{} note(s)", notes.len())),
+                    notes: Some(notes),
+                    note: None,
+                };
+
+                match ToolOutput::json(&response) {
+                    Ok(output) => output,
+                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+                }
+            }
+
+            "add" => {
+                let text = match request.text {
+                    Some(t) if !t.trim().is_empty() => t,
+                    _ => return ToolOutput::error("'text' is required for add operation"),
+                };
+
+                let id = store.add_note(text.clone(), request.session_id);
+
+                if let Err(e) = save_notes(&resolved.project_dir, &store) {
+                    return ToolOutput::error(format!("Failed to save notes: {e}"));
+                }
+
+                let note = store.notes.iter().find(|n| n.id == id).unwrap();
+                let response = ManageNotesResponse {
+                    operation: "add".into(),
+                    project_path: resolved.project_path,
+                    message: Some(format!("Added note #{id}")),
+                    notes: None,
+                    note: Some(NoteEntry {
+                        id: note.id,
+                        text: note.text.clone(),
+                        created_at: note.created_at.to_rfc3339(),
+                        session_id: note.session_id.clone(),
+                    }),
+                };
+
+                match ToolOutput::json(&response) {
+                    Ok(output) => output,
+                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+                }
+            }
+
+            "remove" => {
+                let id = match request.id {
+                    Some(id) => id,
+                    None => return ToolOutput::error("'id' is required for remove operation"),
+                };
+
+                if !store.remove_note(id) {
+                    return ToolOutput::error(format!("Note #{id} not found"));
+                }
+
+                if let Err(e) = save_notes(&resolved.project_dir, &store) {
+                    return ToolOutput::error(format!("Failed to save notes: {e}"));
+                }
+
+                let response = ManageNotesResponse {
+                    operation: "remove".into(),
+                    project_path: resolved.project_path,
+                    message: Some(format!("Removed note #{id}")),
+                    notes: None,
+                    note: None,
+                };
+
+                match ToolOutput::json(&response) {
+                    Ok(output) => output,
+                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+                }
+            }
+
+            "clear" => {
+                let removed = store.clear();
+
+                if let Err(e) = save_notes(&resolved.project_dir, &store) {
+                    return ToolOutput::error(format!("Failed to save notes: {e}"));
+                }
+
+                let response = ManageNotesResponse {
+                    operation: "clear".into(),
+                    project_path: resolved.project_path,
+                    message: Some(format!("Cleared {removed} note(s)")),
+                    notes: None,
+                    note: None,
+                };
+
+                match ToolOutput::json(&response) {
+                    Ok(output) => output,
+                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+                }
+            }
+
+            other => ToolOutput::error(format!(
+                "Unknown operation '{other}'. Use: list, add, remove, clear"
+            )),
         }
     }
 }
