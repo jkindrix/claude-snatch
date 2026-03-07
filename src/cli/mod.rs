@@ -903,6 +903,30 @@ pub struct SearchArgs {
     /// Implies --count --no-limit. Runs all patterns in a single pass.
     #[arg(long, value_name = "FILE")]
     pub patterns_tsv: Option<std::path::PathBuf>,
+
+    /// Filter to sessions modified since this date (YYYY-MM-DD or relative like "1week", "3days").
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Filter to sessions modified until this date (YYYY-MM-DD or relative like "1week", "3days").
+    #[arg(long)]
+    pub until: Option<String>,
+
+    /// Limit search to the N most recent sessions.
+    #[arg(long)]
+    pub recent: Option<usize>,
+
+    /// Output only the matched text (like grep -o). One match per line.
+    #[arg(short = 'O', long)]
+    pub match_only: bool,
+
+    /// Exclude matches where this pattern also matches in the same entry.
+    #[arg(long)]
+    pub exclude: Option<String>,
+
+    /// Include session dates in count output.
+    #[arg(long)]
+    pub with_date: bool,
 }
 
 /// Arguments for the stats command.
@@ -1834,8 +1858,8 @@ pub enum StandupFormat {
 /// Arguments for the lessons command.
 #[derive(Debug, Parser)]
 pub struct LessonsArgs {
-    /// Session ID (full UUID or short prefix).
-    pub session_id: String,
+    /// Session ID (full UUID or short prefix). Optional when --project or --all is used.
+    pub session_id: Option<String>,
 
     /// Lesson category: errors, corrections, or all.
     #[arg(short = 'c', long, default_value = "all")]
@@ -1844,6 +1868,14 @@ pub struct LessonsArgs {
     /// Maximum lessons per category.
     #[arg(short = 'l', long, default_value = "30")]
     pub limit: usize,
+
+    /// Extract lessons across all sessions for a project (substring match).
+    #[arg(short = 'p', long)]
+    pub project: Option<String>,
+
+    /// Extract lessons across all sessions.
+    #[arg(short = 'a', long)]
+    pub all: bool,
 }
 
 /// Arguments for the goals command.

@@ -4,11 +4,14 @@
 
 use std::collections::HashSet;
 use std::io::IsTerminal;
+use std::time::SystemTime;
 
+use chrono::{DateTime, Utc};
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::{Regex, RegexBuilder};
 
 use crate::cli::{Cli, OutputFormat, SearchArgs};
+use crate::discovery::Session;
 use crate::error::{Result, SnatchError};
 use crate::model::{ContentBlock, LogEntry};
 
@@ -504,11 +507,11 @@ fn parse_patterns_tsv(path: &std::path::Path) -> Result<Vec<BatchPattern>> {
     Ok(patterns)
 }
 
-/// Run the batch (multi-pattern, single-pass) search and output counts.
-fn run_batch(cli: &Cli, args: &SearchArgs, patterns: Vec<BatchPattern>) -> Result<()> {
+/// Collect and filter sessions based on search args (shared by single-pattern and batch paths).
+fn collect_sessions(cli: &Cli, args: &SearchArgs) -> Result<Vec<Session>> {
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
 
-    let sessions = if let Some(session_id) = &args.session {
+    let mut sessions = if let Some(session_id) = &args.session {
         let session = claude_dir
             .find_session(session_id)?
             .ok_or_else(|| SnatchError::SessionNotFound {
@@ -517,16 +520,57 @@ fn run_batch(cli: &Cli, args: &SearchArgs, patterns: Vec<BatchPattern>) -> Resul
         vec![session]
     } else if let Some(project_filter) = &args.project {
         let projects = claude_dir.projects()?;
-        let mut sessions = Vec::new();
+        let mut sess = Vec::new();
         for project in projects {
             if project.decoded_path().contains(project_filter) {
-                sessions.extend(project.sessions()?);
+                sess.extend(project.sessions()?);
             }
         }
-        sessions
+        sess
     } else {
         claude_dir.all_sessions()?
     };
+
+    // Apply --since / --until date filters
+    let since_time: Option<SystemTime> = if let Some(ref since) = args.since {
+        Some(super::parse_date_filter(since)?)
+    } else {
+        None
+    };
+    let until_time: Option<SystemTime> = if let Some(ref until) = args.until {
+        Some(super::parse_date_filter(until)?)
+    } else {
+        None
+    };
+    if since_time.is_some() || until_time.is_some() {
+        sessions.retain(|s| {
+            let modified = s.modified_time();
+            if let Some(since) = since_time {
+                if modified < since {
+                    return false;
+                }
+            }
+            if let Some(until) = until_time {
+                if modified > until {
+                    return false;
+                }
+            }
+            true
+        });
+    }
+
+    // Apply --recent N (most recent sessions by modification time)
+    if let Some(n) = args.recent {
+        sessions.sort_by(|a, b| b.modified_time().cmp(&a.modified_time()));
+        sessions.truncate(n);
+    }
+
+    Ok(sessions)
+}
+
+/// Run the batch (multi-pattern, single-pass) search and output counts.
+fn run_batch(cli: &Cli, args: &SearchArgs, patterns: Vec<BatchPattern>) -> Result<()> {
+    let sessions = collect_sessions(cli, args)?;
 
     let mut counts: Vec<usize> = vec![0; patterns.len()];
 
@@ -689,8 +733,6 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
         });
     }
 
-    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
-
     // Build regex
     let regex = RegexBuilder::new(pattern)
         .case_insensitive(args.ignore_case)
@@ -700,32 +742,30 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
             reason: e.to_string(),
         })?;
 
-    // Collect sessions to search
-    let sessions = if let Some(session_id) = &args.session {
-        let session = claude_dir
-            .find_session(session_id)?
-            .ok_or_else(|| SnatchError::SessionNotFound {
-                session_id: session_id.clone(),
-            })?;
-        vec![session]
-    } else if let Some(project_filter) = &args.project {
-        let projects = claude_dir.projects()?;
-        let mut sessions = Vec::new();
-        for project in projects {
-            if project.decoded_path().contains(project_filter) {
-                sessions.extend(project.sessions()?);
-            }
-        }
-        sessions
+    // Build exclude regex if specified
+    let exclude_regex = if let Some(ref exclude_pattern) = args.exclude {
+        Some(
+            RegexBuilder::new(exclude_pattern)
+                .case_insensitive(args.ignore_case)
+                .build()
+                .map_err(|e| SnatchError::InvalidArgument {
+                    name: "exclude".to_string(),
+                    reason: e.to_string(),
+                })?,
+        )
     } else {
-        claude_dir.all_sessions()?
+        None
     };
+
+    // Collect sessions to search
+    let sessions = collect_sessions(cli, args)?;
 
     let mut total_matches = 0;
     let mut all_results = Vec::new();
     let mut sessions_with_matches: HashSet<String> = HashSet::new();
-    // Maps session_id -> (project_path, match_count)
-    let mut match_counts: std::collections::HashMap<String, (String, usize)> = std::collections::HashMap::new();
+    // Maps session_id -> (project_path, match_count, modified_time)
+    let mut match_counts: std::collections::HashMap<String, (String, usize, Option<SystemTime>)> =
+        std::collections::HashMap::new();
 
     // Create progress bar for interactive sessions with many sessions
     let session_count = sessions.len();
@@ -757,7 +797,7 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
     };
 
     // Search each session
-    for session in sessions {
+    for session in &sessions {
         if let Some(ref pb) = progress {
             pb.inc(1);
         }
@@ -772,6 +812,15 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
             // Apply all filters
             if !matches_filters(entry, args) {
                 continue;
+            }
+
+            // Apply --exclude: skip entries where exclude pattern matches
+            if let Some(ref excl) = exclude_regex {
+                let scope = BatchScope::from_search_args(args);
+                let texts = extract_text_for_scope(entry, &scope);
+                if texts.iter().any(|t| excl.is_match(t)) {
+                    continue;
+                }
             }
 
             if let Some(ref bp) = count_mode_pattern {
@@ -827,7 +876,11 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
         if session_match_count > 0 {
             match_counts.insert(
                 session.session_id().to_string(),
-                (session.project_path().to_string(), session_match_count),
+                (
+                    session.project_path().to_string(),
+                    session_match_count,
+                    Some(session.modified_time()),
+                ),
             );
         }
 
@@ -851,7 +904,9 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
     if args.files_only {
         output_files_only(cli, &sessions_with_matches)?;
     } else if args.count {
-        output_count(cli, &match_counts, total_matches)?;
+        output_count(cli, args, &match_counts, total_matches)?;
+    } else if args.match_only {
+        output_match_only(cli, &all_results)?;
     } else {
         output_full_results(cli, args, &all_results, total_matches)?;
     }
@@ -887,25 +942,48 @@ fn output_files_only(cli: &Cli, sessions: &HashSet<String>) -> Result<()> {
     Ok(())
 }
 
+/// Format a SystemTime as YYYY-MM-DD.
+fn format_date(time: &SystemTime) -> String {
+    let dt: DateTime<Utc> = (*time).into();
+    dt.format("%Y-%m-%d").to_string()
+}
+
 /// Output match counts.
 fn output_count(
     cli: &Cli,
-    match_counts: &std::collections::HashMap<String, (String, usize)>,
+    args: &SearchArgs,
+    match_counts: &std::collections::HashMap<String, (String, usize, Option<SystemTime>)>,
     total: usize,
 ) -> Result<()> {
+    // --quiet with --count: output only the total
+    if cli.quiet {
+        match cli.effective_output() {
+            OutputFormat::Json => {
+                println!("{}", serde_json::json!({ "total": total }));
+            }
+            _ => {
+                println!("{}", total);
+            }
+        }
+        return Ok(());
+    }
+
     match cli.effective_output() {
         OutputFormat::Json => {
             // Build a structured JSON with project info
             let by_session: std::collections::HashMap<&str, serde_json::Value> = match_counts
                 .iter()
-                .map(|(session_id, (project, count))| {
-                    (
-                        session_id.as_str(),
-                        serde_json::json!({
-                            "project": project,
-                            "count": count
-                        }),
-                    )
+                .map(|(session_id, (project, count, modified))| {
+                    let mut val = serde_json::json!({
+                        "project": project,
+                        "count": count
+                    });
+                    if args.with_date {
+                        if let Some(time) = modified {
+                            val["date"] = serde_json::Value::String(format_date(time));
+                        }
+                    }
+                    (session_id.as_str(), val)
                 })
                 .collect();
             let output = serde_json::json!({
@@ -920,15 +998,40 @@ fn output_count(
                 println!("{}", total);
             } else {
                 // Multiple sessions - show per-session counts with project
-                let mut counts: Vec<(&String, &(String, usize))> = match_counts.iter().collect();
+                let mut counts: Vec<(&String, &(String, usize, Option<SystemTime>))> =
+                    match_counts.iter().collect();
                 counts.sort_by(|a, b| (b.1).1.cmp(&(a.1).1));
 
-                for (session_id, (project, count)) in counts {
+                for (session_id, (project, count, modified)) in counts {
                     let short_id = &session_id[..8.min(session_id.len())];
-                    println!("{} ({}):{}", short_id, project, count);
+                    if args.with_date {
+                        let date_str = modified
+                            .as_ref()
+                            .map(format_date)
+                            .unwrap_or_else(|| "unknown".to_string());
+                        println!("{} ({}) [{}]:{}", short_id, project, date_str, count);
+                    } else {
+                        println!("{} ({}):{}", short_id, project, count);
+                    }
                 }
                 println!();
                 println!("Total: {}", total);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Output only matched text (--match-only, like grep -o).
+fn output_match_only(cli: &Cli, results: &[SearchResult]) -> Result<()> {
+    match cli.effective_output() {
+        OutputFormat::Json => {
+            let matches: Vec<&str> = results.iter().map(|r| r.matched_text.as_str()).collect();
+            println!("{}", serde_json::to_string_pretty(&matches)?);
+        }
+        _ => {
+            for result in results {
+                println!("{}", result.matched_text);
             }
         }
     }
