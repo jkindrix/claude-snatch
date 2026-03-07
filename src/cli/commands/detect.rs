@@ -10,49 +10,38 @@
 //! Also detects explicit decision markers and reversal patterns.
 
 use std::io::IsTerminal;
-use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 
 use crate::cli::{Cli, DetectArgs};
-use crate::discovery::Session;
+use crate::decisions::{load_decisions, save_decisions};
 use crate::error::{Result, SnatchError};
-use crate::model::{ContentBlock, LogEntry};
 
-use super::get_claude_dir;
+use super::helpers::{
+    self, extract_text, has_options_pattern, has_tool_calls, is_affirmative, is_interrogative,
+    short_id, truncate, SessionCollectParams,
+};
 
 /// A candidate decision point detected in a conversation.
 #[derive(Debug)]
 struct CandidateDecision {
-    /// Timestamp of the decision point.
     timestamp: DateTime<Utc>,
-    /// Session ID.
     session_id: String,
-    /// Short session ID (first 8 chars).
     short_id: String,
-    /// The user's question/prompt that initiated the decision.
     question: String,
-    /// The assistant's response (options/analysis).
     response: String,
-    /// The user's confirmation/choice (if structural pattern).
     confirmation: Option<String>,
-    /// Detection method that found this.
     detection_method: DetectionMethod,
-    /// Confidence score (0.0 - 1.0).
     confidence: f64,
-    /// UUID of the key entry.
     entry_uuid: String,
 }
 
 #[derive(Debug, Clone)]
 enum DetectionMethod {
-    /// Structural: question → options → confirmation
     Structural,
-    /// Explicit marker: "DEF-\d+", "design decision", "we decided", etc.
     ExplicitMarker(String),
-    /// Reversal: "changed my mind", "scratch that", "actually", etc.
     Reversal(String),
 }
 
@@ -64,178 +53,6 @@ impl std::fmt::Display for DetectionMethod {
             DetectionMethod::Reversal(marker) => write!(f, "reversal ({})", marker),
         }
     }
-}
-
-/// Extract visible text from an entry.
-fn extract_text(entry: &LogEntry) -> Option<String> {
-    match entry {
-        LogEntry::User(user) => {
-            let text = match &user.message {
-                crate::model::UserContent::Simple(s) => s.content.clone(),
-                crate::model::UserContent::Blocks(b) => b
-                    .content
-                    .iter()
-                    .filter_map(|c| {
-                        if let ContentBlock::Text(t) = c {
-                            Some(t.text.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            };
-            if text.trim().is_empty() {
-                None
-            } else {
-                Some(text)
-            }
-        }
-        LogEntry::Assistant(assistant) => {
-            let texts: Vec<&str> = assistant
-                .message
-                .content
-                .iter()
-                .filter_map(|block| {
-                    if let ContentBlock::Text(t) = block {
-                        Some(t.text.as_str())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            let joined = texts.join("\n");
-            if joined.trim().is_empty() {
-                None
-            } else {
-                Some(joined)
-            }
-        }
-        _ => None,
-    }
-}
-
-/// Check if an assistant entry contains tool use calls.
-fn has_tool_calls(entry: &LogEntry) -> bool {
-    if let LogEntry::Assistant(assistant) = entry {
-        assistant
-            .message
-            .content
-            .iter()
-            .any(|block| matches!(block, ContentBlock::ToolUse(_)))
-    } else {
-        false
-    }
-}
-
-/// Check if text looks like a question (interrogative).
-fn is_interrogative(text: &str) -> bool {
-    let trimmed = text.trim();
-
-    // Contains question marks
-    if trimmed.contains('?') {
-        return true;
-    }
-
-    // Starts with question words (case-insensitive)
-    let lower = trimmed.to_lowercase();
-    let question_starters = [
-        "what ", "how ", "should ", "can ", "could ", "would ", "will ",
-        "is ", "are ", "do ", "does ", "which ", "where ", "when ", "why ",
-        "shall ", "have you ", "did ",
-    ];
-
-    question_starters.iter().any(|q| lower.starts_with(q))
-}
-
-/// Check if assistant response contains enumeration/options patterns.
-fn has_options_pattern(text: &str) -> bool {
-    let lower = text.to_lowercase();
-
-    // Numbered lists: "1.", "2.", "3." etc.
-    let numbered = Regex::new(r"(?m)^\s*\d+[\.\)]\s+").unwrap();
-    let numbered_count = numbered.find_iter(text).count();
-    if numbered_count >= 2 {
-        return true;
-    }
-
-    // Option A/B or approach 1/2
-    if lower.contains("option a") && lower.contains("option b")
-        || lower.contains("approach 1") && lower.contains("approach 2")
-        || lower.contains("option 1") && lower.contains("option 2")
-    {
-        return true;
-    }
-
-    // Pros/cons patterns
-    if lower.contains("pros:") && lower.contains("cons:")
-        || lower.contains("advantages") && lower.contains("disadvantages")
-        || lower.contains("trade-off") || lower.contains("tradeoff")
-    {
-        return true;
-    }
-
-    // Bullet lists with enough items
-    let bullets = Regex::new(r"(?m)^\s*[-*]\s+").unwrap();
-    if bullets.find_iter(text).count() >= 3 {
-        // Only count as options if also contains comparison-like language
-        if lower.contains("alternatively")
-            || lower.contains("or we could")
-            || lower.contains("another approach")
-            || lower.contains("we could also")
-            || lower.contains("versus")
-            || lower.contains(" vs ")
-        {
-            return true;
-        }
-    }
-
-    false
-}
-
-/// Check if user response is a short affirmative (decision confirmation).
-fn is_affirmative(text: &str) -> bool {
-    let trimmed = text.trim();
-    let lower = trimmed.to_lowercase();
-
-    // Very short responses are more likely confirmations
-    let word_count = trimmed.split_whitespace().count();
-
-    // Direct affirmatives
-    let affirmatives = [
-        "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "sounds good",
-        "go for it", "do it", "let's do it", "let's go", "perfect",
-        "exactly", "agreed", "correct", "right", "absolutely",
-        "that works", "makes sense", "go ahead", "proceed",
-        "i agree", "i like", "i think so", "definitely",
-    ];
-
-    if affirmatives.iter().any(|a| lower.starts_with(a)) {
-        return true;
-    }
-
-    // "Option A/B/1/2" or "let's go with" patterns
-    let choice_patterns = [
-        "option ", "approach ", "let's go with", "go with ",
-        "i prefer", "i'd prefer", "i'll go with", "let's use",
-        "use ", "i choose", "i pick",
-    ];
-    if choice_patterns.iter().any(|p| lower.starts_with(p)) {
-        return true;
-    }
-
-    // Short responses (under 30 words) that aren't questions
-    if word_count <= 30 && !trimmed.contains('?') {
-        // Contains positive language
-        if lower.contains("agree") || lower.contains("go with")
-            || lower.contains("let's") || lower.contains("sounds")
-            || lower.contains("perfect") || lower.contains("great")
-        {
-            return true;
-        }
-    }
-
-    false
 }
 
 /// Explicit decision marker patterns.
@@ -261,7 +78,6 @@ fn find_explicit_markers(text: &str) -> Vec<String> {
         }
     }
 
-    // Additional context-free markers
     if lower.contains("after discussion") || lower.contains("after considering") {
         markers.push("after-deliberation".to_string());
     }
@@ -299,87 +115,16 @@ fn find_reversal_markers(text: &str) -> Vec<String> {
     markers
 }
 
-/// Collect sessions matching detect args.
-fn collect_sessions(cli: &Cli, args: &DetectArgs) -> Result<Vec<Session>> {
-    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
-
-    let mut sessions = if let Some(session_id) = &args.session {
-        let session = claude_dir
-            .find_session(session_id)?
-            .ok_or_else(|| SnatchError::SessionNotFound {
-                session_id: session_id.clone(),
-            })?;
-        vec![session]
-    } else if let Some(project_filter) = &args.project {
-        let projects = claude_dir.projects()?;
-        let mut sess = Vec::new();
-        for project in projects {
-            if project.decoded_path().contains(project_filter) {
-                sess.extend(project.sessions()?);
-            }
-        }
-        sess
-    } else {
-        claude_dir.all_sessions()?
-    };
-
-    // Date filters
-    let since_time: Option<SystemTime> = if let Some(ref since) = args.since {
-        Some(super::parse_date_filter(since)?)
-    } else {
-        None
-    };
-    let until_time: Option<SystemTime> = if let Some(ref until) = args.until {
-        Some(super::parse_date_filter(until)?)
-    } else {
-        None
-    };
-    if since_time.is_some() || until_time.is_some() {
-        sessions.retain(|s| {
-            let modified = s.modified_time();
-            if let Some(since) = since_time {
-                if modified < since {
-                    return false;
-                }
-            }
-            if let Some(until) = until_time {
-                if modified > until {
-                    return false;
-                }
-            }
-            true
-        });
-    }
-
-    if let Some(n) = args.recent {
-        sessions.sort_by(|a, b| b.modified_time().cmp(&a.modified_time()));
-        sessions.truncate(n);
-    }
-
-    if args.no_subagents {
-        sessions.retain(|s| !s.is_subagent());
-    }
-
-    Ok(sessions)
-}
-
-/// Truncate text for display.
-fn truncate(text: &str, max_chars: usize) -> String {
-    if text.len() <= max_chars {
-        text.to_string()
-    } else {
-        let boundary = text
-            .char_indices()
-            .nth(max_chars)
-            .map(|(i, _)| i)
-            .unwrap_or(text.len());
-        format!("{}...", &text[..boundary])
-    }
-}
-
 /// Run the detect command.
 pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
-    let sessions = collect_sessions(cli, args)?;
+    let sessions = helpers::collect_sessions(cli, &SessionCollectParams {
+        session: args.session.as_deref(),
+        project: args.project.as_deref(),
+        since: args.since.as_deref(),
+        until: args.until.as_deref(),
+        recent: args.recent,
+        no_subagents: args.no_subagents,
+    })?;
 
     let session_count = sessions.len();
     let show_progress = session_count > 10 && std::io::stderr().is_terminal() && !cli.quiet;
@@ -409,20 +154,9 @@ pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
             Err(_) => continue,
         };
 
-        // Filter to main thread
-        let main_entries: Vec<&LogEntry> = entries
-            .iter()
-            .filter(|e| !e.is_sidechain())
-            .filter(|e| matches!(e, LogEntry::User(_) | LogEntry::Assistant(_)))
-            .collect();
+        let main_entries = helpers::main_thread_entries(&entries);
+        let sid = short_id(session.session_id()).to_string();
 
-        let short_id = if session.session_id().len() >= 8 {
-            session.session_id()[..8].to_string()
-        } else {
-            session.session_id().to_string()
-        };
-
-        // Scan for structural pattern: user question → assistant options → user confirmation
         for i in 0..main_entries.len() {
             let entry = main_entries[i];
 
@@ -433,7 +167,6 @@ pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
                     let timestamp = entry.timestamp().unwrap_or_else(Utc::now);
                     let confidence = 0.85;
                     if confidence >= min_confidence {
-                        // Get surrounding context
                         let (question, response) = if entry.message_type() == "user" {
                             let resp = if i + 1 < main_entries.len() {
                                 extract_text(main_entries[i + 1]).unwrap_or_default()
@@ -453,7 +186,7 @@ pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
                         candidates.push(CandidateDecision {
                             timestamp,
                             session_id: session.session_id().to_string(),
-                            short_id: short_id.clone(),
+                            short_id: sid.clone(),
                             question,
                             response,
                             confirmation: None,
@@ -480,7 +213,7 @@ pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
                             candidates.push(CandidateDecision {
                                 timestamp,
                                 session_id: session.session_id().to_string(),
-                                short_id: short_id.clone(),
+                                short_id: sid.clone(),
                                 question: text.clone(),
                                 response,
                                 confirmation: None,
@@ -507,7 +240,6 @@ pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
                 continue;
             }
 
-            // Next entry should be assistant with options
             if i + 1 >= main_entries.len() {
                 continue;
             }
@@ -525,7 +257,6 @@ pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
                 continue;
             }
 
-            // Look for user confirmation
             let confirmation = if i + 2 < main_entries.len() {
                 let confirm_entry = main_entries[i + 2];
                 if confirm_entry.message_type() == "user" {
@@ -537,17 +268,14 @@ pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
                 None
             };
 
-            // Score confidence
-            let mut confidence: f64 = 0.5; // Base for question + options
+            let mut confidence: f64 = 0.5;
             if confirmation.is_some() {
-                confidence += 0.25; // User confirmed
+                confidence += 0.25;
             }
-            // Check if implementation followed (tool calls after confirmation)
             let impl_idx = if confirmation.is_some() { i + 3 } else { i + 2 };
             if impl_idx < main_entries.len() && has_tool_calls(main_entries[impl_idx]) {
-                confidence += 0.1; // Implementation followed
+                confidence += 0.1;
             }
-            // Longer assistant response with more options = higher confidence
             if assistant_text.len() > 500 {
                 confidence += 0.05;
             }
@@ -559,7 +287,7 @@ pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
                 candidates.push(CandidateDecision {
                     timestamp,
                     session_id: session.session_id().to_string(),
-                    short_id: short_id.clone(),
+                    short_id: sid.clone(),
                     question: user_text,
                     response: assistant_text,
                     confirmation,
@@ -575,7 +303,6 @@ pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
         pb.finish_and_clear();
     }
 
-    // Sort by confidence (descending), then by timestamp
     candidates.sort_by(|a, b| {
         b.confidence
             .partial_cmp(&a.confidence)
@@ -583,7 +310,6 @@ pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
             .then_with(|| a.timestamp.cmp(&b.timestamp))
     });
 
-    // Apply limit
     let limit = if args.no_limit {
         candidates.len()
     } else {
@@ -598,13 +324,65 @@ pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
         return Ok(());
     }
 
+    // Register confirmed candidates to the decision registry
+    if args.register {
+        let project_filter = args.project.as_deref().ok_or_else(|| SnatchError::InvalidArgument {
+            name: "project".into(),
+            reason: "--project is required with --register".into(),
+        })?;
+
+        let claude_dir = super::get_claude_dir(cli.claude_dir.as_ref())?;
+        let projects = claude_dir.projects()?;
+        let project = projects.iter()
+            .find(|p| p.decoded_path().contains(project_filter))
+            .ok_or_else(|| SnatchError::ProjectNotFound {
+                project_path: format!("No project matching '{project_filter}'"),
+            })?;
+
+        let project_dir = project.path();
+        let mut store = load_decisions(project_dir)?;
+        let mut registered = 0u32;
+
+        // Only register confirmed structural decisions and explicit markers
+        for c in &candidates {
+            let should_register = match &c.detection_method {
+                DetectionMethod::Structural => c.confirmation.is_some(),
+                DetectionMethod::ExplicitMarker(_) => true,
+                DetectionMethod::Reversal(_) => false,
+            };
+            if !should_register {
+                continue;
+            }
+
+            // Build title from question (truncated)
+            let title = truncate(&c.question, 120)
+                .trim_end_matches("...")
+                .trim()
+                .to_string();
+            if title.is_empty() {
+                continue;
+            }
+
+            store.add_decision(
+                title,
+                Some(truncate(&c.response, 500)),
+                Some(c.session_id.clone()),
+                Some(c.confidence),
+                vec![],
+            );
+            registered += 1;
+        }
+
+        save_decisions(project_dir, &store)?;
+
+        if !cli.quiet {
+            eprintln!("Registered {registered} decision(s) to the registry.");
+        }
+    }
+
     match cli.effective_output() {
-        crate::cli::OutputFormat::Json => {
-            output_json(&candidates);
-        }
-        _ => {
-            output_text(cli, &candidates);
-        }
+        crate::cli::OutputFormat::Json => output_json(&candidates),
+        _ => output_text(cli, &candidates),
     }
 
     Ok(())
@@ -674,4 +452,25 @@ fn output_text(cli: &Cli, candidates: &[CandidateDecision]) {
     }
 
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_explicit_markers() {
+        assert!(!find_explicit_markers("DEF-001: No Drop trait").is_empty());
+        assert!(!find_explicit_markers("We decided to use Rust").is_empty());
+        assert!(!find_explicit_markers("The design decision is clear").is_empty());
+        assert!(find_explicit_markers("Just a regular sentence").is_empty());
+    }
+
+    #[test]
+    fn test_find_reversal_markers() {
+        assert!(!find_reversal_markers("Actually, let's go with option B").is_empty());
+        assert!(!find_reversal_markers("I changed my mind about this").is_empty());
+        assert!(!find_reversal_markers("On second thought, use enums").is_empty());
+        assert!(find_reversal_markers("This is a regular message").is_empty());
+    }
 }

@@ -6,195 +6,31 @@
 
 use std::collections::HashSet;
 use std::io::IsTerminal;
-use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::RegexBuilder;
 
 use crate::cli::{Cli, ThreadArgs};
-use crate::discovery::Session;
 use crate::error::{Result, SnatchError};
-use crate::model::{ContentBlock, LogEntry};
 
-use super::get_claude_dir;
+use super::helpers::{
+    self, extract_text, extract_thinking_text, short_id, truncate, SessionCollectParams,
+};
 
 /// A threaded exchange: a match with its surrounding conversation context.
 #[derive(Debug)]
 struct ThreadedExchange {
-    /// Timestamp of the matched entry.
     timestamp: DateTime<Utc>,
-    /// Session ID where the match occurred.
     session_id: String,
-    /// Short session ID (first 8 chars).
     short_id: String,
-    /// Project path.
     project: String,
-    /// UUID of the matched entry (for dedup).
     entry_uuid: String,
-    /// The user message before (or the matched user message itself).
     user_text: Option<String>,
-    /// The assistant response (or the matched assistant message itself).
     assistant_text: Option<String>,
-    /// Thinking block text if requested.
     thinking_text: Option<String>,
-    /// Which part matched: "user", "assistant", or "thinking".
     match_location: String,
-    /// Number of pattern matches in this exchange.
     match_count: usize,
-}
-
-/// Extract visible text from a LogEntry.
-fn extract_entry_text(entry: &LogEntry) -> Option<String> {
-    match entry {
-        LogEntry::User(user) => {
-            let text = match &user.message {
-                crate::model::UserContent::Simple(s) => s.content.clone(),
-                crate::model::UserContent::Blocks(b) => b
-                    .content
-                    .iter()
-                    .filter_map(|c| {
-                        if let ContentBlock::Text(t) = c {
-                            Some(t.text.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            };
-            if text.trim().is_empty() {
-                None
-            } else {
-                Some(text)
-            }
-        }
-        LogEntry::Assistant(assistant) => {
-            let texts: Vec<&str> = assistant
-                .message
-                .content
-                .iter()
-                .filter_map(|block| {
-                    if let ContentBlock::Text(t) = block {
-                        Some(t.text.as_str())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            let joined = texts.join("\n");
-            if joined.trim().is_empty() {
-                None
-            } else {
-                Some(joined)
-            }
-        }
-        _ => None,
-    }
-}
-
-/// Extract thinking text from an assistant entry.
-fn extract_thinking_text(entry: &LogEntry) -> Option<String> {
-    if let LogEntry::Assistant(assistant) = entry {
-        let texts: Vec<&str> = assistant
-            .message
-            .content
-            .iter()
-            .filter_map(|block| {
-                if let ContentBlock::Thinking(t) = block {
-                    Some(t.thinking.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let joined = texts.join("\n");
-        if joined.trim().is_empty() {
-            None
-        } else {
-            Some(joined)
-        }
-    } else {
-        None
-    }
-}
-
-/// Collect sessions matching thread args (mirrors search's collect_sessions).
-fn collect_sessions(cli: &Cli, args: &ThreadArgs) -> Result<Vec<Session>> {
-    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
-
-    let mut sessions = if let Some(session_id) = &args.session {
-        let session = claude_dir
-            .find_session(session_id)?
-            .ok_or_else(|| SnatchError::SessionNotFound {
-                session_id: session_id.clone(),
-            })?;
-        vec![session]
-    } else if let Some(project_filter) = &args.project {
-        let projects = claude_dir.projects()?;
-        let mut sess = Vec::new();
-        for project in projects {
-            if project.decoded_path().contains(project_filter) {
-                sess.extend(project.sessions()?);
-            }
-        }
-        sess
-    } else {
-        claude_dir.all_sessions()?
-    };
-
-    // Date filters
-    let since_time: Option<SystemTime> = if let Some(ref since) = args.since {
-        Some(super::parse_date_filter(since)?)
-    } else {
-        None
-    };
-    let until_time: Option<SystemTime> = if let Some(ref until) = args.until {
-        Some(super::parse_date_filter(until)?)
-    } else {
-        None
-    };
-    if since_time.is_some() || until_time.is_some() {
-        sessions.retain(|s| {
-            let modified = s.modified_time();
-            if let Some(since) = since_time {
-                if modified < since {
-                    return false;
-                }
-            }
-            if let Some(until) = until_time {
-                if modified > until {
-                    return false;
-                }
-            }
-            true
-        });
-    }
-
-    if let Some(n) = args.recent {
-        sessions.sort_by(|a, b| b.modified_time().cmp(&a.modified_time()));
-        sessions.truncate(n);
-    }
-
-    if args.no_subagents {
-        sessions.retain(|s| !s.is_subagent());
-    }
-
-    Ok(sessions)
-}
-
-/// Truncate text to max_chars, appending "..." if truncated.
-fn truncate(text: &str, max_chars: usize) -> String {
-    if text.len() <= max_chars {
-        text.to_string()
-    } else {
-        let boundary = text
-            .char_indices()
-            .nth(max_chars)
-            .map(|(i, _)| i)
-            .unwrap_or(text.len());
-        format!("{}...", &text[..boundary])
-    }
 }
 
 /// Run the thread command.
@@ -214,7 +50,14 @@ pub fn run(cli: &Cli, args: &ThreadArgs) -> Result<()> {
             reason: e.to_string(),
         })?;
 
-    let sessions = collect_sessions(cli, args)?;
+    let sessions = helpers::collect_sessions(cli, &SessionCollectParams {
+        session: args.session.as_deref(),
+        project: args.project.as_deref(),
+        since: args.since.as_deref(),
+        until: args.until.as_deref(),
+        recent: args.recent,
+        no_subagents: args.no_subagents,
+    })?;
 
     let session_count = sessions.len();
     let show_progress = session_count > 10 && std::io::stderr().is_terminal() && !cli.quiet;
@@ -243,23 +86,13 @@ pub fn run(cli: &Cli, args: &ThreadArgs) -> Result<()> {
             Err(_) => continue,
         };
 
-        // Filter to main thread only (skip sidechain/subagent messages)
-        let main_entries: Vec<&LogEntry> = entries
-            .iter()
-            .filter(|e| !e.is_sidechain())
-            .collect();
-
-        // Track which entry UUIDs we've already included (dedup within session)
+        let main_entries = helpers::main_thread_entries(&entries);
         let mut seen_uuids: HashSet<String> = HashSet::new();
 
         for (idx, entry) in main_entries.iter().enumerate() {
             let mut match_location = String::new();
 
-            let user_text_owned;
-            let assistant_text_owned;
-            let thinking_text_owned;
-
-            let entry_text = extract_entry_text(entry);
+            let entry_text = extract_text(entry);
             let thinking_text = if args.thinking {
                 extract_thinking_text(entry)
             } else {
@@ -290,79 +123,50 @@ pub fn run(cli: &Cli, args: &ThreadArgs) -> Result<()> {
                 continue;
             }
 
-            // Dedup: skip if we've seen this UUID
             let uuid = entry.uuid().unwrap_or("").to_string();
             if !uuid.is_empty() && !seen_uuids.insert(uuid.clone()) {
                 continue;
             }
 
-            // Build the exchange context
             let timestamp = entry.timestamp().unwrap_or_else(Utc::now);
 
-            // Find surrounding context
-            // If matched entry is user: look for next assistant response
-            // If matched entry is assistant: look for previous user message
-            user_text_owned = if entry.message_type() == "user" {
-                extract_entry_text(entry)
+            let user_text = if entry.message_type() == "user" {
+                extract_text(entry)
             } else {
-                // Look backward for previous user message
-                let mut found = None;
-                for prev_idx in (0..idx).rev() {
-                    if main_entries[prev_idx].message_type() == "user" {
-                        found = extract_entry_text(main_entries[prev_idx]);
-                        break;
-                    }
-                }
-                found
+                (0..idx).rev()
+                    .find(|&i| main_entries[i].message_type() == "user")
+                    .and_then(|i| extract_text(main_entries[i]))
             };
 
-            assistant_text_owned = if entry.message_type() == "assistant" {
-                extract_entry_text(entry)
+            let assistant_text = if entry.message_type() == "assistant" {
+                extract_text(entry)
             } else {
-                // Look forward for next assistant message
-                let mut found = None;
-                for next_idx in (idx + 1)..main_entries.len() {
-                    if main_entries[next_idx].message_type() == "assistant" {
-                        found = extract_entry_text(main_entries[next_idx]);
-                        break;
-                    }
-                }
-                found
+                ((idx + 1)..main_entries.len())
+                    .find(|&i| main_entries[i].message_type() == "assistant")
+                    .and_then(|i| extract_text(main_entries[i]))
             };
 
-            thinking_text_owned = if args.thinking {
+            let thinking_text = if args.thinking {
                 if entry.message_type() == "assistant" {
                     extract_thinking_text(entry)
                 } else {
-                    // Look forward for next assistant's thinking
-                    let mut found = None;
-                    for next_idx in (idx + 1)..main_entries.len() {
-                        if main_entries[next_idx].message_type() == "assistant" {
-                            found = extract_thinking_text(main_entries[next_idx]);
-                            break;
-                        }
-                    }
-                    found
+                    ((idx + 1)..main_entries.len())
+                        .find(|&i| main_entries[i].message_type() == "assistant")
+                        .and_then(|i| extract_thinking_text(main_entries[i]))
                 }
             } else {
                 None
             };
 
-            let short_id = if session.session_id().len() >= 8 {
-                session.session_id()[..8].to_string()
-            } else {
-                session.session_id().to_string()
-            };
-
             exchanges.push(ThreadedExchange {
                 timestamp,
                 session_id: session.session_id().to_string(),
-                short_id,
+                short_id: short_id(session.session_id()).to_string(),
                 project: session.project_path().to_string(),
                 entry_uuid: uuid,
-                user_text: user_text_owned,
-                assistant_text: assistant_text_owned,
-                thinking_text: thinking_text_owned,
+                user_text,
+                assistant_text,
+                thinking_text,
                 match_location,
                 match_count,
             });
@@ -373,10 +177,8 @@ pub fn run(cli: &Cli, args: &ThreadArgs) -> Result<()> {
         pb.finish_and_clear();
     }
 
-    // Sort chronologically
     exchanges.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
 
-    // Apply limit
     let limit = if args.no_limit {
         exchanges.len()
     } else {
@@ -391,16 +193,11 @@ pub fn run(cli: &Cli, args: &ThreadArgs) -> Result<()> {
         return Ok(());
     }
 
-    // Count unique sessions
     let unique_sessions: HashSet<&str> = exchanges.iter().map(|e| e.session_id.as_str()).collect();
 
     match cli.effective_output() {
-        crate::cli::OutputFormat::Json => {
-            output_json(&exchanges);
-        }
-        _ => {
-            output_text(cli, &exchanges, &args.pattern, unique_sessions.len(), args.max_context);
-        }
+        crate::cli::OutputFormat::Json => output_json(&exchanges),
+        _ => output_text(cli, &exchanges, &args.pattern, unique_sessions.len(), args.max_context),
     }
 
     Ok(())
@@ -455,7 +252,6 @@ fn output_text(
     for (i, exchange) in exchanges.iter().enumerate() {
         let date = exchange.timestamp.format("%Y-%m-%d %H:%M");
 
-        // Print session header when session changes
         if exchange.session_id != last_session_id {
             if i > 0 {
                 println!();

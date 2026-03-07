@@ -2142,6 +2142,10 @@ pub struct DetectArgs {
     /// Show all results without limit.
     #[arg(long)]
     pub no_limit: bool,
+
+    /// Register confirmed candidates (structural with confirmation) to the decision registry.
+    #[arg(long)]
+    pub register: bool,
 }
 
 /// Arguments for the conflicts command.

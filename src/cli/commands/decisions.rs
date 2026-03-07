@@ -6,9 +6,11 @@
 use crate::cli::{Cli, DecisionsArgs, OutputFormat};
 use crate::decisions::{load_decisions, save_decisions, DecisionStatus};
 use crate::error::{Result, SnatchError};
-use crate::model::{ContentBlock, LogEntry};
 
 use super::get_claude_dir;
+use super::helpers::{
+    extract_text, has_options_pattern, has_tool_calls, is_affirmative, main_thread_entries,
+};
 
 /// JSON output for a single decision.
 #[derive(serde::Serialize)]
@@ -90,7 +92,6 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
         "list" => {
             let store = load_decisions(project_dir)?;
 
-            // Filter by status if specified
             let filtered: Vec<_> = if let Some(ref status_filter) = args.status {
                 let status = DecisionStatus::parse(status_filter).ok_or_else(|| {
                     SnatchError::InvalidArgument {
@@ -105,7 +106,6 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                 store.decisions.iter().collect()
             };
 
-            // Filter by tag if specified
             let filtered: Vec<_> = if let Some(ref tag_filter) = args.tag {
                 filtered.into_iter().filter(|d| d.tags.iter().any(|t| t.contains(tag_filter.as_str()))).collect()
             } else {
@@ -190,7 +190,6 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                 tags,
             );
 
-            // Apply status if specified (add defaults to Proposed)
             if let Some(s) = status {
                 store.update_decision(id, Some(s), None, None, None);
             }
@@ -327,7 +326,6 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
         }
 
         "score" => {
-            let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
             let mut store = load_decisions(project_dir)?;
 
             if store.decisions.is_empty() {
@@ -365,14 +363,9 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                     }
                 };
 
-                let main_entries: Vec<&LogEntry> = entries
-                    .iter()
-                    .filter(|e| !e.is_sidechain())
-                    .filter(|e| matches!(e, LogEntry::User(_) | LogEntry::Assistant(_)))
-                    .collect();
-
+                let main_entries = main_thread_entries(&entries);
                 let title_lower = decision.title.to_lowercase();
-                let mut score: f64 = 0.5; // Base score
+                let mut score: f64 = 0.5;
 
                 // Signal 1: User confirmed (affirmative response near decision text)
                 let mut found_confirmation = false;
@@ -390,7 +383,6 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                     {
                         continue;
                     }
-                    // Check if next user message is affirmative
                     if i + 1 < main_entries.len() && main_entries[i + 1].message_type() == "user" {
                         if let Some(user_text) = extract_text(main_entries[i + 1]) {
                             if is_affirmative(&user_text) {
@@ -415,7 +407,6 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                         if text_lower.contains(&title_lower)
                             || title_lower.split_whitespace().all(|w| text_lower.contains(w))
                         {
-                            // Check next few entries for tool calls
                             for j in (i + 1)..main_entries.len().min(i + 4) {
                                 if has_tool_calls(main_entries[j]) {
                                     found_implementation = true;
@@ -467,7 +458,6 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                     if let Some(text) = extract_text(entry) {
                         let text_lower = text.to_lowercase();
                         if correction_patterns.iter().any(|p| text_lower.starts_with(p) || text_lower.contains(p)) {
-                            // Only count if nearby text relates to decision topic
                             if text_lower.contains(&title_lower)
                                 || title_lower.split_whitespace().any(|w| text_lower.contains(w))
                             {
@@ -534,143 +524,4 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Extract visible text from an entry.
-fn extract_text(entry: &LogEntry) -> Option<String> {
-    match entry {
-        LogEntry::User(user) => {
-            let text = match &user.message {
-                crate::model::UserContent::Simple(s) => s.content.clone(),
-                crate::model::UserContent::Blocks(b) => b
-                    .content
-                    .iter()
-                    .filter_map(|c| {
-                        if let ContentBlock::Text(t) = c {
-                            Some(t.text.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            };
-            if text.trim().is_empty() {
-                None
-            } else {
-                Some(text)
-            }
-        }
-        LogEntry::Assistant(assistant) => {
-            let texts: Vec<&str> = assistant
-                .message
-                .content
-                .iter()
-                .filter_map(|block| {
-                    if let ContentBlock::Text(t) = block {
-                        Some(t.text.as_str())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            let joined = texts.join("\n");
-            if joined.trim().is_empty() {
-                None
-            } else {
-                Some(joined)
-            }
-        }
-        _ => None,
-    }
-}
-
-/// Check if an assistant entry contains tool use calls.
-fn has_tool_calls(entry: &LogEntry) -> bool {
-    if let LogEntry::Assistant(assistant) = entry {
-        assistant
-            .message
-            .content
-            .iter()
-            .any(|block| matches!(block, ContentBlock::ToolUse(_)))
-    } else {
-        false
-    }
-}
-
-/// Check if user response is a short affirmative (decision confirmation).
-fn is_affirmative(text: &str) -> bool {
-    let trimmed = text.trim();
-    let lower = trimmed.to_lowercase();
-    let word_count = trimmed.split_whitespace().count();
-
-    let affirmatives = [
-        "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "sounds good",
-        "go for it", "do it", "let's do it", "let's go", "perfect",
-        "exactly", "agreed", "correct", "right", "absolutely",
-        "that works", "makes sense", "go ahead", "proceed",
-        "i agree", "i like", "i think so", "definitely",
-    ];
-    if affirmatives.iter().any(|a| lower.starts_with(a)) {
-        return true;
-    }
-
-    let choice_patterns = [
-        "option ", "approach ", "let's go with", "go with ",
-        "i prefer", "i'd prefer", "i'll go with", "let's use",
-        "use ", "i choose", "i pick",
-    ];
-    if choice_patterns.iter().any(|p| lower.starts_with(p)) {
-        return true;
-    }
-
-    if word_count <= 30 && !trimmed.contains('?') {
-        if lower.contains("agree") || lower.contains("go with")
-            || lower.contains("let's") || lower.contains("sounds")
-            || lower.contains("perfect") || lower.contains("great")
-        {
-            return true;
-        }
-    }
-
-    false
-}
-
-/// Check if assistant response contains enumeration/options patterns.
-fn has_options_pattern(text: &str) -> bool {
-    let lower = text.to_lowercase();
-
-    let numbered = regex::Regex::new(r"(?m)^\s*\d+[\.\)]\s+").unwrap();
-    if numbered.find_iter(text).count() >= 2 {
-        return true;
-    }
-
-    if (lower.contains("option a") && lower.contains("option b"))
-        || (lower.contains("approach 1") && lower.contains("approach 2"))
-        || (lower.contains("option 1") && lower.contains("option 2"))
-    {
-        return true;
-    }
-
-    if (lower.contains("pros:") && lower.contains("cons:"))
-        || (lower.contains("advantages") && lower.contains("disadvantages"))
-        || lower.contains("trade-off")
-        || lower.contains("tradeoff")
-    {
-        return true;
-    }
-
-    let bullets = regex::Regex::new(r"(?m)^\s*[-*]\s+").unwrap();
-    if bullets.find_iter(text).count() >= 3
-        && (lower.contains("alternatively")
-            || lower.contains("or we could")
-            || lower.contains("another approach")
-            || lower.contains("we could also")
-            || lower.contains("versus")
-            || lower.contains(" vs "))
-    {
-        return true;
-    }
-
-    false
 }

@@ -3,10 +3,8 @@
 //! Finds potentially conflicting decisions across sessions by:
 //! 1. Registry-based: comparing decisions that share tags/topics
 //! 2. Search-based: finding opposing language about the same topic across sessions
-//! 3. Lessons-based: cross-referencing repeated user corrections on the same topic
 
 use std::io::IsTerminal;
-use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -14,42 +12,30 @@ use regex::{Regex, RegexBuilder};
 
 use crate::cli::{Cli, ConflictsArgs};
 use crate::decisions::{self, DecisionStatus, DecisionStore};
-use crate::discovery::Session;
 use crate::error::{Result, SnatchError};
-use crate::model::{ContentBlock, LogEntry};
 
-use super::get_claude_dir;
+use super::helpers::{
+    self, extract_text, short_id, truncate, SessionCollectParams,
+};
 
 /// A pair of potentially conflicting statements.
 #[derive(Debug)]
 struct ConflictPair {
-    /// Timestamp of the earlier statement.
     earlier_time: DateTime<Utc>,
-    /// Session ID of the earlier statement.
     earlier_session: String,
-    /// Text of the earlier statement.
     earlier_text: String,
-    /// Timestamp of the later statement.
     later_time: DateTime<Utc>,
-    /// Session ID of the later statement.
     later_session: String,
-    /// Text of the later statement.
     later_text: String,
-    /// How the conflict was detected.
     detection: ConflictDetection,
-    /// Confidence that these actually conflict (0.0-1.0).
     confidence: f64,
-    /// The topic/pattern that links them.
     topic: String,
 }
 
 #[derive(Debug, Clone)]
 enum ConflictDetection {
-    /// Two registry decisions with shared tags but opposing status/content.
     Registry,
-    /// Search found opposing language about the same topic.
     OpposingLanguage,
-    /// Supersede chain in registry.
     SupersedeChain,
 }
 
@@ -63,57 +49,12 @@ impl std::fmt::Display for ConflictDetection {
     }
 }
 
-/// Extract visible text from an entry.
-fn extract_text(entry: &LogEntry) -> Option<String> {
-    match entry {
-        LogEntry::User(user) => {
-            let text = match &user.message {
-                crate::model::UserContent::Simple(s) => s.content.clone(),
-                crate::model::UserContent::Blocks(b) => b
-                    .content
-                    .iter()
-                    .filter_map(|c| {
-                        if let ContentBlock::Text(t) = c {
-                            Some(t.text.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            };
-            if text.trim().is_empty() { None } else { Some(text) }
-        }
-        LogEntry::Assistant(assistant) => {
-            let texts: Vec<&str> = assistant
-                .message
-                .content
-                .iter()
-                .filter_map(|block| {
-                    if let ContentBlock::Text(t) = block {
-                        Some(t.text.as_str())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            let joined = texts.join("\n");
-            if joined.trim().is_empty() { None } else { Some(joined) }
-        }
-        _ => None,
-    }
-}
-
 /// A conclusion extracted from a session about a topic.
 #[derive(Debug)]
 struct TopicConclusion {
     session_id: String,
     timestamp: DateTime<Utc>,
-    /// The assistant's concluding statement about the topic.
     text: String,
-    /// Signal words found (positive/negative). Used for diagnostic output.
-    #[allow(dead_code)]
-    signals: Vec<String>,
 }
 
 /// Signal word pairs that indicate opposing positions.
@@ -148,7 +89,6 @@ fn find_opposing_signals(text_a: &str, text_b: &str) -> Option<(Vec<String>, f64
         let b_has_pos = positive.iter().any(|p| lower_b.contains(p));
         let b_has_neg = negative.iter().any(|n| lower_b.contains(n));
 
-        // A positive + B negative = conflict
         if a_has_pos && b_has_neg {
             for p in positive.iter().filter(|p| lower_a.contains(*p)) {
                 found_a_positive.push(p.to_string());
@@ -157,7 +97,6 @@ fn find_opposing_signals(text_a: &str, text_b: &str) -> Option<(Vec<String>, f64
                 found_b_negative.push(n.to_string());
             }
         }
-        // A negative + B positive = conflict
         if a_has_neg && b_has_pos {
             for n in negative.iter().filter(|n| lower_a.contains(*n)) {
                 found_a_negative.push(n.to_string());
@@ -182,7 +121,6 @@ fn find_opposing_signals(text_a: &str, text_b: &str) -> Option<(Vec<String>, f64
     all_signals.extend(found_b_positive);
     all_signals.dedup();
 
-    // Confidence based on number of opposing signals
     let confidence = match total_signals {
         1..=2 => 0.4,
         3..=4 => 0.6,
@@ -193,56 +131,9 @@ fn find_opposing_signals(text_a: &str, text_b: &str) -> Option<(Vec<String>, f64
     Some((all_signals, confidence))
 }
 
-/// Collect sessions matching args.
-fn collect_sessions(cli: &Cli, args: &ConflictsArgs) -> Result<Vec<Session>> {
-    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
-
-    let mut sessions = if let Some(project_filter) = &args.project {
-        let projects = claude_dir.projects()?;
-        let mut sess = Vec::new();
-        for project in projects {
-            if project.decoded_path().contains(project_filter) {
-                sess.extend(project.sessions()?);
-            }
-        }
-        sess
-    } else {
-        claude_dir.all_sessions()?
-    };
-
-    let since_time: Option<SystemTime> = if let Some(ref since) = args.since {
-        Some(super::parse_date_filter(since)?)
-    } else {
-        None
-    };
-    let until_time: Option<SystemTime> = if let Some(ref until) = args.until {
-        Some(super::parse_date_filter(until)?)
-    } else {
-        None
-    };
-    if since_time.is_some() || until_time.is_some() {
-        sessions.retain(|s| {
-            let modified = s.modified_time();
-            if let Some(since) = since_time {
-                if modified < since { return false; }
-            }
-            if let Some(until) = until_time {
-                if modified > until { return false; }
-            }
-            true
-        });
-    }
-
-    if args.no_subagents {
-        sessions.retain(|s| !s.is_subagent());
-    }
-
-    Ok(sessions)
-}
-
 /// Find the project directory for a given project filter.
 fn find_project_dir(cli: &Cli, project_filter: &str) -> Result<Option<std::path::PathBuf>> {
-    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
+    let claude_dir = super::get_claude_dir(cli.claude_dir.as_ref())?;
     let projects = claude_dir.projects()?;
     for project in projects {
         if project.decoded_path().contains(project_filter) {
@@ -250,24 +141,6 @@ fn find_project_dir(cli: &Cli, project_filter: &str) -> Result<Option<std::path:
         }
     }
     Ok(None)
-}
-
-/// Truncate text for display.
-fn truncate(text: &str, max_chars: usize) -> String {
-    if text.len() <= max_chars {
-        text.to_string()
-    } else {
-        let boundary = text
-            .char_indices()
-            .nth(max_chars)
-            .map(|(i, _)| i)
-            .unwrap_or(text.len());
-        format!("{}...", &text[..boundary])
-    }
-}
-
-fn short_id(id: &str) -> &str {
-    if id.len() > 8 { &id[..8] } else { id }
 }
 
 /// Run the conflicts command.
@@ -287,10 +160,8 @@ pub fn run(cli: &Cli, args: &ConflictsArgs) -> Result<()> {
         detect_search_conflicts(cli, args, topic, &mut conflicts)?;
     }
 
-    // Filter by minimum confidence
     conflicts.retain(|c| c.confidence >= args.min_confidence);
 
-    // Sort by confidence descending, then chronologically
     conflicts.sort_by(|a, b| {
         b.confidence
             .partial_cmp(&a.confidence)
@@ -298,7 +169,6 @@ pub fn run(cli: &Cli, args: &ConflictsArgs) -> Result<()> {
             .then_with(|| a.earlier_time.cmp(&b.earlier_time))
     });
 
-    // Apply limit
     let limit = if args.no_limit {
         conflicts.len()
     } else {
@@ -341,7 +211,6 @@ fn detect_registry_conflicts(
         if d.status == DecisionStatus::Superseded {
             if let Some(new_id) = d.superseded_by {
                 if let Some(new_d) = decisions.iter().find(|dd| dd.id == new_id) {
-                    // Apply topic filter if present
                     if let Some(ref topic) = topic_filter {
                         let topic_lower = topic.to_lowercase();
                         let matches = d.title.to_lowercase().contains(&topic_lower)
@@ -378,12 +247,10 @@ fn detect_registry_conflicts(
             if !d2.status.is_active() && d2.status != DecisionStatus::Superseded {
                 continue;
             }
-            // Skip if same decision
             if d1.id == d2.id {
                 continue;
             }
 
-            // Check for shared tags
             let shared_tags: Vec<&String> = d1.tags.iter()
                 .filter(|t| d2.tags.contains(t))
                 .collect();
@@ -392,7 +259,6 @@ fn detect_registry_conflicts(
                 continue;
             }
 
-            // Apply topic filter
             if let Some(ref topic) = topic_filter {
                 let topic_lower = topic.to_lowercase();
                 if !shared_tags.iter().any(|t| t.to_lowercase().contains(&topic_lower)) {
@@ -400,7 +266,6 @@ fn detect_registry_conflicts(
                 }
             }
 
-            // Check for opposing language in titles/descriptions
             let d1_text = format!("{} {}", d1.title,
                 d1.description.as_deref().unwrap_or(""));
             let d2_text = format!("{} {}", d2.title,
@@ -444,7 +309,14 @@ fn detect_search_conflicts(
             reason: e.to_string(),
         })?;
 
-    let sessions = collect_sessions(cli, args)?;
+    let sessions = helpers::collect_sessions(cli, &SessionCollectParams {
+        session: None,
+        project: args.project.as_deref(),
+        since: args.since.as_deref(),
+        until: args.until.as_deref(),
+        recent: None,
+        no_subagents: args.no_subagents,
+    })?;
 
     let session_count = sessions.len();
     let show_progress = session_count > 10 && std::io::stderr().is_terminal() && !cli.quiet;
@@ -461,7 +333,6 @@ fn detect_search_conflicts(
         None
     };
 
-    // Collect conclusions about the topic from each session
     let mut conclusions: Vec<TopicConclusion> = Vec::new();
 
     for session in &sessions {
@@ -474,14 +345,8 @@ fn detect_search_conflicts(
             Err(_) => continue,
         };
 
-        let main_entries: Vec<&LogEntry> = entries
-            .iter()
-            .filter(|e| !e.is_sidechain())
-            .filter(|e| matches!(e, LogEntry::User(_) | LogEntry::Assistant(_)))
-            .collect();
+        let main_entries = helpers::main_thread_entries(&entries);
 
-        // Find the last assistant message that matches the topic pattern
-        // This is our "conclusion" for this session about this topic
         let mut last_matching_assistant: Option<(DateTime<Utc>, String)> = None;
 
         for entry in &main_entries {
@@ -491,7 +356,6 @@ fn detect_search_conflicts(
             if let Some(text) = extract_text(entry) {
                 if regex.is_match(&text) {
                     let timestamp = entry.timestamp().unwrap_or_else(Utc::now);
-                    // Take the paragraph containing the match for context
                     let conclusion = extract_conclusion_around_match(&text, &regex);
                     last_matching_assistant = Some((timestamp, conclusion));
                 }
@@ -499,27 +363,10 @@ fn detect_search_conflicts(
         }
 
         if let Some((timestamp, text)) = last_matching_assistant {
-            // Classify signals
-            let mut signals = Vec::new();
-            let lower = text.to_lowercase();
-            for (positive, negative) in OPPOSING_PAIRS {
-                for p in positive.iter() {
-                    if lower.contains(p) {
-                        signals.push(format!("+{}", p));
-                    }
-                }
-                for n in negative.iter() {
-                    if lower.contains(n) {
-                        signals.push(format!("-{}", n));
-                    }
-                }
-            }
-
             conclusions.push(TopicConclusion {
                 session_id: session.session_id().to_string(),
                 timestamp,
                 text,
-                signals,
             });
         }
     }
@@ -528,13 +375,12 @@ fn detect_search_conflicts(
         pb.finish_and_clear();
     }
 
-    // Compare conclusions pairwise for opposing signals
     for i in 0..conclusions.len() {
         for j in (i + 1)..conclusions.len() {
             let c1 = &conclusions[i];
             let c2 = &conclusions[j];
 
-            if let Some((_signals, confidence)) = find_opposing_signals(&c1.text, &c2.text) {
+            if let Some((_, confidence)) = find_opposing_signals(&c1.text, &c2.text) {
                 let (earlier, later) = if c1.timestamp <= c2.timestamp {
                     (c1, c2)
                 } else {
@@ -565,7 +411,6 @@ fn extract_conclusion_around_match(text: &str, regex: &Regex) -> String {
         let start = m.start();
         let end = m.end();
 
-        // Expand to paragraph boundaries
         let para_start = text[..start]
             .rfind("\n\n")
             .map(|i| i + 2)
@@ -576,10 +421,8 @@ fn extract_conclusion_around_match(text: &str, regex: &Regex) -> String {
             .unwrap_or(text.len());
 
         let paragraph = &text[para_start..para_end];
-        // Limit to ~500 chars
         truncate(paragraph, 500)
     } else {
-        // Shouldn't happen since we checked is_match, but fallback
         truncate(text, 500)
     }
 }
@@ -652,4 +495,46 @@ fn output_text(cli: &Cli, conflicts: &[ConflictPair]) {
     }
 
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_opposing_signals_basic() {
+        let (signals, confidence) = find_opposing_signals(
+            "We will use traits for polymorphism",
+            "We won't use traits, using enums instead",
+        ).unwrap();
+        assert!(!signals.is_empty());
+        assert!(confidence > 0.0);
+    }
+
+    #[test]
+    fn test_find_opposing_signals_no_conflict() {
+        assert!(find_opposing_signals(
+            "The weather is nice today",
+            "I had lunch at noon",
+        ).is_none());
+    }
+
+    #[test]
+    fn test_find_opposing_signals_add_remove() {
+        let result = find_opposing_signals(
+            "We should add logging to this module",
+            "Remove the logging, it's too noisy",
+        );
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_extract_conclusion_unicode() {
+        // Should not panic on multi-byte characters
+        let text = "This is a test with em dash — and more text that goes on for quite a while to ensure we test truncation properly with unicode characters like café and résumé and naïve and other such words that contain multi-byte characters. We need enough text here to trigger the 500-character truncation limit so let me keep writing more text. The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump.";
+        let regex = Regex::new("test").unwrap();
+        let result = extract_conclusion_around_match(text, &regex);
+        // Should not panic, should end with "..."
+        assert!(result.len() > 0);
+    }
 }

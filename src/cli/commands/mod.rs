@@ -16,6 +16,7 @@ pub mod digest;
 pub mod export;
 pub mod extract;
 pub mod goals;
+pub mod helpers;
 pub mod index;
 pub mod info;
 pub mod lessons;
