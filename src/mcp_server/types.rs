@@ -608,7 +608,7 @@ pub struct ManageNotesResponse {
 /// Request for decision management operations.
 #[derive(Debug, Deserialize, ToolInput)]
 pub struct ManageDecisionsRequest {
-    /// Operation: "list", "add", "update", "remove", "supersede".
+    /// Operation: "list", "add", "update", "remove", "supersede". Auto-scoring via CLI only.
     pub operation: String,
 
     /// Project path filter (substring match). Required.

@@ -955,6 +955,10 @@ pub struct SearchArgs {
     /// Show per-session breakdown in --patterns-tsv mode.
     #[arg(long)]
     pub breakdown: bool,
+
+    /// Filter by session phase: early, middle, late.
+    #[arg(long)]
+    pub phase: Option<String>,
 }
 
 /// Arguments for the stats command.

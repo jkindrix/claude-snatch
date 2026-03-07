@@ -1408,7 +1408,7 @@ impl SnatchServer {
         }
     }
 
-    #[tool(description = "Manage a persistent decision registry for a project. Decisions track design choices with status, confidence, tags, and session provenance. Operations: list, add, update, remove, supersede.")]
+    #[tool(description = "Manage a persistent decision registry for a project. Decisions track design choices with status, confidence, tags, and session provenance. Operations: list, add, update, remove, supersede. For confidence auto-scoring use CLI: snatch decisions score -p <project>.")]
     async fn manage_decisions(&self, request: ManageDecisionsRequest) -> ToolOutput {
         use crate::decisions::{load_decisions, save_decisions, DecisionStatus};
 
@@ -1622,7 +1622,7 @@ impl SnatchServer {
             }
 
             other => ToolOutput::error(format!(
-                "Unknown operation '{other}'. Use: list, add, update, remove, supersede"
+                "Unknown operation '{other}'. Use: list, add, update, remove, supersede. For auto-scoring use CLI: snatch decisions score -p <project>"
             )),
         }
     }

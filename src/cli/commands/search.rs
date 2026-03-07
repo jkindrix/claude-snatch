@@ -935,6 +935,9 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
             Err(_) => continue, // Skip unparseable sessions
         };
 
+        // Compute phase context for this session
+        let phase_ctx = PhaseContext::from_entries(&entries);
+
         let mut session_match_count = 0;
 
         for entry in &entries {
@@ -972,6 +975,9 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
                         session_match_count += 1;
 
                         if !args.files_only {
+                            let (phase, minutes_in, post_compaction) =
+                                phase_ctx.classify(entry);
+
                             let result = SearchResult {
                                 session_id: session.session_id().to_string(),
                                 project: session.project_path().to_string(),
@@ -983,6 +989,9 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
                                 matched_text: m.matched_text,
                                 context_after: m.context_after,
                                 score: m.score,
+                                phase: Some(phase),
+                                minutes_in,
+                                post_compaction: Some(post_compaction),
                             };
 
                             all_results.push(result);
@@ -1022,6 +1031,20 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
     // Finish progress bar
     if let Some(pb) = progress {
         pb.finish_and_clear();
+    }
+
+    // Apply --phase filter
+    if let Some(ref phase_filter) = args.phase {
+        let target_phase = match phase_filter.to_lowercase().as_str() {
+            "early" => Some(SessionPhase::Early),
+            "middle" | "mid" => Some(SessionPhase::Middle),
+            "late" => Some(SessionPhase::Late),
+            _ => None,
+        };
+        if let Some(target) = target_phase {
+            all_results.retain(|r| r.phase == Some(target));
+            total_matches = all_results.len();
+        }
     }
 
     // Sort results by relevance if requested
@@ -1288,7 +1311,16 @@ fn output_full_results(
                 }
 
                 println!();
-                println!("  [{}]", format_match_label(&result.entry_type, &result.location));
+                let phase_info = match (&result.phase, &result.minutes_in, &result.post_compaction) {
+                    (Some(phase), Some(mins), Some(post_c)) => {
+                        let compact_marker = if *post_c { " post-compact" } else { "" };
+                        format!(" ({phase}, {mins}m in{compact_marker})")
+                    }
+                    (Some(phase), Some(mins), _) => format!(" ({phase}, {mins}m in)"),
+                    (Some(phase), _, _) => format!(" ({phase})"),
+                    _ => String::new(),
+                };
+                println!("  [{}]{}", format_match_label(&result.entry_type, &result.location), phase_info);
 
                 if args.context > 0 && !result.context_before.is_empty() {
                     for line in result.context_before.lines() {
@@ -1310,6 +1342,104 @@ fn output_full_results(
     Ok(())
 }
 
+/// Precomputed session phase context for classifying entries.
+struct PhaseContext {
+    session_start: Option<DateTime<Utc>>,
+    session_end: Option<DateTime<Utc>>,
+    compaction_times: Vec<DateTime<Utc>>,
+}
+
+impl PhaseContext {
+    fn from_entries(entries: &[LogEntry]) -> Self {
+        let mut session_start: Option<DateTime<Utc>> = None;
+        let mut session_end: Option<DateTime<Utc>> = None;
+        let mut compaction_times = Vec::new();
+
+        for entry in entries {
+            if let Some(ts) = entry.timestamp() {
+                if session_start.is_none() || ts < session_start.unwrap() {
+                    session_start = Some(ts);
+                }
+                if session_end.is_none() || ts > session_end.unwrap() {
+                    session_end = Some(ts);
+                }
+            }
+
+            // Detect compaction boundaries
+            if let LogEntry::System(sys) = entry {
+                if sys.subtype == Some(crate::model::SystemSubtype::CompactBoundary) {
+                    if let Some(ts) = entry.timestamp() {
+                        compaction_times.push(ts);
+                    }
+                }
+            }
+        }
+
+        compaction_times.sort();
+
+        Self {
+            session_start,
+            session_end,
+            compaction_times,
+        }
+    }
+
+    /// Classify an entry into phase, minutes_in, and post_compaction.
+    fn classify(&self, entry: &LogEntry) -> (SessionPhase, Option<u64>, bool) {
+        let ts = entry.timestamp();
+
+        let phase = match (ts, self.session_start, self.session_end) {
+            (Some(ts), Some(start), Some(end)) => {
+                let total = (end - start).num_seconds().max(1) as f64;
+                let elapsed = (ts - start).num_seconds().max(0) as f64;
+                let position = elapsed / total;
+                if position < 0.33 {
+                    SessionPhase::Early
+                } else if position < 0.67 {
+                    SessionPhase::Middle
+                } else {
+                    SessionPhase::Late
+                }
+            }
+            _ => SessionPhase::Middle,
+        };
+
+        let minutes_in = match (ts, self.session_start) {
+            (Some(ts), Some(start)) => {
+                let mins = (ts - start).num_minutes().max(0) as u64;
+                Some(mins)
+            }
+            _ => None,
+        };
+
+        let post_compaction = match ts {
+            Some(ts) => self.compaction_times.iter().any(|ct| ts > *ct),
+            None => false,
+        };
+
+        (phase, minutes_in, post_compaction)
+    }
+}
+
+/// Session phase position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SessionPhase {
+    Early,
+    Middle,
+    Late,
+}
+
+impl std::fmt::Display for SessionPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SessionPhase::Early => write!(f, "early"),
+            SessionPhase::Middle => write!(f, "middle"),
+            SessionPhase::Late => write!(f, "late"),
+        }
+    }
+}
+
 /// Search result.
 #[derive(Debug, serde::Serialize)]
 struct SearchResult {
@@ -1324,6 +1454,15 @@ struct SearchResult {
     context_after: String,
     /// Relevance score (0-100).
     score: u8,
+    /// Session phase (early/middle/late).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase: Option<SessionPhase>,
+    /// Minutes into session when this match occurred.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    minutes_in: Option<u64>,
+    /// Whether this match is after a compaction event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    post_compaction: Option<bool>,
 }
 
 /// A match within an entry.
