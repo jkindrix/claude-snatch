@@ -577,11 +577,7 @@ fn extract_conclusion_around_match(text: &str, regex: &Regex) -> String {
 
         let paragraph = &text[para_start..para_end];
         // Limit to ~500 chars
-        if paragraph.len() > 500 {
-            format!("{}...", &paragraph[..500])
-        } else {
-            paragraph.to_string()
-        }
+        truncate(paragraph, 500)
     } else {
         // Shouldn't happen since we checked is_match, but fallback
         truncate(text, 500)
