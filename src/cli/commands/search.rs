@@ -565,6 +565,11 @@ fn collect_sessions(cli: &Cli, args: &SearchArgs) -> Result<Vec<Session>> {
         sessions.truncate(n);
     }
 
+    // Apply --no-subagents filter
+    if args.no_subagents {
+        sessions.retain(|s| !s.is_subagent());
+    }
+
     Ok(sessions)
 }
 
@@ -573,6 +578,13 @@ fn run_batch(cli: &Cli, args: &SearchArgs, patterns: Vec<BatchPattern>) -> Resul
     let sessions = collect_sessions(cli, args)?;
 
     let mut counts: Vec<usize> = vec![0; patterns.len()];
+    // Per-pattern per-session breakdown (only allocated when --breakdown)
+    let mut per_session: Vec<std::collections::HashMap<String, (usize, Option<SystemTime>)>> =
+        if args.breakdown {
+            vec![std::collections::HashMap::new(); patterns.len()]
+        } else {
+            Vec::new()
+        };
 
     let session_count = sessions.len();
     let show_progress = session_count > 10 && std::io::stderr().is_terminal() && !cli.quiet;
@@ -597,9 +609,31 @@ fn run_batch(cli: &Cli, args: &SearchArgs, patterns: Vec<BatchPattern>) -> Resul
             Ok(e) => e,
             Err(_) => continue,
         };
+
+        // Track per-pattern session counts for breakdown mode
+        let mut session_counts: Vec<usize> = if args.breakdown {
+            vec![0; patterns.len()]
+        } else {
+            Vec::new()
+        };
+
         for entry in &entries {
             for (i, pattern) in patterns.iter().enumerate() {
-                counts[i] += count_pattern_matches(entry, pattern);
+                let c = count_pattern_matches(entry, pattern);
+                counts[i] += c;
+                if args.breakdown {
+                    session_counts[i] += c;
+                }
+            }
+        }
+
+        if args.breakdown {
+            let sid = session.session_id().to_string();
+            let modified = Some(session.modified_time());
+            for (i, &sc) in session_counts.iter().enumerate() {
+                if sc > 0 {
+                    per_session[i].insert(sid.clone(), (sc, modified));
+                }
             }
         }
     }
@@ -610,10 +644,26 @@ fn run_batch(cli: &Cli, args: &SearchArgs, patterns: Vec<BatchPattern>) -> Resul
 
     // Output
     let is_tsv_mode = args.patterns_tsv.is_some();
+
+    if args.breakdown {
+        output_batch_breakdown(cli, &patterns, &counts, &per_session, is_tsv_mode)?;
+    } else {
+        output_batch_aggregate(cli, &patterns, &counts, is_tsv_mode)?;
+    }
+
+    Ok(())
+}
+
+/// Output batch results as aggregate counts (original behavior).
+fn output_batch_aggregate(
+    cli: &Cli,
+    patterns: &[BatchPattern],
+    counts: &[usize],
+    is_tsv_mode: bool,
+) -> Result<()> {
     match cli.effective_output() {
         OutputFormat::Json => {
             if is_tsv_mode {
-                // Structured output with TSV metadata
                 let entries: Vec<serde_json::Value> = patterns.iter().enumerate().map(|(i, p)| {
                     let parts: Vec<&str> = p.label.splitn(3, '\t').collect();
                     serde_json::json!({
@@ -625,7 +675,6 @@ fn run_batch(cli: &Cli, args: &SearchArgs, patterns: Vec<BatchPattern>) -> Resul
                 }).collect();
                 println!("{}", serde_json::to_string_pretty(&entries)?);
             } else {
-                // Simple pattern -> count mapping
                 let map: Vec<serde_json::Value> = patterns.iter().enumerate().map(|(i, p)| {
                     serde_json::json!({
                         "pattern": p.label,
@@ -663,14 +712,94 @@ fn run_batch(cli: &Cli, args: &SearchArgs, patterns: Vec<BatchPattern>) -> Resul
                     println!("{:<7} {}", counts[i], label);
                 }
             } else {
-                // Multi-pattern positional: just label=pattern text
                 for (i, p) in patterns.iter().enumerate() {
                     println!("{:<7} {}", counts[i], p.label);
                 }
             }
         }
     }
+    Ok(())
+}
 
+/// Output batch results with per-session breakdown (--breakdown).
+fn output_batch_breakdown(
+    cli: &Cli,
+    patterns: &[BatchPattern],
+    counts: &[usize],
+    per_session: &[std::collections::HashMap<String, (usize, Option<SystemTime>)>],
+    is_tsv_mode: bool,
+) -> Result<()> {
+    match cli.effective_output() {
+        OutputFormat::Json => {
+            let entries: Vec<serde_json::Value> = patterns.iter().enumerate().map(|(i, p)| {
+                let parts: Vec<&str> = p.label.splitn(3, '\t').collect();
+                let sessions: Vec<serde_json::Value> = {
+                    let mut sess: Vec<_> = per_session[i].iter().collect();
+                    sess.sort_by(|a, b| (b.1).0.cmp(&(a.1).0));
+                    sess.iter().map(|(sid, (count, modified))| {
+                        let mut val = serde_json::json!({
+                            "session_id": sid,
+                            "count": count,
+                        });
+                        if let Some(time) = modified {
+                            val["date"] = serde_json::Value::String(format_date(time));
+                        }
+                        val
+                    }).collect()
+                };
+                if is_tsv_mode {
+                    serde_json::json!({
+                        "category": parts.first().unwrap_or(&""),
+                        "subcategory": parts.get(1).unwrap_or(&""),
+                        "label": parts.get(2).unwrap_or(&""),
+                        "count": counts[i],
+                        "sessions": sessions,
+                    })
+                } else {
+                    serde_json::json!({
+                        "pattern": p.label,
+                        "count": counts[i],
+                        "sessions": sessions,
+                    })
+                }
+            }).collect();
+            println!("{}", serde_json::to_string_pretty(&entries)?);
+        }
+        _ => {
+            let mut prev_cat = String::new();
+            for (i, p) in patterns.iter().enumerate() {
+                if counts[i] == 0 {
+                    continue;
+                }
+
+                if is_tsv_mode {
+                    let parts: Vec<&str> = p.label.splitn(3, '\t').collect();
+                    let cat = parts.first().unwrap_or(&"");
+                    let label = parts.get(2).unwrap_or(&"");
+                    if *cat != prev_cat {
+                        if !prev_cat.is_empty() { println!(); }
+                        println!("=== {} ===", cat.to_uppercase());
+                        prev_cat = cat.to_string();
+                    }
+                    println!("{:<7} {}", counts[i], label);
+                } else {
+                    println!("{:<7} {}", counts[i], p.label);
+                }
+
+                // Per-session breakdown
+                let mut sess: Vec<_> = per_session[i].iter().collect();
+                sess.sort_by(|a, b| (b.1).0.cmp(&(a.1).0));
+                for (sid, (count, modified)) in &sess {
+                    let short_id = &sid[..8.min(sid.len())];
+                    let date_str = modified
+                        .as_ref()
+                        .map(format_date)
+                        .unwrap_or_else(|| "unknown".to_string());
+                    println!("  {}  {}  {}", date_str, short_id, count);
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -903,6 +1032,8 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
     // Output results based on mode
     if args.files_only {
         output_files_only(cli, &sessions_with_matches)?;
+    } else if args.aggregate_by_session {
+        output_aggregate(cli, &match_counts, total_matches)?;
     } else if args.count {
         output_count(cli, args, &match_counts, total_matches)?;
     } else if args.match_only {
@@ -1017,6 +1148,61 @@ fn output_count(
                 println!();
                 println!("Total: {}", total);
             }
+        }
+    }
+    Ok(())
+}
+
+/// Output one line per session with match count (--aggregate-by-session).
+fn output_aggregate(
+    cli: &Cli,
+    match_counts: &std::collections::HashMap<String, (String, usize, Option<SystemTime>)>,
+    total: usize,
+) -> Result<()> {
+    if match_counts.is_empty() {
+        println!("No matches found.");
+        return Ok(());
+    }
+
+    match cli.effective_output() {
+        OutputFormat::Json => {
+            let mut entries: Vec<serde_json::Value> = match_counts
+                .iter()
+                .map(|(session_id, (project, count, modified))| {
+                    let mut val = serde_json::json!({
+                        "session_id": session_id,
+                        "project": project,
+                        "count": count,
+                    });
+                    if let Some(time) = modified {
+                        val["date"] = serde_json::Value::String(format_date(time));
+                    }
+                    val
+                })
+                .collect();
+            entries.sort_by(|a, b| {
+                b["count"].as_u64().unwrap_or(0).cmp(&a["count"].as_u64().unwrap_or(0))
+            });
+            let output = serde_json::json!({
+                "total": total,
+                "sessions": entries,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        _ => {
+            let mut counts: Vec<(&String, &(String, usize, Option<SystemTime>))> =
+                match_counts.iter().collect();
+            counts.sort_by(|a, b| (b.1).1.cmp(&(a.1).1));
+
+            for (session_id, (_project, count, modified)) in &counts {
+                let short_id = &session_id[..8.min(session_id.len())];
+                let date_str = modified
+                    .as_ref()
+                    .map(format_date)
+                    .unwrap_or_else(|| "unknown".to_string());
+                println!("{}  {}  {} matches", date_str, short_id, count);
+            }
+            println!("\nTotal: {} matches across {} sessions", total, counts.len());
         }
     }
     Ok(())

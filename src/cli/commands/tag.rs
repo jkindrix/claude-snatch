@@ -784,9 +784,130 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                 }
             }
         }
+
+        TagAction::Message { session, message_uuid, tag, project } => {
+            let project_dir = resolve_project_dir(cli, project.as_deref())?;
+            let session_id = resolve_session_id(cli, session)?;
+            let mut tag_store = crate::message_tags::load_message_tags(&project_dir)?;
+            if tag_store.add_tag(&session_id, message_uuid, tag, crate::message_tags::TagSource::Manual) {
+                crate::message_tags::save_message_tags(&project_dir, &tag_store)?;
+                println!("Tagged message {} with '{}'", short_id(message_uuid), tag);
+            } else {
+                println!("Message {} already has tag '{}'", short_id(message_uuid), tag);
+            }
+        }
+
+        TagAction::UntagMessage { message_uuid, tag, project } => {
+            let project_dir = resolve_project_dir(cli, project.as_deref())?;
+            let mut tag_store = crate::message_tags::load_message_tags(&project_dir)?;
+            if tag_store.remove_tag(message_uuid, tag) {
+                crate::message_tags::save_message_tags(&project_dir, &tag_store)?;
+                println!("Removed tag '{}' from message {}", tag, short_id(message_uuid));
+            } else {
+                println!("Message {} does not have tag '{}'", short_id(message_uuid), tag);
+            }
+        }
+
+        TagAction::MessageTags { session, tag, project } => {
+            let project_dir = resolve_project_dir(cli, project.as_deref())?;
+            let tag_store = crate::message_tags::load_message_tags(&project_dir)?;
+
+            if let Some(session_prefix) = session {
+                let session_id = resolve_session_id(cli, session_prefix)?;
+                let msgs = tag_store.messages_in_session(&session_id);
+                if msgs.is_empty() {
+                    println!("No message tags for session {}.", short_id(&session_id));
+                } else {
+                    match cli.effective_output() {
+                        OutputFormat::Json => {
+                            println!("{}", serde_json::to_string_pretty(&msgs)?);
+                        }
+                        _ => {
+                            println!("Message tags for session {} ({} messages):", short_id(&session_id), msgs.len());
+                            for msg in &msgs {
+                                let tags: Vec<&str> = msg.tags.iter().map(|t| t.tag.as_str()).collect();
+                                println!("  {} -> {}", short_id(&msg.message_uuid), tags.join(", "));
+                            }
+                        }
+                    }
+                }
+            } else if let Some(tag_filter) = tag {
+                let msgs = tag_store.messages_with_tag(tag_filter);
+                if msgs.is_empty() {
+                    println!("No messages with tag '{}'.", tag_filter);
+                } else {
+                    match cli.effective_output() {
+                        OutputFormat::Json => {
+                            println!("{}", serde_json::to_string_pretty(&msgs)?);
+                        }
+                        _ => {
+                            println!("Messages with tag '{}' ({} total):", tag_filter, msgs.len());
+                            for msg in &msgs {
+                                let tags: Vec<&str> = msg.tags.iter().map(|t| t.tag.as_str()).collect();
+                                println!("  {} [{}] -> {}", short_id(&msg.message_uuid), short_id(&msg.session_id), tags.join(", "));
+                            }
+                        }
+                    }
+                }
+            } else {
+                let all_tags = tag_store.all_tags();
+                if all_tags.is_empty() {
+                    println!("No message tags in this project.");
+                } else {
+                    match cli.effective_output() {
+                        OutputFormat::Json => {
+                            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                                "tags": all_tags,
+                                "total_messages": tag_store.count(),
+                            }))?);
+                        }
+                        _ => {
+                            println!("Message tags ({} tags, {} messages):", all_tags.len(), tag_store.count());
+                            for t in &all_tags {
+                                let count = tag_store.messages_with_tag(t).len();
+                                println!("  {} ({} message{})", t, count, if count == 1 { "" } else { "s" });
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Resolve a project directory from an optional project filter.
+fn resolve_project_dir(cli: &Cli, project: Option<&str>) -> Result<std::path::PathBuf> {
+    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
+    if let Some(project_filter) = project {
+        let projects = claude_dir.projects()?;
+        for p in projects {
+            if p.decoded_path().contains(project_filter) {
+                return Ok(p.path().to_path_buf());
+            }
+        }
+        Err(crate::error::SnatchError::InvalidArgument {
+            name: "project".to_string(),
+            reason: format!("No project matching '{}'", project_filter),
+        })
+    } else {
+        // Try to infer project from cwd
+        let cwd = std::env::current_dir().map_err(|e| crate::error::SnatchError::IoError {
+            context: "Failed to get current directory".to_string(),
+            source: e,
+        })?;
+        let projects = claude_dir.projects()?;
+        for p in projects {
+            if cwd.to_string_lossy().contains(&p.decoded_path()) {
+                return Ok(p.path().to_path_buf());
+            }
+        }
+        Err(crate::error::SnatchError::InvalidArgument {
+            name: "project".to_string(),
+            reason: "Could not infer project. Use -p <project> to specify.".to_string(),
+        })
+    }
 }
 
 /// Metadata used for similarity comparison.

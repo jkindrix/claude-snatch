@@ -203,6 +203,18 @@ pub enum Commands {
     #[command(alias = "s", alias = "find", display_order = 10)]
     Search(SearchArgs),
 
+    /// Thread a topic across sessions chronologically with conversation context.
+    #[command(display_order = 11)]
+    Thread(ThreadArgs),
+
+    /// Detect candidate decision points in conversations.
+    #[command(display_order = 12)]
+    Detect(DetectArgs),
+
+    /// Detect potential contradictions between decisions across sessions.
+    #[command(display_order = 13)]
+    Conflicts(ConflictsArgs),
+
     // ═══════════════════════════════════════════════════════════════════════
     // ANALYSIS - Usage analytics and comparisons
     // ═══════════════════════════════════════════════════════════════════════
@@ -246,6 +258,10 @@ pub enum Commands {
     /// Manage tactical session notes for a project.
     #[command(display_order = 29)]
     Notes(NotesArgs),
+
+    /// Manage a persistent decision registry for a project.
+    #[command(display_order = 30)]
+    Decisions(DecisionsArgs),
 
     // ═══════════════════════════════════════════════════════════════════════
     // EXPORT - Extract content in various formats
@@ -927,6 +943,18 @@ pub struct SearchArgs {
     /// Include session dates in count output.
     #[arg(long)]
     pub with_date: bool,
+
+    /// Exclude subagent sessions from results.
+    #[arg(long)]
+    pub no_subagents: bool,
+
+    /// Show one line per session with match count (heat-map mode).
+    #[arg(long)]
+    pub aggregate_by_session: bool,
+
+    /// Show per-session breakdown in --patterns-tsv mode.
+    #[arg(long)]
+    pub breakdown: bool,
 }
 
 /// Arguments for the stats command.
@@ -1557,6 +1585,45 @@ pub enum TagAction {
         session: Option<String>,
     },
 
+    /// Tag a specific message within a session.
+    #[command(alias = "msg")]
+    Message {
+        /// Session ID (supports short prefixes).
+        session: String,
+        /// Message UUID to tag.
+        message_uuid: String,
+        /// Tag to apply (e.g., "decision", "decision:drop-trait", "reversal").
+        tag: String,
+        /// Project path filter (required for storage location).
+        #[arg(short = 'p', long)]
+        project: Option<String>,
+    },
+
+    /// Remove a tag from a specific message.
+    #[command(alias = "unmsg")]
+    UntagMessage {
+        /// Message UUID to remove tag from.
+        message_uuid: String,
+        /// Tag to remove.
+        tag: String,
+        /// Project path filter (required for storage location).
+        #[arg(short = 'p', long)]
+        project: Option<String>,
+    },
+
+    /// List message tags for a session or search by tag.
+    #[command(alias = "mtags")]
+    MessageTags {
+        /// Session ID to show message tags for, or omit to search by tag.
+        session: Option<String>,
+        /// Filter by tag (exact or prefix match).
+        #[arg(short = 't', long)]
+        tag: Option<String>,
+        /// Project path filter (required for storage location).
+        #[arg(short = 'p', long)]
+        project: Option<String>,
+    },
+
     /// Find sessions similar to a given session.
     Similar {
         /// Session ID to find similar sessions for (supports short prefixes).
@@ -1939,6 +2006,176 @@ pub struct NotesArgs {
     pub session_id: Option<String>,
 }
 
+/// Arguments for the decisions command.
+#[derive(Debug, Parser)]
+pub struct DecisionsArgs {
+    /// Operation: list, add, update, remove, supersede (default: list).
+    pub operation: Option<String>,
+
+    /// Project path filter (substring match).
+    #[arg(short = 'p', long)]
+    pub project: Option<String>,
+
+    /// Decision title (required for add).
+    #[arg(short = 't', long)]
+    pub title: Option<String>,
+
+    /// Decision description.
+    #[arg(long)]
+    pub description: Option<String>,
+
+    /// Decision ID (required for update, remove, supersede).
+    #[arg(long)]
+    pub id: Option<u64>,
+
+    /// Decision status: proposed, confirmed, superseded, abandoned.
+    #[arg(short = 's', long)]
+    pub status: Option<String>,
+
+    /// Confidence score (0.0 to 1.0).
+    #[arg(long)]
+    pub confidence: Option<f64>,
+
+    /// Tags (comma-separated). Also used as filter for list.
+    #[arg(long)]
+    pub tag: Option<String>,
+
+    /// ID of the decision that supersedes this one (for supersede operation).
+    #[arg(long)]
+    pub superseded_by: Option<u64>,
+
+    /// Session ID where this decision was made.
+    #[arg(long)]
+    pub session_id: Option<String>,
+}
+
+/// Arguments for the thread command.
+#[derive(Debug, Parser)]
+pub struct ThreadArgs {
+    /// Search pattern (regex supported).
+    pub pattern: String,
+
+    /// Search in specific project.
+    #[arg(short = 'p', long)]
+    pub project: Option<String>,
+
+    /// Filter by session ID.
+    #[arg(short = 's', long)]
+    pub session: Option<String>,
+
+    /// Case-insensitive search.
+    #[arg(short = 'i', long)]
+    pub ignore_case: bool,
+
+    /// Include thinking blocks in search and output.
+    #[arg(long)]
+    pub thinking: bool,
+
+    /// Exclude subagent sessions.
+    #[arg(long)]
+    pub no_subagents: bool,
+
+    /// Filter to sessions since this date (YYYY-MM-DD or relative like "1week").
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Filter to sessions until this date.
+    #[arg(long)]
+    pub until: Option<String>,
+
+    /// Limit to N most recent sessions.
+    #[arg(long)]
+    pub recent: Option<usize>,
+
+    /// Maximum results (default: 30).
+    #[arg(short = 'n', long, default_value = "30")]
+    pub limit: usize,
+
+    /// Show all results without limit.
+    #[arg(long)]
+    pub no_limit: bool,
+
+    /// Maximum characters per context block (default: 500).
+    #[arg(long, default_value = "500")]
+    pub max_context: usize,
+}
+
+/// Arguments for the detect command.
+#[derive(Debug, Parser)]
+pub struct DetectArgs {
+    /// Search in specific project.
+    #[arg(short = 'p', long)]
+    pub project: Option<String>,
+
+    /// Filter by session ID.
+    #[arg(short = 's', long)]
+    pub session: Option<String>,
+
+    /// Minimum confidence threshold (0.0-1.0, default: 0.5).
+    #[arg(long, default_value = "0.5")]
+    pub min_confidence: f64,
+
+    /// Exclude subagent sessions.
+    #[arg(long)]
+    pub no_subagents: bool,
+
+    /// Filter to sessions since this date (YYYY-MM-DD or relative like "1week").
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Filter to sessions until this date.
+    #[arg(long)]
+    pub until: Option<String>,
+
+    /// Limit to N most recent sessions.
+    #[arg(long)]
+    pub recent: Option<usize>,
+
+    /// Maximum results (default: 50).
+    #[arg(short = 'n', long, default_value = "50")]
+    pub limit: usize,
+
+    /// Show all results without limit.
+    #[arg(long)]
+    pub no_limit: bool,
+}
+
+/// Arguments for the conflicts command.
+#[derive(Debug, Parser)]
+pub struct ConflictsArgs {
+    /// Search in specific project.
+    #[arg(short = 'p', long)]
+    pub project: Option<String>,
+
+    /// Topic pattern to search for contradictions (regex supported).
+    #[arg(short = 't', long)]
+    pub topic: Option<String>,
+
+    /// Minimum confidence threshold (0.0-1.0, default: 0.3).
+    #[arg(long, default_value = "0.3")]
+    pub min_confidence: f64,
+
+    /// Exclude subagent sessions.
+    #[arg(long)]
+    pub no_subagents: bool,
+
+    /// Filter to sessions since this date.
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Filter to sessions until this date.
+    #[arg(long)]
+    pub until: Option<String>,
+
+    /// Maximum results (default: 20).
+    #[arg(short = 'n', long, default_value = "20")]
+    pub limit: usize,
+
+    /// Show all results without limit.
+    #[arg(long)]
+    pub no_limit: bool,
+}
+
 /// Arguments for the timeline command.
 #[derive(Debug, Parser)]
 pub struct TimelineArgs {
@@ -2319,6 +2556,10 @@ pub fn run() -> Result<()> {
         Some(Commands::Goals(args)) => commands::goals::run(&cli, args),
         Some(Commands::Digest(args)) => commands::digest::run(&cli, args),
         Some(Commands::Notes(args)) => commands::notes::run(&cli, args),
+        Some(Commands::Decisions(args)) => commands::decisions::run(&cli, args),
+        Some(Commands::Thread(args)) => commands::thread::run(&cli, args),
+        Some(Commands::Detect(args)) => commands::detect::run(&cli, args),
+        Some(Commands::Conflicts(args)) => commands::conflicts::run(&cli, args),
         Some(Commands::Timeline(args)) => commands::timeline::run(&cli, args),
         Some(Commands::Messages(args)) => commands::messages::run(&cli, args),
         Some(Commands::Pick(args)) => commands::pick::run(&cli, args),

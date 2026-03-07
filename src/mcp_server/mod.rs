@@ -16,6 +16,7 @@
 //! - `manage_goals` - Persistent goal tracking across sessions and compactions
 //! - `get_session_digest` - Compact session summary for orientation after compaction
 //! - `manage_notes` - Tactical session notes that survive compaction
+//! - `manage_decisions` - Persistent decision registry across sessions
 
 #![cfg(feature = "mcp")]
 
@@ -1403,6 +1404,396 @@ impl SnatchServer {
 
             other => ToolOutput::error(format!(
                 "Unknown operation '{other}'. Use: list, add, remove, clear"
+            )),
+        }
+    }
+
+    #[tool(description = "Manage a persistent decision registry for a project. Decisions track design choices with status, confidence, tags, and session provenance. Operations: list, add, update, remove, supersede.")]
+    async fn manage_decisions(&self, request: ManageDecisionsRequest) -> ToolOutput {
+        use crate::decisions::{load_decisions, save_decisions, DecisionStatus};
+
+        let resolved = match resolve_project(self, &request.project) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+
+        let mut store = match load_decisions(&resolved.project_dir) {
+            Ok(s) => s,
+            Err(e) => return ToolOutput::error(format!("Failed to load decisions: {e}")),
+        };
+
+        fn to_entry(d: &crate::decisions::Decision) -> DecisionEntry {
+            DecisionEntry {
+                id: d.id,
+                title: d.title.clone(),
+                description: d.description.clone(),
+                status: d.status.to_string(),
+                confidence: d.confidence,
+                created_at: d.created_at.to_rfc3339(),
+                updated_at: d.updated_at.to_rfc3339(),
+                session_id: d.session_id.clone(),
+                superseded_by: d.superseded_by,
+                tags: d.tags.clone(),
+                references: d.references.clone(),
+            }
+        }
+
+        match request.operation.as_str() {
+            "list" => {
+                let mut decisions: Vec<&crate::decisions::Decision> = store.decisions.iter().collect();
+
+                // Filter by status if specified
+                if let Some(ref status_str) = request.status {
+                    if let Some(status) = DecisionStatus::parse(status_str) {
+                        decisions.retain(|d| d.status == status);
+                    }
+                }
+
+                // Filter by tag if specified
+                if let Some(ref tags_str) = request.tags {
+                    let tag = tags_str.trim();
+                    decisions.retain(|d| d.tags.iter().any(|t| t.contains(tag)));
+                }
+
+                let entries: Vec<DecisionEntry> = decisions.iter().map(|d| to_entry(d)).collect();
+
+                let response = ManageDecisionsResponse {
+                    operation: "list".into(),
+                    project_path: resolved.project_path,
+                    message: Some(format!("{} decision(s)", entries.len())),
+                    decisions: Some(entries),
+                    decision: None,
+                };
+
+                match ToolOutput::json(&response) {
+                    Ok(output) => output,
+                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+                }
+            }
+
+            "add" => {
+                let title = match request.title {
+                    Some(t) if !t.trim().is_empty() => t,
+                    _ => return ToolOutput::error("'title' is required for add operation"),
+                };
+
+                let tags: Vec<String> = request
+                    .tags
+                    .as_deref()
+                    .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
+                    .unwrap_or_default();
+
+                let id = store.add_decision(
+                    title,
+                    request.description,
+                    request.session_id,
+                    request.confidence,
+                    tags,
+                );
+
+                // Apply status if specified
+                if let Some(ref status_str) = request.status {
+                    if let Some(status) = DecisionStatus::parse(status_str) {
+                        store.update_decision(id, Some(status), None, None, None);
+                    }
+                }
+
+                if let Err(e) = save_decisions(&resolved.project_dir, &store) {
+                    return ToolOutput::error(format!("Failed to save decisions: {e}"));
+                }
+
+                let decision = store.decisions.iter().find(|d| d.id == id).unwrap();
+                let response = ManageDecisionsResponse {
+                    operation: "add".into(),
+                    project_path: resolved.project_path,
+                    message: Some(format!("Added decision #{id}")),
+                    decisions: None,
+                    decision: Some(to_entry(decision)),
+                };
+
+                match ToolOutput::json(&response) {
+                    Ok(output) => output,
+                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+                }
+            }
+
+            "update" => {
+                let id = match request.id {
+                    Some(id) => id,
+                    None => return ToolOutput::error("'id' is required for update operation"),
+                };
+
+                let status = request
+                    .status
+                    .as_deref()
+                    .and_then(DecisionStatus::parse);
+
+                let tags: Option<Vec<String>> = request
+                    .tags
+                    .as_deref()
+                    .map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
+
+                if !store.update_decision(id, status, request.description, request.confidence, tags) {
+                    return ToolOutput::error(format!("Decision #{id} not found"));
+                }
+
+                if let Err(e) = save_decisions(&resolved.project_dir, &store) {
+                    return ToolOutput::error(format!("Failed to save decisions: {e}"));
+                }
+
+                let decision = store.decisions.iter().find(|d| d.id == id).unwrap();
+                let response = ManageDecisionsResponse {
+                    operation: "update".into(),
+                    project_path: resolved.project_path,
+                    message: Some(format!("Updated decision #{id}")),
+                    decisions: None,
+                    decision: Some(to_entry(decision)),
+                };
+
+                match ToolOutput::json(&response) {
+                    Ok(output) => output,
+                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+                }
+            }
+
+            "remove" => {
+                let id = match request.id {
+                    Some(id) => id,
+                    None => return ToolOutput::error("'id' is required for remove operation"),
+                };
+
+                if !store.remove_decision(id) {
+                    return ToolOutput::error(format!("Decision #{id} not found"));
+                }
+
+                if let Err(e) = save_decisions(&resolved.project_dir, &store) {
+                    return ToolOutput::error(format!("Failed to save decisions: {e}"));
+                }
+
+                let response = ManageDecisionsResponse {
+                    operation: "remove".into(),
+                    project_path: resolved.project_path,
+                    message: Some(format!("Removed decision #{id}")),
+                    decisions: None,
+                    decision: None,
+                };
+
+                match ToolOutput::json(&response) {
+                    Ok(output) => output,
+                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+                }
+            }
+
+            "supersede" => {
+                let id = match request.id {
+                    Some(id) => id,
+                    None => return ToolOutput::error("'id' is required for supersede operation"),
+                };
+                let by = match request.superseded_by {
+                    Some(by) => by,
+                    None => {
+                        return ToolOutput::error(
+                            "'superseded_by' is required for supersede operation",
+                        )
+                    }
+                };
+
+                if !store.supersede_decision(id, by) {
+                    return ToolOutput::error(format!("Decision #{id} or #{by} not found"));
+                }
+
+                if let Err(e) = save_decisions(&resolved.project_dir, &store) {
+                    return ToolOutput::error(format!("Failed to save decisions: {e}"));
+                }
+
+                let decision = store.decisions.iter().find(|d| d.id == id).unwrap();
+                let response = ManageDecisionsResponse {
+                    operation: "supersede".into(),
+                    project_path: resolved.project_path,
+                    message: Some(format!("Decision #{id} superseded by #{by}")),
+                    decisions: None,
+                    decision: Some(to_entry(decision)),
+                };
+
+                match ToolOutput::json(&response) {
+                    Ok(output) => output,
+                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+                }
+            }
+
+            other => ToolOutput::error(format!(
+                "Unknown operation '{other}'. Use: list, add, update, remove, supersede"
+            )),
+        }
+    }
+
+    #[tool(description = "Tag individual messages within a session for retrieval. Tags like 'decision', 'reversal', 'correction', 'bug', 'milestone' mark key moments. Use 'decision:topic' for topic-specific decision tags. Operations: add (tag a message), remove (untag), list (show tags for a session), search (find messages by tag).")]
+    async fn tag_message(&self, request: TagMessageRequest) -> ToolOutput {
+        use crate::message_tags::{load_message_tags, save_message_tags, TagSource};
+
+        let resolved = match resolve_project(self, &request.project) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+
+        fn to_entry(msg: &crate::message_tags::TaggedMessage) -> TaggedMessageEntry {
+            TaggedMessageEntry {
+                session_id: msg.session_id.clone(),
+                message_uuid: msg.message_uuid.clone(),
+                tags: msg.tags.iter().map(|t| MessageTagEntry {
+                    tag: t.tag.clone(),
+                    created_at: t.created_at.to_rfc3339(),
+                    source: format!("{:?}", t.source).to_lowercase(),
+                }).collect(),
+            }
+        }
+
+        match request.operation.as_str() {
+            "add" => {
+                let session_id = match &request.session_id {
+                    Some(s) => s.clone(),
+                    None => return ToolOutput::error("'session_id' is required for add operation"),
+                };
+                let message_uuid = match &request.message_uuid {
+                    Some(u) => u.clone(),
+                    None => return ToolOutput::error("'message_uuid' is required for add operation"),
+                };
+                let tag = match &request.tag {
+                    Some(t) => t.clone(),
+                    None => return ToolOutput::error("'tag' is required for add operation"),
+                };
+
+                let mut store = match load_message_tags(&resolved.project_dir) {
+                    Ok(s) => s,
+                    Err(e) => return ToolOutput::error(format!("Failed to load message tags: {e}")),
+                };
+
+                let added = store.add_tag(&session_id, &message_uuid, &tag, TagSource::Manual);
+
+                if let Err(e) = save_message_tags(&resolved.project_dir, &store) {
+                    return ToolOutput::error(format!("Failed to save message tags: {e}"));
+                }
+
+                let response = TagMessageResponse {
+                    operation: "add".into(),
+                    project_path: resolved.project_path,
+                    message: Some(if added {
+                        format!("Tagged message {message_uuid} with '{tag}'")
+                    } else {
+                        format!("Message {message_uuid} already has tag '{tag}'")
+                    }),
+                    messages: None,
+                    tags: None,
+                };
+
+                match ToolOutput::json(&response) {
+                    Ok(output) => output,
+                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+                }
+            }
+
+            "remove" => {
+                let message_uuid = match &request.message_uuid {
+                    Some(u) => u.clone(),
+                    None => return ToolOutput::error("'message_uuid' is required for remove operation"),
+                };
+                let tag = match &request.tag {
+                    Some(t) => t.clone(),
+                    None => return ToolOutput::error("'tag' is required for remove operation"),
+                };
+
+                let mut store = match load_message_tags(&resolved.project_dir) {
+                    Ok(s) => s,
+                    Err(e) => return ToolOutput::error(format!("Failed to load message tags: {e}")),
+                };
+
+                let removed = store.remove_tag(&message_uuid, &tag);
+
+                if let Err(e) = save_message_tags(&resolved.project_dir, &store) {
+                    return ToolOutput::error(format!("Failed to save message tags: {e}"));
+                }
+
+                let response = TagMessageResponse {
+                    operation: "remove".into(),
+                    project_path: resolved.project_path,
+                    message: Some(if removed {
+                        format!("Removed tag '{tag}' from message {message_uuid}")
+                    } else {
+                        format!("Message {message_uuid} does not have tag '{tag}'")
+                    }),
+                    messages: None,
+                    tags: None,
+                };
+
+                match ToolOutput::json(&response) {
+                    Ok(output) => output,
+                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+                }
+            }
+
+            "list" => {
+                let store = match load_message_tags(&resolved.project_dir) {
+                    Ok(s) => s,
+                    Err(e) => return ToolOutput::error(format!("Failed to load message tags: {e}")),
+                };
+
+                let messages = if let Some(ref session_id) = request.session_id {
+                    store.messages_in_session(session_id)
+                        .into_iter()
+                        .map(to_entry)
+                        .collect()
+                } else {
+                    store.messages.values()
+                        .map(to_entry)
+                        .collect()
+                };
+
+                let response = TagMessageResponse {
+                    operation: "list".into(),
+                    project_path: resolved.project_path,
+                    message: None,
+                    messages: Some(messages),
+                    tags: Some(store.all_tags()),
+                };
+
+                match ToolOutput::json(&response) {
+                    Ok(output) => output,
+                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+                }
+            }
+
+            "search" => {
+                let tag = match &request.tag {
+                    Some(t) => t.clone(),
+                    None => return ToolOutput::error("'tag' is required for search operation"),
+                };
+
+                let store = match load_message_tags(&resolved.project_dir) {
+                    Ok(s) => s,
+                    Err(e) => return ToolOutput::error(format!("Failed to load message tags: {e}")),
+                };
+
+                let messages: Vec<TaggedMessageEntry> = store.messages_with_tag(&tag)
+                    .into_iter()
+                    .map(to_entry)
+                    .collect();
+
+                let response = TagMessageResponse {
+                    operation: "search".into(),
+                    project_path: resolved.project_path,
+                    message: Some(format!("Found {} messages with tag '{tag}'", messages.len())),
+                    messages: Some(messages),
+                    tags: None,
+                };
+
+                match ToolOutput::json(&response) {
+                    Ok(output) => output,
+                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+                }
+            }
+
+            other => ToolOutput::error(format!(
+                "Unknown operation '{other}'. Use: add, remove, list, search"
             )),
         }
     }

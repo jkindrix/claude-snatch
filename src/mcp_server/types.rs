@@ -600,3 +600,127 @@ pub struct ManageNotesResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<NoteEntry>,
 }
+
+// ============================================================================
+// New Tool Types: manage_decisions
+// ============================================================================
+
+/// Request for decision management operations.
+#[derive(Debug, Deserialize, ToolInput)]
+pub struct ManageDecisionsRequest {
+    /// Operation: "list", "add", "update", "remove", "supersede".
+    pub operation: String,
+
+    /// Project path filter (substring match). Required.
+    pub project: String,
+
+    /// Decision title (required for "add").
+    pub title: Option<String>,
+
+    /// Decision description.
+    pub description: Option<String>,
+
+    /// Decision ID (required for "update", "remove", "supersede").
+    pub id: Option<u64>,
+
+    /// Status: "proposed", "confirmed", "superseded", "abandoned".
+    pub status: Option<String>,
+
+    /// Confidence score (0.0 to 1.0).
+    pub confidence: Option<f64>,
+
+    /// Comma-separated tags. Also used as filter for "list".
+    pub tags: Option<String>,
+
+    /// ID of decision that supersedes this one (for "supersede" operation).
+    pub superseded_by: Option<u64>,
+
+    /// Session ID where the decision was made.
+    pub session_id: Option<String>,
+}
+
+/// A decision entry in responses.
+#[derive(Debug, Serialize)]
+pub struct DecisionEntry {
+    pub id: u64,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub status: String,
+    pub confidence: f64,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<String>,
+}
+
+/// Response for manage_decisions.
+#[derive(Debug, Serialize)]
+pub struct ManageDecisionsResponse {
+    pub operation: String,
+    pub project_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decisions: Option<Vec<DecisionEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision: Option<DecisionEntry>,
+}
+
+// ============================================================================
+// Message Tagging
+// ============================================================================
+
+/// Request to tag or manage message-level tags.
+#[derive(Debug, Deserialize, ToolInput)]
+pub struct TagMessageRequest {
+    /// Operation: "add", "remove", "list", "search".
+    pub operation: String,
+
+    /// Project path filter (substring match). Required.
+    pub project: String,
+
+    /// Session ID containing the message (required for "add").
+    pub session_id: Option<String>,
+
+    /// Message UUID to tag (required for "add" and "remove").
+    pub message_uuid: Option<String>,
+
+    /// Tag to add or remove (required for "add" and "remove"). For "search", filters by this tag.
+    pub tag: Option<String>,
+}
+
+/// A tagged message entry in responses.
+#[derive(Debug, Serialize)]
+pub struct TaggedMessageEntry {
+    pub session_id: String,
+    pub message_uuid: String,
+    pub tags: Vec<MessageTagEntry>,
+}
+
+/// A single tag on a message.
+#[derive(Debug, Serialize)]
+pub struct MessageTagEntry {
+    pub tag: String,
+    pub created_at: String,
+    pub source: String,
+}
+
+/// Response for tag_message.
+#[derive(Debug, Serialize)]
+pub struct TagMessageResponse {
+    pub operation: String,
+    pub project_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub messages: Option<Vec<TaggedMessageEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+}

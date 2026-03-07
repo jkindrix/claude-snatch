@@ -13,7 +13,7 @@ cargo test                     # run tests
 
 ## Session History Recall (snatch MCP)
 
-This project provides an MCP server (`snatch serve-mcp`) that exposes 12 tools for querying Claude Code session history. When you need to recall what happened in previous sessions or understand the narrative of past work, use these tools:
+This project provides an MCP server (`snatch serve-mcp`) that exposes 14 tools for querying Claude Code session history. When you need to recall what happened in previous sessions or understand the narrative of past work, use these tools:
 
 | Need | Tool | Example |
 |------|------|---------|
@@ -28,6 +28,8 @@ This project provides an MCP server (`snatch serve-mcp`) that exposes 12 tools f
 | What files were changed? | `get_tool_calls` | session_id="abc123", tool_filter="Write,Edit" |
 | Track long-term goals | `manage_goals` | operation="list", project="snatch" |
 | Capture tactical work state | `manage_notes` | operation="add", project="snatch", text="..." |
+| Track design decisions | `manage_decisions` | operation="list", project="snatch" |
+| Tag key messages | `tag_message` | operation="add", project="snatch", session_id="abc", message_uuid="xyz", tag="decision" |
 | List all sessions | `list_sessions` | project="claude-snatch" |
 | Session metadata | `get_session_info` | session_id="abc123" |
 | Usage statistics | `get_stats` | project="claude-snatch" |
@@ -58,6 +60,20 @@ Goals survive compaction and sessions. Use `manage_goals` to track long-term int
 Active goals are auto-injected by the SessionStart hook on startup and compaction.
 Status values: `open`, `in_progress`, `done`, `abandoned`.
 Storage: `~/.claude/projects/<project>/memory/goals.json`
+
+### Decision Registry
+
+Decisions track design choices with status, confidence, tags, and session provenance. Use `manage_decisions` to maintain a structured decision log:
+
+- `manage_decisions(operation="add", project="snatch", title="No Drop trait", status="confirmed", confidence=0.9, tags="memory,traits")` — add
+- `manage_decisions(operation="list", project="snatch")` — see all decisions
+- `manage_decisions(operation="list", project="snatch", status="confirmed")` — filter by status
+- `manage_decisions(operation="update", project="snatch", id=1, status="confirmed")` — update
+- `manage_decisions(operation="supersede", project="snatch", id=1, superseded_by=2)` — supersede
+- `manage_decisions(operation="remove", project="snatch", id=1)` — remove
+
+Status values: `proposed`, `confirmed`, `superseded`, `abandoned`.
+Storage: `~/.claude/projects/<project>/memory/decisions.json`
 
 ### Tactical Notes
 
