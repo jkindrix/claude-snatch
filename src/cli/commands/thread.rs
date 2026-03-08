@@ -15,7 +15,8 @@ use crate::cli::{Cli, ThreadArgs};
 use crate::error::{Result, SnatchError};
 
 use super::helpers::{
-    self, extract_text, extract_thinking_text, short_id, truncate, SessionCollectParams,
+    self, extract_text, extract_thinking_text, looks_like_decision, short_id, truncate,
+    SessionCollectParams,
 };
 
 /// A threaded exchange: a match with its surrounding conversation context.
@@ -130,6 +131,27 @@ pub fn run(cli: &Cli, args: &ThreadArgs) -> Result<()> {
                 }
             }
 
+            // Filter to decision-point exchanges only
+            if args.decisions_only {
+                let is_decision = entry_text.as_ref().map_or(false, |t| looks_like_decision(t));
+                if !is_decision {
+                    // Also check the paired assistant text (if current entry is user)
+                    let paired_assistant = if entry.message_type() == "user" {
+                        ((idx + 1)..main_entries.len())
+                            .find(|&i| main_entries[i].message_type() == "assistant")
+                            .and_then(|i| extract_text(main_entries[i]))
+                    } else {
+                        None
+                    };
+                    let paired_is_decision = paired_assistant
+                        .as_ref()
+                        .map_or(false, |t| looks_like_decision(t));
+                    if !paired_is_decision {
+                        continue;
+                    }
+                }
+            }
+
             let uuid = entry.uuid().unwrap_or("").to_string();
             if !uuid.is_empty() && !seen_uuids.insert(uuid.clone()) {
                 continue;
@@ -204,15 +226,20 @@ pub fn run(cli: &Cli, args: &ThreadArgs) -> Result<()> {
 
     match cli.effective_output() {
         crate::cli::OutputFormat::Json => output_json(&exchanges),
-        _ => output_text(
-            cli,
-            &exchanges,
-            &args.pattern,
-            unique_sessions.len(),
-            args.max_context,
-            args.max_user_context.unwrap_or(args.max_context),
-            args.max_assistant_context.unwrap_or(args.max_context),
-        ),
+        _ => {
+            output_text(
+                cli,
+                &exchanges,
+                &args.pattern,
+                unique_sessions.len(),
+                args.max_context,
+                args.max_user_context.unwrap_or(args.max_context),
+                args.max_assistant_context.unwrap_or(args.max_context),
+            );
+            if args.summary && !cli.quiet {
+                output_summary(&exchanges, unique_sessions.len());
+            }
+        }
     }
 
     Ok(())
@@ -314,6 +341,55 @@ fn output_text(
         if i < exchanges.len() - 1 {
             println!();
             println!("  ─────────────────────────────────────────");
+        }
+    }
+
+    println!();
+}
+
+fn output_summary(exchanges: &[ThreadedExchange], session_count: usize) {
+    if exchanges.is_empty() {
+        return;
+    }
+
+    println!("═══════════════════════════════════════════");
+    println!("  SUMMARY");
+    println!("═══════════════════════════════════════════");
+
+    let first = &exchanges[0];
+    let last = &exchanges[exchanges.len() - 1];
+    let total_matches: usize = exchanges.iter().map(|e| e.match_count).sum();
+
+    // Time span
+    let first_date = first.timestamp.format("%Y-%m-%d");
+    let last_date = last.timestamp.format("%Y-%m-%d");
+    if first_date.to_string() == last_date.to_string() {
+        println!("  Date: {first_date}");
+    } else {
+        println!("  Span: {first_date} → {last_date}");
+    }
+    println!(
+        "  {} exchange(s) across {} session(s), {} total match(es)",
+        exchanges.len(),
+        session_count,
+        total_matches,
+    );
+
+    // First mention context
+    if let Some(ref text) = first.assistant_text {
+        let snippet = truncate(text, 200);
+        let first_line = snippet.lines().next().unwrap_or("");
+        println!("\n  First ({}):", first.timestamp.format("%Y-%m-%d %H:%M"));
+        println!("    {first_line}");
+    }
+
+    // Last mention context (if different from first)
+    if exchanges.len() > 1 {
+        if let Some(ref text) = last.assistant_text {
+            let snippet = truncate(text, 200);
+            let first_line = snippet.lines().next().unwrap_or("");
+            println!("\n  Latest ({}):", last.timestamp.format("%Y-%m-%d %H:%M"));
+            println!("    {first_line}");
         }
     }
 

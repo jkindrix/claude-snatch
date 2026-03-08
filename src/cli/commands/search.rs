@@ -530,33 +530,12 @@ fn collect_sessions(cli: &Cli, args: &SearchArgs) -> Result<Vec<Session>> {
         claude_dir.all_sessions()?
     };
 
-    // Apply --since / --until date filters
-    let since_time: Option<SystemTime> = if let Some(ref since) = args.since {
-        Some(super::parse_date_filter(since)?)
-    } else {
-        None
-    };
-    let until_time: Option<SystemTime> = if let Some(ref until) = args.until {
-        Some(super::parse_date_filter(until)?)
-    } else {
-        None
-    };
-    if since_time.is_some() || until_time.is_some() {
-        sessions.retain(|s| {
-            let modified = s.modified_time();
-            if let Some(since) = since_time {
-                if modified < since {
-                    return false;
-                }
-            }
-            if let Some(until) = until_time {
-                if modified > until {
-                    return false;
-                }
-            }
-            true
-        });
-    }
+    // Apply --since / --until date filters (content-based timestamps)
+    super::helpers::filter_sessions_by_date(
+        &mut sessions,
+        args.since.as_deref(),
+        args.until.as_deref(),
+    )?;
 
     // Apply --recent N (most recent sessions by modification time)
     if let Some(n) = args.recent {

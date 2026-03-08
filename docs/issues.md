@@ -104,7 +104,7 @@ At default confidence: "No conflicts detected" for most topics. At min-confidenc
 
 **Fix:** Hard problem. Would need sentence-level context, not just word presence. Consider requiring opposing words to appear in the same sentence or within N words of each other, or requiring them to appear alongside the search topic terms.
 
-- [ ] Improve opposing-language precision (approach TBD)
+- [x] Improve opposing-language precision via sentence-level topic scoping
 
 ---
 
@@ -143,7 +143,7 @@ Tagging requires a message UUID, but text output doesn't show UUIDs. User must s
 
 **Fix:** Investigate whether date filtering uses file mtime vs message timestamps. May need to use session start/end time from analytics rather than file modification time.
 
-- [ ] Diagnose and fix date range filtering in detect
+- [x] Diagnose and fix date range filtering in detect
 
 ---
 
@@ -184,7 +184,7 @@ After showing all exchanges chronologically, provide a one-paragraph synthesis o
 
 **Note:** This would require either an LLM call (out of scope for a CLI tool) or a heuristic summary (first/last exchange + count). Consider a simple heuristic approach.
 
-- [ ] Consider thread summary feature
+- [x] Add thread `--summary` heuristic summary
 
 ---
 
@@ -236,7 +236,7 @@ Many candidates have empty question or answer fields. These provide no value and
 
 Scorer only checks the single linked session. If a decision was discussed across continuation chains (same conversation continued), confirmations in later segments are missed. Should follow continuation chains when scoring.
 
-- [ ] Follow continuation chains when scoring decisions
+- [x] Follow continuation chains when scoring decisions
 
 ---
 
@@ -248,7 +248,7 @@ Scorer only checks the single linked session. If a decision was discussed across
 
 Many decisions evolve across 3-5 sessions. Only one `--session` allowed. Need either multiple `--session` values or a `--related-sessions` field.
 
-- [ ] Support multiple session references per decision
+- [x] Support multiple session references per decision
 
 ---
 
@@ -284,7 +284,7 @@ No way to preview what would be registered before committing. Users have to regi
 
 Broad patterns return hundreds of exchanges. No way to filter to just decision-point exchanges. Wish: `--decisions-only` cross-references with detect heuristic.
 
-- [ ] Consider `--decisions-only` filter for thread
+- [x] Add `--decisions-only` filter for thread
 
 ---
 
@@ -296,7 +296,7 @@ Broad patterns return hundreds of exchanges. No way to filter to just decision-p
 
 `--since 2026-01-15 --until 2026-02-01` returned results from Jan 9. Related to issue #10 — mtime vs content timestamps. May also be that sessions span the boundary and the filter uses session-level not message-level timestamps.
 
-- [ ] Investigate and fix (see also #10)
+- [x] Investigate and fix (see also #10)
 
 ---
 
@@ -332,8 +332,8 @@ List output shows title, score, tag, description — but not provenance session.
 
 Can't export registry to markdown or import from structured files. Users maintain parallel docs that drift out of sync.
 
-- [ ] Consider decisions export --format md
-- [ ] Consider decisions import
+- [x] Add decisions export (markdown + JSON)
+- [-] decisions import deferred (use `decisions add` for now)
 
 ---
 

@@ -3,7 +3,6 @@
 //! Lists projects and sessions with various filtering and sorting options.
 
 use std::io::Write;
-use std::time::SystemTime;
 
 use crate::cli::{Cli, ListArgs, ListTarget, OutputFormat, SortOrder};
 use crate::discovery::{Project, Session, SessionFilter};
@@ -13,7 +12,7 @@ use crate::parser::JsonlParser;
 use crate::tags::TagStore;
 use crate::util::pager::PagerWriter;
 
-use super::{get_claude_dir, parse_date_filter, parse_size};
+use super::{get_claude_dir, parse_size};
 
 /// Run the list command.
 pub fn run(cli: &Cli, args: &ListArgs) -> Result<()> {
@@ -177,35 +176,12 @@ fn list_sessions<W: Write>(
 
     sessions.retain(|s| filter.matches(s).unwrap_or(false));
 
-    // Apply date filters
-    let since_time: Option<SystemTime> = if let Some(ref since) = args.since {
-        Some(parse_date_filter(since)?)
-    } else {
-        None
-    };
-
-    let until_time: Option<SystemTime> = if let Some(ref until) = args.until {
-        Some(parse_date_filter(until)?)
-    } else {
-        None
-    };
-
-    if since_time.is_some() || until_time.is_some() {
-        sessions.retain(|s| {
-            let modified = s.modified_time();
-            if let Some(since) = since_time {
-                if modified < since {
-                    return false;
-                }
-            }
-            if let Some(until) = until_time {
-                if modified > until {
-                    return false;
-                }
-            }
-            true
-        });
-    }
+    // Apply date filters (content-based timestamps)
+    super::helpers::filter_sessions_by_date(
+        &mut sessions,
+        args.since.as_deref(),
+        args.until.as_deref(),
+    )?;
 
     // Apply size filters
     let min_size: Option<u64> = if let Some(ref size) = args.min_size {

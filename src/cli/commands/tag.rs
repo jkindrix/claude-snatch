@@ -11,7 +11,7 @@ use crate::error::Result;
 use crate::reconstruction::Conversation;
 use crate::tags::TagStore;
 
-use super::{get_claude_dir, parse_date_filter};
+use super::get_claude_dir;
 
 /// Run the tag command.
 pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
@@ -1126,11 +1126,10 @@ fn get_filtered_sessions(
     project: Option<&str>,
 ) -> Result<Vec<String>> {
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
-    let sessions = claude_dir.all_sessions()?;
+    let mut sessions = claude_dir.all_sessions()?;
 
-    // Parse date filters
-    let since_time = since.map(parse_date_filter).transpose()?;
-    let until_time = until.map(parse_date_filter).transpose()?;
+    // Apply date filters (content-based timestamps)
+    super::helpers::filter_sessions_by_date(&mut sessions, since, until)?;
 
     let filtered: Vec<String> = sessions
         .iter()
@@ -1138,19 +1137,6 @@ fn get_filtered_sessions(
             // Apply project filter
             if let Some(ref proj) = project {
                 if !s.project_path().contains(proj) {
-                    return false;
-                }
-            }
-
-            // Apply date filters
-            let modified = s.modified_time();
-            if let Some(since) = since_time {
-                if modified < since {
-                    return false;
-                }
-            }
-            if let Some(until) = until_time {
-                if modified > until {
                     return false;
                 }
             }

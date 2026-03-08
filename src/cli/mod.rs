@@ -2059,6 +2059,10 @@ pub struct DecisionsArgs {
     /// Session ID where this decision was made.
     #[arg(long, alias = "session")]
     pub session_id: Option<String>,
+
+    /// Related session IDs (for decisions that span multiple sessions).
+    #[arg(long = "related-session", num_args = 1..)]
+    pub related_sessions: Vec<String>,
 }
 
 /// Arguments for the thread command.
@@ -2122,6 +2126,14 @@ pub struct ThreadArgs {
     /// Only show exchanges where the match is in this role (user or assistant).
     #[arg(long)]
     pub role: Option<String>,
+
+    /// Only show exchanges that look like decision points (options discussed or explicit markers).
+    #[arg(long)]
+    pub decisions_only: bool,
+
+    /// Append a heuristic summary of the thread evolution.
+    #[arg(long)]
+    pub summary: bool,
 }
 
 /// Arguments for the detect command.

@@ -3,8 +3,8 @@
 //! Extracts common logic used across thread, detect, conflicts, and decisions commands.
 
 use std::sync::LazyLock;
-use std::time::SystemTime;
 
+use chrono::{DateTime, Utc};
 use regex::Regex;
 
 use crate::cli::Cli;
@@ -261,6 +261,37 @@ pub fn is_affirmative(text: &str) -> bool {
     false
 }
 
+/// Check if an exchange looks like a decision point.
+///
+/// Returns true if the assistant text contains structural decision patterns
+/// (options/tradeoffs) or explicit decision markers.
+pub fn looks_like_decision(text: &str) -> bool {
+    // Check structural pattern: options/tradeoffs discussed
+    if has_options_pattern(text) {
+        return true;
+    }
+
+    // Check explicit decision markers
+    let lower = text.to_lowercase();
+    let decision_markers = [
+        "we decided", "design decision", "the decision is",
+        "final decision", "agreed to", "agreed that", "agreed on",
+        "after discussion", "after considering",
+    ];
+    if decision_markers.iter().any(|m| lower.contains(m)) {
+        return true;
+    }
+
+    // Check "decided to" with subject (tighter pattern)
+    static DECIDED_TO_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)(?:we|they|team) decided to").unwrap());
+    if DECIDED_TO_RE.is_match(text) {
+        return true;
+    }
+
+    false
+}
+
 /// Filter projects by a filter string with smart matching.
 ///
 /// If the filter exactly matches a decoded path or its last segment,
@@ -367,33 +398,8 @@ pub fn collect_sessions(cli: &Cli, params: &SessionCollectParams) -> Result<Vec<
         claude_dir.all_sessions()?
     };
 
-    // Date filters
-    let since_time: Option<SystemTime> = if let Some(since) = params.since {
-        Some(super::parse_date_filter(since)?)
-    } else {
-        None
-    };
-    let until_time: Option<SystemTime> = if let Some(until) = params.until {
-        Some(super::parse_date_filter(until)?)
-    } else {
-        None
-    };
-    if since_time.is_some() || until_time.is_some() {
-        sessions.retain(|s| {
-            let modified = s.modified_time();
-            if let Some(since) = since_time {
-                if modified < since {
-                    return false;
-                }
-            }
-            if let Some(until) = until_time {
-                if modified > until {
-                    return false;
-                }
-            }
-            true
-        });
-    }
+    // Date filters — use content timestamps (not file mtime)
+    filter_sessions_by_date(&mut sessions, params.since, params.until)?;
 
     if let Some(n) = params.recent {
         sessions.sort_by(|a, b| b.modified_time().cmp(&a.modified_time()));
@@ -405,6 +411,60 @@ pub fn collect_sessions(cli: &Cli, params: &SessionCollectParams) -> Result<Vec<
     }
 
     Ok(sessions)
+}
+
+/// Filter sessions by date range using content-based timestamps.
+///
+/// Uses `quick_metadata_cached()` to get the session's actual start/end times
+/// from JSONL content rather than file modification time. This correctly handles
+/// compacted sessions whose file mtime reflects the compaction time, not when
+/// the conversation actually occurred.
+///
+/// A session is retained if its time range overlaps [since, until]:
+/// - `session.end_time >= since` (session has content at or after `since`)
+/// - `session.start_time <= until` (session has content at or before `until`)
+pub fn filter_sessions_by_date(
+    sessions: &mut Vec<Session>,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<()> {
+    let since_dt: Option<DateTime<Utc>> = if let Some(since) = since {
+        Some(DateTime::from(super::parse_date_filter(since)?))
+    } else {
+        None
+    };
+    let until_dt: Option<DateTime<Utc>> = if let Some(until) = until {
+        Some(DateTime::from(super::parse_date_filter(until)?))
+    } else {
+        None
+    };
+    if since_dt.is_some() || until_dt.is_some() {
+        sessions.retain(|s| {
+            let (start, end) = match s.quick_metadata_cached() {
+                Ok(meta) => {
+                    let start = meta.start_time.unwrap_or_else(|| DateTime::from(s.modified_time()));
+                    let end = meta.end_time.unwrap_or_else(|| DateTime::from(s.modified_time()));
+                    (start, end)
+                }
+                Err(_) => {
+                    let mt = DateTime::from(s.modified_time());
+                    (mt, mt)
+                }
+            };
+            if let Some(since) = since_dt {
+                if end < since {
+                    return false;
+                }
+            }
+            if let Some(until) = until_dt {
+                if start > until {
+                    return false;
+                }
+            }
+            true
+        });
+    }
+    Ok(())
 }
 
 /// Short session ID (first 8 chars). Safe for ASCII hex UUIDs.

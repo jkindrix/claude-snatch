@@ -73,10 +73,36 @@ const OPPOSING_PAIRS: &[(&[&str], &[&str])] = &[
      &["implicit", "automatic", "opt-out"]),
 ];
 
+/// Extract sentences from text that match a topic regex.
+/// Falls back to the full text if no topic regex is provided.
+fn topic_sentences(text: &str, topic: Option<&Regex>) -> String {
+    let Some(re) = topic else {
+        return text.to_string();
+    };
+    // Split into sentences (rough: split on ". ", ".\n", "! ", "? ")
+    let sentences: Vec<&str> = text.split(|c| c == '.' || c == '!' || c == '?')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let matching: Vec<&str> = sentences.into_iter()
+        .filter(|s| re.is_match(s))
+        .collect();
+    if matching.is_empty() {
+        // Fall back to full text if no sentence-level match
+        text.to_string()
+    } else {
+        matching.join(". ")
+    }
+}
+
 /// Check if two texts contain opposing signal patterns.
-fn find_opposing_signals(text_a: &str, text_b: &str) -> Option<(Vec<String>, f64)> {
-    let lower_a = text_a.to_lowercase();
-    let lower_b = text_b.to_lowercase();
+/// When `topic` is provided, only checks sentences that mention the topic,
+/// reducing false positives from incidental opposing words.
+fn find_opposing_signals(text_a: &str, text_b: &str, topic: Option<&Regex>) -> Option<(Vec<String>, f64)> {
+    let scoped_a = topic_sentences(text_a, topic);
+    let scoped_b = topic_sentences(text_b, topic);
+    let lower_a = scoped_a.to_lowercase();
+    let lower_b = scoped_b.to_lowercase();
 
     let mut found_a_positive = Vec::new();
     let mut found_b_negative = Vec::new();
@@ -268,7 +294,7 @@ fn detect_registry_conflicts(
             let d2_text = format!("{} {}", d2.title,
                 d2.description.as_deref().unwrap_or(""));
 
-            if let Some((_, confidence)) = find_opposing_signals(&d1_text, &d2_text) {
+            if let Some((_, confidence)) = find_opposing_signals(&d1_text, &d2_text, None) {
                 let (earlier, later) = if d1.created_at <= d2.created_at {
                     (d1, d2)
                 } else {
@@ -384,7 +410,7 @@ fn detect_search_conflicts(
             let c1 = &conclusions[i];
             let c2 = &conclusions[j];
 
-            if let Some((_, confidence)) = find_opposing_signals(&c1.text, &c2.text) {
+            if let Some((_, confidence)) = find_opposing_signals(&c1.text, &c2.text, Some(&regex)) {
                 let (earlier, later) = if c1.timestamp <= c2.timestamp {
                     (c1, c2)
                 } else {
@@ -510,6 +536,7 @@ mod tests {
         let (signals, confidence) = find_opposing_signals(
             "We will use traits for polymorphism",
             "We won't use traits, using enums instead",
+            None,
         ).unwrap();
         assert!(!signals.is_empty());
         assert!(confidence > 0.0);
@@ -520,6 +547,7 @@ mod tests {
         assert!(find_opposing_signals(
             "The weather is nice today",
             "I had lunch at noon",
+            None,
         ).is_none());
     }
 
@@ -528,8 +556,24 @@ mod tests {
         let result = find_opposing_signals(
             "We should add logging to this module",
             "Remove the logging, it's too noisy",
+            None,
         );
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_find_opposing_signals_topic_scoping() {
+        // Without topic scoping, this would match because "add" and "remove" appear
+        // But with topic scoping for "traits", only sentences mentioning "traits" are checked
+        let topic = Regex::new("(?i)traits").unwrap();
+        // "add" is in a sentence about traits, but "remove" is about something else
+        let result = find_opposing_signals(
+            "We should add traits for polymorphism. The build is fast.",
+            "Remove the old config files. Traits are great for this.",
+            Some(&topic),
+        );
+        // Should not find conflict because "remove" is about config, not traits
+        assert!(result.is_none());
     }
 
     #[test]

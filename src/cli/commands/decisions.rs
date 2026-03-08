@@ -200,6 +200,13 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                 store.update_decision(id, Some(s), None, None, None);
             }
 
+            // Set related session references
+            if !args.related_sessions.is_empty() {
+                if let Some(decision) = store.decisions.iter_mut().find(|d| d.id == id) {
+                    decision.references = args.related_sessions.clone();
+                }
+            }
+
             save_decisions(project_dir, &store)?;
 
             match cli.effective_output() {
@@ -242,10 +249,11 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                     .collect())
             };
 
-            if status.is_none() && args.description.is_none() && args.confidence.is_none() && tags.is_none() {
+            let has_related = !args.related_sessions.is_empty();
+            if status.is_none() && args.description.is_none() && args.confidence.is_none() && tags.is_none() && !has_related {
                 return Err(SnatchError::InvalidArgument {
                     name: "update".into(),
-                    reason: "At least one of --status, --description, --confidence, or --tag is required".into(),
+                    reason: "At least one of --status, --description, --confidence, --tag, or --related-session is required".into(),
                 });
             }
 
@@ -255,6 +263,18 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                     name: "id".into(),
                     reason: format!("Decision #{id} not found"),
                 });
+            }
+
+            // Update related session references
+            if has_related {
+                if let Some(decision) = store.decisions.iter_mut().find(|d| d.id == id) {
+                    for r in &args.related_sessions {
+                        if !decision.references.contains(r) {
+                            decision.references.push(r.clone());
+                        }
+                    }
+                    decision.updated_at = chrono::Utc::now();
+                }
             }
             save_decisions(project_dir, &store)?;
 
@@ -371,7 +391,7 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                     }
                 };
 
-                let entries = match session.parse_with_options(cli.max_file_size) {
+                let mut all_entries = match session.parse_with_options(cli.max_file_size) {
                     Ok(e) => e,
                     Err(_) => {
                         skipped_not_found += 1;
@@ -379,7 +399,16 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                     }
                 };
 
-                let main_entries = main_thread_entries(&entries);
+                // Also load entries from referenced sessions (for multi-session decisions)
+                for ref_id in &decision.references {
+                    if let Ok(Some(ref_session)) = claude_dir.find_session(ref_id) {
+                        if let Ok(ref_entries) = ref_session.parse_with_options(cli.max_file_size) {
+                            all_entries.extend(ref_entries);
+                        }
+                    }
+                }
+
+                let main_entries = main_thread_entries(&all_entries);
                 let title_lower = decision.title.to_lowercase();
                 let title_keywords: Vec<&str> = title_lower
                     .split_whitespace()
@@ -491,12 +520,76 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                     score -= 0.2;
                 }
 
-                // Signal 5: Already superseded (negative signal from registry)
+                // Signal 5: Cross-session evidence (continuation chains & related sessions)
+                // Check other sessions from the same project for the decision topic.
+                // This catches continuation chains where a decision was discussed
+                // in one session and confirmed/implemented in a later one.
+                let mut cross_session_confirmations = 0u32;
+                let mut cross_session_implementations = 0u32;
+                if let Ok(all_sessions) = project.sessions() {
+                    // Skip sessions already included in primary scoring
+                    let skip_ids: std::collections::HashSet<&str> = std::iter::once(session_id.as_str())
+                        .chain(decision.references.iter().map(|s| s.as_str()))
+                        .collect();
+                    for other_session in &all_sessions {
+                        if skip_ids.contains(other_session.session_id()) {
+                            continue;
+                        }
+                        let other_entries = match other_session.parse_with_options(cli.max_file_size) {
+                            Ok(e) => e,
+                            Err(_) => continue,
+                        };
+                        let other_main = main_thread_entries(&other_entries);
+                        let mut topic_mentioned = false;
+                        for (i, entry) in other_main.iter().enumerate() {
+                            if entry.message_type() != "assistant" {
+                                continue;
+                            }
+                            if let Some(text) = extract_text(entry) {
+                                let text_lower = text.to_lowercase();
+                                if !text_lower.contains(&title_lower)
+                                    && !title_matches_text(&title_keywords, &text_lower)
+                                {
+                                    continue;
+                                }
+                                topic_mentioned = true;
+                                // Check for confirmation in next user message
+                                if i + 1 < other_main.len()
+                                    && other_main[i + 1].message_type() == "user"
+                                {
+                                    if let Some(user_text) = extract_text(other_main[i + 1]) {
+                                        if is_affirmative(&user_text) {
+                                            cross_session_confirmations += 1;
+                                        }
+                                    }
+                                }
+                                // Check for implementation nearby
+                                for j in (i + 1)..other_main.len().min(i + 4) {
+                                    if has_tool_calls(other_main[j]) {
+                                        cross_session_implementations += 1;
+                                        break;
+                                    }
+                                }
+                            }
+                            if topic_mentioned {
+                                break; // One match per session is enough
+                            }
+                        }
+                    }
+                }
+                if cross_session_confirmations > 0 {
+                    score += 0.1;
+                }
+                if cross_session_implementations > 0 {
+                    score += 0.1;
+                }
+
+                // Signal 6: Already superseded (negative signal from registry)
                 if decision.status == DecisionStatus::Superseded {
                     score -= 0.15;
                 }
 
-                // Signal 6: Confirmed status (positive signal from registry)
+                // Signal 7: Confirmed status (positive signal from registry)
                 if decision.status == DecisionStatus::Confirmed {
                     score += 0.1;
                 }
@@ -548,10 +641,76 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
             }
         }
 
+        "export" => {
+            let store = load_decisions(project_dir)?;
+            if store.decisions.is_empty() {
+                if !cli.quiet {
+                    println!("No decisions to export.");
+                }
+                return Ok(());
+            }
+
+            match cli.effective_output() {
+                OutputFormat::Json => {
+                    let output: Vec<DecisionOutput> = store.decisions.iter().map(|d| to_output(d)).collect();
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                }
+                _ => {
+                    // Markdown export
+                    println!("# Decisions — {project_path}\n");
+                    let mut by_status: std::collections::BTreeMap<&str, Vec<&crate::decisions::Decision>> =
+                        std::collections::BTreeMap::new();
+                    for d in &store.decisions {
+                        let key = match d.status {
+                            DecisionStatus::Confirmed => "Confirmed",
+                            DecisionStatus::Proposed => "Proposed",
+                            DecisionStatus::Superseded => "Superseded",
+                            DecisionStatus::Abandoned => "Abandoned",
+                        };
+                        by_status.entry(key).or_default().push(d);
+                    }
+                    for (status, decisions) in &by_status {
+                        println!("## {status}\n");
+                        for d in decisions {
+                            println!("### #{}: {}", d.id, d.title);
+                            if let Some(ref desc) = d.description {
+                                println!("\n{desc}");
+                            }
+                            let mut meta = Vec::new();
+                            meta.push(format!("Confidence: {:.0}%", d.confidence * 100.0));
+                            if !d.tags.is_empty() {
+                                meta.push(format!("Tags: {}", d.tags.join(", ")));
+                            }
+                            if let Some(ref sid) = d.session_id {
+                                meta.push(format!("Session: {}", &sid[..sid.len().min(8)]));
+                            }
+                            if !d.references.is_empty() {
+                                let refs: Vec<&str> = d.references.iter()
+                                    .map(|r| &r[..r.len().min(8)])
+                                    .collect();
+                                meta.push(format!("Related: {}", refs.join(", ")));
+                            }
+                            if let Some(by) = d.superseded_by {
+                                meta.push(format!("Superseded by: #{by}"));
+                            }
+                            println!("\n_{}_\n", meta.join(" | "));
+                        }
+                    }
+                }
+            }
+        }
+
+        "import" => {
+            return Err(SnatchError::InvalidArgument {
+                name: "operation".into(),
+                reason: "Import is not yet implemented. Use 'add' to create decisions manually.".into(),
+            });
+        }
+
         other => {
             return Err(SnatchError::InvalidArgument {
                 name: "operation".into(),
-                reason: format!("Unknown operation '{other}'. Use: list, add, update, remove, supersede, score"),
+                reason: format!("Unknown operation '{other}'. Use: list, add, update, remove, supersede, score, export"),
             });
         }
     }

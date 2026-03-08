@@ -631,16 +631,31 @@ impl SessionFilter {
             return Ok(false);
         }
 
-        // Check modification time
-        if let Some(after) = self.modified_after {
-            if session.modified_time() < after {
-                return Ok(false);
+        // Check time range using content-based timestamps (not file mtime).
+        // File mtime changes on compaction, so a January session compacted in
+        // March would have a March mtime. Content timestamps are authoritative.
+        if self.modified_after.is_some() || self.modified_before.is_some() {
+            let (start, end) = match session.quick_metadata_cached() {
+                Ok(meta) => {
+                    let start = meta.start_time
+                        .map(|t| SystemTime::from(t))
+                        .unwrap_or_else(|| session.modified_time());
+                    let end = meta.end_time
+                        .map(|t| SystemTime::from(t))
+                        .unwrap_or_else(|| session.modified_time());
+                    (start, end)
+                }
+                Err(_) => (session.modified_time(), session.modified_time()),
+            };
+            if let Some(after) = self.modified_after {
+                if end < after {
+                    return Ok(false);
+                }
             }
-        }
-
-        if let Some(before) = self.modified_before {
-            if session.modified_time() > before {
-                return Ok(false);
+            if let Some(before) = self.modified_before {
+                if start > before {
+                    return Ok(false);
+                }
             }
         }
 
