@@ -15,6 +15,9 @@ fn main() -> ExitCode {
         Err(e) => {
             // Print error message
             eprintln!("Error: {e}");
+            if let Some(hint) = e.hint() {
+                eprintln!("  Hint: {hint}");
+            }
 
             // Print cause chain in debug mode
             if std::env::var("RUST_BACKTRACE").is_ok() {
