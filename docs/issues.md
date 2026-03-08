@@ -130,7 +130,7 @@ Tagging requires a message UUID, but text output doesn't show UUIDs. User must s
 
 **Fix:** Use absolute thresholds (first 30m = early, last 30m = late), or compaction-boundary-based classification, or hybrid (ratio for short sessions, absolute for long).
 
-- [ ] Fix phase classification for long/mega sessions
+- [x] Fix phase classification for long/mega sessions
 
 ---
 
@@ -171,7 +171,7 @@ Tagging requires a message UUID, but text output doesn't show UUIDs. User must s
 
 **Wish:** `--max-context` could be per-role (e.g., show full assistant response but truncate user prompts).
 
-- [ ] Consider `--max-user-context` / `--max-assistant-context` split
+- [x] Add `--max-user-context` / `--max-assistant-context` to thread
 
 ---
 
@@ -345,7 +345,7 @@ Can't export registry to markdown or import from structured files. Users maintai
 
 User continuation summaries dominate output. `--role assistant` would show only analysis/conclusions where decisions live.
 
-- [ ] Add `--role` filter to thread
+- [x] Add `--role` filter to thread
 
 ---
 
@@ -357,7 +357,7 @@ User continuation summaries dominate output. `--role assistant` would show only 
 
 When resolving conflicts, current session chain creates noise. `--exclude-session` would help.
 
-- [ ] Add `--exclude-session` to conflicts
+- [x] Add `--exclude-session` to conflicts
 
 ---
 
@@ -381,4 +381,4 @@ When resolving conflicts, current session chain creates noise. `--exclude-sessio
 
 Detect scans all text. `--topic` would scope to a pattern, reducing false positives.
 
-- [ ] Consider `--topic` filter for detect
+- [x] Add `--topic` filter for detect

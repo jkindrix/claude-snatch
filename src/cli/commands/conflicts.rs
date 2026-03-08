@@ -337,6 +337,13 @@ fn detect_search_conflicts(
             pb.inc(1);
         }
 
+        // Skip excluded session
+        if let Some(ref exclude) = args.exclude_session {
+            if session.session_id().starts_with(exclude.as_str()) {
+                continue;
+            }
+        }
+
         let entries = match session.parse_with_options(cli.max_file_size) {
             Ok(e) => e,
             Err(_) => continue,

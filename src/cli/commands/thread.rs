@@ -123,6 +123,13 @@ pub fn run(cli: &Cli, args: &ThreadArgs) -> Result<()> {
                 continue;
             }
 
+            // Filter by role if specified
+            if let Some(ref role) = args.role {
+                if entry.message_type() != role.as_str() {
+                    continue;
+                }
+            }
+
             let uuid = entry.uuid().unwrap_or("").to_string();
             if !uuid.is_empty() && !seen_uuids.insert(uuid.clone()) {
                 continue;
@@ -197,7 +204,15 @@ pub fn run(cli: &Cli, args: &ThreadArgs) -> Result<()> {
 
     match cli.effective_output() {
         crate::cli::OutputFormat::Json => output_json(&exchanges),
-        _ => output_text(cli, &exchanges, &args.pattern, unique_sessions.len(), args.max_context),
+        _ => output_text(
+            cli,
+            &exchanges,
+            &args.pattern,
+            unique_sessions.len(),
+            args.max_context,
+            args.max_user_context.unwrap_or(args.max_context),
+            args.max_assistant_context.unwrap_or(args.max_context),
+        ),
     }
 
     Ok(())
@@ -237,6 +252,8 @@ fn output_text(
     pattern: &str,
     session_count: usize,
     max_context: usize,
+    max_user_context: usize,
+    max_assistant_context: usize,
 ) {
     if !cli.quiet {
         println!(
@@ -273,7 +290,7 @@ fn output_text(
         if let Some(ref text) = exchange.user_text {
             println!();
             println!("  USER:");
-            for line in truncate(text, max_context).lines() {
+            for line in truncate(text, max_user_context).lines() {
                 println!("    {}", line);
             }
         }
@@ -281,7 +298,7 @@ fn output_text(
         if let Some(ref text) = exchange.assistant_text {
             println!();
             println!("  ASSISTANT:");
-            for line in truncate(text, max_context).lines() {
+            for line in truncate(text, max_assistant_context).lines() {
                 println!("    {}", line);
             }
         }

@@ -2110,6 +2110,18 @@ pub struct ThreadArgs {
     /// Maximum characters per context block (default: 500).
     #[arg(long, default_value = "500")]
     pub max_context: usize,
+
+    /// Maximum characters for user context (overrides --max-context for user text).
+    #[arg(long)]
+    pub max_user_context: Option<usize>,
+
+    /// Maximum characters for assistant context (overrides --max-context for assistant text).
+    #[arg(long)]
+    pub max_assistant_context: Option<usize>,
+
+    /// Only show exchanges where the match is in this role (user or assistant).
+    #[arg(long)]
+    pub role: Option<String>,
 }
 
 /// Arguments for the detect command.
@@ -2158,6 +2170,10 @@ pub struct DetectArgs {
     /// Preview what --register would do without writing (requires --register).
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Only detect decisions related to this topic (regex pattern).
+    #[arg(long)]
+    pub topic: Option<String>,
 }
 
 /// Arguments for the conflicts command.
@@ -2194,6 +2210,10 @@ pub struct ConflictsArgs {
     /// Show all results without limit.
     #[arg(long)]
     pub no_limit: bool,
+
+    /// Exclude results from this session (useful when resolving conflicts in current session).
+    #[arg(long)]
+    pub exclude_session: Option<String>,
 }
 
 /// Arguments for the timeline command.

@@ -154,6 +154,15 @@ pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
         no_subagents: args.no_subagents,
     })?;
 
+    let topic_regex = if let Some(ref topic) = args.topic {
+        Some(Regex::new(topic).map_err(|e| SnatchError::InvalidArgument {
+            name: "topic".into(),
+            reason: format!("Invalid topic regex: {e}"),
+        })?)
+    } else {
+        None
+    };
+
     let session_count = sessions.len();
     let show_progress = session_count > 10 && std::io::stderr().is_terminal() && !cli.quiet;
     let progress = if show_progress {
@@ -341,6 +350,13 @@ pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
 
     if let Some(pb) = progress {
         pb.finish_and_clear();
+    }
+
+    // Filter by topic if specified
+    if let Some(ref topic_re) = topic_regex {
+        candidates.retain(|c| {
+            topic_re.is_match(&c.question) || topic_re.is_match(&c.response)
+        });
     }
 
     candidates.sort_by(|a, b| {

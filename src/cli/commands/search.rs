@@ -1394,15 +1394,29 @@ impl PhaseContext {
 
         let phase = match (ts, self.session_start, self.session_end) {
             (Some(ts), Some(start), Some(end)) => {
-                let total = (end - start).num_seconds().max(1) as f64;
-                let elapsed = (ts - start).num_seconds().max(0) as f64;
-                let position = elapsed / total;
-                if position < 0.33 {
-                    SessionPhase::Early
-                } else if position < 0.67 {
-                    SessionPhase::Middle
+                let total_mins = (end - start).num_minutes();
+                let elapsed_mins = (ts - start).num_minutes();
+                let remaining_mins = (end - ts).num_minutes();
+
+                if total_mins <= 120 {
+                    // Short sessions: use ratio
+                    let position = elapsed_mins as f64 / total_mins.max(1) as f64;
+                    if position < 0.33 {
+                        SessionPhase::Early
+                    } else if position < 0.67 {
+                        SessionPhase::Middle
+                    } else {
+                        SessionPhase::Late
+                    }
                 } else {
-                    SessionPhase::Late
+                    // Long sessions: absolute thresholds
+                    if elapsed_mins < 30 {
+                        SessionPhase::Early
+                    } else if remaining_mins < 30 {
+                        SessionPhase::Late
+                    } else {
+                        SessionPhase::Middle
+                    }
                 }
             }
             _ => SessionPhase::Middle,
