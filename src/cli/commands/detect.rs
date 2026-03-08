@@ -113,6 +113,31 @@ fn extract_decision_sentence(text: &str) -> Option<String> {
     None
 }
 
+/// Extract the first non-markdown prose line from text (for title fallback).
+fn extract_first_prose_line(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Skip markdown formatting
+        if trimmed.starts_with('#')
+            || trimmed.starts_with('|')
+            || trimmed.starts_with("---")
+            || trimmed.starts_with("```")
+            || (trimmed.starts_with("**") && trimmed.ends_with("**"))
+            || trimmed.starts_with("- ")
+            || trimmed.starts_with("* ")
+        {
+            continue;
+        }
+        if trimmed.len() > 10 {
+            return Some(truncate(trimmed, 120));
+        }
+    }
+    None
+}
+
 /// Reversal pattern detection.
 fn find_reversal_markers(text: &str) -> Vec<String> {
     let mut markers = Vec::new();
@@ -414,15 +439,11 @@ pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
                 continue;
             }
 
-            // Build title: for explicit markers use the sentence containing the marker,
-            // otherwise use the question text
-            let title = match &c.detection_method {
-                DetectionMethod::ExplicitMarker(_) => {
-                    extract_decision_sentence(&c.response)
-                        .unwrap_or_else(|| truncate(&c.question, 120))
-                }
-                _ => truncate(&c.question, 120),
-            }
+            // Build title: extract a decision sentence from the assistant response,
+            // falling back to the first prose line, then the user question.
+            let title = extract_decision_sentence(&c.response)
+                .or_else(|| extract_first_prose_line(&c.response))
+                .unwrap_or_else(|| truncate(&c.question, 120))
             .trim_end_matches("...")
             .trim()
             .to_string();
