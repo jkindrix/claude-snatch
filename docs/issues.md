@@ -225,6 +225,7 @@ Many candidates have empty question or answer fields. These provide no value and
 `extract_decision_sentence` doesn't handle responses starting with `##`, `|` (tables), `**`, or `---`. Titles come out as table fragments or user prompt text. Needs to skip markdown formatting lines and find actual prose sentences.
 
 - [x] Handle markdown headers, tables, bold, and horizontal rules in title extraction
+- [x] Fix all detection methods to extract title from assistant response (was hardcoded to user prompt for structural/reversal)
 
 ---
 

@@ -429,9 +429,13 @@ pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
                 continue;
             }
 
-            // Skip candidates with continuation/notification prompts
+            // Skip candidates with empty responses, continuation/notification prompts
+            if c.response.trim().is_empty() {
+                continue;
+            }
             let q_lower = c.question.to_lowercase();
             if q_lower.starts_with("this session is being continued")
+                || q_lower.starts_with("in the last session")
                 || q_lower.starts_with("<task-notification")
                 || q_lower.starts_with("<system-reminder")
                 || c.question.trim().is_empty()
