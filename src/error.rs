@@ -330,6 +330,47 @@ impl SnatchError {
                 | Self::Timeout { .. }
         )
     }
+
+    /// Return an actionable hint for the user, if one exists.
+    #[must_use]
+    pub fn hint(&self) -> Option<&str> {
+        match self {
+            Self::SessionNotFound { .. } => Some(
+                "Use 'snatch list sessions' to see available sessions, or use a shorter unique prefix.",
+            ),
+            Self::AmbiguousSessionPrefix { .. } => Some(
+                "Use 'snatch list sessions' to see available sessions, or use a longer unique prefix.",
+            ),
+            Self::InvalidUuid { .. } => Some(
+                "Use 'snatch list sessions' to find valid session UUIDs.",
+            ),
+            Self::ProjectNotFound { .. } => Some(
+                "Use 'snatch list projects' to see known projects.",
+            ),
+            Self::ClaudeDirectoryNotFound { .. } => Some(
+                "Set SNATCH_CLAUDE_DIR to point to your Claude Code data directory, or ensure Claude Code has been run at least once.",
+            ),
+            Self::ConfigError { .. } | Self::InvalidConfig { .. } => Some(
+                "Use 'snatch config' to view current configuration.",
+            ),
+            Self::ParseError { .. } => Some(
+                "Use 'snatch validate <file>' to check the file for issues.",
+            ),
+            Self::InvalidSessionFile { .. } | Self::CorruptedFile { .. } => Some(
+                "Use 'snatch validate <file>' to diagnose session file integrity issues.",
+            ),
+            Self::ExportError { .. } => Some(
+                "Use 'snatch export --help' for supported formats and options.",
+            ),
+            Self::SearchError { .. } => Some(
+                "Use 'snatch search --help' for search syntax.",
+            ),
+            Self::TuiError { .. } => Some(
+                "Ensure your terminal supports VT100/ANSI escape codes, or run the command without the TUI flag.",
+            ),
+            _ => None,
+        }
+    }
 }
 
 /// Result type alias for claude-snatch operations.
