@@ -1816,3 +1816,200 @@ pub async fn run_server(
             source: None,
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::discovery::encode_project_path;
+    use tempfile::TempDir;
+
+    const PROJECT_PATH: &str = "/home/user/test-project";
+
+    fn setup_claude_dir(session_id: &str, project_path: &str, jsonl: &str) -> TempDir {
+        let tmp = TempDir::new().expect("failed to create temp dir");
+        let encoded = encode_project_path(project_path);
+        let project_dir = tmp.path().join("projects").join(&encoded);
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join(format!("{session_id}.jsonl")), jsonl).unwrap();
+        tmp
+    }
+
+    fn minimal_session_jsonl(session_id: &str) -> String {
+        let user_line = format!(
+            r#"{{"type":"user","uuid":"11111111-1111-1111-1111-111111111111","parentUuid":null,"timestamp":"2025-01-15T10:00:00.000Z","sessionId":"{session_id}","version":"2.0.74","message":{{"role":"user","content":"Hello, Claude!"}}}}"#
+        );
+        let assistant_line = format!(
+            r#"{{"type":"assistant","uuid":"22222222-2222-2222-2222-222222222222","parentUuid":"11111111-1111-1111-1111-111111111111","timestamp":"2025-01-15T10:00:01.000Z","sessionId":"{session_id}","version":"2.0.74","message":{{"id":"msg_001","type":"message","role":"assistant","content":[{{"type":"text","text":"Hello! How can I help you today?"}}],"model":"claude-sonnet-4-20250514","stop_reason":"end_turn","usage":{{"input_tokens":10,"output_tokens":15,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}}}}"#
+        );
+        format!("{user_line}\n{assistant_line}\n")
+    }
+
+    fn unwrap_output(output: ToolOutput) -> String {
+        match output {
+            ToolOutput::Success(result) => {
+                result.content.iter().filter_map(|c| c.as_text()).collect::<Vec<_>>().join("\n")
+            }
+            ToolOutput::RecoverableError { message, .. } => {
+                panic!("Expected success but got error: {message}");
+            }
+        }
+    }
+
+    fn assert_error(output: ToolOutput) {
+        assert!(
+            matches!(output, ToolOutput::RecoverableError { .. }),
+            "Expected error but got success"
+        );
+    }
+
+    fn make_server(tmp: &TempDir) -> SnatchServer {
+        SnatchServer::new(Some(tmp.path().to_path_buf()), None)
+    }
+
+    #[tokio::test]
+    async fn test_list_sessions_returns_fixture() {
+        let sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let server = make_server(&tmp);
+        let text = unwrap_output(server.list_sessions(ListSessionsRequest {
+            project: None, limit: None, include_subagents: None,
+        }).await);
+        assert!(text.contains(sid));
+    }
+
+    #[tokio::test]
+    async fn test_list_sessions_project_filter() {
+        let sid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let server = make_server(&tmp);
+        let text = unwrap_output(server.list_sessions(ListSessionsRequest {
+            project: Some("test-project".to_string()), limit: None, include_subagents: None,
+        }).await);
+        assert!(text.contains(sid));
+    }
+
+    #[tokio::test]
+    async fn test_get_session_info_valid() {
+        let sid = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let server = make_server(&tmp);
+        let text = unwrap_output(server.get_session_info(GetSessionInfoRequest {
+            session_id: sid.to_string(),
+        }).await);
+        assert!(text.contains(sid));
+    }
+
+    #[tokio::test]
+    async fn test_get_session_info_nonexistent() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("projects")).unwrap();
+        let server = make_server(&tmp);
+        assert_error(server.get_session_info(GetSessionInfoRequest {
+            session_id: "ffffffff-ffff-ffff-ffff-ffffffffffff".to_string(),
+        }).await);
+    }
+
+    #[tokio::test]
+    async fn test_search_sessions_match() {
+        let sid = "11111111-aaaa-bbbb-cccc-dddddddddddd";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let server = make_server(&tmp);
+        let text = unwrap_output(server.search_sessions(SearchSessionsRequest {
+            pattern: "Hello, Claude!".to_string(),
+            project: None, session_id: None, scope: None,
+            ignore_case: None, limit: None,
+        }).await);
+        assert!(text.contains(sid));
+    }
+
+    #[tokio::test]
+    async fn test_search_sessions_no_match() {
+        let sid = "22222222-aaaa-bbbb-cccc-dddddddddddd";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let server = make_server(&tmp);
+        let text = unwrap_output(server.search_sessions(SearchSessionsRequest {
+            pattern: "xyzzy_nonexistent".to_string(),
+            project: None, session_id: None, scope: None,
+            ignore_case: None, limit: None,
+        }).await);
+        assert!(!text.contains(sid));
+    }
+
+    #[tokio::test]
+    async fn test_get_session_timeline() {
+        let sid = "33333333-aaaa-bbbb-cccc-dddddddddddd";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let server = make_server(&tmp);
+        let text = unwrap_output(server.get_session_timeline(GetSessionTimelineRequest {
+            session_id: sid.to_string(), limit: None,
+        }).await);
+        assert!(!text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_session_digest() {
+        let sid = "44444444-aaaa-bbbb-cccc-dddddddddddd";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let server = make_server(&tmp);
+        let text = unwrap_output(server.get_session_digest(GetSessionDigestRequest {
+            session_id: sid.to_string(), max_prompts: None, max_files: None,
+        }).await);
+        assert!(!text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_session_lessons_no_errors() {
+        let sid = "55555555-aaaa-bbbb-cccc-dddddddddddd";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let server = make_server(&tmp);
+        let _text = unwrap_output(server.get_session_lessons(GetSessionLessonsRequest {
+            session_id: sid.to_string(), category: None, limit: None,
+        }).await);
+    }
+
+    #[tokio::test]
+    async fn test_get_stats() {
+        let sid = "66666666-aaaa-bbbb-cccc-dddddddddddd";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let server = make_server(&tmp);
+        let text = unwrap_output(server.get_stats(GetStatsRequest {
+            session_id: Some(sid.to_string()), project: None,
+        }).await);
+        assert!(!text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_session_messages() {
+        let sid = "77777777-aaaa-bbbb-cccc-dddddddddddd";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let server = make_server(&tmp);
+        let text = unwrap_output(server.get_session_messages(GetSessionMessagesRequest {
+            session_id: sid.to_string(), detail: None, message_type: None,
+            limit: None, offset: None, reverse: None, include_thinking: None,
+        }).await);
+        assert!(text.contains("Hello"));
+    }
+
+    #[tokio::test]
+    async fn test_get_project_history() {
+        let sid = "88888888-aaaa-bbbb-cccc-dddddddddddd";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let server = make_server(&tmp);
+        let text = unwrap_output(server.get_project_history(GetProjectHistoryRequest {
+            project: "test-project".to_string(), period: Some("all".to_string()),
+            limit: None, include_summaries: None,
+        }).await);
+        assert!(!text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_tool_calls() {
+        let sid = "99999999-aaaa-bbbb-cccc-dddddddddddd";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let server = make_server(&tmp);
+        let _text = unwrap_output(server.get_tool_calls(GetToolCallsRequest {
+            session_id: sid.to_string(), tool_filter: None, errors_only: None,
+            limit: None, offset: None,
+        }).await);
+    }
+}
