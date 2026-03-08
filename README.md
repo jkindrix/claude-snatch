@@ -79,7 +79,7 @@ snatch stats -s <session-id>
 # Show global statistics across all sessions
 snatch stats --global
 
-# Launch interactive TUI
+# Launch interactive TUI (requires --features tui at build time)
 snatch tui
 ```
 
@@ -92,24 +92,87 @@ snatch tui
 | `search` | `s`, `find` | Search across sessions |
 | `stats` | `stat` | Show usage statistics |
 | `standup` | `daily` | Generate standup/progress report |
+| `digest` | `d` | Generate a concise digest of a session |
+| `lessons` | | Extract error→fix pairs and user corrections from a session |
+| `timeline` | | Show turn-by-turn timeline with timing and tool activity |
+| `messages` | `msgs` | Show messages for a session |
 | `info` | `i`, `show` | Display detailed information |
 | `pick` | `browse` | Interactively pick a session using fuzzy search |
 | `tui` | `ui` | Launch interactive terminal UI |
 | `diff` | | Compare two sessions or files |
-| `tag` | | Manage session tags, names, and bookmarks |
+| `tag` | | Manage session tags, names, and bookmarks (subcommands: `msg`, `unmsg`, `mtags`) |
 | `prompts` | | Extract user prompts from sessions |
 | `code` | | Extract code blocks from sessions |
 | `summary` | | Show quick summary of Claude Code usage |
 | `recent` | | List most recent sessions (shorthand for list -n 5) |
-| `extract` | | Extract beyond-JSONL data (settings, MCP, etc.) |
-| `index` | | Manage full-text search index |
+| `backup` | `restore` | Backup and restore session snapshot files |
+| `extract` | `ext` | Extract beyond-JSONL data (settings, MCP, etc.) |
+| `index` | `idx` | Manage full-text search index |
 | `cache` | | Manage the session cache |
 | `cleanup` | | Clean up old or empty sessions |
-| `config` | | View and modify configuration |
+| `config` | `cfg` | View and modify configuration |
 | `validate` | | Validate session files |
 | `watch` | | Watch for session changes |
 | `completions` | | Generate shell completions |
-| `quickstart` | | Interactive guide for new users |
+| `quickstart` | `guide`, `examples` | Interactive guide for new users |
+| `serve` | `mcp` | Start the MCP server for AI agent integration |
+
+## MCP Server
+
+When built with the `mcp` feature, claude-snatch runs as an MCP server over stdio, exposing session data and analysis as tools that AI agents can call directly.
+
+### Setup
+
+```bash
+# Build with MCP support
+cargo build --release --features mcp
+
+# Start the server (stdio transport)
+snatch serve
+```
+
+Configure it in your Claude Code MCP settings:
+
+```json
+{
+  "mcpServers": {
+    "snatch": {
+      "command": "snatch",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+### Tools
+
+| Tool | Description |
+|------|-------------|
+| `list_sessions` | List sessions with optional project and time filters |
+| `get_session_info` | Metadata, duration, and summary for a session |
+| `get_session_messages` | Full message content with optional thinking and tool blocks |
+| `get_session_timeline` | Turn-by-turn timeline with timing and tool activity |
+| `get_session_digest` | Concise summary of session activity and key moments |
+| `get_session_lessons` | Error→fix pairs and user corrections for retrospective learning |
+| `get_stats` | Token usage and cost statistics |
+| `get_project_history` | Cross-session activity history for a project |
+| `search_sessions` | Full-text search across all sessions |
+| `get_tool_calls` | Tool call history with input summaries and error detection |
+| `manage_goals` | Create, update, list, and complete goals |
+| `manage_notes` | Create, list, and delete session notes |
+| `manage_decisions` | Record and recall architectural decisions |
+| `tag_message` | Tag specific messages for later recall |
+
+## Analysis and Recall
+
+The `src/analysis/` module powers session intelligence features across both CLI and MCP interfaces:
+
+- **Session digests** — concise summaries of activity, tools used, and key moments (`digest` / `d`)
+- **Lesson extraction** — identifies error→fix pairs and user corrections from session history (`lessons`)
+- **Timeline construction** — turn-by-turn view of conversation flow with timing (`timeline`)
+- **Full-text search** — searches content, thinking blocks, and tool inputs (`search` / `s`)
+
+All four capabilities are also available to AI agents as MCP tools (`get_session_digest`, `get_session_lessons`, `get_session_timeline`, `search_sessions`).
 
 ## Global Options
 
@@ -265,18 +328,32 @@ snatch stats -s <session-id> --tools
 ```
 claude-snatch/
 ├── src/
+│   ├── analysis/      # Session analysis (digest, lessons, timeline, search)
 │   ├── analytics/     # Statistics and usage tracking
+│   ├── async_io/      # Async I/O helpers
+│   ├── cache/         # Session cache
 │   ├── cli/           # Command-line interface
 │   ├── config/        # Configuration management
+│   ├── decisions/     # Architectural decision tracking
 │   ├── discovery/     # Session and project discovery
-│   ├── error.rs       # Error types and handling
-│   ├── export/        # Export formats (Markdown, JSON, HTML, Text)
-│   ├── lib.rs         # Library root
-│   ├── main.rs        # CLI entry point
+│   ├── export/        # Export formats (Markdown, JSON, HTML, CSV, XML, SQLite, OTEL)
+│   ├── extraction/    # Beyond-JSONL extraction (settings, MCP configs, commands)
+│   ├── git/           # Git integration
+│   ├── goals/         # Goal management
+│   ├── index/         # Full-text search index
+│   ├── mcp_server/    # MCP server (14 tools for AI agent integration)
 │   ├── model/         # Data structures for all message types
+│   ├── notes/         # Note management
 │   ├── parser/        # JSONL parsing with streaming support
 │   ├── reconstruction/# Conversation tree building
-│   └── tui/           # Terminal user interface
+│   ├── tui/           # Terminal user interface
+│   ├── util/          # Utility functions
+│   ├── api.rs         # API types
+│   ├── error.rs       # Error types and handling
+│   ├── lib.rs         # Library root
+│   ├── main.rs        # CLI entry point
+│   ├── message_tags.rs# Message tagging
+│   └── tags.rs        # Session tags
 ├── tests/
 │   ├── fixtures/      # Sample JSONL test files
 │   └── integration_tests.rs
@@ -330,6 +407,9 @@ cargo build --release
 Enable additional functionality with feature flags:
 
 ```bash
+# Interactive terminal UI
+cargo build --features tui
+
 # MCP server mode for AI model integration
 cargo build --features mcp
 
@@ -340,14 +420,16 @@ cargo build --features image-preview
 cargo build --features mmap
 
 # Enable all optional features
-cargo build --features "mcp,image-preview,mmap"
+cargo build --features "tui,mcp,image-preview,mmap,tracing"
 ```
 
 | Feature | Description |
 |---------|-------------|
-| `mcp` | MCP server mode exposing claude-snatch as tools for AI models |
+| `tui` | Interactive terminal UI (`snatch tui`) |
+| `mcp` | MCP server exposing 14 tools for session recall, search, lesson extraction, goal and decision management, and message tagging |
 | `image-preview` | Terminal image rendering using sixel, kitty, or iterm2 protocols |
 | `mmap` | Memory-mapped file parsing for very large JSONL files |
+| `tracing` | Enable tracing/diagnostic instrumentation |
 
 ### Running Tests
 
