@@ -27,13 +27,12 @@ pub fn run(cli: &Cli, args: &CleanupArgs) -> Result<()> {
     // Get all sessions
     let mut sessions: Vec<Session> = if let Some(project_filter) = &args.project {
         let projects = claude_dir.projects()?;
-        let mut matched = Vec::new();
-        for project in projects {
-            if project.decoded_path().contains(project_filter) {
-                matched.extend(project.sessions()?);
-            }
+        let matched = super::helpers::filter_projects(projects, project_filter);
+        let mut sess = Vec::new();
+        for project in matched {
+            sess.extend(project.sessions()?);
         }
-        matched
+        sess
     } else {
         claude_dir.all_sessions()?
     };

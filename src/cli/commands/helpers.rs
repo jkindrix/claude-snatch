@@ -8,7 +8,7 @@ use std::time::SystemTime;
 use regex::Regex;
 
 use crate::cli::Cli;
-use crate::discovery::Session;
+use crate::discovery::{Project, Session};
 use crate::error::{Result, SnatchError};
 use crate::model::{ContentBlock, LogEntry};
 
@@ -164,9 +164,12 @@ pub fn has_options_pattern(text: &str) -> bool {
     let has_deliberation = lower.contains("alternatively")
         || lower.contains("or we could")
         || lower.contains("another approach")
+        || lower.contains("another option")
         || lower.contains("we could also")
+        || lower.contains("you could also")
         || lower.contains("versus")
         || lower.contains(" vs ")
+        || lower.contains(" vs.")
         || lower.contains("trade-off")
         || lower.contains("tradeoff")
         || lower.contains("on the other hand")
@@ -175,7 +178,13 @@ pub fn has_options_pattern(text: &str) -> bool {
         || lower.contains("compared to")
         || lower.contains("either way")
         || lower.contains("pros:")
-        || lower.contains("cons:");
+        || lower.contains("cons:")
+        || lower.contains("however,")
+        || lower.contains("recommend")
+        || lower.contains("i'd suggest")
+        || lower.contains("i would suggest")
+        || lower.contains("the best approach")
+        || lower.contains("prefer");
 
     // Option A/B or approach 1/2 — these are strong signals on their own
     if (lower.contains("option a") && lower.contains("option b"))
@@ -192,17 +201,19 @@ pub fn has_options_pattern(text: &str) -> bool {
         return true;
     }
 
-    // Numbered lists: only count as options if deliberation language present
+    // Numbered lists: 2 items + deliberation, or 3+ items on their own
     static NUMBERED: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"(?m)^\s*\d+[\.\)]\s+").unwrap());
-    if NUMBERED.find_iter(text).count() >= 2 && has_deliberation {
+    let numbered_count = NUMBERED.find_iter(text).count();
+    if numbered_count >= 3 || (numbered_count >= 2 && has_deliberation) {
         return true;
     }
 
-    // Bullet lists with deliberation language
+    // Bullet lists: 3 items + deliberation, or 4+ items on their own
     static BULLETS: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"(?m)^\s*[-*]\s+").unwrap());
-    if BULLETS.find_iter(text).count() >= 3 && has_deliberation {
+    let bullet_count = BULLETS.find_iter(text).count();
+    if (bullet_count >= 4) || (bullet_count >= 3 && has_deliberation) {
         return true;
     }
 
@@ -250,6 +261,73 @@ pub fn is_affirmative(text: &str) -> bool {
     false
 }
 
+/// Filter projects by a filter string with smart matching.
+///
+/// If the filter exactly matches a decoded path or its last segment,
+/// returns only that project. Otherwise falls back to substring matching
+/// across decoded paths and encoded names.
+pub fn filter_projects(projects: Vec<Project>, filter: &str) -> Vec<Project> {
+    // Exact full-path match
+    let exact: Vec<_> = projects
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.decoded_path() == filter)
+        .map(|(i, _)| i)
+        .collect();
+    if exact.len() == 1 {
+        let idx = exact[0];
+        return vec![projects.into_iter().nth(idx).unwrap()];
+    }
+
+    // Exact trailing segment match: path ends with "/<filter>"
+    let suffix = format!("/{filter}");
+    let trailing: Vec<_> = projects
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.decoded_path().ends_with(&suffix))
+        .map(|(i, _)| i)
+        .collect();
+    if trailing.len() == 1 {
+        let idx = trailing[0];
+        return vec![projects.into_iter().nth(idx).unwrap()];
+    }
+
+    // Fall back to substring match
+    projects
+        .into_iter()
+        .filter(|p| {
+            p.decoded_path().contains(filter) || p.encoded_name().contains(filter)
+        })
+        .collect()
+}
+
+/// Resolve a single project from a filter string.
+///
+/// Uses `filter_projects` for smart matching, then requires exactly one result.
+/// Returns an error if zero or multiple projects match.
+pub fn resolve_single_project(cli: &Cli, filter: &str) -> Result<crate::discovery::Project> {
+    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
+    let projects = claude_dir.projects()?;
+    let mut matches = filter_projects(projects, filter);
+
+    match matches.len() {
+        0 => Err(SnatchError::ProjectNotFound {
+            project_path: format!("No project matching '{filter}'"),
+        }),
+        1 => Ok(matches.remove(0)),
+        n => {
+            let names: Vec<_> = matches.iter().map(|p| p.decoded_path().to_string()).collect();
+            Err(SnatchError::InvalidArgument {
+                name: "project".into(),
+                reason: format!(
+                    "Ambiguous filter '{filter}' matches {n} projects: {}",
+                    names.join(", ")
+                ),
+            })
+        }
+    }
+}
+
 /// Common session collection parameters.
 pub struct SessionCollectParams<'a> {
     /// Filter to a single session by ID.
@@ -279,11 +357,10 @@ pub fn collect_sessions(cli: &Cli, params: &SessionCollectParams) -> Result<Vec<
         vec![session]
     } else if let Some(project_filter) = params.project {
         let projects = claude_dir.projects()?;
+        let matched = filter_projects(projects, project_filter);
         let mut sess = Vec::new();
-        for project in projects {
-            if project.decoded_path().contains(project_filter) {
-                sess.extend(project.sessions()?);
-            }
+        for project in matched {
+            sess.extend(project.sessions()?);
         }
         sess
     } else {
@@ -429,9 +506,16 @@ mod tests {
     }
 
     #[test]
-    fn test_options_numbered_without_deliberation_rejected() {
-        // Simple numbered steps should NOT match
-        let text = "1. Read the file\n2. Edit the function\n3. Run the tests";
+    fn test_options_numbered_three_plus_matches() {
+        // 3+ numbered items match even without deliberation (may be options)
+        let text = "1. Use traits\n2. Use structs\n3. Use enums";
+        assert!(has_options_pattern(text));
+    }
+
+    #[test]
+    fn test_options_numbered_two_without_deliberation_rejected() {
+        // Only 2 numbered items without deliberation should NOT match
+        let text = "1. Read the file\n2. Edit the function";
         assert!(!has_options_pattern(text));
     }
 

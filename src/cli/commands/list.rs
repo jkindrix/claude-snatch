@@ -49,7 +49,7 @@ fn list_projects<W: Write>(
     // Filter by project path if specified
     // Use best_path() which prefers the authoritative cwd from JSONL
     if let Some(filter) = &args.project {
-        projects.retain(|p| p.best_path().contains(filter) || p.decoded_path().contains(filter));
+        projects = super::helpers::filter_projects(projects, filter);
     }
 
     // Filter out empty projects if requested
@@ -149,16 +149,12 @@ fn list_sessions<W: Write>(
     let show_sizes = args.sizes || matches!(args.sort, SortOrder::Size);
 
     let mut sessions: Vec<Session> = if let Some(project_filter) = &args.project {
-        // Get sessions from matching projects
         let projects = claude_dir.projects()?;
+        let matched = super::helpers::filter_projects(projects, project_filter);
         let mut matched_sessions = Vec::new();
-
-        for project in projects {
-            if project.decoded_path().contains(project_filter) {
-                matched_sessions.extend(project.sessions()?);
-            }
+        for project in matched {
+            matched_sessions.extend(project.sessions()?);
         }
-
         matched_sessions
     } else {
         claude_dir.all_sessions()?

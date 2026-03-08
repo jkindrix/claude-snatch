@@ -329,13 +329,13 @@ pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
         } else if let Some(project_filters) = &args.project {
             // Blocks for specific project(s)
             let projects = claude_dir.projects()?;
-            let matching_projects: Vec<_> = projects
-                .iter()
-                .filter(|p| {
-                    let path = p.decoded_path();
-                    project_filters.iter().any(|filter| path.contains(filter))
-                })
-                .collect();
+            let mut matching_projects = Vec::new();
+            for filter in project_filters {
+                matching_projects.extend(super::helpers::filter_projects(
+                    projects.clone(),
+                    filter,
+                ));
+            }
 
             if matching_projects.is_empty() {
                 return Err(SnatchError::ProjectNotFound {
@@ -372,15 +372,13 @@ pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
     } else if let Some(project_filters) = &args.project {
         // Stats for specific project(s)
         let projects = claude_dir.projects()?;
-
-        // Find all projects matching any of the filters
-        let matching_projects: Vec<_> = projects
-            .iter()
-            .filter(|p| {
-                let path = p.decoded_path();
-                project_filters.iter().any(|filter| path.contains(filter))
-            })
-            .collect();
+        let mut matching_projects = Vec::new();
+        for filter in project_filters {
+            matching_projects.extend(super::helpers::filter_projects(
+                projects.clone(),
+                filter,
+            ));
+        }
 
         if matching_projects.is_empty() {
             return Err(SnatchError::ProjectNotFound {
@@ -390,7 +388,7 @@ pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
 
         // Single project - use original behavior
         if matching_projects.len() == 1 {
-            let project = matching_projects[0];
+            let project = &matching_projects[0];
             let sessions = project.sessions()?;
             let project_analytics = compute_stats_parallel(&sessions, cli.max_file_size);
             output_project_stats(cli, args, &project_analytics, project.decoded_path())?;

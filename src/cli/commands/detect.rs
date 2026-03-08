@@ -65,7 +65,7 @@ fn find_explicit_markers(text: &str) -> Vec<String> {
         (r"(?i)design decision", "design-decision"),
         (r"(?i)we decided", "we-decided"),
         (r"(?i)the decision is", "the-decision-is"),
-        (r"(?i)decided to", "decided-to"),
+        (r"(?i)(?:we|they|team) decided to", "decided-to"),
         (r"(?i)final decision", "final-decision"),
         (r"(?i)agreed (?:to|that|on)", "agreed-to"),
     ];
@@ -83,6 +83,34 @@ fn find_explicit_markers(text: &str) -> Vec<String> {
     }
 
     markers
+}
+
+/// Extract the first prose sentence containing a decision keyword from text.
+/// Skips markdown formatting lines (headers, tables, rules, code fences).
+fn extract_decision_sentence(text: &str) -> Option<String> {
+    let keywords = [
+        "decided to", "design decision", "we decided", "the decision is",
+        "agreed to", "agreed that", "agreed on", "final decision",
+    ];
+    for line in text.lines() {
+        let trimmed = line.trim();
+        // Skip markdown formatting
+        if trimmed.starts_with('#')
+            || trimmed.starts_with('|')
+            || trimmed.starts_with("---")
+            || trimmed.starts_with("```")
+            || trimmed.starts_with("**") && trimmed.ends_with("**")
+        {
+            continue;
+        }
+        let lower = trimmed.to_lowercase();
+        if keywords.iter().any(|k| lower.contains(k)) {
+            if trimmed.len() > 10 {
+                return Some(truncate(trimmed, 120));
+            }
+        }
+    }
+    None
 }
 
 /// Reversal pattern detection.
@@ -182,6 +210,18 @@ pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
                             };
                             (q, text.clone())
                         };
+
+                        // Skip empty or continuation/notification entries
+                        if question.trim().is_empty() && response.trim().is_empty() {
+                            continue;
+                        }
+                        let q_lower = question.to_lowercase();
+                        if q_lower.starts_with("this session is being continued")
+                            || q_lower.starts_with("<task-notification")
+                            || q_lower.starts_with("<system-reminder")
+                        {
+                            continue;
+                        }
 
                         candidates.push(CandidateDecision {
                             timestamp,
@@ -325,19 +365,13 @@ pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
     }
 
     // Register confirmed candidates to the decision registry
-    if args.register {
+    if args.register || args.dry_run {
         let project_filter = args.project.as_deref().ok_or_else(|| SnatchError::InvalidArgument {
             name: "project".into(),
             reason: "--project is required with --register".into(),
         })?;
 
-        let claude_dir = super::get_claude_dir(cli.claude_dir.as_ref())?;
-        let projects = claude_dir.projects()?;
-        let project = projects.iter()
-            .find(|p| p.decoded_path().contains(project_filter))
-            .ok_or_else(|| SnatchError::ProjectNotFound {
-                project_path: format!("No project matching '{project_filter}'"),
-            })?;
+        let project = super::helpers::resolve_single_project(cli, project_filter)?;
 
         let project_dir = project.path();
         let mut store = load_decisions(project_dir)?;
@@ -354,29 +388,58 @@ pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
                 continue;
             }
 
-            // Build title from question (truncated)
-            let title = truncate(&c.question, 120)
-                .trim_end_matches("...")
-                .trim()
-                .to_string();
+            // Skip candidates with continuation/notification prompts
+            let q_lower = c.question.to_lowercase();
+            if q_lower.starts_with("this session is being continued")
+                || q_lower.starts_with("<task-notification")
+                || q_lower.starts_with("<system-reminder")
+                || c.question.trim().is_empty()
+            {
+                continue;
+            }
+
+            // Build title: for explicit markers use the sentence containing the marker,
+            // otherwise use the question text
+            let title = match &c.detection_method {
+                DetectionMethod::ExplicitMarker(_) => {
+                    extract_decision_sentence(&c.response)
+                        .unwrap_or_else(|| truncate(&c.question, 120))
+                }
+                _ => truncate(&c.question, 120),
+            }
+            .trim_end_matches("...")
+            .trim()
+            .to_string();
             if title.is_empty() {
                 continue;
             }
 
-            store.add_decision(
-                title,
-                Some(truncate(&c.response, 500)),
-                Some(c.session_id.clone()),
-                Some(c.confidence),
-                vec![],
-            );
+            if args.dry_run {
+                eprintln!("  [dry-run] \"{}\"", title);
+                eprintln!("            session: {} | confidence: {:.0}%", c.short_id, c.confidence * 100.0);
+                eprintln!();
+            } else {
+                store.add_decision(
+                    title,
+                    Some(truncate(&c.response, 500)),
+                    Some(c.session_id.clone()),
+                    Some(c.confidence),
+                    vec![],
+                );
+            }
             registered += 1;
         }
 
-        save_decisions(project_dir, &store)?;
+        if !args.dry_run {
+            save_decisions(project_dir, &store)?;
+        }
 
         if !cli.quiet {
-            eprintln!("Registered {registered} decision(s) to the registry.");
+            if args.dry_run {
+                eprintln!("Would register {registered} decision(s) (dry run).");
+            } else {
+                eprintln!("Registered {registered} decision(s) to the registry.");
+            }
         }
     }
 

@@ -520,11 +520,10 @@ fn collect_sessions(cli: &Cli, args: &SearchArgs) -> Result<Vec<Session>> {
         vec![session]
     } else if let Some(project_filter) = &args.project {
         let projects = claude_dir.projects()?;
+        let matched = super::helpers::filter_projects(projects, project_filter);
         let mut sess = Vec::new();
-        for project in projects {
-            if project.decoded_path().contains(project_filter) {
-                sess.extend(project.sessions()?);
-            }
+        for project in matched {
+            sess.extend(project.sessions()?);
         }
         sess
     } else {
@@ -1320,7 +1319,12 @@ fn output_full_results(
                     (Some(phase), _, _) => format!(" ({phase})"),
                     _ => String::new(),
                 };
-                println!("  [{}]{}", format_match_label(&result.entry_type, &result.location), phase_info);
+                let uuid_suffix = if args.show_uuid && !result.uuid.is_empty() {
+                    format!(" [{}]", &result.uuid[..result.uuid.len().min(12)])
+                } else {
+                    String::new()
+                };
+                println!("  [{}]{}{}", format_match_label(&result.entry_type, &result.location), phase_info, uuid_suffix);
 
                 if args.context > 0 && !result.context_before.is_empty() {
                     for line in result.context_before.lines() {

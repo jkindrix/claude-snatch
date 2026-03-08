@@ -169,11 +169,10 @@ fn run_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
 
     let sessions = if let Some(ref project_filter) = args.project {
         let projects = claude_dir.projects()?;
+        let matched = super::helpers::filter_projects(projects, project_filter);
         let mut sess = Vec::new();
-        for project in projects {
-            if project.decoded_path().contains(project_filter) {
-                sess.extend(project.sessions()?);
-            }
+        for project in matched {
+            sess.extend(project.sessions()?);
         }
         sess
     } else {

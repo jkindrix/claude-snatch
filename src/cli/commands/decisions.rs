@@ -12,6 +12,24 @@ use super::helpers::{
     extract_text, has_options_pattern, has_tool_calls, is_affirmative, main_thread_entries,
 };
 
+/// Stop words to exclude from title matching in score.
+const STOP_WORDS: &[&str] = &[
+    "the", "this", "that", "with", "from", "into", "have", "will",
+    "been", "were", "they", "them", "their", "what", "when", "where",
+    "which", "there", "then", "than", "also", "just", "more", "some",
+    "each", "does", "should", "would", "could", "about", "other",
+    "take", "make", "like", "over", "only", "very", "after", "before",
+];
+
+/// Check if text contains enough significant title keywords.
+fn title_matches_text(title_keywords: &[&str], text_lower: &str) -> bool {
+    if title_keywords.len() < 2 {
+        // Too few keywords to match reliably
+        return false;
+    }
+    title_keywords.iter().all(|w| text_lower.contains(w))
+}
+
 /// JSON output for a single decision.
 #[derive(serde::Serialize)]
 struct DecisionOutput {
@@ -51,37 +69,8 @@ fn to_output(d: &crate::decisions::Decision) -> DecisionOutput {
 
 /// Run the decisions command.
 pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
-    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
-
-    // Resolve project
     let project_filter = args.project.as_deref().unwrap_or("");
-    let projects = claude_dir.projects()?;
-    let matches: Vec<_> = projects
-        .iter()
-        .filter(|p| {
-            p.decoded_path().contains(project_filter)
-                || p.encoded_name().contains(project_filter)
-        })
-        .collect();
-
-    let project = match matches.len() {
-        0 => {
-            return Err(SnatchError::ProjectNotFound {
-                project_path: format!("No project matching '{project_filter}'"),
-            })
-        }
-        1 => matches[0],
-        n => {
-            let names: Vec<_> = matches.iter().map(|p| p.decoded_path()).collect();
-            return Err(SnatchError::InvalidArgument {
-                name: "project".into(),
-                reason: format!(
-                    "Ambiguous filter '{project_filter}' matches {n} projects: {}",
-                    names.join(", ")
-                ),
-            });
-        }
-    };
+    let project = super::helpers::resolve_single_project(cli, project_filter)?;
 
     let project_dir = project.path();
     let project_path = project.decoded_path().to_string();
@@ -106,8 +95,23 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                 store.decisions.iter().collect()
             };
 
-            let filtered: Vec<_> = if let Some(ref tag_filter) = args.tag {
-                filtered.into_iter().filter(|d| d.tags.iter().any(|t| t.contains(tag_filter.as_str()))).collect()
+            let filtered: Vec<_> = if let Some(ref search) = args.search {
+                let search_lower = search.to_lowercase();
+                filtered.into_iter().filter(|d| {
+                    d.title.to_lowercase().contains(&search_lower)
+                        || d.description.as_ref().is_some_and(|desc| desc.to_lowercase().contains(&search_lower))
+                }).collect()
+            } else {
+                filtered
+            };
+
+            let filtered: Vec<_> = if !args.tag.is_empty() {
+                let tag_filters: Vec<String> = args.tag.iter()
+                    .flat_map(|t| t.split(',').map(|s| s.trim().to_lowercase()))
+                    .collect();
+                filtered.into_iter().filter(|d| {
+                    tag_filters.iter().any(|tf| d.tags.iter().any(|t| t.to_lowercase().contains(tf.as_str())))
+                }).collect()
             } else {
                 filtered
             };
@@ -143,7 +147,10 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                         } else {
                             format!(" [{}]", d.tags.join(", "))
                         };
-                        println!("  [{status_marker}] #{}: {}{}{}", d.id, d.title, conf, tags);
+                        let session = d.session_id.as_deref()
+                            .map(|s| format!(" ({})", &s[..s.len().min(8)]))
+                            .unwrap_or_default();
+                        println!("  [{status_marker}] #{}: {}{}{}{}", d.id, d.title, conf, tags, session);
                         if let Some(ref desc) = d.description {
                             println!("      {desc}");
                         }
@@ -175,11 +182,10 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                 None
             };
 
-            let tags: Vec<String> = args
-                .tag
-                .as_deref()
-                .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
-                .unwrap_or_default();
+            let tags: Vec<String> = args.tag.iter()
+                .flat_map(|t| t.split(',').map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect();
 
             let mut store = load_decisions(project_dir)?;
             let id = store.add_decision(
@@ -227,10 +233,14 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                 None
             };
 
-            let tags = args
-                .tag
-                .as_deref()
-                .map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
+            let tags: Option<Vec<String>> = if args.tag.is_empty() {
+                None
+            } else {
+                Some(args.tag.iter()
+                    .flat_map(|t| t.split(',').map(|s| s.trim().to_string()))
+                    .filter(|s| !s.is_empty())
+                    .collect())
+            };
 
             if status.is_none() && args.description.is_none() && args.confidence.is_none() && tags.is_none() {
                 return Err(SnatchError::InvalidArgument {
@@ -321,7 +331,11 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                         "decision": to_output(decision),
                     }))?);
                 }
-                _ => println!("Decision #{id} superseded by #{by}"),
+                _ => {
+                    let old_title = store.decisions.iter().find(|d| d.id == id).map(|d| d.title.as_str()).unwrap_or("?");
+                    let new_title = store.decisions.iter().find(|d| d.id == by).map(|d| d.title.as_str()).unwrap_or("?");
+                    println!("Decision #{id} '{old_title}' superseded by #{by} '{new_title}'");
+                }
             }
         }
 
@@ -335,14 +349,16 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                 return Ok(());
             }
 
+            let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
             let mut scored_count = 0u32;
-            let mut skipped_count = 0u32;
+            let mut skipped_no_id = 0u32;
+            let mut skipped_not_found = 0u32;
 
             for decision in &mut store.decisions {
                 let session_id = match &decision.session_id {
                     Some(id) => id.clone(),
                     None => {
-                        skipped_count += 1;
+                        skipped_no_id += 1;
                         continue;
                     }
                 };
@@ -350,7 +366,7 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                 let session = match claude_dir.find_session(&session_id)? {
                     Some(s) => s,
                     None => {
-                        skipped_count += 1;
+                        skipped_not_found += 1;
                         continue;
                     }
                 };
@@ -358,13 +374,17 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                 let entries = match session.parse_with_options(cli.max_file_size) {
                     Ok(e) => e,
                     Err(_) => {
-                        skipped_count += 1;
+                        skipped_not_found += 1;
                         continue;
                     }
                 };
 
                 let main_entries = main_thread_entries(&entries);
                 let title_lower = decision.title.to_lowercase();
+                let title_keywords: Vec<&str> = title_lower
+                    .split_whitespace()
+                    .filter(|w| w.len() > 3 && !STOP_WORDS.contains(w))
+                    .collect();
                 let mut score: f64 = 0.5;
 
                 // Signal 1: User confirmed (affirmative response near decision text)
@@ -379,7 +399,7 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                     };
                     let text_lower = text.to_lowercase();
                     if !text_lower.contains(&title_lower)
-                        && !title_lower.split_whitespace().all(|w| text_lower.contains(w))
+                        && !title_matches_text(&title_keywords, &text_lower)
                     {
                         continue;
                     }
@@ -405,7 +425,7 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                     if let Some(text) = extract_text(entry) {
                         let text_lower = text.to_lowercase();
                         if text_lower.contains(&title_lower)
-                            || title_lower.split_whitespace().all(|w| text_lower.contains(w))
+                            || title_matches_text(&title_keywords, &text_lower)
                         {
                             for j in (i + 1)..main_entries.len().min(i + 4) {
                                 if has_tool_calls(main_entries[j]) {
@@ -459,7 +479,7 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                         let text_lower = text.to_lowercase();
                         if correction_patterns.iter().any(|p| text_lower.starts_with(p) || text_lower.contains(p)) {
                             if text_lower.contains(&title_lower)
-                                || title_lower.split_whitespace().any(|w| text_lower.contains(w))
+                                || title_matches_text(&title_keywords, &text_lower)
                             {
                                 found_correction = true;
                                 break;
@@ -496,12 +516,25 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                         "operation": "score",
                         "project_path": project_path,
                         "scored": scored_count,
-                        "skipped": skipped_count,
+                        "skipped_no_session_id": skipped_no_id,
+                        "skipped_session_not_found": skipped_not_found,
                         "decisions": output,
                     }))?);
                 }
                 _ => {
-                    println!("Auto-scored {} decision(s) ({} skipped, no session_id):\n", scored_count, skipped_count);
+                    let mut skip_parts = Vec::new();
+                    if skipped_no_id > 0 {
+                        skip_parts.push(format!("{skipped_no_id} no session_id"));
+                    }
+                    if skipped_not_found > 0 {
+                        skip_parts.push(format!("{skipped_not_found} session not found"));
+                    }
+                    let skip_msg = if skip_parts.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (skipped: {})", skip_parts.join(", "))
+                    };
+                    println!("Auto-scored {} decision(s){}:\n", scored_count, skip_msg);
                     for d in &store.decisions {
                         let status_marker = match d.status {
                             DecisionStatus::Proposed => "?",

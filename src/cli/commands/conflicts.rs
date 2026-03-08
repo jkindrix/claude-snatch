@@ -133,14 +133,11 @@ fn find_opposing_signals(text_a: &str, text_b: &str) -> Option<(Vec<String>, f64
 
 /// Find the project directory for a given project filter.
 fn find_project_dir(cli: &Cli, project_filter: &str) -> Result<Option<std::path::PathBuf>> {
-    let claude_dir = super::get_claude_dir(cli.claude_dir.as_ref())?;
-    let projects = claude_dir.projects()?;
-    for project in projects {
-        if project.decoded_path().contains(project_filter) {
-            return Ok(Some(project.path().to_path_buf()));
-        }
+    match super::helpers::resolve_single_project(cli, project_filter) {
+        Ok(project) => Ok(Some(project.path().to_path_buf())),
+        Err(crate::error::SnatchError::ProjectNotFound { .. }) => Ok(None),
+        Err(e) => Err(e),
     }
-    Ok(None)
 }
 
 /// Run the conflicts command.

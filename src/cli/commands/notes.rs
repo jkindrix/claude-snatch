@@ -7,7 +7,6 @@ use crate::cli::{Cli, NotesArgs, OutputFormat};
 use crate::error::{Result, SnatchError};
 use crate::notes::{load_notes, save_notes};
 
-use super::get_claude_dir;
 
 /// JSON output for notes list.
 #[derive(serde::Serialize)]
@@ -38,37 +37,8 @@ struct NoteMutationOutput {
 
 /// Run the notes command.
 pub fn run(cli: &Cli, args: &NotesArgs) -> Result<()> {
-    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
-
-    // Resolve project
     let project_filter = args.project.as_deref().unwrap_or("");
-    let projects = claude_dir.projects()?;
-    let matches: Vec<_> = projects
-        .iter()
-        .filter(|p| {
-            p.decoded_path().contains(project_filter)
-                || p.encoded_name().contains(project_filter)
-        })
-        .collect();
-
-    let project = match matches.len() {
-        0 => {
-            return Err(SnatchError::ProjectNotFound {
-                project_path: format!("No project matching '{project_filter}'"),
-            })
-        }
-        1 => matches[0],
-        n => {
-            let names: Vec<_> = matches.iter().map(|p| p.decoded_path()).collect();
-            return Err(SnatchError::InvalidArgument {
-                name: "project".into(),
-                reason: format!(
-                    "Ambiguous filter '{project_filter}' matches {n} projects: {}",
-                    names.join(", ")
-                ),
-            });
-        }
-    };
+    let project = super::helpers::resolve_single_project(cli, project_filter)?;
 
     let project_dir = project.path();
     let project_path = project.decoded_path().to_string();

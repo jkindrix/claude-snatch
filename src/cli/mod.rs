@@ -959,6 +959,10 @@ pub struct SearchArgs {
     /// Filter by session phase: early, middle, late.
     #[arg(long)]
     pub phase: Option<String>,
+
+    /// Show message UUIDs in text output (useful for tagging).
+    #[arg(long)]
+    pub show_uuid: bool,
 }
 
 /// Arguments for the stats command.
@@ -2040,16 +2044,20 @@ pub struct DecisionsArgs {
     #[arg(long)]
     pub confidence: Option<f64>,
 
-    /// Tags (comma-separated). Also used as filter for list.
+    /// Tags (comma-separated or repeated). Also used as filter for list.
+    #[arg(long, num_args = 1..)]
+    pub tag: Vec<String>,
+
+    /// Search within decision titles and descriptions (substring match).
     #[arg(long)]
-    pub tag: Option<String>,
+    pub search: Option<String>,
 
     /// ID of the decision that supersedes this one (for supersede operation).
     #[arg(long)]
     pub superseded_by: Option<u64>,
 
     /// Session ID where this decision was made.
-    #[arg(long)]
+    #[arg(long, alias = "session")]
     pub session_id: Option<String>,
 }
 
@@ -2146,6 +2154,10 @@ pub struct DetectArgs {
     /// Register confirmed candidates (structural with confirmation) to the decision registry.
     #[arg(long)]
     pub register: bool,
+
+    /// Preview what --register would do without writing (requires --register).
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Arguments for the conflicts command.

@@ -83,13 +83,7 @@ pub fn resolve_project(server: &SnatchServer, project_filter: &str) -> Result<Re
         .projects()
         .map_err(|e| ToolOutput::error(format!("Failed to list projects: {e}")))?;
 
-    let matches: Vec<_> = projects
-        .into_iter()
-        .filter(|p| {
-            p.decoded_path().contains(project_filter)
-                || p.encoded_name().contains(project_filter)
-        })
-        .collect();
+    let matches = crate::cli::helpers::filter_projects(projects, project_filter);
 
     match matches.len() {
         0 => Err(ToolOutput::error(format!(

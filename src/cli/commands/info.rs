@@ -30,10 +30,9 @@ pub fn run(cli: &Cli, args: &InfoArgs) -> Result<()> {
 
         // Search projects by substring
         let projects = claude_dir.projects()?;
-        for project in projects {
-            if project.decoded_path().contains(target) {
-                return show_project_info(cli, args, &project);
-            }
+        let matched = super::helpers::filter_projects(projects, target);
+        if let Some(project) = matched.into_iter().next() {
+            return show_project_info(cli, args, &project);
         }
 
         return Err(SnatchError::SessionNotFound {

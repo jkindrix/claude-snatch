@@ -223,8 +223,15 @@ pub fn run(cli: &Cli, args: &StandupArgs) -> Result<()> {
     let period_end = Utc::now();
     let cutoff = SystemTime::from(period_start);
 
-    // Get all projects
-    let projects = claude_dir.projects()?;
+    // Get all projects (filtered if specified)
+    let projects = {
+        let all = claude_dir.projects()?;
+        if let Some(ref filter) = args.project {
+            super::helpers::filter_projects(all, filter)
+        } else {
+            all
+        }
+    };
 
     // Filter and aggregate data
     let mut project_summaries: Vec<ProjectSummary> = Vec::new();
@@ -244,12 +251,6 @@ pub fn run(cli: &Cli, args: &StandupArgs) -> Result<()> {
     }
 
     for project in projects {
-        // Apply project filter if specified
-        if let Some(ref filter) = args.project {
-            if !project.decoded_path().contains(filter) {
-                continue;
-            }
-        }
 
         let sessions = project.sessions()?;
         let mut project_sessions = 0;

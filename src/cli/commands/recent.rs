@@ -54,7 +54,12 @@ pub fn run(cli: &Cli, args: &RecentArgs) -> Result<()> {
 
     // Filter by project if specified
     if let Some(project_filter) = &args.project {
-        sessions.retain(|s| s.project_path().contains(project_filter));
+        let projects = claude_dir.projects()?;
+        let matched = super::helpers::filter_projects(projects, project_filter);
+        let matched_paths: Vec<String> = matched.iter().map(|p| p.decoded_path().to_string()).collect();
+        sessions.retain(|s| {
+            matched_paths.iter().any(|mp| s.project_path().contains(mp.as_str()))
+        });
     }
 
     // Sessions are already sorted by modification time (most recent first)

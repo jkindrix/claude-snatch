@@ -879,20 +879,12 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
 
 /// Resolve a project directory from an optional project filter.
 fn resolve_project_dir(cli: &Cli, project: Option<&str>) -> Result<std::path::PathBuf> {
-    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
     if let Some(project_filter) = project {
-        let projects = claude_dir.projects()?;
-        for p in projects {
-            if p.decoded_path().contains(project_filter) {
-                return Ok(p.path().to_path_buf());
-            }
-        }
-        Err(crate::error::SnatchError::InvalidArgument {
-            name: "project".to_string(),
-            reason: format!("No project matching '{}'", project_filter),
-        })
+        let p = super::helpers::resolve_single_project(cli, project_filter)?;
+        Ok(p.path().to_path_buf())
     } else {
         // Try to infer project from cwd
+        let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
         let cwd = std::env::current_dir().map_err(|e| crate::error::SnatchError::IoError {
             context: "Failed to get current directory".to_string(),
             source: e,

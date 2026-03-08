@@ -28,11 +28,10 @@ fn run_build(cli: &Cli, args: &crate::cli::IndexBuildArgs) -> Result<()> {
     // Get sessions to index
     let sessions = if let Some(ref project_filter) = args.project {
         let projects = claude_dir.projects()?;
+        let matched = super::helpers::filter_projects(projects, project_filter);
         let mut sessions = Vec::new();
-        for project in projects {
-            if project.decoded_path().contains(project_filter) {
-                sessions.extend(project.sessions()?);
-            }
+        for project in matched {
+            sessions.extend(project.sessions()?);
         }
         sessions
     } else {
@@ -84,11 +83,10 @@ fn run_rebuild(cli: &Cli, args: &crate::cli::IndexRebuildArgs) -> Result<()> {
     // Get all sessions
     let sessions = if let Some(ref project_filter) = args.project {
         let projects = claude_dir.projects()?;
+        let matched = super::helpers::filter_projects(projects, project_filter);
         let mut sessions = Vec::new();
-        for project in projects {
-            if project.decoded_path().contains(project_filter) {
-                sessions.extend(project.sessions()?);
-            }
+        for project in matched {
+            sessions.extend(project.sessions()?);
         }
         sessions
     } else {

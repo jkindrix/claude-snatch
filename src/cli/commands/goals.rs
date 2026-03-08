@@ -7,7 +7,6 @@ use crate::cli::{Cli, GoalsArgs, OutputFormat};
 use crate::error::{Result, SnatchError};
 use crate::goals::{load_goals, save_goals, GoalStatus};
 
-use super::get_claude_dir;
 
 /// JSON output for goals list.
 #[derive(serde::Serialize)]
@@ -40,37 +39,8 @@ struct GoalMutationOutput {
 
 /// Run the goals command.
 pub fn run(cli: &Cli, args: &GoalsArgs) -> Result<()> {
-    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
-
-    // Resolve project
     let project_filter = args.project.as_deref().unwrap_or("");
-    let projects = claude_dir.projects()?;
-    let matches: Vec<_> = projects
-        .iter()
-        .filter(|p| {
-            p.decoded_path().contains(project_filter)
-                || p.encoded_name().contains(project_filter)
-        })
-        .collect();
-
-    let project = match matches.len() {
-        0 => {
-            return Err(SnatchError::ProjectNotFound {
-                project_path: format!("No project matching '{project_filter}'"),
-            })
-        }
-        1 => matches[0],
-        n => {
-            let names: Vec<_> = matches.iter().map(|p| p.decoded_path()).collect();
-            return Err(SnatchError::InvalidArgument {
-                name: "project".into(),
-                reason: format!(
-                    "Ambiguous filter '{project_filter}' matches {n} projects: {}",
-                    names.join(", ")
-                ),
-            });
-        }
-    };
+    let project = super::helpers::resolve_single_project(cli, project_filter)?;
 
     let project_dir = project.path();
     let project_path = project.decoded_path().to_string();
