@@ -56,6 +56,16 @@ fn show_session_info(
     let tag_store = TagStore::load().unwrap_or_default();
     let session_meta = tag_store.get(&summary.session_id);
 
+    // Look up chain info
+    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
+    let chain_info = claude_dir.projects().ok().and_then(|projects| {
+        let project = projects.into_iter().find(|p| {
+            p.best_path() == summary.project_path || p.decoded_path() == summary.project_path
+        })?;
+        let chains = project.session_chains().ok()?;
+        chains.into_values().find(|c| c.contains(&summary.session_id))
+    });
+
     match cli.effective_output() {
         OutputFormat::Json => {
             // Compute analytics from conversation (the expensive part)
@@ -102,9 +112,13 @@ fn show_session_info(
 
             println!("{}", serde_json::to_string_pretty(&SessionInfoOutput {
                 session_id: summary.session_id.clone(),
+                slug: summary.slug.clone(),
                 project_path: summary.project_path.clone(),
                 is_subagent: summary.is_subagent,
                 parent_session_id: summary.parent_session_id.clone(),
+                chain_id: chain_info.as_ref().map(|c| c.root_id.clone()),
+                chain_length: chain_info.as_ref().map(|c| c.len()),
+                chain_position: chain_info.as_ref().and_then(|c| c.position_of(&summary.session_id)),
                 file_size: summary.file_size,
                 file_size_human: summary.file_size_human.clone(),
                 entry_count: summary.entry_count,
@@ -167,10 +181,17 @@ fn show_session_info(
             println!("===================");
             println!();
             println!("Session ID:   {}", summary.session_id);
+            if let Some(ref slug) = summary.slug {
+                println!("Slug:         {slug}");
+            }
             println!("Project:      {}", summary.project_path);
             println!("Type:         {}", if summary.is_subagent { "Subagent" } else { "Main" });
             if let Some(ref parent) = summary.parent_session_id {
                 println!("Parent:       {}", parent);
+            }
+            if let Some(ref chain) = chain_info {
+                let pos = chain.position_of(&summary.session_id).unwrap_or(0) + 1;
+                println!("Chain:        part {}/{} (root: {})", pos, chain.len(), &chain.root_id[..8.min(chain.root_id.len())]);
             }
             println!("Status:       {:?}", summary.state);
             if summary.compaction_count > 0 {
@@ -642,10 +663,18 @@ fn show_directory_info(
 #[derive(Debug, serde::Serialize)]
 struct SessionInfoOutput {
     session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slug: Option<String>,
     project_path: String,
     is_subagent: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     parent_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chain_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chain_length: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chain_position: Option<usize>,
     file_size: u64,
     file_size_human: String,
     entry_count: usize,
@@ -740,9 +769,13 @@ mod tests {
     fn test_session_info_output_serialization() {
         let output = SessionInfoOutput {
             session_id: "abc123".to_string(),
+            slug: Some("cool-waving-biscuit".to_string()),
             project_path: "/home/user/project".to_string(),
             is_subagent: false,
             parent_session_id: None,
+            chain_id: None,
+            chain_length: None,
+            chain_position: None,
             file_size: 1024,
             file_size_human: "1 KB".to_string(),
             entry_count: 50,
@@ -829,9 +862,13 @@ mod tests {
     fn test_session_info_output_with_nulls() {
         let output = SessionInfoOutput {
             session_id: "test".to_string(),
+            slug: None,
             project_path: "project".to_string(),
             is_subagent: true,
             parent_session_id: Some("parent-uuid".to_string()),
+            chain_id: None,
+            chain_length: None,
+            chain_position: None,
             file_size: 0,
             file_size_human: "0 B".to_string(),
             entry_count: 0,

@@ -329,7 +329,8 @@ impl SnatchServer {
     /// text with tool names, or "full" for tool call details.
     #[tool(description = "Read conversation messages from a session. Use detail='overview' for prompts only, 'conversation' for user+assistant text (skipping tool-only turns), 'standard' for user+assistant text, 'full' for tool details. Set include_thinking=true to recover reasoning/decision rationale (always lost in compaction). Supports pagination with offset/limit.")]
     async fn get_session_messages(&self, request: GetSessionMessagesRequest) -> ToolOutput {
-        let resolved = match resolve_session(self, &request.session_id) {
+        let chain_aware = request.chain_aware.unwrap_or(false);
+        let resolved = match resolve_session_with_chain(self, &request.session_id, chain_aware) {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -564,7 +565,8 @@ impl SnatchServer {
     /// what Claude did, and what files were touched.
     #[tool(description = "Get a turn-by-turn narrative timeline of a session. Each turn shows the user prompt, assistant summary, tools used, and files touched. Also surfaces compaction events.")]
     async fn get_session_timeline(&self, request: GetSessionTimelineRequest) -> ToolOutput {
-        let resolved = match resolve_session(self, &request.session_id) {
+        let chain_aware = request.chain_aware.unwrap_or(false);
+        let resolved = match resolve_session_with_chain(self, &request.session_id, chain_aware) {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -654,125 +656,179 @@ impl SnatchServer {
             Err(e) => return ToolOutput::error(e),
         };
 
-        let mut sessions = match claude_dir.all_sessions() {
-            Ok(s) => s,
-            Err(e) => return ToolOutput::error(format!("Failed to list sessions: {e}")),
+        // Iterate per-project so we can detect chains
+        let projects = match claude_dir.projects() {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::error(format!("Failed to list projects: {e}")),
         };
 
-        // Filter by project
-        sessions.retain(|s| s.project_path().contains(&request.project));
-
-        // Filter subagents
-        sessions.retain(|s| !s.is_subagent());
-
-        // Filter by time
-        if let Some(cutoff_time) = cutoff {
-            sessions.retain(|s| s.modified_datetime() >= cutoff_time);
-        }
-
-        // Limit
-        sessions.truncate(limit);
+        let filtered_projects: Vec<_> = projects
+            .into_iter()
+            .filter(|p| p.best_path().contains(&request.project))
+            .collect();
 
         let mut project_path = String::new();
         let mut agg_tokens = 0u64;
         let mut agg_cost = 0.0f64;
         let mut agg_prompts = 0usize;
         let mut agg_branches = HashSet::new();
-
         let mut session_entries = Vec::new();
 
-        for session in &sessions {
+        for project in &filtered_projects {
             if project_path.is_empty() {
-                project_path = session.project_path().to_string();
+                project_path = project.best_path().to_string();
             }
 
-            let entries = match session.parse_with_options(self.max_file_size) {
-                Ok(e) => e,
+            let mut sessions = match project.main_sessions() {
+                Ok(s) => s,
                 Err(_) => continue,
             };
 
-            let conversation = match Conversation::from_entries(entries) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
+            // Filter by time
+            if let Some(cutoff_time) = cutoff {
+                sessions.retain(|s| s.modified_datetime() >= cutoff_time);
+            }
 
-            let analytics = SessionAnalytics::from_conversation(&conversation);
-            let summary_report = analytics.summary_report();
+            // Detect chains for this project
+            let chains = project.session_chains().unwrap_or_default();
 
-            let main_entries = conversation.main_thread_entries();
-            let main_refs: Vec<&LogEntry> = main_entries.iter().copied().collect();
-
-            // Extract user prompts (excluding system noise)
-            let mut prompts: Vec<String> = Vec::new();
-            let mut prompt_count = 0usize;
-            for entry in &main_refs {
-                if is_human_prompt(entry) {
-                    prompt_count += 1;
-                    if include_summaries && prompts.len() < 3 {
-                        if let Some(text) = extract_user_prompt_text(entry) {
-                            if text.len() > 20 {
-                                prompts.push(truncate_text(&text, 150));
-                            }
-                        }
+            // Build lookup: session_id → chain info
+            let mut chain_lookup: HashMap<String, (&str, usize, Option<&str>)> = HashMap::new();
+            let mut skip_set: HashSet<String> = HashSet::new();
+            for chain in chains.values() {
+                for member in &chain.members {
+                    chain_lookup.insert(
+                        member.file_id.clone(),
+                        (&chain.root_id, chain.len(), chain.slug.as_deref()),
+                    );
+                    if member.file_id != chain.root_id {
+                        skip_set.insert(member.file_id.clone());
                     }
                 }
             }
 
-            // Extract git branch
-            let branch = main_refs
-                .iter()
-                .find_map(|e| e.git_branch().map(String::from));
-            if let Some(ref b) = branch {
-                agg_branches.insert(b.clone());
-            }
+            for session in &sessions {
+                let sid = session.session_id().to_string();
 
-            // Extract files
-            let files = extract_files_from_tools(&main_refs);
-
-            // Tool counts
-            let mut tool_counts: HashMap<String, usize> = HashMap::new();
-            for entry in &main_refs {
-                for name in extract_tool_names(entry) {
-                    *tool_counts.entry(name).or_default() += 1;
+                // Skip non-root chain members (they'll be included in the root entry)
+                if skip_set.contains(&sid) {
+                    continue;
                 }
+
+                // If this is a chain root, parse the full chain; otherwise single file
+                let (entries, chain_info) = if let Some(chain) = chains.get(&sid) {
+                    match project.parse_chain(chain) {
+                        Ok(e) => (e, Some((chain.root_id.clone(), chain.len(), chain.slug.clone()))),
+                        Err(_) => continue,
+                    }
+                } else {
+                    match session.parse_with_options(self.max_file_size) {
+                        Ok(e) => {
+                            let slug = chain_lookup.get(&sid).and_then(|(_, _, s)| s.map(String::from));
+                            (e, slug.map(|s| (sid.clone(), 1, Some(s))))
+                        }
+                        Err(_) => continue,
+                    }
+                };
+
+                let conversation = match Conversation::from_entries(entries) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+
+                let analytics = SessionAnalytics::from_conversation(&conversation);
+                let summary_report = analytics.summary_report();
+
+                let main_entries = conversation.main_thread_entries();
+                let main_refs: Vec<&LogEntry> = main_entries.iter().copied().collect();
+
+                // Extract user prompts (excluding system noise)
+                let mut prompts: Vec<String> = Vec::new();
+                let mut prompt_count = 0usize;
+                for entry in &main_refs {
+                    if is_human_prompt(entry) {
+                        prompt_count += 1;
+                        if include_summaries && prompts.len() < 3 {
+                            if let Some(text) = extract_user_prompt_text(entry) {
+                                if text.len() > 20 {
+                                    prompts.push(truncate_text(&text, 150));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Extract git branch
+                let branch = main_refs
+                    .iter()
+                    .find_map(|e| e.git_branch().map(String::from));
+                if let Some(ref b) = branch {
+                    agg_branches.insert(b.clone());
+                }
+
+                // Extract files
+                let files = extract_files_from_tools(&main_refs);
+
+                // Tool counts
+                let mut tool_counts: HashMap<String, usize> = HashMap::new();
+                for entry in &main_refs {
+                    for name in extract_tool_names(entry) {
+                        *tool_counts.entry(name).or_default() += 1;
+                    }
+                }
+
+                let first_prompt = prompts.first().cloned();
+                let start_time = analytics.start_time.map(|t| t.to_rfc3339());
+                let end_time = analytics.end_time.map(|t| t.to_rfc3339());
+                let duration = analytics.duration_string();
+                let tokens = summary_report.total_tokens;
+                let cost = summary_report.estimated_cost;
+
+                agg_tokens += tokens;
+                agg_cost += cost.unwrap_or(0.0);
+                agg_prompts += prompt_count;
+
+                let compaction_count = session.quick_metadata_cached()
+                    .map(|m| m.compaction_count)
+                    .unwrap_or(0);
+
+                // Extract chain metadata
+                let (chain_id, chain_length, slug) = match chain_info {
+                    Some((root, len, s)) if len > 1 => (Some(root), Some(len), s),
+                    Some((_, _, s)) => (None, None, s),
+                    None => (None, None, None),
+                };
+
+                session_entries.push(ProjectSessionEntry {
+                    session_id: session.session_id().to_string(),
+                    slug,
+                    chain_id,
+                    chain_length,
+                    is_subagent: session.is_subagent(),
+                    parent_session_id: session.parent_session_id().map(String::from),
+                    start_time,
+                    end_time,
+                    duration,
+                    compaction_count,
+                    git_branch: branch,
+                    user_prompt_count: prompt_count,
+                    first_prompt,
+                    key_prompts: prompts,
+                    tools_summary: tool_counts,
+                    files_touched: files.into_iter().take(10).collect(),
+                    estimated_cost: cost,
+                    total_tokens: tokens,
+                });
             }
-
-            let first_prompt = prompts.first().cloned();
-            let start_time = analytics.start_time.map(|t| t.to_rfc3339());
-            let end_time = analytics.end_time.map(|t| t.to_rfc3339());
-            let duration = analytics.duration_string();
-            let tokens = summary_report.total_tokens;
-            let cost = summary_report.estimated_cost;
-
-            agg_tokens += tokens;
-            agg_cost += cost.unwrap_or(0.0);
-            agg_prompts += prompt_count;
-
-            let compaction_count = session.quick_metadata_cached()
-                .map(|m| m.compaction_count)
-                .unwrap_or(0);
-
-            session_entries.push(ProjectSessionEntry {
-                session_id: session.session_id().to_string(),
-                is_subagent: session.is_subagent(),
-                parent_session_id: session.parent_session_id().map(String::from),
-                start_time,
-                end_time,
-                duration,
-                compaction_count,
-                git_branch: branch,
-                user_prompt_count: prompt_count,
-                first_prompt,
-                key_prompts: prompts,
-                tools_summary: tool_counts,
-                files_touched: files.into_iter().take(10).collect(),
-                estimated_cost: cost,
-                total_tokens: tokens,
-            });
         }
 
         // Filter out empty sessions (no prompts and no tokens)
         session_entries.retain(|s| s.user_prompt_count > 0 || s.total_tokens > 0);
+
+        // Sort by start time (newest first) and truncate
+        session_entries.sort_by(|a, b| b.start_time.cmp(&a.start_time));
+        session_entries.truncate(limit);
+
         let sessions_found = session_entries.len();
 
         let mut branches: Vec<String> = agg_branches.into_iter().collect();
@@ -843,6 +899,25 @@ impl SnatchServer {
             all
         };
 
+        // Build chain lookup: session_id → chain root_id
+        let mut chain_lookup: HashMap<String, String> = HashMap::new();
+        if let Ok(projects) = claude_dir.projects() {
+            for project in &projects {
+                if let Some(ref proj_filter) = request.project {
+                    if !project.best_path().contains(proj_filter) {
+                        continue;
+                    }
+                }
+                if let Ok(chains) = project.session_chains() {
+                    for chain in chains.values() {
+                        for member in &chain.members {
+                            chain_lookup.insert(member.file_id.clone(), chain.root_id.clone());
+                        }
+                    }
+                }
+            }
+        }
+
         let mut results = Vec::new();
 
         for session in &sessions {
@@ -856,14 +931,18 @@ impl SnatchServer {
                 Err(_) => continue,
             };
 
+            let sid = session.session_id().to_string();
+            let chain_id = chain_lookup.get(&sid).cloned();
+
             // Search ALL entries (not just main thread) so branches,
             // sidechains, and agent sub-conversations are included.
             for entry in conversation.chronological_entries() {
                 let matches = search_entry_text(entry, &regex, scope, 100);
                 for (matched, context) in matches {
                     results.push(SearchMatch {
-                        session_id: session.session_id().to_string(),
+                        session_id: sid.clone(),
                         project_path: session.project_path().to_string(),
+                        chain_id: chain_id.clone(),
                         timestamp: entry.timestamp().map(|t| t.to_rfc3339()),
                         message_type: entry.message_type().to_string(),
                         matched_text: truncate_text(&matched, 200),
@@ -1987,7 +2066,7 @@ mod tests {
         let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
         let server = make_server(&tmp);
         let text = unwrap_output(server.get_session_timeline(GetSessionTimelineRequest {
-            session_id: sid.to_string(), limit: None,
+            session_id: sid.to_string(), limit: None, chain_aware: None,
         }).await);
         assert!(!text.is_empty());
     }
@@ -2031,7 +2110,7 @@ mod tests {
         let server = make_server(&tmp);
         let text = unwrap_output(server.get_session_messages(GetSessionMessagesRequest {
             session_id: sid.to_string(), detail: None, message_type: None,
-            limit: None, offset: None, reverse: None, include_thinking: None,
+            limit: None, offset: None, reverse: None, include_thinking: None, chain_aware: None,
         }).await);
         assert!(text.contains("Hello"));
     }

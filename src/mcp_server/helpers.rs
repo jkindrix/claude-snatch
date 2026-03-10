@@ -60,6 +60,71 @@ pub fn resolve_session(server: &SnatchServer, session_id: &str) -> Result<Resolv
     })
 }
 
+/// Resolve a session ID to a chain-aware parsed conversation.
+///
+/// If `chain_aware` is true and the session belongs to a chain, parses all chain
+/// members into a unified conversation. The returned `session_id` is the root ID.
+/// Otherwise behaves identically to `resolve_session`.
+pub fn resolve_session_with_chain(
+    server: &SnatchServer,
+    session_id: &str,
+    chain_aware: bool,
+) -> Result<ResolvedSession, ToolOutput> {
+    if !chain_aware {
+        return resolve_session(server, session_id);
+    }
+
+    let claude_dir = server.get_claude_dir().map_err(ToolOutput::error)?;
+
+    let session = claude_dir
+        .find_session(session_id)
+        .map_err(|e| ToolOutput::error(format!("Failed to find session: {e}")))?
+        .ok_or_else(|| ToolOutput::error(format!("Session not found: {session_id}")))?;
+
+    let project_path = session.project_path().to_string();
+    let file_session_id = session.session_id().to_string();
+
+    // Find the project so we can detect chains
+    let projects = claude_dir
+        .projects()
+        .map_err(|e| ToolOutput::error(format!("Failed to list projects: {e}")))?;
+
+    let project = projects
+        .into_iter()
+        .find(|p| p.best_path() == project_path || p.decoded_path() == project_path);
+
+    if let Some(project) = project {
+        let chains = project
+            .session_chains()
+            .map_err(|e| ToolOutput::error(format!("Failed to detect chains: {e}")))?;
+
+        // Check if this session belongs to any chain
+        for chain in chains.values() {
+            if chain.contains(&file_session_id) {
+                // Parse the full chain
+                let entries = project
+                    .parse_chain(chain)
+                    .map_err(|e| ToolOutput::error(format!("Failed to parse chain: {e}")))?;
+
+                let conversation = Conversation::from_entries(entries)
+                    .map_err(|e| ToolOutput::error(format!("Failed to reconstruct chain: {e}")))?;
+
+                let analytics = SessionAnalytics::from_conversation(&conversation);
+
+                return Ok(ResolvedSession {
+                    session_id: chain.root_id.clone(),
+                    project_path,
+                    conversation,
+                    analytics,
+                });
+            }
+        }
+    }
+
+    // Not part of a chain — fall back to single-file resolution
+    resolve_session(server, session_id)
+}
+
 /// Get the Claude directory from the server config.
 pub fn get_claude_dir(server: &SnatchServer) -> Result<ClaudeDirectory, ToolOutput> {
     server.get_claude_dir().map_err(ToolOutput::error)

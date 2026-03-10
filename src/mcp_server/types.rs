@@ -146,6 +146,10 @@ pub struct GetSessionMessagesRequest {
     /// Thinking blocks contain decision rationale and evidence chains that
     /// compaction always drops. Default: false.
     pub include_thinking: Option<bool>,
+
+    /// If true and the session is part of a chain, return messages across all
+    /// member files in the chain. Default: false.
+    pub chain_aware: Option<bool>,
 }
 
 /// A message in the session messages response.
@@ -207,6 +211,10 @@ pub struct GetSessionTimelineRequest {
 
     /// Maximum timeline entries. Default: 30.
     pub limit: Option<usize>,
+
+    /// If true and the session is part of a chain, build timeline across all
+    /// member files. Default: false.
+    pub chain_aware: Option<bool>,
 }
 
 /// A turn in the session timeline.
@@ -273,6 +281,14 @@ pub struct GetProjectHistoryRequest {
 #[derive(Debug, Serialize)]
 pub struct ProjectSessionEntry {
     pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    /// Root chain ID if this session represents a chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
+    /// Number of files in the chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_length: Option<usize>,
     pub is_subagent: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
@@ -348,6 +364,9 @@ pub struct SearchSessionsRequest {
 pub struct SearchMatch {
     pub session_id: String,
     pub project_path: String,
+    /// Root chain ID if this session is part of a chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
     pub message_type: String,
