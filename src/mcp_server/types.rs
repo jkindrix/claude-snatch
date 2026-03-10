@@ -893,6 +893,59 @@ pub struct DetectDecisionsResponse {
     pub candidates: Vec<DetectedDecisionEntry>,
 }
 
+// ============================================================================
+// Conflict Detection
+// ============================================================================
+
+/// Request for conflict/contradiction detection.
+#[derive(Debug, Deserialize, ToolInput)]
+pub struct DetectConflictsRequest {
+    /// Filter by project path (substring match). Required for registry-based detection.
+    pub project: Option<String>,
+
+    /// Topic pattern (regex). Required for search-based detection (opposing language across sessions).
+    pub topic: Option<String>,
+
+    /// Minimum confidence threshold (0.0-1.0). Default: 0.3.
+    pub min_confidence: Option<f64>,
+
+    /// Exclude subagent sessions. Default: true.
+    pub no_subagents: Option<bool>,
+
+    /// Only sessions modified after this date.
+    pub since: Option<String>,
+
+    /// Only sessions modified before this date.
+    pub until: Option<String>,
+
+    /// Session ID to exclude from search-based detection.
+    pub exclude_session: Option<String>,
+
+    /// Maximum conflicts to return. Default: 50.
+    pub limit: Option<usize>,
+}
+
+/// A conflict pair entry in responses.
+#[derive(Debug, Serialize)]
+pub struct ConflictPairEntry {
+    pub topic: String,
+    pub detection_method: String,
+    pub confidence: f64,
+    pub earlier_timestamp: String,
+    pub earlier_session_id: String,
+    pub earlier_text: String,
+    pub later_timestamp: String,
+    pub later_session_id: String,
+    pub later_text: String,
+}
+
+/// Response for detect_conflicts.
+#[derive(Debug, Serialize)]
+pub struct DetectConflictsResponse {
+    pub total_conflicts: usize,
+    pub conflicts: Vec<ConflictPairEntry>,
+}
+
 /// Response for get_file_history.
 #[derive(Debug, Serialize)]
 pub struct GetFileHistoryResponse {

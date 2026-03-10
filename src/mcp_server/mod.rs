@@ -20,6 +20,7 @@
 //! - `get_file_history` - Reverse index: file path → sessions that modified it
 //! - `thread_topic` - Cross-session topic threading with conversation context
 //! - `detect_decisions` - Decision point detection with confidence scoring
+//! - `detect_conflicts` - Contradiction detection across sessions and decision registry
 
 #![cfg(feature = "mcp")]
 
@@ -2174,6 +2175,123 @@ impl SnatchServer {
         let response = DetectDecisionsResponse {
             total_candidates: candidates.len(),
             candidates,
+        };
+
+        match ToolOutput::json(&response) {
+            Ok(output) => output,
+            Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+        }
+    }
+
+    // ========================================================================
+    // New Tool: detect_conflicts
+    // ========================================================================
+
+    /// Detect contradictions and conflicts across sessions and the decision registry.
+    #[tool(description = "Detect contradictions across sessions. Two methods: (1) Registry-based: finds decisions sharing tags with opposing language, and supersede chains. Requires 'project'. (2) Search-based: finds opposing language about a topic across session conclusions. Requires 'topic'. Use to find where positions have changed or conflict.")]
+    async fn detect_conflicts(&self, request: DetectConflictsRequest) -> ToolOutput {
+        use crate::analysis::conflict_detection::{
+            detect_registry_conflicts, detect_search_conflicts, ConflictPair,
+        };
+        use crate::cli::helpers::{filter_sessions_by_date, truncate};
+
+        let claude_dir = match self.get_claude_dir() {
+            Ok(dir) => dir,
+            Err(e) => return ToolOutput::error(e),
+        };
+
+        let mut conflicts: Vec<ConflictPair> = Vec::new();
+
+        // Registry-based detection
+        if let Some(ref project) = request.project {
+            let projects = match claude_dir.projects() {
+                Ok(p) => p,
+                Err(e) => return ToolOutput::error(format!("Failed to list projects: {e}")),
+            };
+
+            if let Some(proj) = projects.iter().find(|p| p.path().to_string_lossy().contains(project.as_str())) {
+                let project_dir = proj.path();
+                match crate::decisions::load_decisions(project_dir) {
+                    Ok(store) => {
+                        detect_registry_conflicts(&store, &request.topic, &mut conflicts);
+                    }
+                    Err(_) => {} // No decision store — skip registry detection
+                }
+            }
+        }
+
+        // Search-based detection
+        if let Some(ref topic) = request.topic {
+            let mut sessions = if let Some(ref project) = request.project {
+                let mut all = match claude_dir.all_sessions() {
+                    Ok(s) => s,
+                    Err(e) => return ToolOutput::error(format!("Failed to list sessions: {e}")),
+                };
+                all.retain(|s| s.project_path().contains(project.as_str()));
+                all
+            } else {
+                match claude_dir.all_sessions() {
+                    Ok(s) => s,
+                    Err(e) => return ToolOutput::error(format!("Failed to list sessions: {e}")),
+                }
+            };
+
+            if request.no_subagents.unwrap_or(true) {
+                sessions.retain(|s| !s.is_subagent());
+            }
+
+            if request.since.is_some() || request.until.is_some() {
+                if let Err(e) = filter_sessions_by_date(
+                    &mut sessions,
+                    request.since.as_deref(),
+                    request.until.as_deref(),
+                ) {
+                    return ToolOutput::error(format!("Date filter error: {e}"));
+                }
+            }
+
+            match detect_search_conflicts(
+                &sessions,
+                topic,
+                request.exclude_session.as_deref(),
+                self.max_file_size,
+            ) {
+                Ok(search_conflicts) => conflicts.extend(search_conflicts),
+                Err(e) => return ToolOutput::error(format!("Search conflict detection error: {e}")),
+            }
+        }
+
+        let min_confidence = request.min_confidence.unwrap_or(0.3);
+        conflicts.retain(|c| c.confidence >= min_confidence);
+
+        conflicts.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.earlier_time.cmp(&b.earlier_time))
+        });
+
+        let limit = request.limit.unwrap_or(50);
+        conflicts.truncate(limit);
+
+        let entries: Vec<ConflictPairEntry> = conflicts
+            .into_iter()
+            .map(|c| ConflictPairEntry {
+                topic: c.topic,
+                detection_method: format!("{}", c.detection),
+                confidence: c.confidence,
+                earlier_timestamp: c.earlier_time.to_rfc3339(),
+                earlier_session_id: c.earlier_session,
+                earlier_text: truncate(&c.earlier_text, 500),
+                later_timestamp: c.later_time.to_rfc3339(),
+                later_session_id: c.later_session,
+                later_text: truncate(&c.later_text, 500),
+            })
+            .collect();
+
+        let response = DetectConflictsResponse {
+            total_conflicts: entries.len(),
+            conflicts: entries,
         };
 
         match ToolOutput::json(&response) {
