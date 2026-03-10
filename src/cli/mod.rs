@@ -259,6 +259,10 @@ pub enum Commands {
     #[command(display_order = 24)]
     Retrospective(RetrospectiveArgs),
 
+    /// Explain why a file evolved: modification history with conversation context.
+    #[command(name = "file-evolution", display_order = 24)]
+    FileEvolution(FileEvolutionArgs),
+
     /// Contextual zoom around a specific event in a session.
     #[command(display_order = 24)]
     Context(ContextArgs),
@@ -2341,6 +2345,40 @@ pub struct RetrospectiveArgs {
     pub until: Option<String>,
 }
 
+/// Arguments for the file-evolution command.
+#[derive(Debug, Parser)]
+pub struct FileEvolutionArgs {
+    /// File path pattern (substring match). Required.
+    pub file_pattern: String,
+
+    /// Project path filter (substring match). Required.
+    pub project: String,
+
+    /// Maximum change events per file.
+    #[arg(short, long, default_value = "30")]
+    pub limit: usize,
+
+    /// Include thinking blocks (decision rationale).
+    #[arg(long, default_value = "true")]
+    pub include_thinking: bool,
+
+    /// Context window (turns before/after each modification).
+    #[arg(short = 'w', long, default_value = "1")]
+    pub context_window: usize,
+
+    /// Exclude subagent sessions.
+    #[arg(long)]
+    pub no_subagents: bool,
+
+    /// Filter to sessions since this date.
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Filter to sessions until this date.
+    #[arg(long)]
+    pub until: Option<String>,
+}
+
 /// Arguments for the context command.
 #[derive(Debug, Parser)]
 pub struct ContextArgs {
@@ -2755,6 +2793,7 @@ pub fn run() -> Result<()> {
         Some(Commands::ProjectLessons(args)) => commands::project_lessons::run(&cli, args),
         Some(Commands::Health(args)) => commands::health::run(&cli, args),
         Some(Commands::Retrospective(args)) => commands::retrospective::run(&cli, args),
+        Some(Commands::FileEvolution(args)) => commands::file_evolution::run(&cli, args),
         Some(Commands::Context(args)) => commands::context::run(&cli, args),
         Some(Commands::Timeline(args)) => commands::timeline::run(&cli, args),
         Some(Commands::Messages(args)) => commands::messages::run(&cli, args),

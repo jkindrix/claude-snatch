@@ -17,6 +17,7 @@ pub mod diff;
 pub mod digest;
 pub mod export;
 pub mod extract;
+pub mod file_evolution;
 pub mod file_history;
 pub mod goals;
 pub mod health;

@@ -15,6 +15,7 @@
 pub mod conflict_detection;
 pub mod decision_detection;
 pub mod event_context;
+pub mod file_evolution;
 pub mod digest;
 pub mod extraction;
 pub mod filters;

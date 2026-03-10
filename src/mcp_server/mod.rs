@@ -25,6 +25,7 @@
 //! - `get_project_health` - Project health dashboard: hotspots, rework, error trends
 //! - `get_event_context` - Contextual zoom around a specific event by message_id or timestamp
 //! - `project_retrospective` - Composite analysis: health + lessons + decisions in one call
+//! - `explain_file_evolution` - Why a file changed: modification history with conversation context
 
 #![cfg(feature = "mcp")]
 
@@ -2501,6 +2502,80 @@ impl SnatchServer {
                 timestamp: s.timestamp,
                 error_count: s.error_count,
                 tool_count: s.tool_count,
+            }).collect(),
+        };
+
+        match ToolOutput::json(&response) {
+            Ok(output) => output,
+            Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+        }
+    }
+
+    // ========================================================================
+    // New Tool: explain_file_evolution
+    // ========================================================================
+
+    /// Explain why a file changed over time.
+    #[tool(description = "Explain how and why a file evolved across sessions. For each modification, shows the user prompt that triggered it, the assistant's response, thinking/rationale (if available), and tools used. Answers 'why did this file end up this way?' by combining file history with conversation context. Returns chronologically ordered change events.")]
+    async fn explain_file_evolution(&self, request: ExplainFileEvolutionRequest) -> ToolOutput {
+        use crate::analysis::file_evolution::{analyze_file_evolution, FileEvolutionParams};
+
+        let claude_dir = match self.get_claude_dir() {
+            Ok(dir) => dir,
+            Err(e) => return ToolOutput::error(e),
+        };
+
+        let period = request.period.as_deref().unwrap_or("30d");
+        let cutoff = match period_cutoff(period) {
+            Ok(c) => c,
+            Err(e) => return ToolOutput::error(format!("Invalid period: {e}")),
+        };
+
+        let mut sessions = match claude_dir.all_sessions() {
+            Ok(s) => s,
+            Err(e) => return ToolOutput::error(format!("Failed to list sessions: {e}")),
+        };
+
+        sessions.retain(|s| s.project_path().contains(request.project.as_str()));
+
+        if request.no_subagents.unwrap_or(true) {
+            sessions.retain(|s| !s.is_subagent());
+        }
+
+        if let Some(cutoff_dt) = cutoff {
+            let cutoff_systime = std::time::SystemTime::from(cutoff_dt);
+            sessions.retain(|s| s.modified_time() >= cutoff_systime);
+        }
+
+        let params = FileEvolutionParams {
+            file_pattern: request.file_pattern.clone(),
+            limit: request.limit.unwrap_or(30),
+            max_text_len: 500,
+            include_thinking: request.include_thinking.unwrap_or(true),
+            context_window: request.context_window.unwrap_or(1),
+        };
+
+        let results = analyze_file_evolution(&sessions, &params, self.max_file_size);
+
+        let response = ExplainFileEvolutionResponse {
+            project_path: request.project,
+            file_pattern: request.file_pattern,
+            period: period.to_string(),
+            files: results.into_iter().map(|r| FileEvolutionEntry {
+                file_path: r.file_path,
+                total_changes: r.total_changes,
+                sessions_involved: r.sessions_involved,
+                changes: r.changes.into_iter().map(|c| ChangeEventEntry {
+                    timestamp: c.timestamp.to_rfc3339(),
+                    session_id: c.session_id,
+                    message_id: c.message_id,
+                    version: c.version,
+                    user_prompt: c.user_prompt,
+                    assistant_response: c.assistant_response,
+                    thinking: c.thinking,
+                    tools_used: c.tools_used,
+                    had_errors: c.had_errors,
+                }).collect(),
             }).collect(),
         };
 

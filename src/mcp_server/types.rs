@@ -1209,6 +1209,71 @@ pub struct ProjectRetrospectiveResponse {
     pub session_stats: Vec<SessionHealthEntry>,
 }
 
+// ============================================================================
+// File Evolution
+// ============================================================================
+
+/// Request for file evolution analysis.
+#[derive(Debug, Deserialize, ToolInput)]
+pub struct ExplainFileEvolutionRequest {
+    /// File path pattern (substring match). Required.
+    pub file_pattern: String,
+
+    /// Project path filter (substring match). Required.
+    pub project: String,
+
+    /// Time period: "24h", "7d", "30d", "all". Default: "30d".
+    pub period: Option<String>,
+
+    /// Maximum change events to return per file. Default: 30.
+    pub limit: Option<usize>,
+
+    /// Include thinking blocks (decision rationale). Default: true.
+    pub include_thinking: Option<bool>,
+
+    /// Context window (turns before/after each modification). Default: 1.
+    pub context_window: Option<usize>,
+
+    /// Exclude subagent sessions. Default: true.
+    pub no_subagents: Option<bool>,
+}
+
+/// A change event in file evolution response.
+#[derive(Debug, Serialize)]
+pub struct ChangeEventEntry {
+    pub timestamp: String,
+    pub session_id: String,
+    pub message_id: String,
+    pub version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant_response: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools_used: Vec<String>,
+    pub had_errors: bool,
+}
+
+/// A single file's evolution in the response.
+#[derive(Debug, Serialize)]
+pub struct FileEvolutionEntry {
+    pub file_path: String,
+    pub total_changes: usize,
+    pub sessions_involved: usize,
+    pub changes: Vec<ChangeEventEntry>,
+}
+
+/// Response for explain_file_evolution.
+#[derive(Debug, Serialize)]
+pub struct ExplainFileEvolutionResponse {
+    pub project_path: String,
+    pub file_pattern: String,
+    pub period: String,
+    pub files: Vec<FileEvolutionEntry>,
+}
+
 /// Response for get_file_history.
 #[derive(Debug, Serialize)]
 pub struct GetFileHistoryResponse {
