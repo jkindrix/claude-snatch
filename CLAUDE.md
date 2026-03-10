@@ -13,7 +13,7 @@ cargo test                     # run tests
 
 ## Session History Recall (snatch MCP)
 
-This project provides an MCP server (`snatch serve-mcp`) that exposes 14 tools for querying Claude Code session history. When you need to recall what happened in previous sessions or understand the narrative of past work, use these tools:
+This project provides an MCP server (`snatch serve-mcp`) that exposes 22 tools for querying Claude Code session history. When you need to recall what happened in previous sessions or understand the narrative of past work, use these tools:
 
 | Need | Tool | Example |
 |------|------|---------|
@@ -22,9 +22,12 @@ This project provides an MCP server (`snatch serve-mcp`) that exposes 14 tools f
 | Quick session overview | `get_session_digest` | session_id="abc123" |
 | Read specific messages | `get_session_messages` | session_id="abc123", detail="standard" |
 | Recover decision rationale | `get_session_messages` | session_id="abc123", include_thinking=true |
+| Messages around a timestamp | `get_session_messages` | session_id="abc123", after_timestamp="2h", before_timestamp="1h" |
 | Find where X was discussed | `search_sessions` | pattern="authentication", project="myproject" |
 | Search reasoning/decisions | `search_sessions` | pattern="decided|because", scope="thinking" |
 | What went wrong & how fixed? | `get_session_lessons` | session_id="abc123" |
+| What keeps going wrong? | `get_project_lessons` | project="snatch", period="30d" |
+| Project health dashboard | `get_project_health` | project="snatch", period="7d" |
 | What files were changed? | `get_tool_calls` | session_id="abc123", tool_filter="Write,Edit" |
 | Track long-term goals | `manage_goals` | operation="list", project="snatch" |
 | Capture tactical work state | `manage_notes` | operation="add", project="snatch", text="..." |
@@ -32,6 +35,11 @@ This project provides an MCP server (`snatch serve-mcp`) that exposes 14 tools f
 | Tag key messages | `tag_message` | operation="add", project="snatch", session_id="abc", message_uuid="xyz", tag="decision" |
 | List all sessions | `list_sessions` | project="claude-snatch" |
 | Session metadata | `get_session_info` | session_id="abc123" |
+| Which sessions changed a file? | `get_file_history` | path="src/main.rs", project="snatch" |
+| Thread a topic across sessions | `thread_topic` | pattern="authentication", project="snatch" |
+| Detect decision points | `detect_decisions` | project="snatch", min_confidence=0.5 |
+| Find contradictions | `detect_conflicts` | project="snatch", topic="traits" |
+| Context around an event | `get_event_context` | session_id="abc123", message_id="uuid" |
 | Usage statistics | `get_stats` | project="claude-snatch" |
 
 ### Detail Levels for get_session_messages
