@@ -153,17 +153,17 @@ The `snatch-recall.sh` hook fires on startup/compact/resume. It should use chain
 
 Items are ordered by dependency. Each builds on the previous.
 
-| # | Item | Depends On | Scope |
-|---|------|-----------|-------|
-| 1 | Read `sessions-index.json` | — | Discovery |
-| 2 | Detect session chains | 1 | Discovery |
-| 3 | Surface `slug` | 1 | Discovery + Display |
-| 4 | Chain-aware parsing | 2 | Parser + Reconstruction |
-| 5 | Chain-aware analytics | 4 | Analytics |
-| 6 | MCP tool updates | 2, 3, 5 | MCP Server |
-| 7 | CLI command updates | 2, 3, 5 | CLI |
-| 8 | Parse `progress` entries | — | Model + Hierarchy |
-| 9 | File-session index | — | New module |
-| 10 | Hook updates | 2, 3 | Hook script |
+| # | Item | Depends On | Scope | Status |
+|---|------|-----------|-------|--------|
+| 1 | Read `sessions-index.json` | — | Discovery | Done (438646d) |
+| 2 | Detect session chains | 1 | Discovery | Done (438646d) |
+| 3 | Surface `slug` | 1 | Discovery + Display | Done (438646d) |
+| 4 | Chain-aware parsing | 2 | Parser + Reconstruction | Done (96e5cfb) |
+| 5 | Chain-aware analytics | 4 | Analytics | Done (no changes needed) |
+| 6 | MCP tool updates | 2, 3, 5 | MCP Server | Done (5a7776b, 6dd9e66) |
+| 7 | CLI command updates | 2, 3, 5 | CLI | Done (10a3247, 6dd9e66) |
+| 8 | Parse `progress` entries | — | Model + Hierarchy | Done (deb8fc9) |
+| 9 | File-session index | — | New module | Done (c9a8c36) |
+| 10 | Hook updates | 2, 3 | Hook script | Done |
 
-Items 8 and 9 are independent of the chain work and can be done in any order.
+All items complete.
