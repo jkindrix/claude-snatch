@@ -1210,6 +1210,56 @@ pub struct ProjectRetrospectiveResponse {
 }
 
 // ============================================================================
+// Suggest Priorities
+// ============================================================================
+
+/// Request for priority suggestions.
+#[derive(Debug, Deserialize, ToolInput)]
+pub struct SuggestPrioritiesRequest {
+    /// Project path filter (substring match). Required.
+    pub project: String,
+
+    /// Time period: "24h", "7d", "30d", "all". Default: "7d".
+    pub period: Option<String>,
+
+    /// Maximum priority items to return. Default: 10.
+    pub max_priorities: Option<usize>,
+
+    /// Exclude subagent sessions. Default: true.
+    pub no_subagents: Option<bool>,
+}
+
+/// A source of evidence for a priority item.
+#[derive(Debug, Serialize)]
+pub struct PrioritySourceEntry {
+    #[serde(rename = "type")]
+    pub source_type: String,
+    pub detail: String,
+}
+
+/// A ranked priority item.
+#[derive(Debug, Serialize)]
+pub struct PriorityItemEntry {
+    pub rank: usize,
+    pub category: String,
+    pub summary: String,
+    pub score: f64,
+    pub sources: Vec<PrioritySourceEntry>,
+}
+
+/// Response for suggest_priorities.
+#[derive(Debug, Serialize)]
+pub struct SuggestPrioritiesResponse {
+    pub project_path: String,
+    pub period: String,
+    pub sessions_analyzed: usize,
+    pub total_errors: usize,
+    pub open_goals: usize,
+    pub proposed_decisions: usize,
+    pub priorities: Vec<PriorityItemEntry>,
+}
+
+// ============================================================================
 // File Evolution
 // ============================================================================
 

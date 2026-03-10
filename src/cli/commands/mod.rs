@@ -29,6 +29,7 @@ pub mod list;
 pub mod notes;
 pub mod messages;
 pub mod pick;
+pub mod priorities;
 pub mod project_lessons;
 pub mod prompts;
 pub mod quickstart;

@@ -20,6 +20,7 @@ pub mod digest;
 pub mod extraction;
 pub mod filters;
 pub mod lessons;
+pub mod priorities;
 pub mod project_health;
 pub mod project_lessons;
 pub mod retrospective;

@@ -26,6 +26,7 @@
 //! - `get_event_context` - Contextual zoom around a specific event by message_id or timestamp
 //! - `project_retrospective` - Composite analysis: health + lessons + decisions in one call
 //! - `explain_file_evolution` - Why a file changed: modification history with conversation context
+//! - `suggest_priorities` - What to work on next: errors, churn, goals, decisions ranked by score
 
 #![cfg(feature = "mcp")]
 
@@ -2502,6 +2503,98 @@ impl SnatchServer {
                 timestamp: s.timestamp,
                 error_count: s.error_count,
                 tool_count: s.tool_count,
+            }).collect(),
+        };
+
+        match ToolOutput::json(&response) {
+            Ok(output) => output,
+            Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+        }
+    }
+
+    // ========================================================================
+    // New Tool: suggest_priorities
+    // ========================================================================
+
+    /// Suggest what to work on next based on project data.
+    #[tool(description = "Suggest priorities based on project data: recurring errors (reliability issues), high-churn files (stability concerns), open goals (committed work), and proposed decisions (unresolved uncertainty). Returns ranked items with evidence. Use at session start or when deciding what to tackle next.")]
+    async fn suggest_priorities(&self, request: SuggestPrioritiesRequest) -> ToolOutput {
+        use crate::analysis::priorities::{suggest_priorities as analyze_priorities, PriorityParams};
+
+        let claude_dir = match self.get_claude_dir() {
+            Ok(dir) => dir,
+            Err(e) => return ToolOutput::error(e),
+        };
+
+        let period = request.period.as_deref().unwrap_or("7d");
+        let cutoff = match period_cutoff(period) {
+            Ok(c) => c,
+            Err(e) => return ToolOutput::error(format!("Invalid period: {e}")),
+        };
+
+        let mut sessions = match claude_dir.all_sessions() {
+            Ok(s) => s,
+            Err(e) => return ToolOutput::error(format!("Failed to list sessions: {e}")),
+        };
+
+        sessions.retain(|s| s.project_path().contains(request.project.as_str()));
+
+        if request.no_subagents.unwrap_or(true) {
+            sessions.retain(|s| !s.is_subagent());
+        }
+
+        if let Some(cutoff_dt) = cutoff {
+            let cutoff_systime = std::time::SystemTime::from(cutoff_dt);
+            sessions.retain(|s| s.modified_time() >= cutoff_systime);
+        }
+
+        // Load decision and goal stores
+        let projects = claude_dir.projects().unwrap_or_default();
+        let project_dir = projects.iter()
+            .find(|p| p.path().to_string_lossy().contains(request.project.as_str()));
+
+        let decision_store = project_dir
+            .and_then(|proj| crate::decisions::load_decisions(proj.path()).ok());
+        let goal_store = project_dir
+            .and_then(|proj| crate::goals::load_goals(proj.path()).ok());
+
+        let params = PriorityParams {
+            max_priorities: request.max_priorities.unwrap_or(10),
+            ..Default::default()
+        };
+
+        let result = analyze_priorities(
+            &sessions,
+            decision_store.as_ref(),
+            goal_store.as_ref(),
+            &params,
+            self.max_file_size,
+        );
+
+        let response = SuggestPrioritiesResponse {
+            project_path: request.project,
+            period: period.to_string(),
+            sessions_analyzed: result.sessions_analyzed,
+            total_errors: result.total_errors,
+            open_goals: result.open_goals,
+            proposed_decisions: result.proposed_decisions,
+            priorities: result.priorities.into_iter().map(|p| PriorityItemEntry {
+                rank: p.rank,
+                category: p.category,
+                summary: p.summary,
+                score: p.score,
+                sources: p.sources.into_iter().map(|s| {
+                    let (source_type, detail) = match &s {
+                        crate::analysis::priorities::PrioritySource::RecurringError { .. } => ("error", s.to_string()),
+                        crate::analysis::priorities::PrioritySource::FileChurn { .. } => ("churn", s.to_string()),
+                        crate::analysis::priorities::PrioritySource::OpenGoal { .. } => ("goal", s.to_string()),
+                        crate::analysis::priorities::PrioritySource::ProposedDecision { .. } => ("decision", s.to_string()),
+                    };
+                    PrioritySourceEntry {
+                        source_type: source_type.to_string(),
+                        detail,
+                    }
+                }).collect(),
             }).collect(),
         };
 

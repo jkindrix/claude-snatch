@@ -263,6 +263,10 @@ pub enum Commands {
     #[command(name = "file-evolution", display_order = 24)]
     FileEvolution(FileEvolutionArgs),
 
+    /// Suggest what to work on next based on project data.
+    #[command(display_order = 24)]
+    Priorities(PrioritiesArgs),
+
     /// Contextual zoom around a specific event in a session.
     #[command(display_order = 24)]
     Context(ContextArgs),
@@ -2379,6 +2383,29 @@ pub struct FileEvolutionArgs {
     pub until: Option<String>,
 }
 
+/// Arguments for the priorities command.
+#[derive(Debug, Parser)]
+pub struct PrioritiesArgs {
+    /// Project path filter (substring match). Required.
+    pub project: String,
+
+    /// Maximum priority items to return.
+    #[arg(long, default_value = "10")]
+    pub max_priorities: usize,
+
+    /// Exclude subagent sessions.
+    #[arg(long)]
+    pub no_subagents: bool,
+
+    /// Filter to sessions since this date.
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Filter to sessions until this date.
+    #[arg(long)]
+    pub until: Option<String>,
+}
+
 /// Arguments for the context command.
 #[derive(Debug, Parser)]
 pub struct ContextArgs {
@@ -2794,6 +2821,7 @@ pub fn run() -> Result<()> {
         Some(Commands::Health(args)) => commands::health::run(&cli, args),
         Some(Commands::Retrospective(args)) => commands::retrospective::run(&cli, args),
         Some(Commands::FileEvolution(args)) => commands::file_evolution::run(&cli, args),
+        Some(Commands::Priorities(args)) => commands::priorities::run(&cli, args),
         Some(Commands::Context(args)) => commands::context::run(&cli, args),
         Some(Commands::Timeline(args)) => commands::timeline::run(&cli, args),
         Some(Commands::Messages(args)) => commands::messages::run(&cli, args),
