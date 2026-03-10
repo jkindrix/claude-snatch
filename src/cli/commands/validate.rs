@@ -235,6 +235,7 @@ fn validate_session(
                 | LogEntry::System(_)
                 | LogEntry::QueueOperation(_)
                 | LogEntry::TurnEnd(_)
+                | LogEntry::Progress(_)
         );
 
         if requires_timestamp && entry.timestamp().is_none() {

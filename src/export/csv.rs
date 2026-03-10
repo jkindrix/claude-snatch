@@ -401,6 +401,7 @@ impl Exporter for CsvExporter {
                 LogEntry::FileHistorySnapshot(_) => "file_history",
                 LogEntry::QueueOperation(_) => "queue",
                 LogEntry::TurnEnd(_) => "turn_end",
+                LogEntry::Progress(_) => "progress",
             };
 
             self.write_row(writer, &[uuid, parent_uuid, entry_type, &timestamp, ""])?;

@@ -731,6 +731,9 @@ impl MarkdownExporter {
             LogEntry::TurnEnd(_) => {
                 // Skip turn end markers in Markdown export
             }
+            LogEntry::Progress(_) => {
+                // Skip progress entries in Markdown export
+            }
         }
         Ok(())
     }

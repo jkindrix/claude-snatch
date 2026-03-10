@@ -2916,6 +2916,7 @@ impl AppState {
                 LogEntry::System(s) => Some(&s.timestamp),
                 LogEntry::QueueOperation(q) => Some(&q.timestamp),
                 LogEntry::TurnEnd(t) => Some(&t.timestamp),
+                LogEntry::Progress(p) => Some(&p.timestamp),
                 // Summary and FileHistorySnapshot don't have timestamps, include them by default
                 LogEntry::Summary(_) | LogEntry::FileHistorySnapshot(_) => None,
             };

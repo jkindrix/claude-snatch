@@ -44,6 +44,9 @@ pub enum LogEntry {
 
     /// Turn completion markers.
     TurnEnd(TurnEnd),
+
+    /// Progress notifications (hooks, subagent activity, bash output, etc.).
+    Progress(ProgressMessage),
 }
 
 impl LogEntry {
@@ -54,6 +57,7 @@ impl LogEntry {
             Self::Assistant(m) => Some(&m.uuid),
             Self::User(m) => Some(&m.uuid),
             Self::System(m) => Some(&m.uuid),
+            Self::Progress(m) => Some(&m.uuid),
             Self::Summary(_) => None, // Summary messages lack UUID
             Self::FileHistorySnapshot(_) => None,
             Self::QueueOperation(_) => None,
@@ -68,6 +72,7 @@ impl LogEntry {
             Self::Assistant(m) => m.parent_uuid.as_deref(),
             Self::User(m) => m.parent_uuid.as_deref(),
             Self::System(m) => m.parent_uuid.as_deref(),
+            Self::Progress(m) => m.parent_uuid.as_deref(),
             _ => None,
         }
     }
@@ -88,6 +93,7 @@ impl LogEntry {
             Self::Assistant(m) => Some(&m.session_id),
             Self::User(m) => Some(&m.session_id),
             Self::System(m) => m.session_id.as_deref(),
+            Self::Progress(m) => Some(&m.session_id),
             Self::FileHistorySnapshot(_) => None,
             Self::QueueOperation(m) => Some(&m.session_id),
             Self::TurnEnd(_) => None,
@@ -102,6 +108,7 @@ impl LogEntry {
             Self::Assistant(m) => Some(m.timestamp),
             Self::User(m) => Some(m.timestamp),
             Self::System(m) => Some(m.timestamp),
+            Self::Progress(m) => Some(m.timestamp),
             Self::FileHistorySnapshot(_) => None,
             Self::QueueOperation(m) => Some(m.timestamp),
             Self::TurnEnd(m) => Some(m.timestamp),
@@ -127,6 +134,7 @@ impl LogEntry {
             Self::Assistant(m) => m.is_sidechain,
             Self::User(m) => m.is_sidechain,
             Self::System(m) => m.is_sidechain.unwrap_or(false),
+            Self::Progress(m) => m.is_sidechain,
             _ => false,
         }
     }
@@ -137,6 +145,7 @@ impl LogEntry {
         match self {
             Self::Assistant(m) => m.slug.as_deref(),
             Self::User(m) => m.slug.as_deref(),
+            Self::Progress(m) => m.slug.as_deref(),
             _ => None,
         }
     }
@@ -159,6 +168,7 @@ impl LogEntry {
             Self::User(_) => "user",
             Self::System(_) => "system",
             Self::Summary(_) => "summary",
+            Self::Progress(_) => "progress",
             Self::FileHistorySnapshot(_) => "file-history-snapshot",
             Self::QueueOperation(_) => "queue-operation",
             Self::TurnEnd(_) => "turn_end",
@@ -794,6 +804,91 @@ pub struct TurnEnd {
     pub extra: IndexMap<String, Value>,
 }
 
+/// Progress notification from hooks, subagents, bash output, etc.
+///
+/// These entries contain provenance information linking subagent activity
+/// to the specific tool call that spawned them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressMessage {
+    /// Unique identifier for this progress entry.
+    pub uuid: String,
+
+    /// Parent UUID in the conversation tree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_uuid: Option<String>,
+
+    /// ISO 8601 UTC timestamp.
+    pub timestamp: DateTime<Utc>,
+
+    /// The logical session this belongs to.
+    #[serde(default)]
+    pub session_id: String,
+
+    /// The tool use ID that this progress relates to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
+
+    /// The parent tool use ID that spawned this activity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "parentToolUseID")]
+    pub parent_tool_use_id: Option<String>,
+
+    /// Agent ID for subagent progress.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+
+    /// Whether this is a sidechain (subagent) message.
+    #[serde(default)]
+    pub is_sidechain: bool,
+
+    /// Human-readable session slug.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+
+    /// Progress data containing the subtype and payload.
+    pub data: ProgressData,
+
+    /// Unknown fields for forward compatibility.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// Progress data payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProgressData {
+    /// Progress subtype: hook_progress, agent_progress, bash_progress, etc.
+    #[serde(rename = "type")]
+    pub progress_type: String,
+
+    /// Agent ID (present in agent_progress).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "agentId")]
+    pub agent_id: Option<String>,
+
+    /// The prompt sent to a subagent (present in agent_progress).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+
+    /// Unknown fields for forward compatibility.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+impl ProgressMessage {
+    /// Whether this is an agent progress entry (subagent spawned).
+    #[must_use]
+    pub fn is_agent_progress(&self) -> bool {
+        self.data.progress_type == "agent_progress"
+    }
+
+    /// Get the effective agent ID from the data payload or the entry-level field.
+    #[must_use]
+    pub fn effective_agent_id(&self) -> Option<&str> {
+        self.data.agent_id.as_deref().or(self.agent_id.as_deref())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -845,6 +940,41 @@ mod tests {
                 assert_eq!(entry.message_type(), "system");
             }
             Err(e) => panic!("Failed to parse turn_duration system entry: {e}"),
+        }
+    }
+
+    #[test]
+    fn test_progress_entry_parsing() {
+        let json = r#"{"parentUuid":"59648a0e-2e62","isSidechain":true,"userType":"external","cwd":"/tmp","sessionId":"29907bd0-test","version":"2.1.63","gitBranch":"main","agentId":"aef951e7b587a5f44","slug":"kind-honking-gray","type":"progress","data":{"type":"hook_progress","hookEvent":"PostToolUse","hookName":"PostToolUse:Read","command":"callback"},"parentToolUseID":"toolu_01Gv1AwMjEQfjPJbCEN8AMJm","toolUseID":"toolu_01Gv1AwMjEQfjPJbCEN8AMJm","timestamp":"2026-02-28T14:59:00.866Z","uuid":"a9aa02c6-cf82"}"#;
+        let entry: LogEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.message_type(), "progress");
+        assert_eq!(entry.uuid(), Some("a9aa02c6-cf82"));
+        assert_eq!(entry.session_id(), Some("29907bd0-test"));
+        assert!(entry.is_sidechain());
+        assert_eq!(entry.slug(), Some("kind-honking-gray"));
+
+        if let LogEntry::Progress(p) = &entry {
+            assert_eq!(p.data.progress_type, "hook_progress");
+            assert_eq!(p.agent_id.as_deref(), Some("aef951e7b587a5f44"));
+            assert_eq!(p.parent_tool_use_id.as_deref(), Some("toolu_01Gv1AwMjEQfjPJbCEN8AMJm"));
+            assert!(!p.is_agent_progress());
+        } else {
+            panic!("Expected Progress variant");
+        }
+    }
+
+    #[test]
+    fn test_agent_progress_entry() {
+        let json = r#"{"parentUuid":"e08af7a4-f18b","isSidechain":false,"userType":"external","cwd":"/tmp","sessionId":"29907bd0-test","version":"2.1.63","gitBranch":"main","type":"progress","data":{"type":"agent_progress","prompt":"analyze this file","agentId":"a6f6f2bba8a080f95","message":{},"normalizedMessages":[]},"toolUseID":"agent_msg_01QunCZaUkmWtCoYzBpXAuKD","parentToolUseID":"toolu_01RWqMEXFBWfKHHpDArnDTvv","timestamp":"2026-02-28T14:20:19.665Z","uuid":"test-uuid-1234"}"#;
+        let entry: LogEntry = serde_json::from_str(json).unwrap();
+
+        if let LogEntry::Progress(p) = &entry {
+            assert!(p.is_agent_progress());
+            assert_eq!(p.effective_agent_id(), Some("a6f6f2bba8a080f95"));
+            assert_eq!(p.data.prompt.as_deref(), Some("analyze this file"));
+            assert_eq!(p.parent_tool_use_id.as_deref(), Some("toolu_01RWqMEXFBWfKHHpDArnDTvv"));
+        } else {
+            panic!("Expected Progress variant");
         }
     }
 }

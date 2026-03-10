@@ -141,7 +141,7 @@ fn should_include_entry(entry: &LogEntry, options: &ExportOptions) -> bool {
         LogEntry::System(_) => options.should_include_system(),
         LogEntry::Summary(_) => options.should_include_summary(),
         // Always include structural entries
-        LogEntry::FileHistorySnapshot(_) | LogEntry::QueueOperation(_) | LogEntry::TurnEnd(_) => true,
+        LogEntry::FileHistorySnapshot(_) | LogEntry::QueueOperation(_) | LogEntry::TurnEnd(_) | LogEntry::Progress(_) => true,
     }
 }
 

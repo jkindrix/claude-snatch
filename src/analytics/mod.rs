@@ -151,6 +151,9 @@ impl SessionAnalytics {
             LogEntry::TurnEnd(_) => {
                 self.message_counts.turn_end += 1;
             }
+            LogEntry::Progress(_) => {
+                // Progress entries are informational; no analytics to gather
+            }
         }
     }
 
