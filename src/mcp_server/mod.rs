@@ -17,6 +17,8 @@
 //! - `get_session_digest` - Compact session summary for orientation after compaction
 //! - `manage_notes` - Tactical session notes that survive compaction
 //! - `manage_decisions` - Persistent decision registry across sessions
+//! - `get_file_history` - Reverse index: file path → sessions that modified it
+//! - `thread_topic` - Cross-session topic threading with conversation context
 
 #![cfg(feature = "mcp")]
 
@@ -1920,6 +1922,176 @@ impl SnatchServer {
             other => ToolOutput::error(format!(
                 "Unknown operation '{other}'. Use: add, remove, list, search"
             )),
+        }
+    }
+
+    /// Look up which sessions modified a file. Returns file modification history
+    /// from file-history-snapshot entries — the reverse index from file path to sessions.
+    #[tool(description = "Look up which sessions modified a file path. Uses file-history-snapshot entries to build a reverse index. Returns session IDs, timestamps, and version numbers for each modification. Use to answer 'when was this file changed?' or 'which session introduced this code?'")]
+    async fn get_file_history(&self, request: GetFileHistoryRequest) -> ToolOutput {
+        use crate::file_index::FileIndex;
+
+        let claude_dir = match self.get_claude_dir() {
+            Ok(dir) => dir,
+            Err(e) => return ToolOutput::error(e),
+        };
+
+        let projects = match claude_dir.projects() {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::error(format!("Failed to list projects: {e}")),
+        };
+
+        let mut sessions = Vec::new();
+        for project in &projects {
+            if let Some(ref filter) = request.project {
+                if !project.best_path().contains(filter) {
+                    continue;
+                }
+            }
+            if let Ok(s) = project.sessions() {
+                sessions.extend(s);
+            }
+        }
+
+        let index = FileIndex::from_sessions(&sessions, self.max_file_size);
+        let mut matches = index.search(&request.path);
+        matches.sort_by_key(|(path, _)| path.to_string());
+
+        let limit = request.limit.unwrap_or(50);
+        let total_files = matches.len();
+        let total_modifications: usize = matches.iter().map(|(_, m)| m.len()).sum();
+
+        let mut modifications = Vec::new();
+        for (path, mods) in &matches {
+            for m in *mods {
+                if modifications.len() >= limit {
+                    break;
+                }
+                modifications.push(FileModificationEntry {
+                    file_path: path.to_string(),
+                    session_id: m.session_id.clone(),
+                    project_path: m.project_path.clone(),
+                    message_id: m.message_id.clone(),
+                    timestamp: m.timestamp.to_rfc3339(),
+                    version: m.version,
+                });
+            }
+            if modifications.len() >= limit {
+                break;
+            }
+        }
+
+        let returned = modifications.len();
+        let response = GetFileHistoryResponse {
+            path_query: request.path,
+            total_files,
+            total_modifications,
+            returned,
+            modifications,
+        };
+
+        match ToolOutput::json(&response) {
+            Ok(output) => output,
+            Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+        }
+    }
+
+    /// Cross-session topic threading: search for a pattern across sessions and
+    /// return chronologically-ordered exchanges with conversation context.
+    #[tool(description = "Cross-session topic threading. Searches all sessions for a regex pattern and returns chronologically-ordered exchanges with surrounding user/assistant context. Use to trace how a topic evolved across sessions — 'show me every time we discussed X'. Set decisions_only=true to filter to decision points. Set include_thinking=true to search reasoning blocks.")]
+    async fn thread_topic(&self, request: ThreadTopicRequest) -> ToolOutput {
+        use crate::analysis::threading::{thread_topic, ThreadParams};
+        use crate::cli::helpers::truncate;
+
+        let claude_dir = match self.get_claude_dir() {
+            Ok(dir) => dir,
+            Err(e) => return ToolOutput::error(e),
+        };
+
+        let pattern = &request.pattern;
+        let ignore_case = true;
+        let regex = match regex::RegexBuilder::new(pattern)
+            .case_insensitive(ignore_case)
+            .build()
+        {
+            Ok(r) => r,
+            Err(e) => return ToolOutput::error(format!("Invalid regex pattern: {e}")),
+        };
+
+        // Collect sessions with filters
+        let mut sessions = if let Some(ref session_id) = request.session_id {
+            match claude_dir.find_session(session_id) {
+                Ok(Some(s)) => vec![s],
+                Ok(None) => return ToolOutput::error(format!("Session not found: {session_id}")),
+                Err(e) => return ToolOutput::error(format!("Failed to find session: {e}")),
+            }
+        } else {
+            let mut all = match claude_dir.all_sessions() {
+                Ok(s) => s,
+                Err(e) => return ToolOutput::error(format!("Failed to list sessions: {e}")),
+            };
+            if let Some(ref project) = request.project {
+                all.retain(|s| s.project_path().contains(project));
+            }
+            all
+        };
+
+        if request.no_subagents.unwrap_or(true) {
+            sessions.retain(|s| !s.is_subagent());
+        }
+
+        // Apply date filters
+        if request.since.is_some() || request.until.is_some() {
+            use crate::cli::helpers::filter_sessions_by_date;
+            if let Err(e) = filter_sessions_by_date(
+                &mut sessions,
+                request.since.as_deref(),
+                request.until.as_deref(),
+            ) {
+                return ToolOutput::error(format!("Date filter error: {e}"));
+            }
+        }
+
+        let max_context = request.max_context.unwrap_or(500);
+        let params = ThreadParams {
+            include_thinking: request.include_thinking.unwrap_or(false),
+            limit: request.limit.unwrap_or(30),
+            max_user_context: max_context,
+            max_assistant_context: max_context,
+            max_thinking_context: max_context,
+            role_filter: None,
+            decisions_only: request.decisions_only.unwrap_or(false),
+        };
+
+        let result = thread_topic(&sessions, &regex, &params, self.max_file_size);
+
+        let exchanges: Vec<ThreadExchangeEntry> = result
+            .exchanges
+            .into_iter()
+            .map(|e| ThreadExchangeEntry {
+                timestamp: e.timestamp.to_rfc3339(),
+                session_id: e.session_id,
+                project: e.project,
+                entry_uuid: e.entry_uuid,
+                user_text: e.user_text.map(|t| truncate(&t, max_context)),
+                assistant_text: e.assistant_text.map(|t| truncate(&t, max_context)),
+                thinking_text: e.thinking_text.map(|t| truncate(&t, max_context)),
+                match_location: e.match_location,
+                match_count: e.match_count,
+            })
+            .collect();
+
+        let response = ThreadTopicResponse {
+            pattern: request.pattern,
+            total_exchanges: exchanges.len(),
+            session_count: result.session_count,
+            total_matches: result.total_matches,
+            exchanges,
+        };
+
+        match ToolOutput::json(&response) {
+            Ok(output) => output,
+            Err(e) => ToolOutput::error(format!("JSON error: {e}")),
         }
     }
 }

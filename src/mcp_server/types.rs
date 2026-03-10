@@ -747,6 +747,109 @@ pub struct MessageTagEntry {
     pub source: String,
 }
 
+// ============================================================================
+// File History
+// ============================================================================
+
+/// Request for file history lookup.
+#[derive(Debug, Deserialize, ToolInput)]
+pub struct GetFileHistoryRequest {
+    /// File path to look up (substring match).
+    pub path: String,
+
+    /// Filter by project path (substring match).
+    pub project: Option<String>,
+
+    /// Maximum results to return. Default: 50.
+    pub limit: Option<usize>,
+}
+
+/// A file modification entry in responses.
+#[derive(Debug, Serialize)]
+pub struct FileModificationEntry {
+    pub file_path: String,
+    pub session_id: String,
+    pub project_path: String,
+    pub message_id: String,
+    pub timestamp: String,
+    pub version: u32,
+}
+
+// ============================================================================
+// Topic Threading
+// ============================================================================
+
+/// Request for cross-session topic threading.
+#[derive(Debug, Deserialize, ToolInput)]
+pub struct ThreadTopicRequest {
+    /// Search pattern (regex supported).
+    pub pattern: String,
+
+    /// Filter by project path (substring match).
+    pub project: Option<String>,
+
+    /// Filter by specific session ID.
+    pub session_id: Option<String>,
+
+    /// Include thinking/reasoning blocks in search and output. Default: false.
+    pub include_thinking: Option<bool>,
+
+    /// Exclude subagent sessions. Default: true.
+    pub no_subagents: Option<bool>,
+
+    /// Only sessions modified after this date (e.g., "7d", "2026-03-01").
+    pub since: Option<String>,
+
+    /// Only sessions modified before this date.
+    pub until: Option<String>,
+
+    /// Only include exchanges that look like decision points. Default: false.
+    pub decisions_only: Option<bool>,
+
+    /// Maximum exchanges to return. Default: 30.
+    pub limit: Option<usize>,
+
+    /// Maximum characters per context field. Default: 500.
+    pub max_context: Option<usize>,
+}
+
+/// A threaded exchange entry in responses.
+#[derive(Debug, Serialize)]
+pub struct ThreadExchangeEntry {
+    pub timestamp: String,
+    pub session_id: String,
+    pub project: String,
+    pub entry_uuid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_text: Option<String>,
+    pub match_location: String,
+    pub match_count: usize,
+}
+
+/// Response for thread_topic.
+#[derive(Debug, Serialize)]
+pub struct ThreadTopicResponse {
+    pub pattern: String,
+    pub total_exchanges: usize,
+    pub session_count: usize,
+    pub total_matches: usize,
+    pub exchanges: Vec<ThreadExchangeEntry>,
+}
+
+/// Response for get_file_history.
+#[derive(Debug, Serialize)]
+pub struct GetFileHistoryResponse {
+    pub path_query: String,
+    pub total_files: usize,
+    pub total_modifications: usize,
+    pub returned: usize,
+    pub modifications: Vec<FileModificationEntry>,
+}
+
 /// Response for tag_message.
 #[derive(Debug, Serialize)]
 pub struct TagMessageResponse {
