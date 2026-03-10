@@ -199,6 +199,10 @@ pub enum Commands {
     #[command(display_order = 5)]
     Chain(commands::chain::ChainArgs),
 
+    /// Show which sessions modified a file.
+    #[command(name = "file-history", display_order = 6)]
+    FileHistory(commands::file_history::FileHistoryArgs),
+
     // ═══════════════════════════════════════════════════════════════════════
     // SEARCH - Find content across sessions
     // ═══════════════════════════════════════════════════════════════════════
@@ -2620,6 +2624,7 @@ pub fn run() -> Result<()> {
         Some(Commands::Messages(args)) => commands::messages::run(&cli, args),
         Some(Commands::Pick(args)) => commands::pick::run(&cli, args),
         Some(Commands::Chain(args)) => commands::chain::run(&cli, args),
+        Some(Commands::FileHistory(args)) => commands::file_history::run(&cli, args),
         Some(Commands::Quickstart(args)) => commands::quickstart::run(&cli, args),
         Some(Commands::Summary(args)) => commands::summary::run(&cli, args),
         Some(Commands::Recent(args)) => commands::recent::run(&cli, args),

@@ -91,6 +91,7 @@ pub mod decisions;
 pub mod error;
 pub mod export;
 pub mod extraction;
+pub mod file_index;
 pub mod git;
 pub mod goals;
 pub mod index;
