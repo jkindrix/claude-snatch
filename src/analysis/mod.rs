@@ -18,6 +18,7 @@ pub mod digest;
 pub mod extraction;
 pub mod filters;
 pub mod lessons;
+pub mod project_lessons;
 pub mod search;
 pub mod threading;
 pub mod timeline;

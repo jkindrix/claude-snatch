@@ -947,6 +947,67 @@ pub struct ConflictPairEntry {
     pub later_text: String,
 }
 
+// ============================================================================
+// Project Lessons
+// ============================================================================
+
+/// Request for cross-session lesson aggregation.
+#[derive(Debug, Deserialize, ToolInput)]
+pub struct GetProjectLessonsRequest {
+    /// Project path filter (substring match). Required.
+    pub project: String,
+
+    /// Time period: "24h", "7d", "30d", "all". Default: "7d".
+    pub period: Option<String>,
+
+    /// Category filter: "errors", "corrections", "all". Default: "all".
+    pub category: Option<String>,
+
+    /// Maximum recurring patterns per category. Default: 30.
+    pub limit: Option<usize>,
+
+    /// Minimum occurrences to include a pattern. Default: 1.
+    pub min_occurrences: Option<usize>,
+
+    /// Exclude subagent sessions. Default: true.
+    pub no_subagents: Option<bool>,
+}
+
+/// A recurring error pattern in responses.
+#[derive(Debug, Serialize)]
+pub struct RecurringErrorEntry {
+    pub tool_name: String,
+    pub error_pattern: String,
+    pub count: usize,
+    pub sessions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub example_resolution: Option<String>,
+}
+
+/// A recurring user correction in responses.
+#[derive(Debug, Serialize)]
+pub struct RecurringCorrectionEntry {
+    pub pattern: String,
+    pub count: usize,
+    pub sessions: Vec<String>,
+    pub examples: Vec<String>,
+}
+
+/// Response for get_project_lessons.
+#[derive(Debug, Serialize)]
+pub struct GetProjectLessonsResponse {
+    pub project_path: String,
+    pub period: String,
+    pub sessions_analyzed: usize,
+    pub total_errors: usize,
+    pub total_corrections: usize,
+    pub top_failure_modes: Vec<(String, usize)>,
+    pub recurring_errors: Vec<RecurringErrorEntry>,
+    pub recurring_corrections: Vec<RecurringCorrectionEntry>,
+}
+
 /// Response for detect_conflicts.
 #[derive(Debug, Serialize)]
 pub struct DetectConflictsResponse {

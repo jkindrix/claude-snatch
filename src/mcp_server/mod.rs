@@ -21,6 +21,7 @@
 //! - `thread_topic` - Cross-session topic threading with conversation context
 //! - `detect_decisions` - Decision point detection with confidence scoring
 //! - `detect_conflicts` - Contradiction detection across sessions and decision registry
+//! - `get_project_lessons` - Cross-session lesson aggregation: recurring errors and corrections
 
 #![cfg(feature = "mcp")]
 
@@ -2209,6 +2210,90 @@ impl SnatchServer {
         let response = DetectDecisionsResponse {
             total_candidates: candidates.len(),
             candidates,
+        };
+
+        match ToolOutput::json(&response) {
+            Ok(output) => output,
+            Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+        }
+    }
+
+    // ========================================================================
+    // New Tool: get_project_lessons
+    // ========================================================================
+
+    /// Aggregate lessons across all sessions for a project.
+    #[tool(description = "Aggregate error->fix pairs and user corrections across ALL sessions for a project. Deduplicates similar errors, ranks by frequency, identifies recurring failure patterns. Answers 'what keeps going wrong?' across the project lifetime. More useful than per-session lessons after many sessions.")]
+    async fn get_project_lessons(&self, request: GetProjectLessonsRequest) -> ToolOutput {
+        use crate::analysis::project_lessons::{aggregate_project_lessons, ProjectLessonsParams};
+
+        let claude_dir = match self.get_claude_dir() {
+            Ok(dir) => dir,
+            Err(e) => return ToolOutput::error(e),
+        };
+
+        let period = request.period.as_deref().unwrap_or("7d");
+        let cutoff = match period_cutoff(period) {
+            Ok(c) => c,
+            Err(e) => return ToolOutput::error(format!("Invalid period: {e}")),
+        };
+
+        let mut sessions = match claude_dir.all_sessions() {
+            Ok(s) => s,
+            Err(e) => return ToolOutput::error(format!("Failed to list sessions: {e}")),
+        };
+
+        sessions.retain(|s| s.project_path().contains(request.project.as_str()));
+
+        if request.no_subagents.unwrap_or(true) {
+            sessions.retain(|s| !s.is_subagent());
+        }
+
+        // Apply period filter
+        if let Some(cutoff_dt) = cutoff {
+            let cutoff_systime = std::time::SystemTime::from(cutoff_dt);
+            sessions.retain(|s| s.modified_time() >= cutoff_systime);
+        }
+
+        let params = ProjectLessonsParams {
+            category: request.category.unwrap_or_else(|| "all".to_string()),
+            limit: request.limit.unwrap_or(30),
+            min_occurrences: request.min_occurrences.unwrap_or(1),
+        };
+
+        let result = aggregate_project_lessons(&sessions, &params, self.max_file_size);
+
+        let recurring_errors: Vec<RecurringErrorEntry> = result.recurring_errors
+            .into_iter()
+            .map(|e| RecurringErrorEntry {
+                tool_name: e.tool_name,
+                error_pattern: e.error_pattern,
+                count: e.count,
+                sessions: e.sessions,
+                last_seen: e.last_seen,
+                example_resolution: e.example_resolution,
+            })
+            .collect();
+
+        let recurring_corrections: Vec<RecurringCorrectionEntry> = result.recurring_corrections
+            .into_iter()
+            .map(|c| RecurringCorrectionEntry {
+                pattern: c.pattern,
+                count: c.count,
+                sessions: c.sessions,
+                examples: c.examples,
+            })
+            .collect();
+
+        let response = GetProjectLessonsResponse {
+            project_path: request.project,
+            period: period.to_string(),
+            sessions_analyzed: result.summary.sessions_analyzed,
+            total_errors: result.summary.total_errors,
+            total_corrections: result.summary.total_corrections,
+            top_failure_modes: result.summary.top_failure_modes,
+            recurring_errors,
+            recurring_corrections,
         };
 
         match ToolOutput::json(&response) {
