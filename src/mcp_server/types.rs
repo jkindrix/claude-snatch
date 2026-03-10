@@ -1137,6 +1137,78 @@ pub struct GetEventContextResponse {
     pub error_count: usize,
 }
 
+// ============================================================================
+// Project Retrospective
+// ============================================================================
+
+/// Request for composite project retrospective.
+#[derive(Debug, Deserialize, ToolInput)]
+pub struct ProjectRetrospectiveRequest {
+    /// Project path filter (substring match). Required.
+    pub project: String,
+
+    /// Time period: "24h", "7d", "30d", "all". Default: "7d".
+    pub period: Option<String>,
+
+    /// Maximum hotspot/rework files to include. Default: 10.
+    pub max_files: Option<usize>,
+
+    /// Maximum recurring errors to include. Default: 10.
+    pub max_errors: Option<usize>,
+
+    /// Maximum recurring corrections to include. Default: 5.
+    pub max_corrections: Option<usize>,
+
+    /// Minimum error occurrences to include a pattern. Default: 1.
+    pub min_occurrences: Option<usize>,
+
+    /// Exclude subagent sessions. Default: true.
+    pub no_subagents: Option<bool>,
+}
+
+/// Summary statistics in retrospective response.
+#[derive(Debug, Serialize)]
+pub struct RetrospectiveSummaryEntry {
+    pub sessions_analyzed: usize,
+    pub total_errors: usize,
+    pub total_tool_calls: usize,
+    pub total_corrections: usize,
+    pub error_rate: f64,
+    pub top_failure_modes: Vec<FailureModeEntry>,
+}
+
+/// A failure mode (tool + count).
+#[derive(Debug, Serialize)]
+pub struct FailureModeEntry {
+    pub tool: String,
+    pub count: usize,
+}
+
+/// A decision entry in retrospective response.
+#[derive(Debug, Serialize)]
+pub struct ActiveDecisionEntry {
+    pub id: usize,
+    pub title: String,
+    pub status: String,
+    pub confidence: f64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+/// Response for project_retrospective.
+#[derive(Debug, Serialize)]
+pub struct ProjectRetrospectiveResponse {
+    pub project_path: String,
+    pub period: String,
+    pub summary: RetrospectiveSummaryEntry,
+    pub hotspot_files: Vec<HotspotFileEntry>,
+    pub rework_files: Vec<ReworkFileEntry>,
+    pub recurring_errors: Vec<RecurringErrorEntry>,
+    pub recurring_corrections: Vec<RecurringCorrectionEntry>,
+    pub decisions: Vec<ActiveDecisionEntry>,
+    pub session_stats: Vec<SessionHealthEntry>,
+}
+
 /// Response for get_file_history.
 #[derive(Debug, Serialize)]
 pub struct GetFileHistoryResponse {

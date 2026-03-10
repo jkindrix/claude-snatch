@@ -24,6 +24,7 @@
 //! - `get_project_lessons` - Cross-session lesson aggregation: recurring errors and corrections
 //! - `get_project_health` - Project health dashboard: hotspots, rework, error trends
 //! - `get_event_context` - Contextual zoom around a specific event by message_id or timestamp
+//! - `project_retrospective` - Composite analysis: health + lessons + decisions in one call
 
 #![cfg(feature = "mcp")]
 
@@ -2380,6 +2381,121 @@ impl SnatchServer {
                 abandoned_count: dc.abandoned_count,
                 proposed_count: dc.proposed_count,
             }),
+            session_stats: result.session_stats.into_iter().map(|s| SessionHealthEntry {
+                session_id: s.session_id,
+                timestamp: s.timestamp,
+                error_count: s.error_count,
+                tool_count: s.tool_count,
+            }).collect(),
+        };
+
+        match ToolOutput::json(&response) {
+            Ok(output) => output,
+            Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+        }
+    }
+
+    // ========================================================================
+    // New Tool: project_retrospective
+    // ========================================================================
+
+    /// Composite project retrospective combining health, lessons, and decisions.
+    #[tool(description = "Composite project analysis: combines health metrics (hotspots, rework), recurring errors/corrections, decision stability, and per-session stats into a single retrospective. Answers 'how is this project going?' in one call instead of chaining get_project_health + get_project_lessons + manage_decisions. Use for periodic project reviews or when starting a new session on a project.")]
+    async fn project_retrospective(&self, request: ProjectRetrospectiveRequest) -> ToolOutput {
+        use crate::analysis::retrospective::{analyze_retrospective, RetrospectiveParams};
+        use crate::cli::helpers::truncate;
+
+        let claude_dir = match self.get_claude_dir() {
+            Ok(dir) => dir,
+            Err(e) => return ToolOutput::error(e),
+        };
+
+        let period = request.period.as_deref().unwrap_or("7d");
+        let cutoff = match period_cutoff(period) {
+            Ok(c) => c,
+            Err(e) => return ToolOutput::error(format!("Invalid period: {e}")),
+        };
+
+        let mut sessions = match claude_dir.all_sessions() {
+            Ok(s) => s,
+            Err(e) => return ToolOutput::error(format!("Failed to list sessions: {e}")),
+        };
+
+        sessions.retain(|s| s.project_path().contains(request.project.as_str()));
+
+        if request.no_subagents.unwrap_or(true) {
+            sessions.retain(|s| !s.is_subagent());
+        }
+
+        if let Some(cutoff_dt) = cutoff {
+            let cutoff_systime = std::time::SystemTime::from(cutoff_dt);
+            sessions.retain(|s| s.modified_time() >= cutoff_systime);
+        }
+
+        // Load decision store
+        let projects = claude_dir.projects().unwrap_or_default();
+        let decision_store = projects.iter()
+            .find(|p| p.path().to_string_lossy().contains(request.project.as_str()))
+            .and_then(|proj| crate::decisions::load_decisions(proj.path()).ok());
+
+        let params = RetrospectiveParams {
+            max_files: request.max_files.unwrap_or(10),
+            max_errors: request.max_errors.unwrap_or(10),
+            max_corrections: request.max_corrections.unwrap_or(5),
+            min_occurrences: request.min_occurrences.unwrap_or(1),
+        };
+
+        let result = analyze_retrospective(
+            &sessions,
+            decision_store.as_ref(),
+            &params,
+            self.max_file_size,
+        );
+
+        let response = ProjectRetrospectiveResponse {
+            project_path: request.project,
+            period: period.to_string(),
+            summary: RetrospectiveSummaryEntry {
+                sessions_analyzed: result.summary.sessions_analyzed,
+                total_errors: result.summary.total_errors,
+                total_tool_calls: result.summary.total_tool_calls,
+                total_corrections: result.summary.total_corrections,
+                error_rate: result.summary.error_rate,
+                top_failure_modes: result.summary.top_failure_modes.into_iter()
+                    .map(|(tool, count)| FailureModeEntry { tool, count })
+                    .collect(),
+            },
+            hotspot_files: result.hotspot_files.into_iter().map(|f| HotspotFileEntry {
+                path: f.path,
+                edit_count: f.edit_count,
+                session_count: f.session_count,
+            }).collect(),
+            rework_files: result.rework_files.into_iter().map(|f| ReworkFileEntry {
+                path: f.path,
+                version_count: f.version_count,
+                session_count: f.session_count,
+            }).collect(),
+            recurring_errors: result.recurring_errors.into_iter().map(|e| RecurringErrorEntry {
+                tool_name: e.tool_name,
+                error_pattern: truncate(&e.error_pattern, 300),
+                count: e.count,
+                sessions: e.sessions.into_iter().take(5).collect(),
+                last_seen: e.last_seen,
+                example_resolution: e.example_resolution.map(|r| truncate(&r, 200)),
+            }).collect(),
+            recurring_corrections: result.recurring_corrections.into_iter().map(|c| RecurringCorrectionEntry {
+                pattern: truncate(&c.pattern, 300),
+                count: c.count,
+                sessions: c.sessions.into_iter().take(5).collect(),
+                examples: c.examples.into_iter().take(3).map(|e| truncate(&e, 200)).collect(),
+            }).collect(),
+            decisions: result.decisions.into_iter().map(|d| ActiveDecisionEntry {
+                id: d.id,
+                title: d.title,
+                status: d.status,
+                confidence: d.confidence,
+                tags: d.tags,
+            }).collect(),
             session_stats: result.session_stats.into_iter().map(|s| SessionHealthEntry {
                 session_id: s.session_id,
                 timestamp: s.timestamp,

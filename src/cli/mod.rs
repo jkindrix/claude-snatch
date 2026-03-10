@@ -255,6 +255,10 @@ pub enum Commands {
     #[command(display_order = 24)]
     Health(HealthArgs),
 
+    /// Composite project retrospective: health + lessons + decisions.
+    #[command(display_order = 24)]
+    Retrospective(RetrospectiveArgs),
+
     /// Contextual zoom around a specific event in a session.
     #[command(display_order = 24)]
     Context(ContextArgs),
@@ -2302,6 +2306,41 @@ pub struct HealthArgs {
     pub until: Option<String>,
 }
 
+/// Arguments for the retrospective command.
+#[derive(Debug, Parser)]
+pub struct RetrospectiveArgs {
+    /// Project path filter (substring match). Required.
+    pub project: String,
+
+    /// Maximum hotspot/rework files to include.
+    #[arg(long, default_value = "10")]
+    pub max_files: usize,
+
+    /// Maximum recurring errors to include.
+    #[arg(long, default_value = "10")]
+    pub max_errors: usize,
+
+    /// Maximum recurring corrections to include.
+    #[arg(long, default_value = "5")]
+    pub max_corrections: usize,
+
+    /// Minimum occurrences to include an error pattern.
+    #[arg(long, default_value = "1")]
+    pub min_occurrences: usize,
+
+    /// Exclude subagent sessions.
+    #[arg(long)]
+    pub no_subagents: bool,
+
+    /// Filter to sessions since this date.
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Filter to sessions until this date.
+    #[arg(long)]
+    pub until: Option<String>,
+}
+
 /// Arguments for the context command.
 #[derive(Debug, Parser)]
 pub struct ContextArgs {
@@ -2715,6 +2754,7 @@ pub fn run() -> Result<()> {
         Some(Commands::Conflicts(args)) => commands::conflicts::run(&cli, args),
         Some(Commands::ProjectLessons(args)) => commands::project_lessons::run(&cli, args),
         Some(Commands::Health(args)) => commands::health::run(&cli, args),
+        Some(Commands::Retrospective(args)) => commands::retrospective::run(&cli, args),
         Some(Commands::Context(args)) => commands::context::run(&cli, args),
         Some(Commands::Timeline(args)) => commands::timeline::run(&cli, args),
         Some(Commands::Messages(args)) => commands::messages::run(&cli, args),

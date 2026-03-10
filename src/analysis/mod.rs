@@ -21,6 +21,7 @@ pub mod filters;
 pub mod lessons;
 pub mod project_health;
 pub mod project_lessons;
+pub mod retrospective;
 pub mod search;
 pub mod threading;
 pub mod timeline;
