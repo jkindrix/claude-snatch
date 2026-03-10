@@ -313,6 +313,27 @@ fn list_sessions<W: Write>(
         sessions.truncate(args.limit);
     }
 
+    // Build chain lookup for display
+    let chain_lookup: std::collections::HashMap<String, (String, usize, usize)> = {
+        use crate::discovery::chain::detect_chains;
+        let main_sessions: Vec<_> = sessions.iter()
+            .filter(|s| !s.is_subagent())
+            .collect();
+        let chains = detect_chains(
+            main_sessions.iter().map(|s| (s.session_id(), s.path()))
+        );
+        let mut lookup = std::collections::HashMap::new();
+        for (_root_id, chain) in &chains {
+            for (pos, member) in chain.members.iter().enumerate() {
+                lookup.insert(
+                    member.file_id.clone(),
+                    (chain.root_id.clone(), pos, chain.len()),
+                );
+            }
+        }
+        lookup
+    };
+
     // Output
     match cli.effective_output() {
         OutputFormat::Json => {
@@ -427,6 +448,15 @@ fn list_sessions<W: Write>(
                     write!(writer, "  {}{} [{}]{}{}", bookmark_marker, id, slug, subagent_marker, outcome_badge)?;
                 } else {
                     write!(writer, "  {}{}{}{}", bookmark_marker, id, subagent_marker, outcome_badge)?;
+                }
+
+                // Show chain indicator
+                if let Some(info) = chain_lookup.get(session.session_id()) {
+                    let pos = info.1;
+                    let len = info.2;
+                    if len > 1 {
+                        write!(writer, " (part {}/{} of chain)", pos + 1, len)?;
+                    }
                 }
 
                 if show_sizes {

@@ -195,6 +195,10 @@ pub enum Commands {
     #[command(alias = "browse", display_order = 4)]
     Pick(PickArgs),
 
+    /// List session chains (multi-file logical sessions).
+    #[command(display_order = 5)]
+    Chain(commands::chain::ChainArgs),
+
     // ═══════════════════════════════════════════════════════════════════════
     // SEARCH - Find content across sessions
     // ═══════════════════════════════════════════════════════════════════════
@@ -2615,6 +2619,7 @@ pub fn run() -> Result<()> {
         Some(Commands::Timeline(args)) => commands::timeline::run(&cli, args),
         Some(Commands::Messages(args)) => commands::messages::run(&cli, args),
         Some(Commands::Pick(args)) => commands::pick::run(&cli, args),
+        Some(Commands::Chain(args)) => commands::chain::run(&cli, args),
         Some(Commands::Quickstart(args)) => commands::quickstart::run(&cli, args),
         Some(Commands::Summary(args)) => commands::summary::run(&cli, args),
         Some(Commands::Recent(args)) => commands::recent::run(&cli, args),
