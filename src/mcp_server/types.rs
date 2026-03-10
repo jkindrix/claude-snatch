@@ -41,6 +41,12 @@ pub struct SessionSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<String>,
     pub compaction_count: usize,
+    /// Root session ID if this session is part of a chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
+    /// Number of files in the chain (only set for chain members).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_length: Option<usize>,
 }
 
 /// Request to get session info.
@@ -56,6 +62,12 @@ pub struct SessionInfoResponse {
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
+    /// Root session ID if this session is part of a chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
+    /// All file UUIDs in the chain, in order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_members: Option<Vec<String>>,
     pub project_path: String,
     pub is_subagent: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

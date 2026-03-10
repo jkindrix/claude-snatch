@@ -73,14 +73,10 @@ Currently each file is parsed independently. For chained sessions, we need to pa
 
 ### 5. Update analytics to aggregate across chains
 
-`SessionAnalytics` currently computes stats from a single file's conversation. Chained sessions need aggregated stats.
-
-**What to do:**
-- Add `SessionAnalytics::from_chain()` that aggregates: total tokens, total duration (first file start → last file end), message counts, compaction count, model usage
-- `duration_string()` should reflect the full chain duration
-- `start_time` / `end_time` should span the full chain
-
-**Files affected:** `src/analytics/mod.rs`
+**No code changes needed.** `SessionAnalytics::from_conversation()` already works on any
+`Conversation` regardless of source. Chain parsing (Item 4) produces a unified entry list
+that builds into a single `Conversation`, so analytics automatically span the full chain
+including correct duration, token totals, and message counts.
 
 ---
 

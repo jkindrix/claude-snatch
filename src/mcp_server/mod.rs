@@ -30,7 +30,7 @@ use mcpkit::prelude::*;
 use mcpkit::transport::stdio::StdioTransport;
 
 use crate::analytics::{AnalyticsSummary, SessionAnalytics};
-use crate::discovery::ClaudeDirectory;
+use crate::discovery::{chain::detect_chains, ClaudeDirectory};
 use crate::model::message::LogEntry;
 use crate::reconstruction::Conversation;
 
@@ -100,12 +100,31 @@ impl SnatchServer {
         let limit = request.limit.unwrap_or(50);
         sessions.truncate(limit);
 
+        // Detect chains for the sessions we're listing
+        let main_sessions: Vec<_> = sessions.iter()
+            .filter(|s| !s.is_subagent())
+            .collect();
+        let chains = detect_chains(
+            main_sessions.iter().map(|s| (s.session_id(), s.path()))
+        );
+        // Build reverse lookup: file_id -> (chain_root, chain_len)
+        let mut chain_lookup: HashMap<String, (String, usize)> = HashMap::new();
+        for (root_id, chain) in &chains {
+            for member in &chain.members {
+                chain_lookup.insert(
+                    member.file_id.clone(),
+                    (root_id.clone(), chain.len()),
+                );
+            }
+        }
+
         let summaries: Vec<SessionSummary> = sessions
             .iter()
             .map(|s| {
                 let (duration, compaction_count, slug) = s.quick_metadata_cached()
                     .map(|m| (m.duration_human(), m.compaction_count, m.slug.clone()))
                     .unwrap_or((None, 0, None));
+                let chain_info = chain_lookup.get(s.session_id());
                 SessionSummary {
                     session_id: s.session_id().to_string(),
                     slug,
@@ -116,6 +135,8 @@ impl SnatchServer {
                     is_active: s.is_active().unwrap_or(false),
                     duration,
                     compaction_count,
+                    chain_id: chain_info.map(|(root, _)| root.clone()),
+                    chain_length: chain_info.map(|(_, len)| *len),
                 }
             })
             .collect();
@@ -161,9 +182,32 @@ impl SnatchServer {
             .map(|m| (m.compaction_count, m.slug.clone()))
             .unwrap_or((0, None));
 
+        // Detect chain membership for this session
+        let (chain_id, chain_members) = if !session.is_subagent() {
+            if let Ok(Some(project)) = claude_dir.find_project(session.project_path()) {
+                if let Ok(chains) = project.session_chains() {
+                    chains.values()
+                        .find(|c| c.contains(session.session_id()))
+                        .map(|c| (
+                            Some(c.root_id.clone()),
+                            Some(c.file_ids().into_iter().map(String::from).collect()),
+                        ))
+                        .unwrap_or((None, None))
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
         let info = SessionInfoResponse {
             session_id: session.session_id().to_string(),
             slug,
+            chain_id,
+            chain_members,
             project_path: session.project_path().to_string(),
             is_subagent: session.is_subagent(),
             parent_session_id: session.parent_session_id().map(String::from),
