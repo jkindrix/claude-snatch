@@ -22,6 +22,7 @@
 //! - `detect_decisions` - Decision point detection with confidence scoring
 //! - `detect_conflicts` - Contradiction detection across sessions and decision registry
 //! - `get_project_lessons` - Cross-session lesson aggregation: recurring errors and corrections
+//! - `get_event_context` - Contextual zoom around a specific event by message_id or timestamp
 
 #![cfg(feature = "mcp")]
 
@@ -2294,6 +2295,77 @@ impl SnatchServer {
             top_failure_modes: result.summary.top_failure_modes,
             recurring_errors,
             recurring_corrections,
+        };
+
+        match ToolOutput::json(&response) {
+            Ok(output) => output,
+            Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+        }
+    }
+
+    // ========================================================================
+    // New Tool: get_event_context
+    // ========================================================================
+
+    /// Get contextual zoom around a specific event in a session.
+    #[tool(description = "Get conversation context around a specific message or timestamp in a session. Returns the target event plus surrounding turns (user prompts, assistant responses, tools, errors). Use to understand 'what was happening around this event?' after finding events via other tools. Provide either message_id or timestamp.")]
+    async fn get_event_context(&self, request: GetEventContextRequest) -> ToolOutput {
+        use crate::analysis::event_context::{find_event_context, EventContextParams};
+
+        if request.message_id.is_none() && request.timestamp.is_none() {
+            return ToolOutput::error("Either message_id or timestamp is required");
+        }
+
+        let chain_aware = request.chain_aware.unwrap_or(false);
+        let resolved = match resolve_session_with_chain(self, &request.session_id, chain_aware) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+
+        let entries = resolved.conversation.main_thread_entries();
+        let entry_refs: Vec<&LogEntry> = entries.iter().copied().collect();
+
+        let timestamp = if let Some(ref ts) = request.timestamp {
+            match parse_timestamp_param(ts) {
+                Ok(dt) => Some(dt),
+                Err(e) => return ToolOutput::error(format!("Invalid timestamp: {e}")),
+            }
+        } else {
+            None
+        };
+
+        let params = EventContextParams {
+            message_id: request.message_id,
+            timestamp,
+            context_window: request.context_window.unwrap_or(2),
+            max_text_len: 500,
+        };
+
+        let result = match find_event_context(&entry_refs, &params) {
+            Some(r) => r,
+            None => return ToolOutput::error("Event not found in session"),
+        };
+
+        let to_entry = |t: crate::analysis::event_context::ContextTurn| -> ContextTurnEntry {
+            ContextTurnEntry {
+                index: t.index,
+                msg_type: t.message_type,
+                uuid: t.uuid,
+                timestamp: t.timestamp.map(|ts| ts.to_rfc3339()),
+                text: t.text,
+                tools: t.tools,
+                had_errors: t.had_errors,
+            }
+        };
+
+        let response = GetEventContextResponse {
+            session_id: resolved.session_id,
+            target_index: result.target_index,
+            target: to_entry(result.target),
+            before: result.before.into_iter().map(to_entry).collect(),
+            after: result.after.into_iter().map(to_entry).collect(),
+            related_files: result.related_files,
+            error_count: result.error_count,
         };
 
         match ToolOutput::json(&response) {

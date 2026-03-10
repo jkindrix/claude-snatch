@@ -1015,6 +1015,57 @@ pub struct DetectConflictsResponse {
     pub conflicts: Vec<ConflictPairEntry>,
 }
 
+// ============================================================================
+// Event Context
+// ============================================================================
+
+/// Request for contextual zoom around a specific event.
+#[derive(Debug, Deserialize, ToolInput)]
+pub struct GetEventContextRequest {
+    /// Session ID (full or prefix).
+    pub session_id: String,
+
+    /// Message UUID to find.
+    pub message_id: Option<String>,
+
+    /// Timestamp to find (ISO 8601 or relative). Finds closest match.
+    pub timestamp: Option<String>,
+
+    /// Number of turns before/after the target. Default: 2.
+    pub context_window: Option<usize>,
+
+    /// If true and the session is part of a chain, search across all chain members.
+    pub chain_aware: Option<bool>,
+}
+
+/// A turn in the context window response.
+#[derive(Debug, Serialize)]
+pub struct ContextTurnEntry {
+    pub index: usize,
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub uuid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    pub had_errors: bool,
+}
+
+/// Response for get_event_context.
+#[derive(Debug, Serialize)]
+pub struct GetEventContextResponse {
+    pub session_id: String,
+    pub target_index: usize,
+    pub target: ContextTurnEntry,
+    pub before: Vec<ContextTurnEntry>,
+    pub after: Vec<ContextTurnEntry>,
+    pub related_files: Vec<String>,
+    pub error_count: usize,
+}
+
 /// Response for get_file_history.
 #[derive(Debug, Serialize)]
 pub struct GetFileHistoryResponse {
