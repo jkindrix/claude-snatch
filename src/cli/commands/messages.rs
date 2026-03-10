@@ -101,6 +101,36 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
         _ => {}
     }
 
+    // Filter by timestamp window
+    if args.after.is_some() || args.before.is_some() {
+        use chrono::{DateTime, Utc};
+        let after = if let Some(ref ts) = args.after {
+            let systime = super::parse_date_filter(ts)?;
+            Some(DateTime::<Utc>::from(systime))
+        } else {
+            None
+        };
+        let before = if let Some(ref ts) = args.before {
+            let systime = super::parse_date_filter(ts)?;
+            Some(DateTime::<Utc>::from(systime))
+        } else {
+            None
+        };
+        main_entries.retain(|e| {
+            if let Some(ts) = e.timestamp() {
+                if let Some(ref a) = after {
+                    if ts < *a { return false; }
+                }
+                if let Some(ref b) = before {
+                    if ts > *b { return false; }
+                }
+                true
+            } else {
+                true
+            }
+        });
+    }
+
     // Pre-filter by detail level
     match detail {
         "overview" => {

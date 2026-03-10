@@ -247,6 +247,18 @@ pub enum Commands {
     #[command(display_order = 24)]
     Lessons(LessonsArgs),
 
+    /// Aggregate recurring lessons across all sessions for a project.
+    #[command(name = "project-lessons", display_order = 24)]
+    ProjectLessons(ProjectLessonsArgs),
+
+    /// Project health dashboard: hotspots, rework, error trends.
+    #[command(display_order = 24)]
+    Health(HealthArgs),
+
+    /// Contextual zoom around a specific event in a session.
+    #[command(display_order = 24)]
+    Context(ContextArgs),
+
     /// Show turn-by-turn narrative timeline of a session.
     #[command(display_order = 25)]
     Timeline(TimelineArgs),
@@ -2236,6 +2248,79 @@ pub struct ConflictsArgs {
     pub exclude_session: Option<String>,
 }
 
+/// Arguments for the project-lessons command.
+#[derive(Debug, Parser)]
+pub struct ProjectLessonsArgs {
+    /// Project path filter (substring match). Required.
+    pub project: String,
+
+    /// Category filter: errors, corrections, or all.
+    #[arg(short = 'c', long)]
+    pub category: Option<String>,
+
+    /// Maximum recurring patterns per category.
+    #[arg(short = 'l', long, default_value = "30")]
+    pub limit: usize,
+
+    /// Minimum occurrences to include a pattern.
+    #[arg(long, default_value = "1")]
+    pub min_occurrences: usize,
+
+    /// Exclude subagent sessions.
+    #[arg(long)]
+    pub no_subagents: bool,
+
+    /// Filter to sessions since this date.
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Filter to sessions until this date.
+    #[arg(long)]
+    pub until: Option<String>,
+}
+
+/// Arguments for the health command.
+#[derive(Debug, Parser)]
+pub struct HealthArgs {
+    /// Project path filter (substring match). Required.
+    pub project: String,
+
+    /// Maximum hotspot/rework files to show.
+    #[arg(long, default_value = "20")]
+    pub max_hotspots: usize,
+
+    /// Exclude subagent sessions.
+    #[arg(long)]
+    pub no_subagents: bool,
+
+    /// Filter to sessions since this date.
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Filter to sessions until this date.
+    #[arg(long)]
+    pub until: Option<String>,
+}
+
+/// Arguments for the context command.
+#[derive(Debug, Parser)]
+pub struct ContextArgs {
+    /// Session ID (full UUID or short prefix).
+    pub session_id: String,
+
+    /// Message UUID to zoom around.
+    #[arg(short = 'm', long)]
+    pub message_id: Option<String>,
+
+    /// Timestamp to zoom around (ISO 8601, date, or relative like "2h").
+    #[arg(short = 't', long)]
+    pub timestamp: Option<String>,
+
+    /// Number of turns before/after the target.
+    #[arg(short = 'w', long, default_value = "2")]
+    pub context_window: usize,
+}
+
 /// Arguments for the timeline command.
 #[derive(Debug, Parser)]
 pub struct TimelineArgs {
@@ -2330,6 +2415,14 @@ pub struct MessagesArgs {
     /// Include thinking/reasoning blocks.
     #[arg(long)]
     pub include_thinking: bool,
+
+    /// Only include messages after this timestamp (ISO 8601, date, or relative like "2h").
+    #[arg(long)]
+    pub after: Option<String>,
+
+    /// Only include messages before this timestamp (ISO 8601, date, or relative like "2h").
+    #[arg(long)]
+    pub before: Option<String>,
 }
 
 /// Arguments for the pick command.
@@ -2620,6 +2713,9 @@ pub fn run() -> Result<()> {
         Some(Commands::Thread(args)) => commands::thread::run(&cli, args),
         Some(Commands::Detect(args)) => commands::detect::run(&cli, args),
         Some(Commands::Conflicts(args)) => commands::conflicts::run(&cli, args),
+        Some(Commands::ProjectLessons(args)) => commands::project_lessons::run(&cli, args),
+        Some(Commands::Health(args)) => commands::health::run(&cli, args),
+        Some(Commands::Context(args)) => commands::context::run(&cli, args),
         Some(Commands::Timeline(args)) => commands::timeline::run(&cli, args),
         Some(Commands::Messages(args)) => commands::messages::run(&cli, args),
         Some(Commands::Pick(args)) => commands::pick::run(&cli, args),
