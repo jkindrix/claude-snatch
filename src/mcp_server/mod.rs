@@ -19,6 +19,7 @@
 //! - `manage_decisions` - Persistent decision registry across sessions
 //! - `get_file_history` - Reverse index: file path → sessions that modified it
 //! - `thread_topic` - Cross-session topic threading with conversation context
+//! - `detect_decisions` - Decision point detection with confidence scoring
 
 #![cfg(feature = "mcp")]
 
@@ -2087,6 +2088,92 @@ impl SnatchServer {
             session_count: result.session_count,
             total_matches: result.total_matches,
             exchanges,
+        };
+
+        match ToolOutput::json(&response) {
+            Ok(output) => output,
+            Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+        }
+    }
+
+    /// Detect candidate decision points across sessions using structural patterns,
+    /// explicit markers, and reversal detection.
+    #[tool(description = "Detect candidate decision points across sessions. Uses three detection methods: (1) structural pattern matching (question→options→confirmation), (2) explicit markers ('DEF-001', 'we decided', 'design decision'), (3) reversal patterns ('changed my mind', 'scratch that'). Returns candidates with confidence scores. Use to find decisions that should be tracked.")]
+    async fn detect_decisions(&self, request: DetectDecisionsRequest) -> ToolOutput {
+        use crate::analysis::decision_detection::{detect_decisions, DetectParams};
+        use crate::cli::helpers::{filter_sessions_by_date, truncate};
+
+        let claude_dir = match self.get_claude_dir() {
+            Ok(dir) => dir,
+            Err(e) => return ToolOutput::error(e),
+        };
+
+        let mut sessions = if let Some(ref session_id) = request.session_id {
+            match claude_dir.find_session(session_id) {
+                Ok(Some(s)) => vec![s],
+                Ok(None) => return ToolOutput::error(format!("Session not found: {session_id}")),
+                Err(e) => return ToolOutput::error(format!("Failed to find session: {e}")),
+            }
+        } else {
+            let mut all = match claude_dir.all_sessions() {
+                Ok(s) => s,
+                Err(e) => return ToolOutput::error(format!("Failed to list sessions: {e}")),
+            };
+            if let Some(ref project) = request.project {
+                all.retain(|s| s.project_path().contains(project));
+            }
+            all
+        };
+
+        if request.no_subagents.unwrap_or(true) {
+            sessions.retain(|s| !s.is_subagent());
+        }
+
+        if request.since.is_some() || request.until.is_some() {
+            if let Err(e) = filter_sessions_by_date(
+                &mut sessions,
+                request.since.as_deref(),
+                request.until.as_deref(),
+            ) {
+                return ToolOutput::error(format!("Date filter error: {e}"));
+            }
+        }
+
+        let topic_filter = if let Some(ref topic) = request.topic {
+            match regex::Regex::new(topic) {
+                Ok(r) => Some(r),
+                Err(e) => return ToolOutput::error(format!("Invalid topic regex: {e}")),
+            }
+        } else {
+            None
+        };
+
+        let params = DetectParams {
+            min_confidence: request.min_confidence.unwrap_or(0.5),
+            limit: request.limit.unwrap_or(50),
+            topic_filter,
+        };
+
+        let result = detect_decisions(&sessions, &params, self.max_file_size);
+
+        let candidates: Vec<DetectedDecisionEntry> = result
+            .candidates
+            .into_iter()
+            .map(|c| DetectedDecisionEntry {
+                timestamp: c.timestamp.to_rfc3339(),
+                session_id: c.session_id,
+                entry_uuid: c.entry_uuid,
+                detection_method: format!("{}", c.detection_method),
+                confidence: c.confidence,
+                question: truncate(&c.question, 300),
+                response: truncate(&c.response, 500),
+                confirmation: c.confirmation.map(|t| truncate(&t, 200)),
+            })
+            .collect();
+
+        let response = DetectDecisionsResponse {
+            total_candidates: candidates.len(),
+            candidates,
         };
 
         match ToolOutput::json(&response) {

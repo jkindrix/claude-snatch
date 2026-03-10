@@ -840,6 +840,59 @@ pub struct ThreadTopicResponse {
     pub exchanges: Vec<ThreadExchangeEntry>,
 }
 
+// ============================================================================
+// Decision Detection
+// ============================================================================
+
+/// Request for decision point detection.
+#[derive(Debug, Deserialize, ToolInput)]
+pub struct DetectDecisionsRequest {
+    /// Filter by project path (substring match).
+    pub project: Option<String>,
+
+    /// Filter by specific session ID.
+    pub session_id: Option<String>,
+
+    /// Minimum confidence threshold (0.0-1.0). Default: 0.5.
+    pub min_confidence: Option<f64>,
+
+    /// Exclude subagent sessions. Default: true.
+    pub no_subagents: Option<bool>,
+
+    /// Only sessions modified after this date.
+    pub since: Option<String>,
+
+    /// Only sessions modified before this date.
+    pub until: Option<String>,
+
+    /// Topic filter regex (applied after detection).
+    pub topic: Option<String>,
+
+    /// Maximum candidates to return. Default: 50.
+    pub limit: Option<usize>,
+}
+
+/// A detected decision candidate in responses.
+#[derive(Debug, Serialize)]
+pub struct DetectedDecisionEntry {
+    pub timestamp: String,
+    pub session_id: String,
+    pub entry_uuid: String,
+    pub detection_method: String,
+    pub confidence: f64,
+    pub question: String,
+    pub response: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmation: Option<String>,
+}
+
+/// Response for detect_decisions.
+#[derive(Debug, Serialize)]
+pub struct DetectDecisionsResponse {
+    pub total_candidates: usize,
+    pub candidates: Vec<DetectedDecisionEntry>,
+}
+
 /// Response for get_file_history.
 #[derive(Debug, Serialize)]
 pub struct GetFileHistoryResponse {
