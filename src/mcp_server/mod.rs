@@ -361,6 +361,40 @@ impl SnatchServer {
             _ => {} // "all" — keep everything
         }
 
+        // Filter by timestamp window
+        if request.after_timestamp.is_some() || request.before_timestamp.is_some() {
+            let after = if let Some(ref ts) = request.after_timestamp {
+                match parse_timestamp_param(ts) {
+                    Ok(dt) => Some(dt),
+                    Err(e) => return ToolOutput::error(format!("Invalid after_timestamp: {e}")),
+                }
+            } else {
+                None
+            };
+            let before = if let Some(ref ts) = request.before_timestamp {
+                match parse_timestamp_param(ts) {
+                    Ok(dt) => Some(dt),
+                    Err(e) => return ToolOutput::error(format!("Invalid before_timestamp: {e}")),
+                }
+            } else {
+                None
+            };
+            entries.retain(|e| {
+                if let Some(ts) = e.timestamp() {
+                    if let Some(ref a) = after {
+                        if ts < *a { return false; }
+                    }
+                    if let Some(ref b) = before {
+                        if ts > *b { return false; }
+                    }
+                    true
+                } else {
+                    // Keep entries without timestamps (conservative)
+                    true
+                }
+            });
+        }
+
         // Pre-filter entries based on detail level
         match detail {
             "overview" => {
@@ -2488,6 +2522,7 @@ mod tests {
         let text = unwrap_output(server.get_session_messages(GetSessionMessagesRequest {
             session_id: sid.to_string(), detail: None, message_type: None,
             limit: None, offset: None, reverse: None, include_thinking: None, chain_aware: None,
+            after_timestamp: None, before_timestamp: None,
         }).await);
         assert!(text.contains("Hello"));
     }

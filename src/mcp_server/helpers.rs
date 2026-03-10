@@ -168,6 +168,59 @@ pub fn resolve_project(server: &SnatchServer, project_filter: &str) -> Result<Re
     }
 }
 
+/// Parse a timestamp parameter string into a `DateTime<Utc>`.
+///
+/// Accepts:
+/// - ISO 8601 full datetime: "2026-03-10T12:00:00Z"
+/// - ISO 8601 date only: "2026-03-10" (interpreted as midnight UTC)
+/// - Relative durations: "2h", "30m", "7d" (subtracted from now)
+pub fn parse_timestamp_param(s: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
+    use chrono::{DateTime, NaiveDate, Utc};
+
+    // Try ISO 8601 full datetime
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+
+    // Try ISO 8601 date only
+    if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        let datetime = date.and_hms_opt(0, 0, 0).expect("midnight is always valid");
+        return Ok(chrono::TimeZone::from_utc_datetime(&Utc, &datetime));
+    }
+
+    // Try relative duration (e.g., "2h", "30m", "7d")
+    let s_lower = s.to_lowercase();
+    let numeric_end = s_lower
+        .char_indices()
+        .find(|(_, c)| !c.is_ascii_digit())
+        .map(|(i, _)| i)
+        .unwrap_or(s_lower.len());
+
+    if numeric_end == 0 || numeric_end == s_lower.len() {
+        return Err(format!(
+            "Invalid timestamp '{}'. Use ISO 8601 (e.g., '2026-03-10T12:00:00Z'), \
+             date ('2026-03-10'), or relative ('2h', '30m', '7d')",
+            s
+        ));
+    }
+
+    let amount: i64 = s_lower[..numeric_end]
+        .parse()
+        .map_err(|_| format!("Invalid number in timestamp: {}", &s_lower[..numeric_end]))?;
+
+    let unit = &s_lower[numeric_end..];
+    let duration = match unit {
+        "s" | "sec" | "seconds" => chrono::Duration::seconds(amount),
+        "m" | "min" | "minutes" => chrono::Duration::minutes(amount),
+        "h" | "hr" | "hours" => chrono::Duration::hours(amount),
+        "d" | "day" | "days" => chrono::Duration::days(amount),
+        "w" | "week" | "weeks" => chrono::Duration::weeks(amount),
+        _ => return Err(format!("Unknown time unit '{}'. Use s, m, h, d, or w", unit)),
+    };
+
+    Ok(Utc::now() - duration)
+}
+
 /// Search a single entry for a regex pattern match.
 /// Returns the matched text and surrounding context if found.
 pub fn search_entry_text(

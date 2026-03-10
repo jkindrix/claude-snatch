@@ -150,6 +150,14 @@ pub struct GetSessionMessagesRequest {
     /// If true and the session is part of a chain, return messages across all
     /// member files in the chain. Default: false.
     pub chain_aware: Option<bool>,
+
+    /// Only include messages after this timestamp (ISO 8601 or relative like "2h", "30m").
+    /// Enables contextual zoom: find an event timestamp from another tool, then
+    /// retrieve messages around it.
+    pub after_timestamp: Option<String>,
+
+    /// Only include messages before this timestamp (ISO 8601 or relative like "2h", "30m").
+    pub before_timestamp: Option<String>,
 }
 
 /// A message in the session messages response.
