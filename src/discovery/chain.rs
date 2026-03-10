@@ -20,6 +20,10 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use tracing::{debug, trace, warn};
 
+use crate::error::Result;
+use crate::model::LogEntry;
+use crate::parser::JsonlParser;
+
 /// A chain of session files forming one logical conversation.
 #[derive(Debug, Clone)]
 pub struct SessionChain {
@@ -262,6 +266,44 @@ pub fn detect_chains<'a>(
 }
 
 impl SessionChain {
+    /// Parse all files in this chain into a unified entry list.
+    ///
+    /// Files are parsed in chain order (root first, continuations after).
+    /// The resulting entries can be passed to `Conversation::from_entries()`
+    /// to build a single conversation tree spanning all files.
+    ///
+    /// Requires a function that resolves file IDs to filesystem paths.
+    pub fn parse_entries(
+        &self,
+        resolve_path: impl Fn(&str) -> Option<std::path::PathBuf>,
+    ) -> Result<Vec<LogEntry>> {
+        let mut all_entries = Vec::new();
+        let mut parser = JsonlParser::new().with_lenient(true);
+
+        for member in &self.members {
+            let path = resolve_path(&member.file_id).ok_or_else(|| {
+                crate::error::SnatchError::FileNotFound {
+                    path: std::path::PathBuf::from(&member.file_id),
+                }
+            })?;
+            let entries = parser.parse_file(&path)?;
+            debug!(
+                file_id = %member.file_id,
+                entries = entries.len(),
+                "Parsed chain member"
+            );
+            all_entries.extend(entries);
+        }
+
+        debug!(
+            chain_root = %self.root_id,
+            total_entries = all_entries.len(),
+            members = self.members.len(),
+            "Parsed full chain"
+        );
+        Ok(all_entries)
+    }
+
     /// Number of files in this chain.
     pub fn len(&self) -> usize {
         self.members.len()
@@ -307,7 +349,7 @@ mod tests {
             .unwrap_or_default();
         writeln!(
             file,
-            r#"{{"type": "user", "uuid": "{name}", "sessionId": "{session_id}", "timestamp": "2026-01-01T00:00:00Z"{slug_field}, "message": {{"role": "user", "content": "hello"}}}}"#
+            r#"{{"type": "user", "uuid": "{name}", "sessionId": "{session_id}", "timestamp": "2026-01-01T00:00:00Z", "version": "2.1.0", "isSidechain": false{slug_field}, "message": {{"role": "user", "content": "hello"}}}}"#
         )
         .unwrap();
         path
@@ -400,6 +442,28 @@ mod tests {
 
         // Should not panic, and single orphan doesn't form a chain
         assert!(chains.is_empty());
+    }
+
+    #[test]
+    fn test_chain_parse_entries() {
+        let dir = TempDir::new().unwrap();
+        let root_path = write_jsonl(dir.path(), "root", "root", Some("slug"));
+        let cont_path = write_jsonl(dir.path(), "cont", "root", Some("slug"));
+
+        let sessions: Vec<(&str, &Path)> = vec![
+            ("root", &root_path),
+            ("cont", &cont_path),
+        ];
+        let chains = detect_chains(sessions.into_iter());
+        let chain = chains.get("root").unwrap();
+
+        let entries = chain.parse_entries(|file_id| {
+            Some(dir.path().join(format!("{file_id}.jsonl")))
+        }).unwrap();
+
+        // Each file has 1 user entry, so chain should have 2
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|e| e.message_type() == "user"));
     }
 
     #[test]

@@ -217,6 +217,21 @@ impl Project {
         Ok(detect_chains(pairs.into_iter()))
     }
 
+    /// Parse all entries from a session chain as a unified entry list.
+    ///
+    /// Resolves file IDs to paths within this project directory.
+    pub fn parse_chain(&self, chain: &SessionChain) -> Result<Vec<crate::model::LogEntry>> {
+        let sessions = self.sessions()?;
+        let session_map: std::collections::HashMap<&str, &std::path::Path> = sessions
+            .iter()
+            .map(|s| (s.session_id(), s.path()))
+            .collect();
+
+        chain.parse_entries(|file_id| {
+            session_map.get(file_id).map(|p| p.to_path_buf())
+        })
+    }
+
     /// Get the number of sessions in this project.
     pub fn session_count(&self) -> Result<usize> {
         Ok(self.sessions()?.len())
