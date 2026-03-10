@@ -8,8 +8,10 @@ use std::time::SystemTime;
 
 use crate::error::{Result, SnatchError};
 
+use super::chain::{detect_chains, SessionChain};
 use super::paths::{decode_project_path, is_session_file};
 use super::session::Session;
+use super::session_index::SessionIndex;
 
 /// A Claude Code project directory.
 #[derive(Debug, Clone)]
@@ -20,6 +22,8 @@ pub struct Project {
     encoded_name: String,
     /// Decoded project path (the actual working directory).
     decoded_path: String,
+    /// Session index loaded from sessions-index.json (empty if absent).
+    session_index: SessionIndex,
 }
 
 impl Project {
@@ -49,11 +53,13 @@ impl Project {
             .to_string();
 
         let decoded_path = decode_project_path(&encoded_name);
+        let session_index = SessionIndex::load(&path);
 
         Ok(Self {
             path,
             encoded_name,
             decoded_path,
+            session_index,
         })
     }
 
@@ -73,6 +79,12 @@ impl Project {
     #[must_use]
     pub fn decoded_path(&self) -> &str {
         &self.decoded_path
+    }
+
+    /// Get the session index for this project.
+    #[must_use]
+    pub fn session_index(&self) -> &SessionIndex {
+        &self.session_index
     }
 
     /// Get a display name for the project (last component of decoded path).
@@ -190,6 +202,19 @@ impl Project {
         }
 
         Ok(None)
+    }
+
+    /// Detect session chains in this project.
+    ///
+    /// Returns a map from root session UUID to its chain. Only multi-file
+    /// chains are included — standalone sessions are not in the map.
+    pub fn session_chains(&self) -> Result<std::collections::HashMap<String, SessionChain>> {
+        let sessions = self.main_sessions()?;
+        let pairs: Vec<(&str, &std::path::Path)> = sessions
+            .iter()
+            .map(|s| (s.session_id(), s.path()))
+            .collect();
+        Ok(detect_chains(pairs.into_iter()))
     }
 
     /// Get the number of sessions in this project.

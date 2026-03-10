@@ -103,11 +103,12 @@ impl SnatchServer {
         let summaries: Vec<SessionSummary> = sessions
             .iter()
             .map(|s| {
-                let (duration, compaction_count) = s.quick_metadata_cached()
-                    .map(|m| (m.duration_human(), m.compaction_count))
-                    .unwrap_or((None, 0));
+                let (duration, compaction_count, slug) = s.quick_metadata_cached()
+                    .map(|m| (m.duration_human(), m.compaction_count, m.slug.clone()))
+                    .unwrap_or((None, 0, None));
                 SessionSummary {
                     session_id: s.session_id().to_string(),
+                    slug,
                     project_path: s.project_path().to_string(),
                     is_subagent: s.is_subagent(),
                     parent_session_id: s.parent_session_id().map(String::from),
@@ -156,12 +157,13 @@ impl SnatchServer {
         let analytics = SessionAnalytics::from_conversation(&conversation);
         let summary = analytics.summary_report();
 
-        let compaction_count = session.quick_metadata_cached()
-            .map(|m| m.compaction_count)
-            .unwrap_or(0);
+        let (compaction_count, slug) = session.quick_metadata_cached()
+            .map(|m| (m.compaction_count, m.slug.clone()))
+            .unwrap_or((0, None));
 
         let info = SessionInfoResponse {
             session_id: session.session_id().to_string(),
+            slug,
             project_path: session.project_path().to_string(),
             is_subagent: session.is_subagent(),
             parent_session_id: session.parent_session_id().map(String::from),

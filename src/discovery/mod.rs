@@ -38,16 +38,20 @@
 //! }
 //! ```
 
+pub mod chain;
 mod hierarchy;
 mod paths;
 mod project;
 mod session;
+mod session_index;
 pub mod streaming;
 
+pub use chain::*;
 pub use hierarchy::*;
 pub use paths::*;
 pub use project::*;
 pub use session::*;
+pub use session_index::*;
 pub use streaming::{detect_session_state, SessionState};
 
 use std::path::{Path, PathBuf};

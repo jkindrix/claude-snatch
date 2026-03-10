@@ -131,6 +131,16 @@ impl LogEntry {
         }
     }
 
+    /// Get the slug (human-readable session name) from this entry, if present.
+    #[must_use]
+    pub fn slug(&self) -> Option<&str> {
+        match self {
+            Self::Assistant(m) => m.slug.as_deref(),
+            Self::User(m) => m.slug.as_deref(),
+            _ => None,
+        }
+    }
+
     /// Get the token usage for this entry, if available.
     /// Usage data is only present on assistant messages.
     #[must_use]

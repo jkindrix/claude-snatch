@@ -419,9 +419,12 @@ fn list_sessions<W: Write>(
                     .map(|o| format!(" [{:?}]", o))
                     .unwrap_or_default();
 
-                // Show custom name if available
+                // Show custom name if available, fall back to slug
+                let slug = session.quick_metadata_cached().ok().and_then(|m| m.slug);
                 if let Some(name) = meta.and_then(|m| m.name.as_ref()) {
                     write!(writer, "  {}\"{}\" ({}){}{}", bookmark_marker, name, id, subagent_marker, outcome_badge)?;
+                } else if let Some(slug) = &slug {
+                    write!(writer, "  {}{} [{}]{}{}", bookmark_marker, id, slug, subagent_marker, outcome_badge)?;
                 } else {
                     write!(writer, "  {}{}{}{}", bookmark_marker, id, subagent_marker, outcome_badge)?;
                 }

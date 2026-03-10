@@ -30,6 +30,8 @@ pub struct ListSessionsRequest {
 #[derive(Debug, Serialize)]
 pub struct SessionSummary {
     pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
     pub project_path: String,
     pub is_subagent: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -52,6 +54,8 @@ pub struct GetSessionInfoRequest {
 #[derive(Debug, Serialize)]
 pub struct SessionInfoResponse {
     pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
     pub project_path: String,
     pub is_subagent: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

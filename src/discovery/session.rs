@@ -278,6 +278,9 @@ impl Session {
         // Extract git branch from the first entry that has it
         let git_branch = entries.iter().find_map(|e| e.git_branch().map(String::from));
 
+        // Extract slug from the first entry that has it
+        let slug = entries.iter().find_map(|e| e.slug().map(String::from));
+
         // Check if content indicates this is a subagent (parentUuid on first entry)
         let content_is_subagent = entries.first()
             .and_then(|e| e.parent_uuid())
@@ -321,6 +324,7 @@ impl Session {
             schema_version,
             extracted_cwd,
             git_branch,
+            slug,
             compaction_count,
             content_is_subagent,
             // Left at 0 to avoid expensive filesystem scans during metadata computation.
@@ -337,6 +341,7 @@ impl Session {
 
         Ok(SessionSummary {
             session_id: self.session_id.clone(),
+            slug: meta.slug.clone(),
             is_subagent: self.is_subagent,
             parent_session_id: self.parent_session_id.clone(),
             project_path: self.project_path.clone(),
@@ -439,6 +444,9 @@ pub struct QuickSessionMetadata {
     pub git_branch: Option<String>,
     /// Number of compaction events in this session.
     pub compaction_count: usize,
+    /// Human-readable session slug (adjective-adjective-noun pattern).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
     /// Whether this session is a subagent based on content analysis.
     /// True when the first entry has a non-null parentUuid (even if filename
     /// looks like a main session UUID).
@@ -486,6 +494,8 @@ impl QuickSessionMetadata {
 pub struct SessionSummary {
     /// Session ID.
     pub session_id: String,
+    /// Human-readable session slug.
+    pub slug: Option<String>,
     /// Whether this is a subagent session.
     pub is_subagent: bool,
     /// Parent session ID for subagent sessions.
@@ -689,6 +699,7 @@ mod tests {
     fn test_short_id() {
         let summary = SessionSummary {
             session_id: "40afc8a7-3fcb-4d29-b1ee-100b81b8c6c0".to_string(),
+            slug: None,
             is_subagent: false,
             parent_session_id: None,
             project_path: "/test".to_string(),
@@ -713,6 +724,7 @@ mod tests {
     fn test_session_summary_prefers_extracted_cwd() {
         let summary = SessionSummary {
             session_id: "test".to_string(),
+            slug: None,
             is_subagent: false,
             parent_session_id: None,
             project_path: "/decoded/path".to_string(),
