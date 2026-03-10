@@ -1016,6 +1016,77 @@ pub struct DetectConflictsResponse {
 }
 
 // ============================================================================
+// Project Health
+// ============================================================================
+
+/// Request for project health dashboard.
+#[derive(Debug, Deserialize, ToolInput)]
+pub struct GetProjectHealthRequest {
+    /// Project path filter (substring match). Required.
+    pub project: String,
+
+    /// Time period: "24h", "7d", "30d", "all". Default: "7d".
+    pub period: Option<String>,
+
+    /// Maximum hotspot/rework files to return. Default: 20.
+    pub max_hotspots: Option<usize>,
+
+    /// Exclude subagent sessions. Default: true.
+    pub no_subagents: Option<bool>,
+}
+
+/// A hotspot file entry.
+#[derive(Debug, Serialize)]
+pub struct HotspotFileEntry {
+    pub path: String,
+    pub edit_count: usize,
+    pub session_count: usize,
+}
+
+/// A rework file entry.
+#[derive(Debug, Serialize)]
+pub struct ReworkFileEntry {
+    pub path: String,
+    pub version_count: usize,
+    pub session_count: usize,
+}
+
+/// Decision stability metrics.
+#[derive(Debug, Serialize)]
+pub struct DecisionChurnEntry {
+    pub total_decisions: usize,
+    pub confirmed_count: usize,
+    pub superseded_count: usize,
+    pub abandoned_count: usize,
+    pub proposed_count: usize,
+}
+
+/// Per-session health stats.
+#[derive(Debug, Serialize)]
+pub struct SessionHealthEntry {
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    pub error_count: usize,
+    pub tool_count: usize,
+}
+
+/// Response for get_project_health.
+#[derive(Debug, Serialize)]
+pub struct GetProjectHealthResponse {
+    pub project_path: String,
+    pub period: String,
+    pub sessions_analyzed: usize,
+    pub total_errors: usize,
+    pub total_tool_calls: usize,
+    pub hotspot_files: Vec<HotspotFileEntry>,
+    pub rework_files: Vec<ReworkFileEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_churn: Option<DecisionChurnEntry>,
+    pub session_stats: Vec<SessionHealthEntry>,
+}
+
+// ============================================================================
 // Event Context
 // ============================================================================
 

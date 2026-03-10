@@ -22,6 +22,7 @@
 //! - `detect_decisions` - Decision point detection with confidence scoring
 //! - `detect_conflicts` - Contradiction detection across sessions and decision registry
 //! - `get_project_lessons` - Cross-session lesson aggregation: recurring errors and corrections
+//! - `get_project_health` - Project health dashboard: hotspots, rework, error trends
 //! - `get_event_context` - Contextual zoom around a specific event by message_id or timestamp
 
 #![cfg(feature = "mcp")]
@@ -2295,6 +2296,96 @@ impl SnatchServer {
             top_failure_modes: result.summary.top_failure_modes,
             recurring_errors,
             recurring_corrections,
+        };
+
+        match ToolOutput::json(&response) {
+            Ok(output) => output,
+            Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+        }
+    }
+
+    // ========================================================================
+    // New Tool: get_project_health
+    // ========================================================================
+
+    /// Project health dashboard: hotspot files, rework, error trends, decision stability.
+    #[tool(description = "Project health dashboard. Shows hotspot files (most edits), rework files (edited across multiple sessions), decision stability metrics, and per-session error/tool counts. Answers 'which parts of the codebase cause the most trouble?' and 'are we improving?'")]
+    async fn get_project_health(&self, request: GetProjectHealthRequest) -> ToolOutput {
+        use crate::analysis::project_health::{analyze_project_health, ProjectHealthParams};
+
+        let claude_dir = match self.get_claude_dir() {
+            Ok(dir) => dir,
+            Err(e) => return ToolOutput::error(e),
+        };
+
+        let period = request.period.as_deref().unwrap_or("7d");
+        let cutoff = match period_cutoff(period) {
+            Ok(c) => c,
+            Err(e) => return ToolOutput::error(format!("Invalid period: {e}")),
+        };
+
+        let mut sessions = match claude_dir.all_sessions() {
+            Ok(s) => s,
+            Err(e) => return ToolOutput::error(format!("Failed to list sessions: {e}")),
+        };
+
+        sessions.retain(|s| s.project_path().contains(request.project.as_str()));
+
+        if request.no_subagents.unwrap_or(true) {
+            sessions.retain(|s| !s.is_subagent());
+        }
+
+        if let Some(cutoff_dt) = cutoff {
+            let cutoff_systime = std::time::SystemTime::from(cutoff_dt);
+            sessions.retain(|s| s.modified_time() >= cutoff_systime);
+        }
+
+        // Try to load decision store for this project
+        let projects = claude_dir.projects().unwrap_or_default();
+        let decision_store = projects.iter()
+            .find(|p| p.path().to_string_lossy().contains(request.project.as_str()))
+            .and_then(|proj| crate::decisions::load_decisions(proj.path()).ok());
+
+        let params = ProjectHealthParams {
+            max_hotspots: request.max_hotspots.unwrap_or(20),
+        };
+
+        let result = analyze_project_health(
+            &sessions,
+            decision_store.as_ref(),
+            &params,
+            self.max_file_size,
+        );
+
+        let response = GetProjectHealthResponse {
+            project_path: request.project,
+            period: period.to_string(),
+            sessions_analyzed: result.sessions_analyzed,
+            total_errors: result.total_errors,
+            total_tool_calls: result.total_tool_calls,
+            hotspot_files: result.hotspot_files.into_iter().map(|f| HotspotFileEntry {
+                path: f.path,
+                edit_count: f.edit_count,
+                session_count: f.session_count,
+            }).collect(),
+            rework_files: result.rework_files.into_iter().map(|f| ReworkFileEntry {
+                path: f.path,
+                version_count: f.version_count,
+                session_count: f.session_count,
+            }).collect(),
+            decision_churn: result.decision_churn.map(|dc| DecisionChurnEntry {
+                total_decisions: dc.total_decisions,
+                confirmed_count: dc.confirmed_count,
+                superseded_count: dc.superseded_count,
+                abandoned_count: dc.abandoned_count,
+                proposed_count: dc.proposed_count,
+            }),
+            session_stats: result.session_stats.into_iter().map(|s| SessionHealthEntry {
+                session_id: s.session_id,
+                timestamp: s.timestamp,
+                error_count: s.error_count,
+                tool_count: s.tool_count,
+            }).collect(),
         };
 
         match ToolOutput::json(&response) {
