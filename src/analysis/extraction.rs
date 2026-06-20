@@ -36,7 +36,17 @@ pub fn truncate_text(text: &str, max_len: usize) -> String {
 /// Returns `false` for system-generated user entries like `/compact` commands,
 /// `/mcp` reconnect messages, `local-command-caveat` wrappers,
 /// `local-command-stdout` outputs, and `[Request interrupted by user]`.
+///
+/// Also returns `false` for tool-result turns. A user-role message that
+/// carries a `tool_result` block (e.g. a `ToolSearch` result) may be paired
+/// with a synthetic harness acknowledgement like `"Tool loaded."`; that text
+/// is not human-authored, so such turns are not counted as prompts.
 pub fn is_human_prompt(entry: &LogEntry) -> bool {
+    if let LogEntry::User(user) = entry {
+        if user.message.has_tool_results() {
+            return false;
+        }
+    }
     let text = match extract_user_prompt_text(entry) {
         Some(t) => t,
         None => return false,
@@ -432,6 +442,20 @@ mod tests {
     fn test_is_noise_text_interrupt() {
         assert!(is_noise_text("[Request interrupted by user]"));
         assert!(is_noise_text("[Request interrupted by user for tool use]"));
+    }
+
+    #[test]
+    fn test_tool_result_turn_is_not_human_prompt() {
+        // A user-role turn carrying a tool_result plus a synthetic
+        // "Tool loaded." acknowledgement is not a human prompt.
+        let line = r#"{"uuid":"1","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","version":"2.0","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"Read"}]},{"type":"text","text":"Tool loaded."}]}}"#;
+        let entry: LogEntry = serde_json::from_str(line).unwrap();
+        assert!(!is_human_prompt(&entry));
+
+        // A plain user-typed message is still a human prompt.
+        let line2 = r#"{"uuid":"2","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:01Z","sessionId":"s","version":"2.0","isSidechain":false,"message":{"role":"user","content":"fix the parser"}}"#;
+        let entry2: LogEntry = serde_json::from_str(line2).unwrap();
+        assert!(is_human_prompt(&entry2));
     }
 
     #[test]
