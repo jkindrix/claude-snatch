@@ -3,7 +3,7 @@
 //! Builds a reverse index from file paths to the sessions and messages
 //! that modified them, using `file-history-snapshot` entries.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 
@@ -66,9 +66,16 @@ impl FileIndex {
             }
         }
 
-        // Sort each file's modifications by timestamp
+        // Sort each file's modifications by timestamp, then collapse duplicate
+        // snapshot records. A file-history-snapshot re-lists every tracked file
+        // (with its current version) each time any file changes, so the same
+        // (session, version) state appears in many snapshots. Keep one record
+        // per (session, version) — the earliest — so counts reflect actual
+        // modifications rather than snapshot appearances.
         for mods in index.entries.values_mut() {
             mods.sort_by_key(|m| m.timestamp);
+            let mut seen = HashSet::new();
+            mods.retain(|m| seen.insert((m.session_id.clone(), m.version)));
         }
 
         index
