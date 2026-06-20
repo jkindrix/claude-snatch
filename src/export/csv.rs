@@ -402,6 +402,11 @@ impl Exporter for CsvExporter {
                 LogEntry::QueueOperation(_) => "queue",
                 LogEntry::TurnEnd(_) => "turn_end",
                 LogEntry::Progress(_) => "progress",
+                LogEntry::Attachment(_) => "attachment",
+                LogEntry::LastPrompt(_) => "last_prompt",
+                LogEntry::Mode(_) => "mode",
+                LogEntry::PermissionMode(_) => "permission_mode",
+                LogEntry::AiTitle(_) => "ai_title",
             };
 
             self.write_row(writer, &[uuid, parent_uuid, entry_type, &timestamp, ""])?;

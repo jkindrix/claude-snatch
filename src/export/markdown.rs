@@ -734,6 +734,13 @@ impl MarkdownExporter {
             LogEntry::Progress(_) => {
                 // Skip progress entries in Markdown export
             }
+            LogEntry::Attachment(_)
+            | LogEntry::LastPrompt(_)
+            | LogEntry::Mode(_)
+            | LogEntry::PermissionMode(_)
+            | LogEntry::AiTitle(_) => {
+                // Skip attachment and sidecar metadata entries in Markdown export
+            }
         }
         Ok(())
     }

@@ -47,6 +47,27 @@ pub enum LogEntry {
 
     /// Progress notifications (hooks, subagent activity, bash output, etc.).
     Progress(ProgressMessage),
+
+    /// Hook-injected attachment context (e.g. SessionStart hook output).
+    ///
+    /// These carry a `uuid`/`parentUuid` and are real links in the
+    /// conversation tree; dropping them fragments the main thread.
+    Attachment(AttachmentMessage),
+
+    /// The most recent user prompt, recorded as session sidecar metadata.
+    #[serde(rename = "last-prompt")]
+    LastPrompt(LastPromptMessage),
+
+    /// Editor mode sidecar metadata.
+    Mode(ModeMessage),
+
+    /// Permission mode sidecar metadata.
+    #[serde(rename = "permission-mode")]
+    PermissionMode(PermissionModeMessage),
+
+    /// AI-generated session title metadata.
+    #[serde(rename = "ai-title")]
+    AiTitle(AiTitleMessage),
 }
 
 impl LogEntry {
@@ -58,10 +79,13 @@ impl LogEntry {
             Self::User(m) => Some(&m.uuid),
             Self::System(m) => Some(&m.uuid),
             Self::Progress(m) => Some(&m.uuid),
+            Self::Attachment(m) => Some(&m.uuid),
             Self::Summary(_) => None, // Summary messages lack UUID
             Self::FileHistorySnapshot(_) => None,
             Self::QueueOperation(_) => None,
             Self::TurnEnd(_) => None,
+            // Sidecar metadata entries carry no UUID.
+            Self::LastPrompt(_) | Self::Mode(_) | Self::PermissionMode(_) | Self::AiTitle(_) => None,
         }
     }
 
@@ -73,6 +97,7 @@ impl LogEntry {
             Self::User(m) => m.parent_uuid.as_deref(),
             Self::System(m) => m.parent_uuid.as_deref(),
             Self::Progress(m) => m.parent_uuid.as_deref(),
+            Self::Attachment(m) => m.parent_uuid.as_deref(),
             _ => None,
         }
     }
@@ -94,6 +119,11 @@ impl LogEntry {
             Self::User(m) => Some(&m.session_id),
             Self::System(m) => m.session_id.as_deref(),
             Self::Progress(m) => Some(&m.session_id),
+            Self::Attachment(m) => Some(&m.session_id),
+            Self::LastPrompt(m) => Some(&m.session_id),
+            Self::Mode(m) => Some(&m.session_id),
+            Self::PermissionMode(m) => Some(&m.session_id),
+            Self::AiTitle(m) => Some(&m.session_id),
             Self::FileHistorySnapshot(_) => None,
             Self::QueueOperation(m) => Some(&m.session_id),
             Self::TurnEnd(_) => None,
@@ -109,10 +139,13 @@ impl LogEntry {
             Self::User(m) => Some(m.timestamp),
             Self::System(m) => Some(m.timestamp),
             Self::Progress(m) => Some(m.timestamp),
+            Self::Attachment(m) => Some(m.timestamp),
             Self::FileHistorySnapshot(_) => None,
             Self::QueueOperation(m) => Some(m.timestamp),
             Self::TurnEnd(m) => Some(m.timestamp),
             Self::Summary(_) => None,
+            // Sidecar metadata entries carry no timestamp.
+            Self::LastPrompt(_) | Self::Mode(_) | Self::PermissionMode(_) | Self::AiTitle(_) => None,
         }
     }
 
@@ -135,6 +168,7 @@ impl LogEntry {
             Self::User(m) => m.is_sidechain,
             Self::System(m) => m.is_sidechain.unwrap_or(false),
             Self::Progress(m) => m.is_sidechain,
+            Self::Attachment(m) => m.is_sidechain,
             _ => false,
         }
     }
@@ -172,6 +206,11 @@ impl LogEntry {
             Self::FileHistorySnapshot(_) => "file-history-snapshot",
             Self::QueueOperation(_) => "queue-operation",
             Self::TurnEnd(_) => "turn_end",
+            Self::Attachment(_) => "attachment",
+            Self::LastPrompt(_) => "last-prompt",
+            Self::Mode(_) => "mode",
+            Self::PermissionMode(_) => "permission-mode",
+            Self::AiTitle(_) => "ai-title",
         }
     }
 
@@ -187,6 +226,7 @@ impl LogEntry {
             Self::Assistant(m) => m.cwd.as_deref(),
             Self::User(m) => m.cwd.as_deref(),
             Self::System(m) => m.cwd.as_deref(),
+            Self::Attachment(m) => m.cwd.as_deref(),
             _ => None,
         }
     }
@@ -198,6 +238,7 @@ impl LogEntry {
             Self::Assistant(m) => m.git_branch.as_deref(),
             Self::User(m) => m.git_branch.as_deref(),
             Self::System(m) => m.git_branch.as_deref(),
+            Self::Attachment(m) => m.git_branch.as_deref(),
             _ => None,
         }
     }
@@ -887,6 +928,117 @@ impl ProgressMessage {
     pub fn effective_agent_id(&self) -> Option<&str> {
         self.data.agent_id.as_deref().or(self.agent_id.as_deref())
     }
+}
+
+/// Hook-injected attachment context.
+///
+/// Carries `uuid`/`parentUuid` and is a structural link in the conversation
+/// tree, so it must be preserved during reconstruction to avoid fragmenting
+/// the main thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentMessage {
+    /// Unique identifier for this entry.
+    pub uuid: String,
+
+    /// Parent event reference in the conversation tree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_uuid: Option<String>,
+
+    /// ISO 8601 UTC timestamp.
+    pub timestamp: DateTime<Utc>,
+
+    /// Conversation session identifier.
+    #[serde(default)]
+    pub session_id: String,
+
+    /// Whether this is a sidechain (subagent) message.
+    #[serde(default)]
+    pub is_sidechain: bool,
+
+    /// Working directory when the entry was recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+
+    /// Git branch when the entry was recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+
+    /// Claude Code version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+
+    /// The attachment payload (hook output, injected context, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<Value>,
+
+    /// Unknown fields for forward compatibility.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// Sidecar metadata recording the most recent user prompt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastPromptMessage {
+    /// The most recent user prompt text.
+    pub last_prompt: String,
+
+    /// Conversation session identifier.
+    #[serde(default)]
+    pub session_id: String,
+
+    /// Unknown fields for forward compatibility.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// Sidecar metadata recording the editor mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModeMessage {
+    /// Editor mode (e.g. "normal").
+    pub mode: String,
+
+    /// Conversation session identifier.
+    #[serde(default)]
+    pub session_id: String,
+
+    /// Unknown fields for forward compatibility.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// Sidecar metadata recording the permission mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionModeMessage {
+    /// Permission mode (e.g. "bypassPermissions").
+    pub permission_mode: String,
+
+    /// Conversation session identifier.
+    #[serde(default)]
+    pub session_id: String,
+
+    /// Unknown fields for forward compatibility.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// Sidecar metadata recording the AI-generated session title.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiTitleMessage {
+    /// AI-generated session title.
+    pub ai_title: String,
+
+    /// Conversation session identifier.
+    #[serde(default)]
+    pub session_id: String,
+
+    /// Unknown fields for forward compatibility.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
 }
 
 #[cfg(test)]

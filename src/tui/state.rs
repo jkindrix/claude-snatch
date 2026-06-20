@@ -2917,8 +2917,15 @@ impl AppState {
                 LogEntry::QueueOperation(q) => Some(&q.timestamp),
                 LogEntry::TurnEnd(t) => Some(&t.timestamp),
                 LogEntry::Progress(p) => Some(&p.timestamp),
-                // Summary and FileHistorySnapshot don't have timestamps, include them by default
-                LogEntry::Summary(_) | LogEntry::FileHistorySnapshot(_) => None,
+                LogEntry::Attachment(a) => Some(&a.timestamp),
+                // Summary, FileHistorySnapshot, and sidecar metadata lack timestamps;
+                // include them by default.
+                LogEntry::Summary(_)
+                | LogEntry::FileHistorySnapshot(_)
+                | LogEntry::LastPrompt(_)
+                | LogEntry::Mode(_)
+                | LogEntry::PermissionMode(_)
+                | LogEntry::AiTitle(_) => None,
             };
             if let Some(ts) = timestamp {
                 if !self.filter_state.is_in_date_range(ts) {

@@ -154,6 +154,13 @@ impl SessionAnalytics {
             LogEntry::Progress(_) => {
                 // Progress entries are informational; no analytics to gather
             }
+            LogEntry::Attachment(_)
+            | LogEntry::LastPrompt(_)
+            | LogEntry::Mode(_)
+            | LogEntry::PermissionMode(_)
+            | LogEntry::AiTitle(_) => {
+                // Attachment and sidecar metadata entries carry no analytics.
+            }
         }
     }
 

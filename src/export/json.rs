@@ -140,8 +140,16 @@ fn should_include_entry(entry: &LogEntry, options: &ExportOptions) -> bool {
         LogEntry::Assistant(_) => options.should_include_assistant(),
         LogEntry::System(_) => options.should_include_system(),
         LogEntry::Summary(_) => options.should_include_summary(),
-        // Always include structural entries
-        LogEntry::FileHistorySnapshot(_) | LogEntry::QueueOperation(_) | LogEntry::TurnEnd(_) | LogEntry::Progress(_) => true,
+        // Always include structural and metadata entries
+        LogEntry::FileHistorySnapshot(_)
+        | LogEntry::QueueOperation(_)
+        | LogEntry::TurnEnd(_)
+        | LogEntry::Progress(_)
+        | LogEntry::Attachment(_)
+        | LogEntry::LastPrompt(_)
+        | LogEntry::Mode(_)
+        | LogEntry::PermissionMode(_)
+        | LogEntry::AiTitle(_) => true,
     }
 }
 
