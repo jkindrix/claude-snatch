@@ -214,12 +214,19 @@ impl Conversation {
             }
         }
 
-        // Compute subtree sizes bottom-up for main thread selection.
-        // At branch points, the main thread follows the child with the
-        // largest subtree, which naturally tracks the active conversation
-        // rather than dead-end streaming chunks or short side branches.
-        let mut subtree_sizes: HashMap<String, usize> = HashMap::new();
-        fn compute_subtree_size(
+        // Score each subtree by the number of *conversational* nodes it
+        // contains, for main thread selection. Progress notifications
+        // (bash_progress/hook_progress/agent_progress) form long dead-end
+        // sibling chains off an assistant node during a long-running tool
+        // call. Counting them lets a progress chain outweigh the real
+        // continuation at a fork, so the walk follows the progress chain and
+        // dead-ends — silently dropping the rest of the conversation.
+        // Weighting progress nodes as 0 keeps the walk on the conversation.
+        fn is_conversational(entry: &LogEntry) -> bool {
+            !matches!(entry, LogEntry::Progress(_))
+        }
+        let mut subtree_scores: HashMap<String, usize> = HashMap::new();
+        fn compute_subtree_score(
             uuid: &str,
             nodes: &IndexMap<String, ConversationNode>,
             cache: &mut HashMap<String, usize>,
@@ -228,11 +235,13 @@ impl Conversation {
                 return cached;
             }
             let size = if let Some(node) = nodes.get(uuid) {
-                1 + node
-                    .children
-                    .iter()
-                    .map(|c| compute_subtree_size(c, nodes, cache))
-                    .sum::<usize>()
+                let self_weight = usize::from(is_conversational(&node.entry));
+                self_weight
+                    + node
+                        .children
+                        .iter()
+                        .map(|c| compute_subtree_score(c, nodes, cache))
+                        .sum::<usize>()
             } else {
                 0
             };
@@ -240,11 +249,21 @@ impl Conversation {
             size
         }
         for uuid in nodes.keys().cloned().collect::<Vec<_>>() {
-            compute_subtree_size(&uuid, &nodes, &mut subtree_sizes);
+            compute_subtree_score(&uuid, &nodes, &mut subtree_scores);
         }
 
-        // Build main thread following the largest subtree at each branch
-        if let Some(first_root) = roots.first() {
+        // Start from the root whose subtree holds the most conversational
+        // nodes. When dropped entries fragment the tree into several roots,
+        // this keeps the main thread on the largest real fragment rather than
+        // an arbitrary first root.
+        let start = roots
+            .iter()
+            .max_by_key(|r| subtree_scores.get(*r).copied().unwrap_or(0))
+            .cloned();
+
+        // Build main thread following the largest conversational subtree at
+        // each branch.
+        if let Some(first_root) = start {
             let mut current = first_root.clone();
             main_thread.push(current.clone());
 
@@ -254,11 +273,11 @@ impl Conversation {
                         break;
                     }
 
-                    // Follow the child with the largest subtree
+                    // Follow the child with the largest conversational subtree
                     let next = node
                         .children
                         .iter()
-                        .max_by_key(|c| subtree_sizes.get(*c).copied().unwrap_or(0))
+                        .max_by_key(|c| subtree_scores.get(*c).copied().unwrap_or(0))
                         .cloned();
                     if let Some(next_uuid) = next {
                         main_thread.push(next_uuid.clone());
@@ -631,6 +650,61 @@ mod tests {
         assert_eq!(conv.roots()[0], "2");
         // Main thread should include all 3 entries
         assert_eq!(conv.main_thread().len(), 3);
+    }
+
+    fn make_progress_entry(uuid: &str, parent: Option<&str>) -> LogEntry {
+        use crate::model::message::{ProgressData, ProgressMessage};
+        LogEntry::Progress(ProgressMessage {
+            uuid: uuid.to_string(),
+            parent_uuid: parent.map(String::from),
+            timestamp: Utc::now(),
+            session_id: "test".to_string(),
+            tool_use_id: None,
+            parent_tool_use_id: None,
+            agent_id: None,
+            is_sidechain: false,
+            slug: None,
+            data: ProgressData {
+                progress_type: "bash_progress".to_string(),
+                agent_id: None,
+                prompt: None,
+                extra: IndexMap::new(),
+            },
+            extra: IndexMap::new(),
+        })
+    }
+
+    #[test]
+    fn test_progress_chain_does_not_truncate_main_thread() {
+        // An assistant node forks into a long progress chain (bash_progress
+        // notifications during a long tool call) and the real user
+        // continuation. The progress chain is longer, but the main thread must
+        // follow the conversation, not dead-end into the progress chain.
+        let mut entries = vec![
+            make_user_entry("1", None),
+            make_user_entry("assistant", Some("1")),
+        ];
+        // Progress chain off "assistant": 5 nodes.
+        let mut prev = "assistant".to_string();
+        for i in 0..5 {
+            let id = format!("p{i}");
+            entries.push(make_progress_entry(&id, Some(&prev)));
+            prev = id;
+        }
+        // Real continuation off "assistant": 2 nodes (shorter than progress).
+        entries.push(make_user_entry("cont1", Some("assistant")));
+        entries.push(make_user_entry("cont2", Some("cont1")));
+
+        let conv = Conversation::from_entries(entries).unwrap();
+        let thread: Vec<&str> = conv.main_thread().iter().map(String::as_str).collect();
+
+        // The thread must reach the real continuation, not stop in progress.
+        assert!(thread.contains(&"cont1"), "thread: {thread:?}");
+        assert!(thread.contains(&"cont2"), "thread: {thread:?}");
+        assert!(
+            !thread.iter().any(|u| u.starts_with('p')),
+            "main thread walked into progress chain: {thread:?}"
+        );
     }
 
     #[test]
