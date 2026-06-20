@@ -191,6 +191,19 @@ fn is_likely_false_positive(tool_name: &str, content: &str) -> bool {
     }
 }
 
+/// Read-only git commands whose output (commit messages, diffs) routinely
+/// contains error-like words without being a tool failure — e.g. `git log`
+/// showing a "fix stack overflow" commit message would otherwise match the
+/// soft-error regex.
+fn is_readonly_git_command(command: &str) -> bool {
+    let c = command.trim_start();
+    c.starts_with("git log")
+        || c.starts_with("git show")
+        || c.starts_with("git diff")
+        || c.starts_with("git blame")
+        || c.starts_with("git status")
+}
+
 /// Soft error pattern: detect errors in tool result content even when
 /// `is_error` is not set (e.g., SIGSEGV, panics, assertion failures).
 fn build_soft_error_regex() -> Option<regex::Regex> {
@@ -277,6 +290,16 @@ pub fn extract_error_fix_pairs(
                     .get(&result.tool_use_id)
                     .cloned()
                     .unwrap_or_else(|| ("unknown".into(), serde_json::Value::Null, None));
+
+                // Filter false positives: a soft-error keyword inside read-only git
+                // output (commit messages, diffs) is not a real failure.
+                if is_soft_error && tool_name == "Bash" {
+                    if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
+                        if is_readonly_git_command(cmd) {
+                            continue;
+                        }
+                    }
+                }
 
                 // Filter false positives: successful results spuriously flagged is_error=true,
                 // or soft error patterns matching inside structured response data
