@@ -11,7 +11,7 @@ use std::io::{self, BufWriter, Write};
 use regex::{Regex, RegexBuilder};
 use serde::Serialize;
 
-use crate::analysis::extraction::is_noise_text;
+use crate::analysis::extraction::{is_human_prompt, is_noise_text};
 use crate::cli::{Cli, OutputFormat, PromptsArgs};
 use crate::discovery::{Session, SessionFilter};
 use crate::error::{Result, SnatchError};
@@ -841,6 +841,9 @@ fn extract_prompts_from_session(session: &Session, args: &PromptsArgs, max_file_
     let mut prompts = Vec::new();
 
     for entry in entries {
+        if !is_human_prompt(&entry) {
+            continue;
+        }
         if let LogEntry::User(user) = entry {
             // Get text content from user message
             let text = match &user.message {
