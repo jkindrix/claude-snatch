@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 
 use crate::analysis::extraction::{
     extract_assistant_summary, extract_thinking_text, extract_tool_names,
-    extract_user_prompt_text, truncate_text,
+    extract_user_prompt_text, is_human_prompt, truncate_text,
 };
 use crate::discovery::Session;
 use crate::file_index::FileIndex;
@@ -172,7 +172,7 @@ fn extract_change_context(
 
         match entry {
             LogEntry::User(_) => {
-                if user_prompt.is_none() {
+                if user_prompt.is_none() && is_human_prompt(entry) {
                     user_prompt = extract_user_prompt_text(entry)
                         .map(|t| truncate_text(&t, params.max_text_len));
                 }

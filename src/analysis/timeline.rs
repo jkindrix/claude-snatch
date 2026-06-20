@@ -23,7 +23,8 @@ use crate::model::message::LogEntry;
 use crate::reconstruction::ConversationTurn;
 
 use super::extraction::{
-    extract_assistant_summary, extract_files_from_tools, extract_user_prompt_text, truncate_text,
+    extract_assistant_summary, extract_files_from_tools, extract_user_prompt_text, is_human_prompt,
+    truncate_text,
 };
 
 // ── Result types ────────────────────────────────────────────────────────────
@@ -84,6 +85,9 @@ pub fn build_timeline(turns: &[ConversationTurn<'_>], opts: &TimelineOptions) ->
         .enumerate()
         .map(|(i, turn)| {
             let user_prompt = turn.user_message.and_then(|e| {
+                if !is_human_prompt(e) {
+                    return None;
+                }
                 extract_user_prompt_text(e).map(|t| truncate_text(&t, opts.prompt_max_len))
             });
 
