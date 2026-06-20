@@ -122,6 +122,7 @@ fn show_session_info(
                 file_size: summary.file_size,
                 file_size_human: summary.file_size_human.clone(),
                 entry_count: summary.entry_count,
+                unparsed_count: summary.unparsed_count,
                 message_count: summary.message_count,
                 compaction_count: summary.compaction_count,
                 start_time: summary.start_time.map(|t| t.to_rfc3339()),
@@ -205,7 +206,16 @@ fn show_session_info(
             }
 
             println!("File Size:    {}", summary.file_size_human);
-            println!("Entries:      {}", summary.entry_count);
+            if summary.unparsed_count > 0 {
+                println!(
+                    "Entries:      {} ({} line{} unparsed)",
+                    summary.entry_count,
+                    summary.unparsed_count,
+                    if summary.unparsed_count == 1 { "" } else { "s" },
+                );
+            } else {
+                println!("Entries:      {}", summary.entry_count);
+            }
             println!("Messages:     {}", summary.message_count);
 
             // Show tool result artifacts info
@@ -678,6 +688,7 @@ struct SessionInfoOutput {
     file_size: u64,
     file_size_human: String,
     entry_count: usize,
+    unparsed_count: usize,
     message_count: usize,
     compaction_count: usize,
     start_time: Option<String>,
@@ -779,6 +790,7 @@ mod tests {
             file_size: 1024,
             file_size_human: "1 KB".to_string(),
             entry_count: 50,
+            unparsed_count: 0,
             message_count: 25,
             compaction_count: 2,
             start_time: Some("2025-01-01T00:00:00Z".to_string()),
@@ -872,6 +884,7 @@ mod tests {
             file_size: 0,
             file_size_human: "0 B".to_string(),
             entry_count: 0,
+            unparsed_count: 0,
             message_count: 0,
             compaction_count: 0,
             start_time: None,

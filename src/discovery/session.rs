@@ -260,6 +260,7 @@ impl Session {
         // Read just the first and last few lines
         let mut parser = JsonlParser::new().with_lenient(true);
         let entries = parser.parse_file(&self.path)?;
+        let unparsed_count = parser.stats().lines_skipped;
 
         // Find the first entry with a timestamp (Summary entries don't have timestamps)
         let start_time = entries.iter().find_map(|e| e.timestamp());
@@ -314,6 +315,7 @@ impl Session {
             is_subagent: self.is_subagent,
             file_size: self.file_size,
             entry_count: entries.len(),
+            unparsed_count,
             user_count,
             assistant_count,
             system_count,
@@ -350,6 +352,7 @@ impl Session {
             file_size: self.file_size,
             file_size_human: self.file_size_human(),
             entry_count: meta.entry_count,
+            unparsed_count: meta.unparsed_count,
             message_count: meta.user_count + meta.assistant_count,
             compaction_count: meta.compaction_count,
             start_time: meta.start_time,
@@ -419,6 +422,11 @@ pub struct QuickSessionMetadata {
     pub file_size: u64,
     /// Total entry count.
     pub entry_count: usize,
+    /// Number of non-empty lines that could not be parsed (malformed JSON or a
+    /// known `type` whose body the schema rejected). These are dropped from the
+    /// reconstruction; surfacing the count keeps silent drops visible.
+    #[serde(default)]
+    pub unparsed_count: usize,
     /// User message count.
     pub user_count: usize,
     /// Assistant message count.
@@ -513,6 +521,8 @@ pub struct SessionSummary {
     pub file_size_human: String,
     /// Total JSONL entry count.
     pub entry_count: usize,
+    /// Number of non-empty lines that could not be parsed and were dropped.
+    pub unparsed_count: usize,
     /// User + Assistant message count.
     pub message_count: usize,
     /// Number of compaction events in this session.
@@ -708,6 +718,7 @@ mod tests {
             file_size: 1000,
             file_size_human: "1 KB".to_string(),
             entry_count: 10,
+            unparsed_count: 0,
             message_count: 5,
             compaction_count: 0,
             start_time: None,
@@ -733,6 +744,7 @@ mod tests {
             file_size: 0,
             file_size_human: "0 B".to_string(),
             entry_count: 0,
+            unparsed_count: 0,
             message_count: 0,
             compaction_count: 0,
             start_time: None,
