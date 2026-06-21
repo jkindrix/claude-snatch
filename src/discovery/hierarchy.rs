@@ -1,7 +1,8 @@
 //! Agent hierarchy discovery and management.
 //!
-//! Links parent sessions to their spawned subagent sessions based on
-//! temporal proximity (subagents created during parent session's active period).
+//! Links parent sessions to their spawned subagent sessions by directory
+//! structure (subagents live under `<parent>/subagents/`), falling back to
+//! temporal proximity only when that structure is absent.
 
 use std::collections::HashMap;
 
@@ -110,6 +111,19 @@ impl HierarchyBuilder {
         let mut unassigned_subagents: Vec<Session> = Vec::new();
 
         for subagent in subagents {
+            // Authoritative link: subagents live at <parent>/subagents/, so the
+            // directory name is the parent session id. Use it when present;
+            // attach only if that parent is among the known main sessions.
+            if let Some(dir_parent) = subagent.parent_session_id().map(str::to_string) {
+                if main_sessions.iter().any(|m| m.session_id() == dir_parent) {
+                    parent_to_children.entry(dir_parent).or_default().push(subagent);
+                } else {
+                    unassigned_subagents.push(subagent);
+                }
+                continue;
+            }
+
+            // Fallback (no directory structure): match by temporal proximity.
             let subagent_time = subagent.modified_time();
 
             // Find the best matching parent (most recent main session before subagent)
