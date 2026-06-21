@@ -302,39 +302,50 @@ impl Conversation {
         // nodes. When dropped entries fragment the tree into several roots,
         // this keeps the main thread on the largest real fragment rather than
         // an arbitrary first root.
-        let start = roots
+        // Roots that hold conversational content, ordered by activity so older
+        // fragments come first. When a dropped logical parent fragments the tree
+        // (e.g. a compaction boundary whose parent line was lost), walking every
+        // conversational root — not just the most recent — keeps the otherwise
+        // orphaned preamble on the main thread. Pure-progress roots are excluded.
+        let mut conv_roots: Vec<String> = roots
             .iter()
-            .max_by_key(|r| select_key(r))
-            .cloned();
+            .filter(|r| latest_conv_ts.get(*r).copied().flatten().is_some())
+            .cloned()
+            .collect();
+        if conv_roots.is_empty() {
+            conv_roots = roots
+                .iter()
+                .max_by_key(|r| select_key(r))
+                .cloned()
+                .into_iter()
+                .collect();
+        }
+        conv_roots.sort_by_key(|r| latest_conv_ts.get(r).copied().flatten());
 
-        // Build main thread following the largest conversational subtree at
-        // each branch.
-        if let Some(first_root) = start {
-            let mut current = first_root.clone();
+        // Build the main thread by walking each root in turn, following the
+        // child with the most recent conversational activity (subtree size
+        // breaks ties). A visited set guards against revisits/cycles.
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for root in conv_roots {
+            let mut current = root;
+            if !visited.insert(current.clone()) {
+                continue;
+            }
             main_thread.push(current.clone());
-
             loop {
-                if let Some(node) = nodes.get(&current) {
-                    if node.children.is_empty() {
-                        break;
-                    }
-
-                    // Follow the child with the most recent conversational
-                    // activity (subtree size breaks ties).
-                    let next = node
-                        .children
-                        .iter()
-                        .max_by_key(|c| select_key(c))
-                        .cloned();
-                    if let Some(next_uuid) = next {
-                        main_thread.push(next_uuid.clone());
-                        current = next_uuid;
-                    } else {
-                        break;
-                    }
-                } else {
+                let Some(node) = nodes.get(&current) else { break };
+                if node.children.is_empty() {
                     break;
                 }
+                let Some(next_uuid) = node.children.iter().max_by_key(|c| select_key(c)).cloned()
+                else {
+                    break;
+                };
+                if !visited.insert(next_uuid.clone()) {
+                    break;
+                }
+                main_thread.push(next_uuid.clone());
+                current = next_uuid;
             }
         }
 
@@ -785,6 +796,23 @@ mod tests {
             r#"{{"type":"user","uuid":"{uuid}","parentUuid":{parent_json},"timestamp":"{ts}","sessionId":"s","version":"2.1.0","isSidechain":false,"message":{{"role":"user","content":"x"}}}}"#
         );
         serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn test_multi_root_preserves_preamble() {
+        // Preamble root (u1->a1) and a post-compaction fragment whose
+        // compact_boundary logical parent was dropped (own root). Only the
+        // most-recent root is walked, so the preamble vanishes.
+        let entries = vec![
+            make_user_entry("u1", None),
+            make_user_entry("a1", Some("u1")),
+            make_compact_boundary("cb", "DROPPED-PARENT"),
+            make_user_entry("u2", Some("cb")),
+            make_user_entry("a2", Some("u2")),
+        ];
+        let conv = Conversation::from_entries(entries).unwrap();
+        let thread: Vec<&str> = conv.main_thread().iter().map(String::as_str).collect();
+        assert!(thread.contains(&"u1"), "preamble lost from main thread: {thread:?}");
     }
 
     #[test]
