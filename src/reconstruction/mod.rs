@@ -171,6 +171,68 @@ impl Conversation {
             }
         }
 
+        // Cycle break: parentUuid edges form a forest, but the logicalParentUuid
+        // fallback used above to bridge compaction boundaries can point back into a
+        // node's own descendant chain, wiring a cycle into the tree. Any walk over a
+        // cyclic graph fails to terminate — recursive walks overflow the stack,
+        // iterative walks loop forever. Each node has at most one parent, so the
+        // parent graph is functional and every component holds at most one cycle.
+        // Detect each cycle and cut it at a logical-derived edge (one whose real
+        // parentUuid is absent), promoting that node to a root.
+        {
+            let parents: HashMap<String, String> = nodes
+                .iter()
+                .filter_map(|(u, n)| n.parent_uuid.clone().map(|p| (u.clone(), p)))
+                .collect();
+            let mut settled: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut cuts: Vec<String> = Vec::new();
+            for start in nodes.keys() {
+                if settled.contains(start) {
+                    continue;
+                }
+                let mut path: Vec<String> = Vec::new();
+                let mut on_path: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                let mut cur = start.clone();
+                loop {
+                    if settled.contains(&cur) {
+                        break;
+                    }
+                    if !on_path.insert(cur.clone()) {
+                        // `cur` repeats: the cycle is path[idx..] where path[idx] == cur.
+                        let idx = path.iter().position(|x| *x == cur).unwrap_or(0);
+                        let victim = path[idx..]
+                            .iter()
+                            .find(|u| {
+                                nodes
+                                    .get(*u)
+                                    .is_some_and(|n| n.entry.parent_uuid().is_none())
+                            })
+                            .cloned()
+                            .unwrap_or_else(|| cur.clone());
+                        cuts.push(victim);
+                        break;
+                    }
+                    path.push(cur.clone());
+                    match parents.get(&cur) {
+                        Some(p) => cur = p.clone(),
+                        None => break,
+                    }
+                }
+                for u in path {
+                    settled.insert(u);
+                }
+            }
+            for u in cuts {
+                if let Some(n) = nodes.get_mut(&u) {
+                    n.parent_uuid = None;
+                }
+                if !roots.contains(&u) {
+                    roots.push(u);
+                }
+            }
+        }
+
         // Second pass: build parent-child relationships and promote orphans to roots
         let node_keys: Vec<String> = nodes.keys().cloned().collect();
         for uuid in &node_keys {
@@ -225,31 +287,42 @@ impl Conversation {
         fn is_conversational(entry: &LogEntry) -> bool {
             !matches!(entry, LogEntry::Progress(_))
         }
+        // Iterative post-order traversal (children before parent). A recursive
+        // walk recurses once per child and so reaches a depth equal to the
+        // chain length; a long linear conversation (thousands of messages)
+        // overflows the stack. The explicit stack keeps the depth in heap.
         let mut subtree_scores: HashMap<String, usize> = HashMap::new();
-        fn compute_subtree_score(
-            uuid: &str,
-            nodes: &IndexMap<String, ConversationNode>,
-            cache: &mut HashMap<String, usize>,
-        ) -> usize {
-            if let Some(&cached) = cache.get(uuid) {
-                return cached;
+        for start in nodes.keys() {
+            if subtree_scores.contains_key(start) {
+                continue;
             }
-            let size = if let Some(node) = nodes.get(uuid) {
-                let self_weight = usize::from(is_conversational(&node.entry));
-                self_weight
-                    + node
-                        .children
-                        .iter()
-                        .map(|c| compute_subtree_score(c, nodes, cache))
-                        .sum::<usize>()
-            } else {
-                0
-            };
-            cache.insert(uuid.to_string(), size);
-            size
-        }
-        for uuid in nodes.keys().cloned().collect::<Vec<_>>() {
-            compute_subtree_score(&uuid, &nodes, &mut subtree_scores);
+            let mut stack: Vec<(&str, bool)> = vec![(start.as_str(), false)];
+            while let Some((uuid, processed)) = stack.pop() {
+                if subtree_scores.contains_key(uuid) {
+                    continue;
+                }
+                if processed {
+                    let size = nodes.get(uuid).map_or(0, |node| {
+                        let self_weight = usize::from(is_conversational(&node.entry));
+                        self_weight
+                            + node
+                                .children
+                                .iter()
+                                .map(|c| subtree_scores.get(c.as_str()).copied().unwrap_or(0))
+                                .sum::<usize>()
+                    });
+                    subtree_scores.insert(uuid.to_string(), size);
+                } else {
+                    stack.push((uuid, true));
+                    if let Some(node) = nodes.get(uuid) {
+                        for c in &node.children {
+                            if !subtree_scores.contains_key(c.as_str()) {
+                                stack.push((c.as_str(), false));
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Latest timestamp among *conversational* nodes in each subtree.
@@ -258,36 +331,44 @@ impl Conversation {
         // older. It also reinforces the progress fix — a progress dead-end has no
         // conversational descendants, so it scores None and loses to the real
         // continuation, which is always newer than the progress events.
+        // Iterative post-order traversal, same rationale as subtree_scores above.
         let mut latest_conv_ts: HashMap<String, Option<chrono::DateTime<chrono::Utc>>> =
             HashMap::new();
-        fn compute_latest_conv_ts(
-            uuid: &str,
-            nodes: &IndexMap<String, ConversationNode>,
-            cache: &mut HashMap<String, Option<chrono::DateTime<chrono::Utc>>>,
-        ) -> Option<chrono::DateTime<chrono::Utc>> {
-            if let Some(&cached) = cache.get(uuid) {
-                return cached;
+        for start in nodes.keys() {
+            if latest_conv_ts.contains_key(start) {
+                continue;
             }
-            let ts = if let Some(node) = nodes.get(uuid) {
-                let own = if is_conversational(&node.entry) {
-                    node.entry.timestamp()
+            let mut stack: Vec<(&str, bool)> = vec![(start.as_str(), false)];
+            while let Some((uuid, processed)) = stack.pop() {
+                if latest_conv_ts.contains_key(uuid) {
+                    continue;
+                }
+                if processed {
+                    let ts = nodes.get(uuid).and_then(|node| {
+                        let own = if is_conversational(&node.entry) {
+                            node.entry.timestamp()
+                        } else {
+                            None
+                        };
+                        let child_max = node
+                            .children
+                            .iter()
+                            .filter_map(|c| latest_conv_ts.get(c.as_str()).copied().flatten())
+                            .max();
+                        own.into_iter().chain(child_max).max()
+                    });
+                    latest_conv_ts.insert(uuid.to_string(), ts);
                 } else {
-                    None
-                };
-                let child_max = node
-                    .children
-                    .iter()
-                    .filter_map(|c| compute_latest_conv_ts(c, nodes, cache))
-                    .max();
-                own.into_iter().chain(child_max).max()
-            } else {
-                None
-            };
-            cache.insert(uuid.to_string(), ts);
-            ts
-        }
-        for uuid in nodes.keys().cloned().collect::<Vec<_>>() {
-            compute_latest_conv_ts(&uuid, &nodes, &mut latest_conv_ts);
+                    stack.push((uuid, true));
+                    if let Some(node) = nodes.get(uuid) {
+                        for c in &node.children {
+                            if !latest_conv_ts.contains_key(c.as_str()) {
+                                stack.push((c.as_str(), false));
+                            }
+                        }
+                    }
+                }
+            }
         }
         // Selection key: most recent conversational activity first, subtree size
         // as a tiebreak.
@@ -708,6 +789,27 @@ mod tests {
         assert_eq!(conv.roots()[0], "2");
         // Main thread should include all 3 entries
         assert_eq!(conv.main_thread().len(), 3);
+    }
+
+    #[test]
+    fn test_logical_parent_cycle_is_broken() {
+        // A compaction boundary's logicalParentUuid can point into its own
+        // descendant chain, wiring a cycle into the tree (real parentUuid edges
+        // stay acyclic, but the logical fallback closes a loop). "2" -> "B" via a
+        // real parentUuid and "B" -> "2" via logicalParentUuid forms a 2-node cycle.
+        // Reconstruction must break it instead of looping forever / overflowing the
+        // stack. Regression test for the MCP server crash on deep cyclic sessions.
+        let entries = vec![
+            make_user_entry("root", None),
+            make_user_entry("2", Some("B")),
+            make_compact_boundary("B", "2"),
+        ];
+
+        // Reaching these assertions at all proves termination.
+        let conv = Conversation::from_entries(entries).unwrap();
+        assert_eq!(conv.len(), 3);
+        // The cycle is cut at the logical-derived edge ("B"), promoting it to a root.
+        assert!(conv.roots().contains(&"B".to_string()));
     }
 
     fn make_progress_entry(uuid: &str, parent: Option<&str>) -> LogEntry {
