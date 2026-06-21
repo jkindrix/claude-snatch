@@ -48,7 +48,7 @@ pub fn run(cli: &Cli, args: &TimelineArgs) -> Result<()> {
             session_id: args.session_id.clone(),
         })?;
 
-    let entries = session.parse_with_options(cli.max_file_size)?;
+    let (entries, unparsed) = session.parse_with_options_counted(cli.max_file_size)?;
     let conversation = Conversation::from_entries(entries)?;
     let turns = conversation.turns();
 
@@ -100,6 +100,12 @@ pub fn run(cli: &Cli, args: &TimelineArgs) -> Result<()> {
                 "Timeline for session {} ({} turns)\n",
                 args.session_id, total_turns,
             );
+            if unparsed > 0 {
+                println!(
+                    "⚠ {unparsed} line{} could not be parsed (dropped from this view)\n",
+                    if unparsed == 1 { "" } else { "s" }
+                );
+            }
 
             for turn in &timeline {
                 let marker = if turn.had_errors { "!" } else { " " };

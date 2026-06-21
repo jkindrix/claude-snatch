@@ -894,7 +894,13 @@ fn export_session(
     output_path: Option<&PathBuf>,
 ) -> Result<bool> {
     // Parse the session with custom max file size if specified
-    let entries = session.parse_with_options(cli.max_file_size)?;
+    let (entries, unparsed) = session.parse_with_options_counted(cli.max_file_size)?;
+    if unparsed > 0 {
+        eprintln!(
+            "⚠ {unparsed} line{} could not be parsed (dropped from export)",
+            if unparsed == 1 { "" } else { "s" }
+        );
+    }
 
     if entries.is_empty() {
         return Ok(false);

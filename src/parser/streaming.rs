@@ -21,6 +21,7 @@ pub struct StreamingParser<R> {
     line_num: usize,
     bytes_read: u64,
     lenient: bool,
+    lines_skipped: usize,
     buffer: String,
 }
 
@@ -32,8 +33,15 @@ impl<R: BufRead> StreamingParser<R> {
             line_num: 0,
             bytes_read: 0,
             lenient: true,
+            lines_skipped: 0,
             buffer: String::with_capacity(4096),
         }
+    }
+
+    /// Number of malformed lines skipped so far (lenient mode).
+    #[must_use]
+    pub const fn lines_skipped(&self) -> usize {
+        self.lines_skipped
     }
 
     /// Set lenient mode.
@@ -75,6 +83,7 @@ impl<R: BufRead> StreamingParser<R> {
                         Ok(entry) => return Some(Ok(entry)),
                         Err(e) => {
                             if self.lenient {
+                                self.lines_skipped += 1;
                                 continue;
                             }
                             return Some(Err(SnatchError::parse_with_source(
@@ -88,6 +97,7 @@ impl<R: BufRead> StreamingParser<R> {
                 Err(e) => {
                     if self.lenient {
                         self.line_num += 1;
+                        self.lines_skipped += 1;
                         continue;
                     }
                     return Some(Err(SnatchError::io(
@@ -687,10 +697,14 @@ invalid
 {"uuid":"b","parentUuid":null,"type":"user","timestamp":"2025-12-23T00:00:01Z","sessionId":"s1","version":"2.0.74","isSidechain":false,"message":{"role":"user","content":"test2"}}"#;
 
         let reader = BufReader::new(Cursor::new(content));
-        let parser = StreamingParser::new(reader).lenient(true);
+        let mut parser = StreamingParser::new(reader).lenient(true);
 
-        let entries: Vec<_> = parser.entries().filter_map(|r| r.ok()).collect();
+        let mut entries = Vec::new();
+        while let Some(Ok(e)) = parser.next_entry() {
+            entries.push(e);
+        }
         assert_eq!(entries.len(), 2);
+        assert_eq!(parser.lines_skipped(), 1);
     }
 
     #[test]

@@ -70,7 +70,7 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
         })?;
 
     let project_path = session.project_path().to_string();
-    let entries = session.parse_with_options(cli.max_file_size)?;
+    let (entries, unparsed) = session.parse_with_options_counted(cli.max_file_size)?;
     let conversation = Conversation::from_entries(entries)?;
 
     let detail = args.detail.as_str();
@@ -191,6 +191,12 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                 offset + 1,
                 (offset + paginated.len()).min(total_messages),
             );
+            if unparsed > 0 {
+                println!(
+                    "⚠ {unparsed} line{} could not be parsed (dropped from this view)\n",
+                    if unparsed == 1 { "" } else { "s" }
+                );
+            }
 
             for (orig_idx, entry) in &paginated {
                 let msg_type = entry.message_type();

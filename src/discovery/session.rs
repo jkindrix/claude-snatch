@@ -214,13 +214,24 @@ impl Session {
     ///                     If None, uses the default limit.
     #[instrument(skip(self), fields(session_id = %self.session_id))]
     pub fn parse_with_options(&self, max_file_size: Option<u64>) -> Result<Vec<LogEntry>> {
+        Ok(self.parse_with_options_counted(max_file_size)?.0)
+    }
+
+    /// Parse all entries, also returning the count of lines the lenient parser
+    /// could not parse and skipped. Lets callers surface a drop notice.
+    #[instrument(skip(self), fields(session_id = %self.session_id))]
+    pub fn parse_with_options_counted(
+        &self,
+        max_file_size: Option<u64>,
+    ) -> Result<(Vec<LogEntry>, usize)> {
         let mut parser = JsonlParser::new().with_lenient(true);
         if let Some(max_size) = max_file_size {
             parser = parser.with_max_file_size(max_size);
         }
         let entries = parser.parse_file(&self.path)?;
-        debug!(entries = entries.len(), "Session parsed");
-        Ok(entries)
+        let unparsed = parser.stats().lines_skipped;
+        debug!(entries = entries.len(), unparsed, "Session parsed");
+        Ok((entries, unparsed))
     }
 
     /// Parse all entries with caching support.
