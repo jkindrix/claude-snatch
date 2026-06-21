@@ -981,8 +981,10 @@ pub struct AttachmentMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LastPromptMessage {
-    /// The most recent user prompt text.
-    pub last_prompt: String,
+    /// The most recent user prompt text. Absent in newer pointer-only
+    /// last-prompt entries that carry only `leafUuid`/`sessionId`.
+    #[serde(default)]
+    pub last_prompt: Option<String>,
 
     /// Conversation session identifier.
     #[serde(default)]
