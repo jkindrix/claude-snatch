@@ -629,6 +629,14 @@ impl SnatchServer {
                 summary,
             })
             .collect();
+        let error_events: Vec<crate::mcp_server::types::ErrorEvent> =
+            crate::analysis::extraction::find_error_events(&main_refs)
+                .into_iter()
+                .map(|(ts, message)| crate::mcp_server::types::ErrorEvent {
+                    timestamp: ts,
+                    message,
+                })
+                .collect();
 
         // Get session time bounds and git branch
         let start_time = resolved.analytics.start_time.map(|t| t.to_rfc3339());
@@ -670,6 +678,7 @@ impl SnatchServer {
             git_branch,
             timeline,
             compaction_events,
+            error_events,
         };
 
         match ToolOutput::json(&response) {

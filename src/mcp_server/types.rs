@@ -247,6 +247,13 @@ pub struct CompactionEvent {
     pub summary: Option<String>,
 }
 
+/// An error-level system event in the timeline (e.g. an API error).
+#[derive(Debug, Serialize)]
+pub struct ErrorEvent {
+    pub timestamp: String,
+    pub message: String,
+}
+
 /// Response for get_session_timeline.
 #[derive(Debug, Serialize)]
 pub struct SessionTimelineResponse {
@@ -263,6 +270,8 @@ pub struct SessionTimelineResponse {
     pub git_branch: Option<String>,
     pub timeline: Vec<TimelineTurn>,
     pub compaction_events: Vec<CompactionEvent>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub error_events: Vec<ErrorEvent>,
 }
 
 // ============================================================================

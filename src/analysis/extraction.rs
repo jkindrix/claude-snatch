@@ -365,6 +365,32 @@ pub fn find_compaction_events(entries: &[&LogEntry]) -> Vec<(String, Option<Stri
     events
 }
 
+/// Detect error-level system events (e.g. API errors) in a conversation's
+/// main thread entries.
+///
+/// These sit on the main thread but are not conversation turns, so `turns()`
+/// (and timelines built from it) skip them. Surface them separately like
+/// compaction events. Returns `(timestamp_rfc3339, message)` pairs.
+pub fn find_error_events(entries: &[&LogEntry]) -> Vec<(String, String)> {
+    let mut events = Vec::new();
+    for entry in entries {
+        if let LogEntry::System(sys) = entry {
+            let is_error = sys.subtype == Some(SystemSubtype::ApiError)
+                || sys.level.as_deref() == Some("error");
+            if is_error {
+                let ts = sys.timestamp.to_rfc3339();
+                let msg = sys
+                    .content
+                    .clone()
+                    .or_else(|| sys.error.as_ref().map(std::string::ToString::to_string))
+                    .unwrap_or_else(|| "(error)".to_string());
+                events.push((ts, msg));
+            }
+        }
+    }
+    events
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +398,24 @@ mod tests {
     #[test]
     fn test_truncate_text_short() {
         assert_eq!(truncate_text("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_find_error_events_surfaces_api_error() {
+        let json = r#"{"type":"system","subtype":"api_error","uuid":"e1","timestamp":"2026-06-21T00:00:00Z","sessionId":"s","level":"error","content":"overloaded_error"}"#;
+        let entry: LogEntry = serde_json::from_str(json).unwrap();
+        let refs: Vec<&LogEntry> = vec![&entry];
+        let events = find_error_events(&refs);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].1, "overloaded_error");
+    }
+
+    #[test]
+    fn test_find_error_events_ignores_non_errors() {
+        let json = r#"{"type":"system","subtype":"turn_duration","uuid":"t1","timestamp":"2026-06-21T00:00:00Z","sessionId":"s","durationMs":100}"#;
+        let entry: LogEntry = serde_json::from_str(json).unwrap();
+        let refs: Vec<&LogEntry> = vec![&entry];
+        assert!(find_error_events(&refs).is_empty());
     }
 
     #[test]
