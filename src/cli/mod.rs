@@ -678,6 +678,11 @@ pub struct ExportArgs {
     #[arg(long)]
     pub combine_agents: bool,
 
+    /// Inline full tool outputs that were externalized to tool-results/<id>.txt
+    /// (replaces the truncated <persisted-output> preview with the full file).
+    #[arg(long)]
+    pub resolve_tool_results: bool,
+
     /// Include thinking blocks (enabled by default, use --no-thinking to disable).
     #[arg(long, default_value = "true")]
     pub thinking: bool,

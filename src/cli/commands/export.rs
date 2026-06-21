@@ -198,6 +198,34 @@ fn export_single_session(cli: &Cli, args: &ExportArgs, session_id: &str) -> Resu
 }
 
 /// Export a session to a GitHub Gist.
+/// Replace externalized `<persisted-output>` tool-result stubs with the full
+/// content saved to `tool-results/<tool_use_id>.txt`, in place. Large tool
+/// outputs are otherwise truncated to a 2KB preview.
+fn resolve_persisted_outputs(entries: &mut [LogEntry], session: &Session) {
+    let Some(dir) = session.tool_results_dir() else {
+        return;
+    };
+    for entry in entries.iter_mut() {
+        let LogEntry::User(user) = entry else { continue };
+        let crate::model::message::UserContent::Blocks(blocks) = &mut user.message else {
+            continue;
+        };
+        for block in &mut blocks.content {
+            let ContentBlock::ToolResult(tr) = block else { continue };
+            let Some(crate::model::content::ToolResultContent::String(s)) = &tr.content else {
+                continue;
+            };
+            if !s.starts_with("<persisted-output>") {
+                continue;
+            }
+            let path = dir.join(format!("{}.txt", tr.tool_use_id));
+            if let Ok(full) = std::fs::read_to_string(&path) {
+                tr.content = Some(crate::model::content::ToolResultContent::String(full));
+            }
+        }
+    }
+}
+
 fn export_session_to_gist(cli: &Cli, args: &ExportArgs, session: &Session) -> Result<()> {
     // Parse the session
     let entries = session.parse_with_options(cli.max_file_size)?;
@@ -894,12 +922,15 @@ fn export_session(
     output_path: Option<&PathBuf>,
 ) -> Result<bool> {
     // Parse the session with custom max file size if specified
-    let (entries, unparsed) = session.parse_with_options_counted(cli.max_file_size)?;
+    let (mut entries, unparsed) = session.parse_with_options_counted(cli.max_file_size)?;
     if unparsed > 0 {
         eprintln!(
             "⚠ {unparsed} line{} could not be parsed (dropped from export)",
             if unparsed == 1 { "" } else { "s" }
         );
+    }
+    if args.resolve_tool_results {
+        resolve_persisted_outputs(&mut entries, session);
     }
 
     if entries.is_empty() {
