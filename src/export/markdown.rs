@@ -277,6 +277,7 @@ impl MarkdownExporter {
         options: &ExportOptions,
     ) -> Result<()> {
         match content {
+            ContentBlock::Unknown => {}
             ContentBlock::Text(text) => {
                 // Handle code-only mode - extract code blocks instead of full text
                 if options.is_code_only() {
@@ -696,6 +697,7 @@ impl MarkdownExporter {
         options: &ExportOptions,
     ) -> Result<()> {
         match entry {
+            LogEntry::Unknown => {}
             LogEntry::User(user) => {
                 if options.should_include_user() {
                     // Skip user messages that have no visible text content when using

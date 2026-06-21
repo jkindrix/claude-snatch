@@ -102,8 +102,9 @@ impl Todo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HookInfo {
-    /// Hook identifier from settings.
-    pub hook_name: String,
+    /// Hook identifier from settings. Optional: some hook-summary shapes omit it.
+    #[serde(default)]
+    pub hook_name: Option<String>,
 
     /// Shell command that was executed.
     pub command: String,
@@ -388,7 +389,7 @@ mod tests {
     #[test]
     fn test_hook_info() {
         let hook = HookInfo {
-            hook_name: "lint-check".to_string(),
+            hook_name: Some("lint-check".to_string()),
             command: "npm run lint".to_string(),
             exit_code: 0,
             output: Some("All checks passed".to_string()),

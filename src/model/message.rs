@@ -68,6 +68,11 @@ pub enum LogEntry {
     /// AI-generated session title metadata.
     #[serde(rename = "ai-title")]
     AiTitle(AiTitleMessage),
+
+    /// Any entry type not modeled above. Captured so a future/unknown entry
+    /// type degrades to a counted placeholder instead of dropping the line.
+    #[serde(other)]
+    Unknown,
 }
 
 impl LogEntry {
@@ -85,7 +90,11 @@ impl LogEntry {
             Self::QueueOperation(_) => None,
             Self::TurnEnd(_) => None,
             // Sidecar metadata entries carry no UUID.
-            Self::LastPrompt(_) | Self::Mode(_) | Self::PermissionMode(_) | Self::AiTitle(_) => None,
+            Self::LastPrompt(_)
+            | Self::Mode(_)
+            | Self::PermissionMode(_)
+            | Self::AiTitle(_)
+            | Self::Unknown => None,
         }
     }
 
@@ -128,6 +137,7 @@ impl LogEntry {
             Self::QueueOperation(m) => Some(&m.session_id),
             Self::TurnEnd(_) => None,
             Self::Summary(_) => None,
+            Self::Unknown => None,
         }
     }
 
@@ -145,7 +155,11 @@ impl LogEntry {
             Self::TurnEnd(m) => Some(m.timestamp),
             Self::Summary(_) => None,
             // Sidecar metadata entries carry no timestamp.
-            Self::LastPrompt(_) | Self::Mode(_) | Self::PermissionMode(_) | Self::AiTitle(_) => None,
+            Self::LastPrompt(_)
+            | Self::Mode(_)
+            | Self::PermissionMode(_)
+            | Self::AiTitle(_)
+            | Self::Unknown => None,
         }
     }
 
@@ -211,6 +225,7 @@ impl LogEntry {
             Self::Mode(_) => "mode",
             Self::PermissionMode(_) => "permission-mode",
             Self::AiTitle(_) => "ai-title",
+            Self::Unknown => "unknown",
         }
     }
 
@@ -1130,5 +1145,34 @@ mod tests {
         } else {
             panic!("Expected Progress variant");
         }
+    }
+
+    #[test]
+    fn test_unknown_entry_type_degrades() {
+        // An unmodeled entry type parses as Unknown instead of failing the line.
+        let json = r#"{"type":"future-entry-type","uuid":"x1","sessionId":"s","timestamp":"2026-06-21T00:00:00Z","weird":true}"#;
+        let entry: LogEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.message_type(), "unknown");
+    }
+
+    #[test]
+    fn test_unknown_content_block_preserves_message() {
+        // An unmodeled content block must not drop the whole message; the
+        // sibling text block still parses.
+        let json = r#"{"type":"assistant","uuid":"a1","timestamp":"2026-06-21T00:00:01Z","sessionId":"s","version":"2.1.0","isSidechain":false,"message":{"id":"m1","type":"message","role":"assistant","model":"claude","content":[{"type":"redacted_thinking","data":"opaque"},{"type":"text","text":"survives"}]}}"#;
+        let entry: LogEntry = serde_json::from_str(json).unwrap();
+        if let LogEntry::Assistant(a) = entry {
+            assert_eq!(a.message.combined_text(), "survives");
+        } else {
+            panic!("Expected Assistant variant");
+        }
+    }
+
+    #[test]
+    fn test_stop_hook_summary_without_hook_name() {
+        // hookInfos entries omitting hookName must still parse.
+        let json = r#"{"type":"system","subtype":"stop_hook_summary","uuid":"sy1","timestamp":"2026-06-21T00:00:02Z","sessionId":"s","hookInfos":[{"command":"x","exitCode":0}]}"#;
+        let entry: LogEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.message_type(), "system");
     }
 }

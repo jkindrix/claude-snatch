@@ -398,6 +398,7 @@ impl Exporter for CsvExporter {
                 LogEntry::Assistant(_) => "assistant",
                 LogEntry::System(_) => "system",
                 LogEntry::Summary(_) => "summary",
+                LogEntry::Unknown => "unknown",
                 LogEntry::FileHistorySnapshot(_) => "file_history",
                 LogEntry::QueueOperation(_) => "queue",
                 LogEntry::TurnEnd(_) => "turn_end",
@@ -429,6 +430,7 @@ fn content_preview(block: &ContentBlock) -> &str {
         ContentBlock::ToolUse(t) => &t.name,
         ContentBlock::ToolResult(_) => "[result]",
         ContentBlock::Image(_) => "[image]",
+        ContentBlock::Unknown => "[unknown]",
     }
 }
 

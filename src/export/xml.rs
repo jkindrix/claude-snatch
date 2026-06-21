@@ -376,6 +376,7 @@ impl XmlExporter {
         options: &ExportOptions,
     ) -> Result<()> {
         match block {
+            ContentBlock::Unknown => {}
             ContentBlock::Text(text) => {
                 // Use should_include() directly for text content to respect exclusive filter
                 if options.should_include(ContentType::Assistant) {

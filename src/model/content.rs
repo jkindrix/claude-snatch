@@ -211,6 +211,12 @@ pub enum ContentBlock {
 
     /// Visual input (base64/url/file).
     Image(ImageBlock),
+
+    /// Any content-block type not modeled above (e.g. `redacted_thinking`,
+    /// `server_tool_use`). Captured so an unknown block doesn't drop the whole
+    /// message; the block's payload is not retained.
+    #[serde(other)]
+    Unknown,
 }
 
 impl ContentBlock {
@@ -223,6 +229,7 @@ impl ContentBlock {
             Self::ToolResult(_) => "tool_result",
             Self::Thinking(_) => "thinking",
             Self::Image(_) => "image",
+            Self::Unknown => "unknown",
         }
     }
 

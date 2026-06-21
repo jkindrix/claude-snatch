@@ -149,7 +149,8 @@ fn should_include_entry(entry: &LogEntry, options: &ExportOptions) -> bool {
         | LogEntry::LastPrompt(_)
         | LogEntry::Mode(_)
         | LogEntry::PermissionMode(_)
-        | LogEntry::AiTitle(_) => true,
+        | LogEntry::AiTitle(_)
+        | LogEntry::Unknown => true,
     }
 }
 

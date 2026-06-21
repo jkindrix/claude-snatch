@@ -205,6 +205,7 @@ impl TextExporter {
                         ContentBlock::ToolUse(_) => options.should_include_tool_use(),
                         ContentBlock::Thinking(_) => options.should_include_thinking(),
                         ContentBlock::Image(_) => true,
+                        ContentBlock::Unknown => false,
                     }
                 })
             }
@@ -288,6 +289,7 @@ impl TextExporter {
         options: &ExportOptions,
     ) -> Result<()> {
         match content {
+            ContentBlock::Unknown => {}
             ContentBlock::Text(text) => {
                 // Use should_include() directly for text content to respect exclusive filter
                 if options.should_include(ContentType::Assistant) {

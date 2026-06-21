@@ -2925,7 +2925,8 @@ impl AppState {
                 | LogEntry::LastPrompt(_)
                 | LogEntry::Mode(_)
                 | LogEntry::PermissionMode(_)
-                | LogEntry::AiTitle(_) => None,
+                | LogEntry::AiTitle(_)
+                | LogEntry::Unknown => None,
             };
             if let Some(ts) = timestamp {
                 if !self.filter_state.is_in_date_range(ts) {
