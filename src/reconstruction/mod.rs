@@ -252,13 +252,59 @@ impl Conversation {
             compute_subtree_score(&uuid, &nodes, &mut subtree_scores);
         }
 
+        // Latest timestamp among *conversational* nodes in each subtree.
+        // Recency distinguishes the canonical (active) branch from an abandoned
+        // edit/retry branch at a fork: the abandoned branch can be larger but is
+        // older. It also reinforces the progress fix — a progress dead-end has no
+        // conversational descendants, so it scores None and loses to the real
+        // continuation, which is always newer than the progress events.
+        let mut latest_conv_ts: HashMap<String, Option<chrono::DateTime<chrono::Utc>>> =
+            HashMap::new();
+        fn compute_latest_conv_ts(
+            uuid: &str,
+            nodes: &IndexMap<String, ConversationNode>,
+            cache: &mut HashMap<String, Option<chrono::DateTime<chrono::Utc>>>,
+        ) -> Option<chrono::DateTime<chrono::Utc>> {
+            if let Some(&cached) = cache.get(uuid) {
+                return cached;
+            }
+            let ts = if let Some(node) = nodes.get(uuid) {
+                let own = if is_conversational(&node.entry) {
+                    node.entry.timestamp()
+                } else {
+                    None
+                };
+                let child_max = node
+                    .children
+                    .iter()
+                    .filter_map(|c| compute_latest_conv_ts(c, nodes, cache))
+                    .max();
+                own.into_iter().chain(child_max).max()
+            } else {
+                None
+            };
+            cache.insert(uuid.to_string(), ts);
+            ts
+        }
+        for uuid in nodes.keys().cloned().collect::<Vec<_>>() {
+            compute_latest_conv_ts(&uuid, &nodes, &mut latest_conv_ts);
+        }
+        // Selection key: most recent conversational activity first, subtree size
+        // as a tiebreak.
+        let select_key = |uuid: &str| {
+            (
+                latest_conv_ts.get(uuid).copied().flatten(),
+                subtree_scores.get(uuid).copied().unwrap_or(0),
+            )
+        };
+
         // Start from the root whose subtree holds the most conversational
         // nodes. When dropped entries fragment the tree into several roots,
         // this keeps the main thread on the largest real fragment rather than
         // an arbitrary first root.
         let start = roots
             .iter()
-            .max_by_key(|r| subtree_scores.get(*r).copied().unwrap_or(0))
+            .max_by_key(|r| select_key(r))
             .cloned();
 
         // Build main thread following the largest conversational subtree at
@@ -273,11 +319,12 @@ impl Conversation {
                         break;
                     }
 
-                    // Follow the child with the largest conversational subtree
+                    // Follow the child with the most recent conversational
+                    // activity (subtree size breaks ties).
                     let next = node
                         .children
                         .iter()
-                        .max_by_key(|c| subtree_scores.get(*c).copied().unwrap_or(0))
+                        .max_by_key(|c| select_key(c))
                         .cloned();
                     if let Some(next_uuid) = next {
                         main_thread.push(next_uuid.clone());
@@ -730,5 +777,37 @@ mod tests {
         assert_eq!(conv.main_thread().len(), 6);
         // All entries accessible via main_thread_entries
         assert_eq!(conv.main_thread_entries().len(), 6);
+    }
+
+    fn user_ts(uuid: &str, parent: Option<&str>, ts: &str) -> LogEntry {
+        let parent_json = parent.map_or("null".to_string(), |p| format!("\"{p}\""));
+        let json = format!(
+            r#"{{"type":"user","uuid":"{uuid}","parentUuid":{parent_json},"timestamp":"{ts}","sessionId":"s","version":"2.1.0","isSidechain":false,"message":{{"role":"user","content":"x"}}}}"#
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn test_branch_point_follows_recent_canonical_branch() {
+        // At an edit/retry fork, the abandoned branch can be LONGER than the
+        // newer canonical branch. The main thread should follow the recent
+        // (canonical) branch, not the larger abandoned one.
+        let entries = vec![
+            user_ts("u0", None, "2026-01-01T00:00:00Z"),
+            user_ts("a1", Some("u0"), "2026-01-01T00:01:00Z"),
+            // abandoned branch: larger (3 nodes), older
+            user_ts("uold", Some("a1"), "2026-01-01T00:02:00Z"),
+            user_ts("aold1", Some("uold"), "2026-01-01T00:03:00Z"),
+            user_ts("aold2", Some("aold1"), "2026-01-01T00:04:00Z"),
+            // canonical branch: smaller (2 nodes), newer
+            user_ts("unew", Some("a1"), "2026-01-01T00:10:00Z"),
+            user_ts("anew", Some("unew"), "2026-01-01T00:11:00Z"),
+        ];
+        let conv = Conversation::from_entries(entries).unwrap();
+        let thread: Vec<&str> = conv.main_thread().iter().map(String::as_str).collect();
+        assert!(
+            thread.contains(&"unew") && thread.contains(&"anew"),
+            "main thread should follow the recent canonical branch, got {thread:?}"
+        );
     }
 }
