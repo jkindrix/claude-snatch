@@ -109,13 +109,17 @@ impl AssistantContent {
     /// Check if this message has any thinking content.
     #[must_use]
     pub fn has_thinking(&self) -> bool {
-        self.content.iter().any(|c| matches!(c, ContentBlock::Thinking(_)))
+        self.content
+            .iter()
+            .any(|c| matches!(c, ContentBlock::Thinking(_)))
     }
 
     /// Check if this message has any tool calls.
     #[must_use]
     pub fn has_tool_use(&self) -> bool {
-        self.content.iter().any(|c| matches!(c, ContentBlock::ToolUse(_)))
+        self.content
+            .iter()
+            .any(|c| matches!(c, ContentBlock::ToolUse(_)))
     }
 }
 

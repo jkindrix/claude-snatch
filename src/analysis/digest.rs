@@ -108,7 +108,7 @@ pub fn build_digest(entries: &[&LogEntry], opts: &DigestOptions) -> SessionDiges
         }
     }
     let mut top_tools: Vec<(String, usize)> = tool_counts.into_iter().collect();
-    top_tools.sort_by(|a, b| b.1.cmp(&a.1));
+    top_tools.sort_by_key(|b| std::cmp::Reverse(b.1));
     top_tools.truncate(5);
 
     // 4. Error count
@@ -179,10 +179,7 @@ pub fn format_digest(digest: &SessionDigest, max_chars: usize) -> String {
     // Recent prompts first — most important for post-compaction orientation
     if !digest.recent_prompts.is_empty() {
         let start = digest.total_prompts - digest.recent_prompts.len() + 1;
-        lines.push(format!(
-            "Recent prompts ({} total):",
-            digest.total_prompts
-        ));
+        lines.push(format!("Recent prompts ({} total):", digest.total_prompts));
         for (i, p) in digest.recent_prompts.iter().enumerate() {
             lines.push(format!("  {}. {p}", start + i));
         }
@@ -327,10 +324,18 @@ mod tests {
     #[test]
     fn test_format_digest_truncation() {
         let digest = SessionDigest {
-            key_prompts: vec!["A very long prompt that goes on and on and on and on and on and on".into()],
+            key_prompts: vec![
+                "A very long prompt that goes on and on and on and on and on and on".into(),
+            ],
             recent_prompts: vec![],
             total_prompts: 1,
-            files_touched: vec!["a.rs".into(), "b.rs".into(), "c.rs".into(), "d.rs".into(), "e.rs".into()],
+            files_touched: vec![
+                "a.rs".into(),
+                "b.rs".into(),
+                "c.rs".into(),
+                "d.rs".into(),
+                "e.rs".into(),
+            ],
             top_tools: vec![("Edit".into(), 100)],
             error_count: 0,
             compaction_count: 0,

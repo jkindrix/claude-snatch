@@ -103,7 +103,7 @@ pub fn analyze_project_health(
             session_count: sessions.len(),
         })
         .collect();
-    hotspot_files.sort_by(|a, b| b.edit_count.cmp(&a.edit_count));
+    hotspot_files.sort_by_key(|b| std::cmp::Reverse(b.edit_count));
     hotspot_files.truncate(params.max_hotspots);
 
     // Rework files: files edited across multiple sessions
@@ -116,7 +116,7 @@ pub fn analyze_project_health(
             session_count: sessions.len(),
         })
         .collect();
-    rework_files.sort_by(|a, b| b.session_count.cmp(&a.session_count));
+    rework_files.sort_by_key(|b| std::cmp::Reverse(b.session_count));
     rework_files.truncate(params.max_hotspots);
 
     // Decision churn from registry
@@ -124,10 +124,22 @@ pub fn analyze_project_health(
         let decisions = &store.decisions;
         DecisionChurn {
             total_decisions: decisions.len(),
-            confirmed_count: decisions.iter().filter(|d| d.status == DecisionStatus::Confirmed).count(),
-            superseded_count: decisions.iter().filter(|d| d.status == DecisionStatus::Superseded).count(),
-            abandoned_count: decisions.iter().filter(|d| d.status == DecisionStatus::Abandoned).count(),
-            proposed_count: decisions.iter().filter(|d| d.status == DecisionStatus::Proposed).count(),
+            confirmed_count: decisions
+                .iter()
+                .filter(|d| d.status == DecisionStatus::Confirmed)
+                .count(),
+            superseded_count: decisions
+                .iter()
+                .filter(|d| d.status == DecisionStatus::Superseded)
+                .count(),
+            abandoned_count: decisions
+                .iter()
+                .filter(|d| d.status == DecisionStatus::Abandoned)
+                .count(),
+            proposed_count: decisions
+                .iter()
+                .filter(|d| d.status == DecisionStatus::Proposed)
+                .count(),
         }
     });
 
@@ -152,12 +164,11 @@ pub fn analyze_project_health(
         let error_count = errors.len();
         total_errors += error_count;
 
-        let tool_count: usize = refs.iter()
-            .map(|e| extract_tool_names(e).len())
-            .sum();
+        let tool_count: usize = refs.iter().map(|e| extract_tool_names(e).len()).sum();
         total_tool_calls += tool_count;
 
-        let timestamp = entries.first()
+        let timestamp = entries
+            .first()
             .and_then(|e| e.timestamp())
             .map(|t| t.to_rfc3339());
 

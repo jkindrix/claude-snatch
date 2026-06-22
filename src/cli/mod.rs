@@ -44,11 +44,23 @@ pub struct Cli {
     long_help: (),
 
     /// Path to Claude directory (default: ~/.claude).
-    #[arg(short = 'd', long, global = true, env = "SNATCH_CLAUDE_DIR", hide_short_help = true)]
+    #[arg(
+        short = 'd',
+        long,
+        global = true,
+        env = "SNATCH_CLAUDE_DIR",
+        hide_short_help = true
+    )]
     pub claude_dir: Option<PathBuf>,
 
     /// Output format for structured data.
-    #[arg(short = 'o', long, global = true, default_value = "text", env = "SNATCH_OUTPUT")]
+    #[arg(
+        short = 'o',
+        long,
+        global = true,
+        default_value = "text",
+        env = "SNATCH_OUTPUT"
+    )]
     pub output: OutputFormat,
 
     /// Enable verbose output.
@@ -68,11 +80,23 @@ pub struct Cli {
     pub json: bool,
 
     /// Log level (error, warn, info, debug, trace).
-    #[arg(long, global = true, default_value = "warn", env = "SNATCH_LOG_LEVEL", hide_short_help = true)]
+    #[arg(
+        long,
+        global = true,
+        default_value = "warn",
+        env = "SNATCH_LOG_LEVEL",
+        hide_short_help = true
+    )]
     pub log_level: LogLevel,
 
     /// Log format (text, json, compact, pretty).
-    #[arg(long, global = true, default_value = "text", env = "SNATCH_LOG_FORMAT", hide_short_help = true)]
+    #[arg(
+        long,
+        global = true,
+        default_value = "text",
+        env = "SNATCH_LOG_FORMAT",
+        hide_short_help = true
+    )]
     pub log_format: LogFormat,
 
     /// Log output file (default: stderr).
@@ -80,7 +104,13 @@ pub struct Cli {
     pub log_file: Option<std::path::PathBuf>,
 
     /// Number of threads for parallel processing (default: number of CPUs).
-    #[arg(short = 'j', long, global = true, env = "SNATCH_THREADS", hide_short_help = true)]
+    #[arg(
+        short = 'j',
+        long,
+        global = true,
+        env = "SNATCH_THREADS",
+        hide_short_help = true
+    )]
     pub threads: Option<usize>,
 
     /// Path to custom configuration file.
@@ -89,7 +119,13 @@ pub struct Cli {
 
     /// Maximum file size to parse in bytes (default: unlimited).
     /// Set a limit to prevent memory exhaustion on very large files.
-    #[arg(long, global = true, env = "SNATCH_MAX_FILE_SIZE", value_name = "BYTES", hide_short_help = true)]
+    #[arg(
+        long,
+        global = true,
+        env = "SNATCH_MAX_FILE_SIZE",
+        value_name = "BYTES",
+        hide_short_help = true
+    )]
     pub max_file_size: Option<u64>,
 }
 
@@ -178,7 +214,6 @@ pub enum Commands {
     // ═══════════════════════════════════════════════════════════════════════
     // DISCOVERY - Browse sessions and projects
     // ═══════════════════════════════════════════════════════════════════════
-
     /// List projects and sessions.
     #[command(alias = "ls", display_order = 1)]
     List(ListArgs),
@@ -206,7 +241,6 @@ pub enum Commands {
     // ═══════════════════════════════════════════════════════════════════════
     // SEARCH - Find content across sessions
     // ═══════════════════════════════════════════════════════════════════════
-
     /// Search across sessions (regex and fuzzy matching).
     #[command(alias = "s", alias = "find", display_order = 10)]
     Search(SearchArgs),
@@ -226,7 +260,6 @@ pub enum Commands {
     // ═══════════════════════════════════════════════════════════════════════
     // ANALYSIS - Usage analytics and comparisons
     // ═══════════════════════════════════════════════════════════════════════
-
     /// Show usage statistics and cost tracking.
     #[command(alias = "stat", display_order = 20)]
     Stats(StatsArgs),
@@ -298,7 +331,6 @@ pub enum Commands {
     // ═══════════════════════════════════════════════════════════════════════
     // EXPORT - Extract content in various formats
     // ═══════════════════════════════════════════════════════════════════════
-
     /// Export conversations to various formats (markdown, json, html, etc.).
     #[command(alias = "x", display_order = 30)]
     Export(ExportArgs),
@@ -318,7 +350,6 @@ pub enum Commands {
     // ═══════════════════════════════════════════════════════════════════════
     // INTERACTIVE - Live session viewing
     // ═══════════════════════════════════════════════════════════════════════
-
     /// Launch interactive TUI browser.
     #[command(alias = "ui", display_order = 40)]
     Tui(TuiArgs),
@@ -330,7 +361,6 @@ pub enum Commands {
     // ═══════════════════════════════════════════════════════════════════════
     // MANAGEMENT - Session maintenance
     // ═══════════════════════════════════════════════════════════════════════
-
     /// Manage session tags, names, and bookmarks.
     #[command(display_order = 50)]
     Tag(TagArgs),
@@ -354,7 +384,6 @@ pub enum Commands {
     // ═══════════════════════════════════════════════════════════════════════
     // CONFIGURATION - Settings and setup
     // ═══════════════════════════════════════════════════════════════════════
-
     /// View and modify configuration.
     #[command(alias = "cfg", display_order = 60)]
     Config(ConfigArgs),
@@ -374,7 +403,6 @@ pub enum Commands {
     // ═══════════════════════════════════════════════════════════════════════
     // ADVANCED / HIDDEN
     // ═══════════════════════════════════════════════════════════════════════
-
     /// Generate dynamic completions (used by shell completion scripts).
     #[command(hide = true, name = "_complete")]
     DynamicCompletions(DynamicCompletionsArgs),
@@ -651,7 +679,12 @@ pub struct ExportArgs {
     pub output_file: Option<PathBuf>,
 
     /// Export format.
-    #[arg(short = 'f', long, default_value = "markdown", env = "SNATCH_EXPORT_FORMAT")]
+    #[arg(
+        short = 'f',
+        long,
+        default_value = "markdown",
+        env = "SNATCH_EXPORT_FORMAT"
+    )]
     pub format: ExportFormatArg,
 
     /// Export all sessions.
@@ -678,8 +711,8 @@ pub struct ExportArgs {
     #[arg(long)]
     pub combine_agents: bool,
 
-    /// Inline full tool outputs that were externalized to tool-results/<id>.txt
-    /// (replaces the truncated <persisted-output> preview with the full file).
+    /// Inline full tool outputs that were externalized to `tool-results/<id>.txt`
+    /// (replaces the truncated `<persisted-output>` preview with the full file).
     #[arg(long)]
     pub resolve_tool_results: bool,
 
@@ -951,7 +984,7 @@ pub struct SearchArgs {
 
     /// Read patterns from a TSV file with per-pattern scopes.
     ///
-    /// TSV format: category<TAB>subcategory<TAB>label<TAB>scope<TAB>pattern
+    /// TSV format: `category<TAB>subcategory<TAB>label<TAB>scope<TAB>pattern`
     /// Scopes: --thinking, --thinking-only, -t assistant, -t user, --tools, -a
     /// Implies --count --no-limit. Runs all patterns in a single pass.
     #[arg(long, value_name = "FILE")]
@@ -1865,7 +1898,7 @@ pub struct PromptsArgs {
 
     /// Exclude common system messages from results.
     ///
-    /// Filters out: [Request interrupted], Caveat:, <command-name>, <local-command-stdout>,
+    /// Filters out: `[Request interrupted]`, `Caveat:`, `<command-name>`, `<local-command-stdout>`,
     /// and other Claude Code system messages that pollute prompt analysis.
     #[arg(long)]
     pub exclude_system: bool,
@@ -2651,13 +2684,12 @@ fn init_logging(cli: &Cli) {
     let use_ansi = match cli.color {
         Some(explicit) => explicit,
         None => {
-            // Check NO_COLOR environment variable (if set to any value, disable color)
-            if std::env::var("NO_COLOR").is_ok() {
+            // Disable color if NO_COLOR is set (any value) or the terminal is "dumb";
+            // otherwise fall back to terminal detection.
+            if std::env::var("NO_COLOR").is_ok()
+                || std::env::var("TERM").map(|t| t == "dumb").unwrap_or(false)
+            {
                 false
-            // Check for dumb terminal
-            } else if std::env::var("TERM").map(|t| t == "dumb").unwrap_or(false) {
-                false
-            // Fall back to terminal detection
             } else {
                 std::io::stderr().is_terminal()
             }
@@ -2758,7 +2790,11 @@ pub fn run() -> Result<()> {
     // Initialize the cache from configuration
     let config = match &cli.config {
         Some(path) => Config::load_from(path).unwrap_or_else(|e| {
-            eprintln!("Warning: Failed to load config from {}: {}", path.display(), e);
+            eprintln!(
+                "Warning: Failed to load config from {}: {}",
+                path.display(),
+                e
+            );
             Config::default()
         }),
         None => Config::load().unwrap_or_default(),
@@ -2839,13 +2875,14 @@ pub fn run() -> Result<()> {
         #[cfg(feature = "mcp")]
         Some(Commands::ServeMcp(_)) => {
             // Run the MCP server
-            let rt = tokio::runtime::Runtime::new().map_err(|e| {
-                SnatchError::ExportError {
-                    message: format!("Failed to create tokio runtime: {e}"),
-                    source: None,
-                }
+            let rt = tokio::runtime::Runtime::new().map_err(|e| SnatchError::ExportError {
+                message: format!("Failed to create tokio runtime: {e}"),
+                source: None,
             })?;
-            rt.block_on(crate::mcp_server::run_server(cli.claude_dir.clone(), cli.max_file_size))
+            rt.block_on(crate::mcp_server::run_server(
+                cli.claude_dir.clone(),
+                cli.max_file_size,
+            ))
         }
     }
 }

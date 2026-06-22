@@ -18,21 +18,41 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
     let mut store = TagStore::load()?;
 
     match &args.action {
-        TagAction::Add { tag, session, since, until, project, preview } => {
+        TagAction::Add {
+            tag,
+            session,
+            since,
+            until,
+            project,
+            preview,
+        } => {
             // If session is specified, use single-session mode
             if let Some(session_prefix) = session {
                 let session_id = resolve_session_id(cli, session_prefix)?;
                 if *preview {
-                    println!("Would add tag '{}' to session {}", tag, short_id(&session_id));
+                    println!(
+                        "Would add tag '{}' to session {}",
+                        tag,
+                        short_id(&session_id)
+                    );
                 } else if store.add_tag(&session_id, tag) {
                     store.save()?;
                     println!("Added tag '{}' to session {}", tag, short_id(&session_id));
                 } else {
-                    println!("Session {} already has tag '{}'", short_id(&session_id), tag);
+                    println!(
+                        "Session {} already has tag '{}'",
+                        short_id(&session_id),
+                        tag
+                    );
                 }
             } else if since.is_some() || until.is_some() || project.is_some() {
                 // Bulk mode with filters
-                let sessions = get_filtered_sessions(cli, since.as_deref(), until.as_deref(), project.as_deref())?;
+                let sessions = get_filtered_sessions(
+                    cli,
+                    since.as_deref(),
+                    until.as_deref(),
+                    project.as_deref(),
+                )?;
                 if sessions.is_empty() {
                     println!("No sessions match the specified filters.");
                     return Ok(());
@@ -51,7 +71,12 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                         }
                     }
                     store.save()?;
-                    println!("Added tag '{}' to {} sessions ({} already had it)", tag, added, sessions.len() - added);
+                    println!(
+                        "Added tag '{}' to {} sessions ({} already had it)",
+                        tag,
+                        added,
+                        sessions.len() - added
+                    );
                 }
             } else {
                 eprintln!("Error: Either --session or date/project filters are required.");
@@ -62,28 +87,56 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
             }
         }
 
-        TagAction::Remove { tag, session, since, until, project, preview } => {
+        TagAction::Remove {
+            tag,
+            session,
+            since,
+            until,
+            project,
+            preview,
+        } => {
             // If session is specified, use single-session mode
             if let Some(session_prefix) = session {
                 let session_id = resolve_session_id(cli, session_prefix)?;
                 if *preview {
-                    println!("Would remove tag '{}' from session {}", tag, short_id(&session_id));
+                    println!(
+                        "Would remove tag '{}' from session {}",
+                        tag,
+                        short_id(&session_id)
+                    );
                 } else if store.remove_tag(&session_id, tag) {
                     store.save()?;
-                    println!("Removed tag '{}' from session {}", tag, short_id(&session_id));
+                    println!(
+                        "Removed tag '{}' from session {}",
+                        tag,
+                        short_id(&session_id)
+                    );
                 } else {
-                    println!("Session {} does not have tag '{}'", short_id(&session_id), tag);
+                    println!(
+                        "Session {} does not have tag '{}'",
+                        short_id(&session_id),
+                        tag
+                    );
                 }
             } else if since.is_some() || until.is_some() || project.is_some() {
                 // Bulk mode with filters
-                let sessions = get_filtered_sessions(cli, since.as_deref(), until.as_deref(), project.as_deref())?;
+                let sessions = get_filtered_sessions(
+                    cli,
+                    since.as_deref(),
+                    until.as_deref(),
+                    project.as_deref(),
+                )?;
                 if sessions.is_empty() {
                     println!("No sessions match the specified filters.");
                     return Ok(());
                 }
 
                 if *preview {
-                    println!("Would remove tag '{}' from {} sessions:", tag, sessions.len());
+                    println!(
+                        "Would remove tag '{}' from {} sessions:",
+                        tag,
+                        sessions.len()
+                    );
                     for id in &sessions {
                         println!("  {}", short_id(id));
                     }
@@ -95,7 +148,12 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                         }
                     }
                     store.save()?;
-                    println!("Removed tag '{}' from {} sessions ({} didn't have it)", tag, removed, sessions.len() - removed);
+                    println!(
+                        "Removed tag '{}' from {} sessions ({} didn't have it)",
+                        tag,
+                        removed,
+                        sessions.len() - removed
+                    );
                 }
             } else {
                 eprintln!("Error: Either --session or date/project filters are required.");
@@ -110,11 +168,7 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
             if let Some(name) = name {
                 store.set_name(&session_id, Some(name.clone()));
                 store.save()?;
-                println!(
-                    "Set name '{}' for session {}",
-                    name,
-                    short_id(&session_id)
-                );
+                println!("Set name '{}' for session {}", name, short_id(&session_id));
             } else {
                 store.set_name(&session_id, None);
                 store.save()?;
@@ -230,10 +284,7 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                 OutputFormat::Tsv => {
                     println!("session_id\tname");
                     for id in &bookmarked {
-                        let name = store
-                            .get(id)
-                            .and_then(|m| m.name.as_deref())
-                            .unwrap_or("");
+                        let name = store.get(id).and_then(|m| m.name.as_deref()).unwrap_or("");
                         println!("{}\t{}", id, name);
                     }
                 }
@@ -270,10 +321,7 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                 OutputFormat::Tsv => {
                     println!("session_id\tname");
                     for id in &sessions {
-                        let name = store
-                            .get(id)
-                            .and_then(|m| m.name.as_deref())
-                            .unwrap_or("");
+                        let name = store.get(id).and_then(|m| m.name.as_deref()).unwrap_or("");
                         println!("{}\t{}", id, name);
                     }
                 }
@@ -283,11 +331,7 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                     }
                 }
                 OutputFormat::Text => {
-                    println!(
-                        "Sessions with tag '{}' ({}):",
-                        tag,
-                        sessions.len()
-                    );
+                    println!("Sessions with tag '{}' ({}):", tag, sessions.len());
                     for id in &sessions {
                         let name = store
                             .get(id)
@@ -333,10 +377,7 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                     OutputFormat::Tsv => {
                         println!("session_id\tname\toutcome");
                         for id in &sessions {
-                            let name = store
-                                .get(id)
-                                .and_then(|m| m.name.as_deref())
-                                .unwrap_or("");
+                            let name = store.get(id).and_then(|m| m.name.as_deref()).unwrap_or("");
                             println!("{}\t{}\t{}", id, name, outcome);
                         }
                     }
@@ -346,11 +387,7 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                         }
                     }
                     OutputFormat::Text => {
-                        println!(
-                            "Sessions with outcome '{}' ({}):",
-                            outcome,
-                            sessions.len()
-                        );
+                        println!("Sessions with outcome '{}' ({}):", outcome, sessions.len());
                         for id in &sessions {
                             let name = store
                                 .get(id)
@@ -378,9 +415,14 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                         println!("unclassified\t{}", stats.unclassified);
                     }
                     OutputFormat::Compact => {
-                        println!("{} {} {} {} {}",
-                            stats.success, stats.partial, stats.failed,
-                            stats.abandoned, stats.unclassified);
+                        println!(
+                            "{} {} {} {} {}",
+                            stats.success,
+                            stats.partial,
+                            stats.failed,
+                            stats.abandoned,
+                            stats.unclassified
+                        );
                     }
                     OutputFormat::Text => {
                         println!("Session Outcome Statistics");
@@ -398,12 +440,23 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
             }
         }
 
-        TagAction::Note { session, text, label } => {
+        TagAction::Note {
+            session,
+            text,
+            label,
+        } => {
             let session_id = resolve_session_id(cli, session)?;
             store.add_note(&session_id, text, label.as_deref());
             store.save()?;
-            let label_str = label.as_ref().map(|l| format!(" [{}]", l)).unwrap_or_default();
-            println!("Added note{} to session {}", label_str, short_id(&session_id));
+            let label_str = label
+                .as_ref()
+                .map(|l| format!(" [{}]", l))
+                .unwrap_or_default();
+            println!(
+                "Added note{} to session {}",
+                label_str,
+                short_id(&session_id)
+            );
         }
 
         TagAction::Notes { session } => {
@@ -436,11 +489,24 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                         }
                     }
                     OutputFormat::Text => {
-                        println!("Notes for session {} ({} total):", short_id(&session_id), notes.len());
+                        println!(
+                            "Notes for session {} ({} total):",
+                            short_id(&session_id),
+                            notes.len()
+                        );
                         println!();
                         for (i, note) in notes.iter().enumerate() {
-                            let label_str = note.label.as_ref().map(|l| format!(" [{}]", l)).unwrap_or_default();
-                            println!("[{}]{} - {}", i, label_str, note.created_at.format("%Y-%m-%d %H:%M"));
+                            let label_str = note
+                                .label
+                                .as_ref()
+                                .map(|l| format!(" [{}]", l))
+                                .unwrap_or_default();
+                            println!(
+                                "[{}]{} - {}",
+                                i,
+                                label_str,
+                                note.created_at.format("%Y-%m-%d %H:%M")
+                            );
                             for line in note.text.lines() {
                                 println!("    {}", line);
                             }
@@ -457,9 +523,17 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
             let session_id = resolve_session_id(cli, session)?;
             if store.remove_note(&session_id, *index) {
                 store.save()?;
-                println!("Removed note {} from session {}", index, short_id(&session_id));
+                println!(
+                    "Removed note {} from session {}",
+                    index,
+                    short_id(&session_id)
+                );
             } else {
-                println!("No note at index {} for session {}", index, short_id(&session_id));
+                println!(
+                    "No note at index {} for session {}",
+                    index,
+                    short_id(&session_id)
+                );
             }
         }
 
@@ -470,7 +544,10 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
             println!("Cleared all notes from session {}", short_id(&session_id));
         }
 
-        TagAction::Link { session_a, session_b } => {
+        TagAction::Link {
+            session_a,
+            session_b,
+        } => {
             let id_a = resolve_session_id(cli, session_a)?;
             let id_b = resolve_session_id(cli, session_b)?;
 
@@ -495,7 +572,10 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
             }
         }
 
-        TagAction::Unlink { session_a, session_b } => {
+        TagAction::Unlink {
+            session_a,
+            session_b,
+        } => {
             let id_a = resolve_session_id(cli, session_a)?;
             let id_b = resolve_session_id(cli, session_b)?;
 
@@ -533,10 +613,7 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                     OutputFormat::Tsv => {
                         println!("session_id\tname");
                         for id in &linked {
-                            let name = store
-                                .get(id)
-                                .and_then(|m| m.name.as_deref())
-                                .unwrap_or("");
+                            let name = store.get(id).and_then(|m| m.name.as_deref()).unwrap_or("");
                             println!("{}\t{}", id, name);
                         }
                     }
@@ -588,10 +665,7 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                     OutputFormat::Tsv => {
                         println!("session_id\tname\tlinked_count");
                         for id in &sessions {
-                            let name = store
-                                .get(id)
-                                .and_then(|m| m.name.as_deref())
-                                .unwrap_or("");
+                            let name = store.get(id).and_then(|m| m.name.as_deref()).unwrap_or("");
                             let linked = store.get_linked_sessions(id);
                             println!("{}\t{}\t{}", id, name, linked.len());
                         }
@@ -646,7 +720,8 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                 })?;
 
             // Get source session metadata
-            let source_meta = get_session_similarity_meta(source_session, &store, cli.max_file_size)?;
+            let source_meta =
+                get_session_similarity_meta(source_session, &store, cli.max_file_size)?;
 
             // Calculate similarity for all other sessions
             let weights = SimilarityWeights {
@@ -672,13 +747,21 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                 .collect();
 
             // Sort by similarity score (highest first)
-            similarities.sort_by(|a, b| b.1.total.partial_cmp(&a.1.total).unwrap_or(std::cmp::Ordering::Equal));
+            similarities.sort_by(|a, b| {
+                b.1.total
+                    .partial_cmp(&a.1.total)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
 
             // Limit results
             similarities.truncate(*limit);
 
             if similarities.is_empty() {
-                println!("No similar sessions found for {} with threshold >= {}%", short_id(&session_id), threshold);
+                println!(
+                    "No similar sessions found for {} with threshold >= {}%",
+                    short_id(&session_id),
+                    threshold
+                );
                 return Ok(());
             }
 
@@ -701,23 +784,28 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                             })
                         })
                         .collect();
-                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                        "source_session": session_id,
-                        "similar_sessions": data,
-                    }))?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "source_session": session_id,
+                            "similar_sessions": data,
+                        }))?
+                    );
                 }
                 OutputFormat::Tsv => {
                     println!("session_id\tname\ttotal\ttool\tproject\ttime\ttag\ttoken");
                     for (id, score) in &similarities {
-                        let name = store
-                            .get(id)
-                            .and_then(|m| m.name.as_deref())
-                            .unwrap_or("");
+                        let name = store.get(id).and_then(|m| m.name.as_deref()).unwrap_or("");
                         println!(
                             "{}\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}",
-                            id, name, score.total, score.tool_overlap,
-                            score.project_match, score.time_proximity,
-                            score.tag_overlap, score.token_similarity
+                            id,
+                            name,
+                            score.total,
+                            score.tool_overlap,
+                            score.project_match,
+                            score.time_proximity,
+                            score.tag_overlap,
+                            score.token_similarity
                         );
                     }
                 }
@@ -733,7 +821,11 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                         .map(|n| format!(" \"{}\"", n))
                         .unwrap_or_default();
 
-                    println!("Sessions similar to {}{}", short_id(&session_id), source_name);
+                    println!(
+                        "Sessions similar to {}{}",
+                        short_id(&session_id),
+                        source_name
+                    );
                     println!("{}", "=".repeat(40));
                     println!();
 
@@ -746,11 +838,7 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
 
                         // Similarity bar
                         let bar_len = (score.total / 100.0 * 20.0) as usize;
-                        let bar = format!(
-                            "[{}{}]",
-                            "█".repeat(bar_len),
-                            "░".repeat(20 - bar_len)
-                        );
+                        let bar = format!("[{}{}]", "█".repeat(bar_len), "░".repeat(20 - bar_len));
 
                         println!(
                             "  {}. {}{} {} {:.0}%",
@@ -785,30 +873,60 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
             }
         }
 
-        TagAction::Message { session, message_uuid, tag, project } => {
+        TagAction::Message {
+            session,
+            message_uuid,
+            tag,
+            project,
+        } => {
             let project_dir = resolve_project_dir(cli, project.as_deref())?;
             let session_id = resolve_session_id(cli, session)?;
             let mut tag_store = crate::message_tags::load_message_tags(&project_dir)?;
-            if tag_store.add_tag(&session_id, message_uuid, tag, crate::message_tags::TagSource::Manual) {
+            if tag_store.add_tag(
+                &session_id,
+                message_uuid,
+                tag,
+                crate::message_tags::TagSource::Manual,
+            ) {
                 crate::message_tags::save_message_tags(&project_dir, &tag_store)?;
                 println!("Tagged message {} with '{}'", short_id(message_uuid), tag);
             } else {
-                println!("Message {} already has tag '{}'", short_id(message_uuid), tag);
+                println!(
+                    "Message {} already has tag '{}'",
+                    short_id(message_uuid),
+                    tag
+                );
             }
         }
 
-        TagAction::UntagMessage { message_uuid, tag, project } => {
+        TagAction::UntagMessage {
+            message_uuid,
+            tag,
+            project,
+        } => {
             let project_dir = resolve_project_dir(cli, project.as_deref())?;
             let mut tag_store = crate::message_tags::load_message_tags(&project_dir)?;
             if tag_store.remove_tag(message_uuid, tag) {
                 crate::message_tags::save_message_tags(&project_dir, &tag_store)?;
-                println!("Removed tag '{}' from message {}", tag, short_id(message_uuid));
+                println!(
+                    "Removed tag '{}' from message {}",
+                    tag,
+                    short_id(message_uuid)
+                );
             } else {
-                println!("Message {} does not have tag '{}'", short_id(message_uuid), tag);
+                println!(
+                    "Message {} does not have tag '{}'",
+                    short_id(message_uuid),
+                    tag
+                );
             }
         }
 
-        TagAction::MessageTags { session, tag, project } => {
+        TagAction::MessageTags {
+            session,
+            tag,
+            project,
+        } => {
             let project_dir = resolve_project_dir(cli, project.as_deref())?;
             let tag_store = crate::message_tags::load_message_tags(&project_dir)?;
 
@@ -823,10 +941,19 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                             println!("{}", serde_json::to_string_pretty(&msgs)?);
                         }
                         _ => {
-                            println!("Message tags for session {} ({} messages):", short_id(&session_id), msgs.len());
+                            println!(
+                                "Message tags for session {} ({} messages):",
+                                short_id(&session_id),
+                                msgs.len()
+                            );
                             for msg in &msgs {
-                                let tags: Vec<&str> = msg.tags.iter().map(|t| t.tag.as_str()).collect();
-                                println!("  {} -> {}", short_id(&msg.message_uuid), tags.join(", "));
+                                let tags: Vec<&str> =
+                                    msg.tags.iter().map(|t| t.tag.as_str()).collect();
+                                println!(
+                                    "  {} -> {}",
+                                    short_id(&msg.message_uuid),
+                                    tags.join(", ")
+                                );
                             }
                         }
                     }
@@ -843,8 +970,14 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                         _ => {
                             println!("Messages with tag '{}' ({} total):", tag_filter, msgs.len());
                             for msg in &msgs {
-                                let tags: Vec<&str> = msg.tags.iter().map(|t| t.tag.as_str()).collect();
-                                println!("  {} [{}] -> {}", short_id(&msg.message_uuid), short_id(&msg.session_id), tags.join(", "));
+                                let tags: Vec<&str> =
+                                    msg.tags.iter().map(|t| t.tag.as_str()).collect();
+                                println!(
+                                    "  {} [{}] -> {}",
+                                    short_id(&msg.message_uuid),
+                                    short_id(&msg.session_id),
+                                    tags.join(", ")
+                                );
                             }
                         }
                     }
@@ -856,16 +989,28 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                 } else {
                     match cli.effective_output() {
                         OutputFormat::Json => {
-                            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                                "tags": all_tags,
-                                "total_messages": tag_store.count(),
-                            }))?);
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&serde_json::json!({
+                                    "tags": all_tags,
+                                    "total_messages": tag_store.count(),
+                                }))?
+                            );
                         }
                         _ => {
-                            println!("Message tags ({} tags, {} messages):", all_tags.len(), tag_store.count());
+                            println!(
+                                "Message tags ({} tags, {} messages):",
+                                all_tags.len(),
+                                tag_store.count()
+                            );
                             for t in &all_tags {
                                 let count = tag_store.messages_with_tag(t).len();
-                                println!("  {} ({} message{})", t, count, if count == 1 { "" } else { "s" });
+                                println!(
+                                    "  {} ({} message{})",
+                                    t,
+                                    count,
+                                    if count == 1 { "" } else { "s" }
+                                );
                             }
                         }
                     }
@@ -891,7 +1036,7 @@ fn resolve_project_dir(cli: &Cli, project: Option<&str>) -> Result<std::path::Pa
         })?;
         let projects = claude_dir.projects()?;
         for p in projects {
-            if cwd.to_string_lossy().contains(&p.decoded_path()) {
+            if cwd.to_string_lossy().contains(p.decoded_path()) {
                 return Ok(p.path().to_path_buf());
             }
         }
@@ -946,7 +1091,8 @@ fn get_session_similarity_meta(
     let modified_time: chrono::DateTime<chrono::Utc> = session.modified_time().into();
 
     // Get tools and tokens from session content
-    let (tools_used, total_tokens) = if let Ok(entries) = session.parse_with_options(max_file_size) {
+    let (tools_used, total_tokens) = if let Ok(entries) = session.parse_with_options(max_file_size)
+    {
         if let Ok(conv) = Conversation::from_entries(entries) {
             let analytics = SessionAnalytics::from_conversation(&conv);
             let tools: HashSet<String> = analytics.tool_counts.keys().cloned().collect();

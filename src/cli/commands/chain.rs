@@ -26,7 +26,10 @@ pub fn run(cli: &Cli, args: &ChainArgs) -> Result<()> {
 
     let projects = claude_dir.projects()?;
     let filtered: Vec<_> = if let Some(ref filter) = args.project {
-        projects.into_iter().filter(|p| p.best_path().contains(filter)).collect()
+        projects
+            .into_iter()
+            .filter(|p| p.best_path().contains(filter))
+            .collect()
     } else {
         projects
     };
@@ -39,9 +42,7 @@ pub fn run(cli: &Cli, args: &ChainArgs) -> Result<()> {
             continue;
         }
 
-        let chains = detect_chains(
-            sessions.iter().map(|s| (s.session_id(), s.path()))
-        );
+        let chains = detect_chains(sessions.iter().map(|s| (s.session_id(), s.path())));
 
         if chains.is_empty() {
             continue;
@@ -49,20 +50,23 @@ pub fn run(cli: &Cli, args: &ChainArgs) -> Result<()> {
 
         // Sort chains by start time (newest first)
         let mut sorted_chains: Vec<_> = chains.values().collect();
-        sorted_chains.sort_by(|a, b| b.started().cmp(&a.started()));
+        sorted_chains.sort_by_key(|b| std::cmp::Reverse(b.started()));
 
         match cli.effective_output() {
             OutputFormat::Json => {
-                let output: Vec<serde_json::Value> = sorted_chains.iter().map(|c| {
-                    serde_json::json!({
-                        "root_id": c.root_id,
-                        "slug": c.slug,
-                        "members": c.file_ids(),
-                        "length": c.len(),
-                        "started": c.started().map(|t| t.to_rfc3339()),
-                        "project": project.best_path(),
+                let output: Vec<serde_json::Value> = sorted_chains
+                    .iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "root_id": c.root_id,
+                            "slug": c.slug,
+                            "members": c.file_ids(),
+                            "length": c.len(),
+                            "started": c.started().map(|t| t.to_rfc3339()),
+                            "project": project.best_path(),
+                        })
                     })
-                }).collect();
+                    .collect();
                 writeln!(writer, "{}", serde_json::to_string_pretty(&output)?)?;
             }
             _ => {
@@ -72,11 +76,14 @@ pub fn run(cli: &Cli, args: &ChainArgs) -> Result<()> {
 
                 for chain in &sorted_chains {
                     let slug_display = chain.slug.as_deref().unwrap_or("(no slug)");
-                    let started = chain.started()
+                    let started = chain
+                        .started()
                         .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
                         .unwrap_or_else(|| "unknown".to_string());
 
-                    writeln!(writer, "  {} [{}] ({} files, started {})",
+                    writeln!(
+                        writer,
+                        "  {} [{}] ({} files, started {})",
                         &chain.root_id[..8.min(chain.root_id.len())],
                         slug_display,
                         chain.len(),
@@ -85,10 +92,13 @@ pub fn run(cli: &Cli, args: &ChainArgs) -> Result<()> {
 
                     for (i, member) in chain.members.iter().enumerate() {
                         let marker = if i == 0 { "root" } else { "cont" };
-                        let ts = member.started
+                        let ts = member
+                            .started
                             .map(|t| t.format("%H:%M").to_string())
                             .unwrap_or_else(|| "??:??".to_string());
-                        writeln!(writer, "    {}. {} ({}, {})",
+                        writeln!(
+                            writer,
+                            "    {}. {} ({}, {})",
                             i + 1,
                             &member.file_id[..8.min(member.file_id.len())],
                             marker,

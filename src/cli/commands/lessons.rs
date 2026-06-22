@@ -76,22 +76,26 @@ pub fn run(cli: &Cli, args: &LessonsArgs) -> Result<()> {
         return run_cross_session(cli, args);
     }
 
-    let session_id = args.session_id.as_ref().ok_or_else(|| SnatchError::InvalidArgument {
-        name: "session_id".to_string(),
-        reason: "session ID is required unless --project or --all is specified".to_string(),
-    })?;
+    let session_id = args
+        .session_id
+        .as_ref()
+        .ok_or_else(|| SnatchError::InvalidArgument {
+            name: "session_id".to_string(),
+            reason: "session ID is required unless --project or --all is specified".to_string(),
+        })?;
 
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
-    let session = claude_dir
-        .find_session(session_id)?
-        .ok_or_else(|| SnatchError::SessionNotFound {
-            session_id: session_id.clone(),
-        })?;
+    let session =
+        claude_dir
+            .find_session(session_id)?
+            .ok_or_else(|| SnatchError::SessionNotFound {
+                session_id: session_id.clone(),
+            })?;
 
     let entries = session.parse_with_options(cli.max_file_size)?;
     let conversation = Conversation::from_entries(entries)?;
     let all_entries = conversation.chronological_entries();
-    let entry_refs: Vec<&_> = all_entries.iter().map(|e| *e).collect();
+    let entry_refs: Vec<&_> = all_entries.clone();
 
     let category = args
         .category
@@ -151,9 +155,7 @@ pub fn run(cli: &Cli, args: &LessonsArgs) -> Result<()> {
 
             println!(
                 "Lessons for session {} ({} errors, {} corrections)\n",
-                session_id,
-                result.summary.total_errors,
-                result.summary.total_corrections,
+                session_id, result.summary.total_errors, result.summary.total_corrections,
             );
 
             print_text_lessons(&result);
@@ -196,8 +198,7 @@ fn run_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
     let mut tool_error_counts: HashMap<String, usize> = HashMap::new();
     let mut sessions_with_lessons = 0;
 
-    let show_progress =
-        sessions.len() > 10 && std::io::stderr().is_terminal() && !cli.quiet;
+    let show_progress = sessions.len() > 10 && std::io::stderr().is_terminal() && !cli.quiet;
     let progress = if show_progress {
         use indicatif::{ProgressBar, ProgressStyle};
         let pb = ProgressBar::new(sessions.len() as u64);
@@ -229,7 +230,7 @@ fn run_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
             Err(_) => continue,
         };
         let all_entries = conversation.chronological_entries();
-        let entry_refs: Vec<&_> = all_entries.iter().map(|e| *e).collect();
+        let entry_refs: Vec<&_> = all_entries.clone();
 
         let result = extract_lessons(&entry_refs, &opts);
 
@@ -271,7 +272,7 @@ fn run_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
     }
 
     let mut most_error_prone: Vec<(String, usize)> = tool_error_counts.into_iter().collect();
-    most_error_prone.sort_by(|a, b| b.1.cmp(&a.1));
+    most_error_prone.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     match cli.effective_output() {
         OutputFormat::Json => {
@@ -290,10 +291,7 @@ fn run_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
         }
         _ => {
             if all_error_pairs.is_empty() && all_corrections.is_empty() {
-                println!(
-                    "No lessons found across {} sessions.",
-                    sessions.len()
-                );
+                println!("No lessons found across {} sessions.", sessions.len());
                 return Ok(());
             }
 
@@ -314,7 +312,13 @@ fn run_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
                         .as_deref()
                         .map(|s| &s[..8.min(s.len())])
                         .unwrap_or("?");
-                    println!("  {}. [{}] [{}] {}", i + 1, sid, pair.tool_name, pair.error_preview);
+                    println!(
+                        "  {}. [{}] [{}] {}",
+                        i + 1,
+                        sid,
+                        pair.tool_name,
+                        pair.error_preview
+                    );
                     if let Some(ref resolution) = pair.resolution_summary {
                         println!("     Fix: {resolution}");
                     }

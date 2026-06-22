@@ -11,14 +11,17 @@ use super::helpers::{self, short_id, SessionCollectParams};
 
 /// Run the health command.
 pub fn run(cli: &Cli, args: &HealthArgs) -> Result<()> {
-    let sessions = helpers::collect_sessions(cli, &SessionCollectParams {
-        session: None,
-        project: Some(&args.project),
-        since: args.since.as_deref(),
-        until: args.until.as_deref(),
-        recent: None,
-        no_subagents: args.no_subagents,
-    })?;
+    let sessions = helpers::collect_sessions(
+        cli,
+        &SessionCollectParams {
+            session: None,
+            project: Some(&args.project),
+            since: args.since.as_deref(),
+            until: args.until.as_deref(),
+            recent: None,
+            no_subagents: args.no_subagents,
+        },
+    )?;
 
     // Try to load decision store
     let project = helpers::resolve_single_project(cli, &args.project).ok();
@@ -113,8 +116,11 @@ pub fn run(cli: &Cli, args: &HealthArgs) -> Result<()> {
                 println!("{}", "-".repeat(60));
                 println!(
                     "  {} total | {} confirmed | {} superseded | {} abandoned | {} proposed",
-                    dc.total_decisions, dc.confirmed_count, dc.superseded_count,
-                    dc.abandoned_count, dc.proposed_count,
+                    dc.total_decisions,
+                    dc.confirmed_count,
+                    dc.superseded_count,
+                    dc.abandoned_count,
+                    dc.proposed_count,
                 );
                 println!();
             }
@@ -126,7 +132,10 @@ pub fn run(cli: &Cli, args: &HealthArgs) -> Result<()> {
                     let ts = s.timestamp.as_deref().unwrap_or("?");
                     println!(
                         "  [{}] {} — {} errors, {} tools",
-                        short_id(&s.session_id), ts, s.error_count, s.tool_count,
+                        short_id(&s.session_id),
+                        ts,
+                        s.error_count,
+                        s.tool_count,
                     );
                 }
             }

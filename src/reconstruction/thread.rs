@@ -7,11 +7,7 @@
 
 use std::collections::HashMap;
 
-
-use crate::model::{
-    ContentBlock, LogEntry, SystemMessage,
-    SystemSubtype,
-};
+use crate::model::{ContentBlock, LogEntry, SystemMessage, SystemSubtype};
 
 /// Groups streaming message chunks by their message.id.
 #[derive(Debug, Default)]
@@ -38,10 +34,7 @@ impl MessageGrouper {
                 self.order.push(msg_id.clone());
             }
 
-            self.groups
-                .entry(msg_id)
-                .or_default()
-                .add_chunk(entry);
+            self.groups.entry(msg_id).or_default().add_chunk(entry);
         }
     }
 
@@ -152,18 +145,24 @@ impl MessageGroup {
         let last = self.last();
 
         // Extract metadata from first chunk
-        let (uuid, timestamp, session_id, version, model) = if let Some(LogEntry::Assistant(a)) = first
-        {
-            (
-                a.uuid.clone(),
-                a.timestamp,
-                a.session_id.clone(),
-                a.version.clone(),
-                a.message.model.clone(),
-            )
-        } else {
-            (String::new(), chrono::Utc::now(), String::new(), String::new(), String::new())
-        };
+        let (uuid, timestamp, session_id, version, model) =
+            if let Some(LogEntry::Assistant(a)) = first {
+                (
+                    a.uuid.clone(),
+                    a.timestamp,
+                    a.session_id.clone(),
+                    a.version.clone(),
+                    a.message.model.clone(),
+                )
+            } else {
+                (
+                    String::new(),
+                    chrono::Utc::now(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                )
+            };
 
         // Get final stop reason from last chunk
         let stop_reason = if let Some(LogEntry::Assistant(a)) = last {
@@ -283,13 +282,17 @@ impl ReconstructedMessage {
     /// Check if this message contains thinking.
     #[must_use]
     pub fn has_thinking(&self) -> bool {
-        self.content.iter().any(|c| matches!(c, ContentBlock::Thinking(_)))
+        self.content
+            .iter()
+            .any(|c| matches!(c, ContentBlock::Thinking(_)))
     }
 
     /// Check if this message contains tool uses.
     #[must_use]
     pub fn has_tool_use(&self) -> bool {
-        self.content.iter().any(|c| matches!(c, ContentBlock::ToolUse(_)))
+        self.content
+            .iter()
+            .any(|c| matches!(c, ContentBlock::ToolUse(_)))
     }
 }
 
@@ -422,10 +425,7 @@ impl RetryChain {
     /// Get total retry delay in milliseconds.
     #[must_use]
     pub fn total_delay_ms(&self) -> f64 {
-        self.attempts
-            .iter()
-            .filter_map(|a| a.retry_in_ms)
-            .sum()
+        self.attempts.iter().filter_map(|a| a.retry_in_ms).sum()
     }
 }
 
@@ -476,8 +476,11 @@ impl RetryStatistics {
 
 #[cfg(test)]
 mod tests {
+    // Test assertions compare exactly-representable float values (0.0, integer-valued
+    // costs/scores); the float_cmp lint is a false positive for these.
+    #![allow(clippy::float_cmp)]
     use super::*;
-    use crate::model::{AssistantMessage, AssistantContent, TextBlock, SummaryMessage};
+    use crate::model::{AssistantContent, AssistantMessage, SummaryMessage, TextBlock};
     use chrono::Utc;
     use indexmap::IndexMap;
 

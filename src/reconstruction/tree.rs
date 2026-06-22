@@ -17,8 +17,16 @@ pub struct DepthFirstIterator<'a> {
 impl<'a> DepthFirstIterator<'a> {
     /// Create a new depth-first iterator.
     pub fn new(conversation: &'a Conversation) -> Self {
-        let stack = conversation.roots().iter().rev().map(String::as_str).collect();
-        Self { conversation, stack }
+        let stack = conversation
+            .roots()
+            .iter()
+            .rev()
+            .map(String::as_str)
+            .collect();
+        Self {
+            conversation,
+            stack,
+        }
     }
 }
 
@@ -49,7 +57,10 @@ impl<'a> BreadthFirstIterator<'a> {
     /// Create a new breadth-first iterator.
     pub fn new(conversation: &'a Conversation) -> Self {
         let queue = conversation.roots().iter().map(String::as_str).collect();
-        Self { conversation, queue }
+        Self {
+            conversation,
+            queue,
+        }
     }
 }
 
@@ -383,11 +394,8 @@ mod tests {
 
     #[test]
     fn test_conversation_path_contains() {
-        let path = ConversationPath::from_uuids(vec![
-            "a".to_string(),
-            "b".to_string(),
-            "c".to_string(),
-        ]);
+        let path =
+            ConversationPath::from_uuids(vec!["a".to_string(), "b".to_string(), "c".to_string()]);
 
         assert!(path.contains("a"));
         assert!(path.contains("b"));

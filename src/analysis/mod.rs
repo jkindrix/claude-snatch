@@ -1,8 +1,8 @@
 //! Shared analytical operations for session data.
 //!
 //! This module contains core analysis logic that is consumed by both
-//! the CLI and MCP server. Functions operate on parsed [`LogEntry`] slices
-//! and [`Conversation`] structures — no transport-specific types.
+//! the CLI and MCP server. Functions operate on parsed `LogEntry` slices
+//! and `Conversation` structures — no transport-specific types.
 //!
 //! # Modules
 //!
@@ -14,10 +14,10 @@
 
 pub mod conflict_detection;
 pub mod decision_detection;
-pub mod event_context;
-pub mod file_evolution;
 pub mod digest;
+pub mod event_context;
 pub mod extraction;
+pub mod file_evolution;
 pub mod filters;
 pub mod lessons;
 pub mod priorities;

@@ -20,16 +20,17 @@ pub fn run(cli: &Cli, args: &ContextArgs) -> Result<()> {
     }
 
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
-    let session = claude_dir
-        .find_session(&args.session_id)?
-        .ok_or_else(|| SnatchError::SessionNotFound {
-            session_id: args.session_id.clone(),
-        })?;
+    let session =
+        claude_dir
+            .find_session(&args.session_id)?
+            .ok_or_else(|| SnatchError::SessionNotFound {
+                session_id: args.session_id.clone(),
+            })?;
 
     let entries = session.parse_with_options(cli.max_file_size)?;
     let conversation = Conversation::from_entries(entries)?;
     let main_entries = conversation.main_thread_entries();
-    let entry_refs: Vec<&_> = main_entries.iter().copied().collect();
+    let entry_refs: Vec<&_> = main_entries.clone();
 
     let timestamp = if let Some(ref ts) = args.timestamp {
         use crate::cli::commands::parse_date_filter;
@@ -117,12 +118,16 @@ pub fn run(cli: &Cli, args: &ContextArgs) -> Result<()> {
 }
 
 fn print_turn(turn: &crate::analysis::event_context::ContextTurn, prefix: &str) {
-    let ts = turn.timestamp
+    let ts = turn
+        .timestamp
         .map(|t| t.format("%H:%M:%S").to_string())
         .unwrap_or_default();
     let error_mark = if turn.had_errors { " ✗" } else { "" };
 
-    println!("{prefix}[{}] {ts} {}{}:", turn.index, turn.message_type, error_mark);
+    println!(
+        "{prefix}[{}] {ts} {}{}:",
+        turn.index, turn.message_type, error_mark
+    );
     if let Some(ref text) = turn.text {
         for line in text.lines().take(5) {
             println!("{prefix}    {line}");

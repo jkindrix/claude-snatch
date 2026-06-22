@@ -53,7 +53,8 @@ impl<'a> ScrollableText<'a> {
             Style::default().fg(Color::DarkGray)
         };
 
-        let visible_content: Vec<Line> = self.content
+        let visible_content: Vec<Line> = self
+            .content
             .into_iter()
             .skip(self.scroll)
             .take(area.height as usize - 2)
@@ -119,8 +120,8 @@ impl<'a> StatusBar<'a> {
         spans.extend(self.right);
 
         let line = Line::from(spans);
-        let paragraph = Paragraph::new(vec![line])
-            .style(Style::default().bg(Color::DarkGray).fg(Color::White));
+        let paragraph =
+            Paragraph::new(vec![line]).style(Style::default().bg(Color::DarkGray).fg(Color::White));
 
         f.render_widget(paragraph, area);
     }

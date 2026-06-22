@@ -145,9 +145,24 @@ pub fn is_interrogative(text: &str) -> bool {
 
     // Starts with question words (case-insensitive)
     let question_starters = [
-        "what ", "how ", "should ", "can ", "could ", "would ", "will ",
-        "is ", "are ", "do ", "does ", "which ", "where ", "when ", "why ",
-        "shall ", "have you ", "did ",
+        "what ",
+        "how ",
+        "should ",
+        "can ",
+        "could ",
+        "would ",
+        "will ",
+        "is ",
+        "are ",
+        "do ",
+        "does ",
+        "which ",
+        "where ",
+        "when ",
+        "why ",
+        "shall ",
+        "have you ",
+        "did ",
     ];
 
     question_starters.iter().any(|q| lower.starts_with(q))
@@ -210,8 +225,7 @@ pub fn has_options_pattern(text: &str) -> bool {
     }
 
     // Bullet lists: 3 items + deliberation, or 4+ items on their own
-    static BULLETS: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?m)^\s*[-*]\s+").unwrap());
+    static BULLETS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^\s*[-*]\s+").unwrap());
     let bullet_count = BULLETS.find_iter(text).count();
     if (bullet_count >= 4) || (bullet_count >= 3 && has_deliberation) {
         return true;
@@ -228,11 +242,32 @@ pub fn is_affirmative(text: &str) -> bool {
 
     // Direct affirmatives
     let affirmatives = [
-        "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "sounds good",
-        "go for it", "do it", "let's do it", "let's go", "perfect",
-        "exactly", "agreed", "correct", "right", "absolutely",
-        "that works", "makes sense", "go ahead", "proceed",
-        "i agree", "i like", "i think so", "definitely",
+        "yes",
+        "yeah",
+        "yep",
+        "yup",
+        "sure",
+        "ok",
+        "okay",
+        "sounds good",
+        "go for it",
+        "do it",
+        "let's do it",
+        "let's go",
+        "perfect",
+        "exactly",
+        "agreed",
+        "correct",
+        "right",
+        "absolutely",
+        "that works",
+        "makes sense",
+        "go ahead",
+        "proceed",
+        "i agree",
+        "i like",
+        "i think so",
+        "definitely",
     ];
     if affirmatives.iter().any(|a| lower.starts_with(a)) {
         return true;
@@ -240,22 +275,32 @@ pub fn is_affirmative(text: &str) -> bool {
 
     // "Option A/B/1/2" or "let's go with" patterns
     let choice_patterns = [
-        "option ", "approach ", "let's go with", "go with ",
-        "i prefer", "i'd prefer", "i'll go with", "let's use",
-        "i choose", "i pick",
+        "option ",
+        "approach ",
+        "let's go with",
+        "go with ",
+        "i prefer",
+        "i'd prefer",
+        "i'll go with",
+        "let's use",
+        "i choose",
+        "i pick",
     ];
     if choice_patterns.iter().any(|p| lower.starts_with(p)) {
         return true;
     }
 
     // Short responses (under 30 words) that aren't questions
-    if word_count <= 30 && !trimmed.contains('?') {
-        if lower.contains("agree") || lower.contains("go with")
-            || lower.contains("let's") || lower.contains("sounds")
-            || lower.contains("perfect") || lower.contains("great")
-        {
-            return true;
-        }
+    if word_count <= 30
+        && !trimmed.contains('?')
+        && (lower.contains("agree")
+            || lower.contains("go with")
+            || lower.contains("let's")
+            || lower.contains("sounds")
+            || lower.contains("perfect")
+            || lower.contains("great"))
+    {
+        return true;
     }
 
     false
@@ -274,9 +319,15 @@ pub fn looks_like_decision(text: &str) -> bool {
     // Check explicit decision markers
     let lower = text.to_lowercase();
     let decision_markers = [
-        "we decided", "design decision", "the decision is",
-        "final decision", "agreed to", "agreed that", "agreed on",
-        "after discussion", "after considering",
+        "we decided",
+        "design decision",
+        "the decision is",
+        "final decision",
+        "agreed to",
+        "agreed that",
+        "agreed on",
+        "after discussion",
+        "after considering",
     ];
     if decision_markers.iter().any(|m| lower.contains(m)) {
         return true;
@@ -326,9 +377,7 @@ pub fn filter_projects(projects: Vec<Project>, filter: &str) -> Vec<Project> {
     // Fall back to substring match
     projects
         .into_iter()
-        .filter(|p| {
-            p.decoded_path().contains(filter) || p.encoded_name().contains(filter)
-        })
+        .filter(|p| p.decoded_path().contains(filter) || p.encoded_name().contains(filter))
         .collect()
 }
 
@@ -347,7 +396,10 @@ pub fn resolve_single_project(cli: &Cli, filter: &str) -> Result<crate::discover
         }),
         1 => Ok(matches.remove(0)),
         n => {
-            let names: Vec<_> = matches.iter().map(|p| p.decoded_path().to_string()).collect();
+            let names: Vec<_> = matches
+                .iter()
+                .map(|p| p.decoded_path().to_string())
+                .collect();
             Err(SnatchError::InvalidArgument {
                 name: "project".into(),
                 reason: format!(
@@ -380,11 +432,12 @@ pub fn collect_sessions(cli: &Cli, params: &SessionCollectParams) -> Result<Vec<
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
 
     let mut sessions = if let Some(session_id) = params.session {
-        let session = claude_dir
-            .find_session(session_id)?
-            .ok_or_else(|| SnatchError::SessionNotFound {
-                session_id: session_id.to_string(),
-            })?;
+        let session =
+            claude_dir
+                .find_session(session_id)?
+                .ok_or_else(|| SnatchError::SessionNotFound {
+                    session_id: session_id.to_string(),
+                })?;
         vec![session]
     } else if let Some(project_filter) = params.project {
         let projects = claude_dir.projects()?;
@@ -402,7 +455,7 @@ pub fn collect_sessions(cli: &Cli, params: &SessionCollectParams) -> Result<Vec<
     filter_sessions_by_date(&mut sessions, params.since, params.until)?;
 
     if let Some(n) = params.recent {
-        sessions.sort_by(|a, b| b.modified_time().cmp(&a.modified_time()));
+        sessions.sort_by_key(|b| std::cmp::Reverse(b.modified_time()));
         sessions.truncate(n);
     }
 
@@ -442,8 +495,12 @@ pub fn filter_sessions_by_date(
         sessions.retain(|s| {
             let (start, end) = match s.quick_metadata_cached() {
                 Ok(meta) => {
-                    let start = meta.start_time.unwrap_or_else(|| DateTime::from(s.modified_time()));
-                    let end = meta.end_time.unwrap_or_else(|| DateTime::from(s.modified_time()));
+                    let start = meta
+                        .start_time
+                        .unwrap_or_else(|| DateTime::from(s.modified_time()));
+                    let end = meta
+                        .end_time
+                        .unwrap_or_else(|| DateTime::from(s.modified_time()));
                     (start, end)
                 }
                 Err(_) => {
@@ -469,7 +526,11 @@ pub fn filter_sessions_by_date(
 
 /// Short session ID (first 8 chars). Safe for ASCII hex UUIDs.
 pub fn short_id(id: &str) -> &str {
-    if id.len() > 8 { &id[..8] } else { id }
+    if id.len() > 8 {
+        &id[..8]
+    } else {
+        id
+    }
 }
 
 /// Filter main-thread user+assistant entries from a parsed session.
@@ -550,13 +611,17 @@ mod tests {
 
     #[test]
     fn test_options_explicit_ab() {
-        assert!(has_options_pattern("Option A: use traits\nOption B: use structs"));
+        assert!(has_options_pattern(
+            "Option A: use traits\nOption B: use structs"
+        ));
     }
 
     #[test]
     fn test_options_pros_cons() {
         assert!(has_options_pattern("Pros: fast\nCons: complex"));
-        assert!(has_options_pattern("Advantages: simple\nDisadvantages: slow"));
+        assert!(has_options_pattern(
+            "Advantages: simple\nDisadvantages: slow"
+        ));
     }
 
     #[test]

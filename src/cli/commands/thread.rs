@@ -32,14 +32,17 @@ pub fn run(cli: &Cli, args: &ThreadArgs) -> Result<()> {
             reason: e.to_string(),
         })?;
 
-    let sessions = helpers::collect_sessions(cli, &SessionCollectParams {
-        session: args.session.as_deref(),
-        project: args.project.as_deref(),
-        since: args.since.as_deref(),
-        until: args.until.as_deref(),
-        recent: args.recent,
-        no_subagents: args.no_subagents,
-    })?;
+    let sessions = helpers::collect_sessions(
+        cli,
+        &SessionCollectParams {
+            session: args.session.as_deref(),
+            project: args.project.as_deref(),
+            since: args.since.as_deref(),
+            until: args.until.as_deref(),
+            recent: args.recent,
+            no_subagents: args.no_subagents,
+        },
+    )?;
 
     let session_count = sessions.len();
     let show_progress = session_count > 10 && std::io::stderr().is_terminal() && !cli.quiet;
@@ -55,7 +58,11 @@ pub fn run(cli: &Cli, args: &ThreadArgs) -> Result<()> {
         pb.finish_and_clear();
     }
 
-    let limit = if args.no_limit { usize::MAX } else { args.limit };
+    let limit = if args.no_limit {
+        usize::MAX
+    } else {
+        args.limit
+    };
 
     let params = ThreadParams {
         include_thinking: args.thinking,
@@ -122,7 +129,10 @@ fn output_json(exchanges: &[ThreadedExchange]) {
         })
         .collect();
 
-    println!("{}", serde_json::to_string_pretty(&entries).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&entries).unwrap_or_default()
+    );
 }
 
 fn output_text(
@@ -152,7 +162,11 @@ fn output_text(
             if i > 0 {
                 println!();
             }
-            println!("--- {} [{}] ---", date.to_string().split(' ').next().unwrap_or(""), exchange.short_id);
+            println!(
+                "--- {} [{}] ---",
+                date.to_string().split(' ').next().unwrap_or(""),
+                exchange.short_id
+            );
             last_session_id = exchange.session_id.clone();
         }
 

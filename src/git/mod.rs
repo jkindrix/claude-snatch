@@ -502,13 +502,7 @@ mod tests {
 
     #[test]
     fn test_correlate_with_session_branch() {
-        let result = correlate_session(
-            Some("/nonexistent"),
-            None,
-            None,
-            Some("feature/test"),
-            &[],
-        );
+        let result = correlate_session(Some("/nonexistent"), None, None, Some("feature/test"), &[]);
         // Path doesn't exist, so no data
         assert!(!result.has_data());
     }
@@ -516,13 +510,7 @@ mod tests {
     #[test]
     fn test_correlate_with_modified_files() {
         let files = vec!["src/main.rs".to_string(), "README.md".to_string()];
-        let result = correlate_session(
-            Some("/nonexistent"),
-            None,
-            None,
-            None,
-            &files,
-        );
+        let result = correlate_session(Some("/nonexistent"), None, None, None, &files);
         assert!(!result.has_data());
     }
 

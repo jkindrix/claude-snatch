@@ -150,7 +150,11 @@ fn print_text_output(data: &BeyondJsonlData, args: &ExtractArgs) -> Result<()> {
     if !data.global_commands.is_empty() && (args.all || args.commands) {
         println!("[Global Commands]");
         for cmd in &data.global_commands {
-            println!("  - /{}: {}", cmd.name, cmd.description.as_deref().unwrap_or(""));
+            println!(
+                "  - /{}: {}",
+                cmd.name,
+                cmd.description.as_deref().unwrap_or("")
+            );
         }
         println!();
     }
@@ -159,7 +163,11 @@ fn print_text_output(data: &BeyondJsonlData, args: &ExtractArgs) -> Result<()> {
     if !data.project_commands.is_empty() && (args.all || args.commands) {
         println!("[Project Commands]");
         for cmd in &data.project_commands {
-            println!("  - /{}: {}", cmd.name, cmd.description.as_deref().unwrap_or(""));
+            println!(
+                "  - /{}: {}",
+                cmd.name,
+                cmd.description.as_deref().unwrap_or("")
+            );
         }
         println!();
     }
@@ -178,7 +186,9 @@ fn print_text_output(data: &BeyondJsonlData, args: &ExtractArgs) -> Result<()> {
     if !data.hooks.is_empty() && (args.all || args.hooks) {
         println!("[Hooks]");
         for hook in &data.hooks {
-            let event_name = hook.event.as_deref()
+            let event_name = hook
+                .event
+                .as_deref()
                 .or(hook.matcher.as_deref())
                 .unwrap_or("unknown");
             let cmd = hook.command.as_deref().unwrap_or("(no command)");
@@ -208,7 +218,10 @@ fn print_text_output(data: &BeyondJsonlData, args: &ExtractArgs) -> Result<()> {
             println!("[Sandbox Configuration]");
             println!("  Enabled: {}", sandbox.enabled);
             if !sandbox.allowed_directories.is_empty() {
-                println!("  Allowed directories: {}", sandbox.allowed_directories.len());
+                println!(
+                    "  Allowed directories: {}",
+                    sandbox.allowed_directories.len()
+                );
             }
             if !sandbox.blocked_commands.is_empty() {
                 println!("  Blocked commands: {}", sandbox.blocked_commands.len());
@@ -221,7 +234,11 @@ fn print_text_output(data: &BeyondJsonlData, args: &ExtractArgs) -> Result<()> {
     if !data.global_rules.is_empty() && (args.all || args.rules) {
         println!("[Global Rules]");
         for rule in &data.global_rules {
-            println!("  - {}: {}", rule.name, rule.description.as_deref().unwrap_or(""));
+            println!(
+                "  - {}: {}",
+                rule.name,
+                rule.description.as_deref().unwrap_or("")
+            );
         }
         println!();
     }
@@ -230,7 +247,11 @@ fn print_text_output(data: &BeyondJsonlData, args: &ExtractArgs) -> Result<()> {
     if !data.project_rules.is_empty() && (args.all || args.rules) {
         println!("[Project Rules]");
         for rule in &data.project_rules {
-            println!("  - {}: {}", rule.name, rule.description.as_deref().unwrap_or(""));
+            println!(
+                "  - {}: {}",
+                rule.name,
+                rule.description.as_deref().unwrap_or("")
+            );
         }
         println!();
     }

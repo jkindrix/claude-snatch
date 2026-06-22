@@ -633,10 +633,7 @@ pub fn entry_to_jsonl(entry: &LogEntry) -> Result<String> {
 }
 
 /// Export entries to JSONL format.
-pub fn entries_to_jsonl<W: Write>(
-    entries: &[LogEntry],
-    writer: &mut W,
-) -> Result<()> {
+pub fn entries_to_jsonl<W: Write>(entries: &[LogEntry], writer: &mut W) -> Result<()> {
     for entry in entries {
         writeln!(writer, "{}", entry_to_jsonl(entry)?)?;
     }
@@ -698,9 +695,7 @@ impl JsonlDiff {
     /// Check if files are identical.
     #[must_use]
     pub fn is_identical(&self) -> bool {
-        self.only_in_first.is_empty()
-            && self.only_in_second.is_empty()
-            && self.different.is_empty()
+        self.only_in_first.is_empty() && self.only_in_second.is_empty() && self.different.is_empty()
     }
 
     /// Compare two JSONL strings.
@@ -723,7 +718,8 @@ impl JsonlDiff {
                             diff.matching += 1;
                         }
                         _ => {
-                            diff.different.push((i + 1, (*l1).to_string(), (*l2).to_string()));
+                            diff.different
+                                .push((i + 1, (*l1).to_string(), (*l2).to_string()));
                         }
                     }
                 }

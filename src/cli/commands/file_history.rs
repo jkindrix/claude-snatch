@@ -52,7 +52,11 @@ pub fn run(cli: &Cli, args: &FileHistoryArgs) -> Result<()> {
     matches.sort_by_key(|(path, _)| path.to_string());
 
     if matches.is_empty() {
-        writeln!(writer, "No sessions found that modified files matching '{}'.", args.path)?;
+        writeln!(
+            writer,
+            "No sessions found that modified files matching '{}'.",
+            args.path
+        )?;
         writer.finish()?;
         return Ok(());
     }
@@ -80,7 +84,11 @@ pub fn run(cli: &Cli, args: &FileHistoryArgs) -> Result<()> {
         _ => {
             let total_files = matches.len();
             let total_mods: usize = matches.iter().map(|(_, m)| m.len()).sum();
-            writeln!(writer, "Files matching '{}': {} ({} modifications)", args.path, total_files, total_mods)?;
+            writeln!(
+                writer,
+                "Files matching '{}': {} ({} modifications)",
+                args.path, total_files, total_mods
+            )?;
             writeln!(writer)?;
 
             let mut shown = 0;

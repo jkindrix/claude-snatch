@@ -66,10 +66,8 @@ impl ClaudeSettings {
             SnatchError::io(format!("Failed to read settings: {}", path.display()), e)
         })?;
 
-        serde_json::from_str(&content).map_err(|e| {
-            SnatchError::ConfigError {
-                message: format!("Failed to parse settings.json: {e}"),
-            }
+        serde_json::from_str(&content).map_err(|e| SnatchError::ConfigError {
+            message: format!("Failed to parse settings.json: {e}"),
         })
     }
 

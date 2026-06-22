@@ -148,7 +148,10 @@ mod parsing {
             }
         });
 
-        assert!(has_tool_result, "Expected a user message with toolUseResult");
+        assert!(
+            has_tool_result,
+            "Expected a user message with toolUseResult"
+        );
     }
 }
 
@@ -158,24 +161,29 @@ mod reconstruction {
     #[test]
     fn test_simple_conversation_tree() {
         let entries = parse_fixture("simple_session.jsonl");
-        let conversation = Conversation::from_entries(entries).expect("Failed to build conversation");
+        let conversation =
+            Conversation::from_entries(entries).expect("Failed to build conversation");
 
         assert!(!conversation.is_empty());
         assert_eq!(conversation.roots().len(), 1, "Expected single root");
-        assert!(!conversation.has_branches(), "Simple session should not branch");
+        assert!(
+            !conversation.has_branches(),
+            "Simple session should not branch"
+        );
     }
 
     #[test]
     fn test_branching_conversation_tree() {
         let entries = parse_fixture("branching_session.jsonl");
-        let conversation = Conversation::from_entries(entries).expect("Failed to build conversation");
+        let conversation =
+            Conversation::from_entries(entries).expect("Failed to build conversation");
 
         assert!(
             conversation.has_branches(),
             "Branching session should have branches"
         );
         assert!(
-            conversation.branch_points().len() >= 1,
+            !conversation.branch_points().is_empty(),
             "Expected at least one branch point"
         );
     }
@@ -183,7 +191,8 @@ mod reconstruction {
     #[test]
     fn test_main_thread_extraction() {
         let entries = parse_fixture("simple_session.jsonl");
-        let conversation = Conversation::from_entries(entries).expect("Failed to build conversation");
+        let conversation =
+            Conversation::from_entries(entries).expect("Failed to build conversation");
 
         let main_thread = conversation.main_thread_entries();
         assert!(!main_thread.is_empty(), "Main thread should not be empty");
@@ -206,7 +215,8 @@ mod reconstruction {
     #[test]
     fn test_conversation_statistics() {
         let entries = parse_fixture("simple_session.jsonl");
-        let conversation = Conversation::from_entries(entries).expect("Failed to build conversation");
+        let conversation =
+            Conversation::from_entries(entries).expect("Failed to build conversation");
 
         let stats = conversation.statistics();
 
@@ -214,13 +224,17 @@ mod reconstruction {
         assert!(stats.assistant_messages > 0, "Expected assistant messages");
         assert!(stats.tool_uses > 0, "Expected tool uses");
         assert!(stats.tool_results > 0, "Expected tool results");
-        assert!(stats.tools_balanced(), "Tool uses and results should be balanced");
+        assert!(
+            stats.tools_balanced(),
+            "Tool uses and results should be balanced"
+        );
     }
 
     #[test]
     fn test_thinking_block_statistics() {
         let entries = parse_fixture("thinking_session.jsonl");
-        let conversation = Conversation::from_entries(entries).expect("Failed to build conversation");
+        let conversation =
+            Conversation::from_entries(entries).expect("Failed to build conversation");
 
         let stats = conversation.statistics();
         assert!(
@@ -232,12 +246,15 @@ mod reconstruction {
 
 mod export {
     use super::*;
-    use claude_snatch::export::{ExportOptions, HtmlExporter, JsonExporter, MarkdownExporter, Exporter};
+    use claude_snatch::export::{
+        ExportOptions, Exporter, HtmlExporter, JsonExporter, MarkdownExporter,
+    };
 
     #[test]
     fn test_json_export() {
         let entries = parse_fixture("simple_session.jsonl");
-        let conversation = Conversation::from_entries(entries.clone()).expect("Failed to build conversation");
+        let conversation =
+            Conversation::from_entries(entries.clone()).expect("Failed to build conversation");
 
         let exporter = JsonExporter::new().pretty(true).with_envelope(false);
         let options = ExportOptions::default();
@@ -258,11 +275,11 @@ mod export {
     #[test]
     fn test_markdown_export() {
         let entries = parse_fixture("simple_session.jsonl");
-        let conversation = Conversation::from_entries(entries).expect("Failed to build conversation");
+        let conversation =
+            Conversation::from_entries(entries).expect("Failed to build conversation");
 
         let exporter = MarkdownExporter::new();
-        let options = ExportOptions::default()
-            .with_metadata(true);
+        let options = ExportOptions::default().with_metadata(true);
 
         let mut output = Vec::new();
         exporter
@@ -272,7 +289,10 @@ mod export {
         let output_str = String::from_utf8(output).expect("Invalid UTF-8");
 
         // Verify markdown structure
-        assert!(output_str.contains("User") || output_str.contains("user"), "Should have User content");
+        assert!(
+            output_str.contains("User") || output_str.contains("user"),
+            "Should have User content"
+        );
         assert!(
             output_str.contains("Assistant") || output_str.contains("assistant"),
             "Should have Assistant content"
@@ -282,7 +302,8 @@ mod export {
     #[test]
     fn test_json_round_trip() {
         let entries = parse_fixture("simple_session.jsonl");
-        let conversation = Conversation::from_entries(entries.clone()).expect("Failed to build conversation");
+        let conversation =
+            Conversation::from_entries(entries.clone()).expect("Failed to build conversation");
 
         let exporter = JsonExporter::new().with_envelope(false);
         let options = ExportOptions::default();
@@ -302,7 +323,8 @@ mod export {
     #[test]
     fn test_export_with_thinking() {
         let entries = parse_fixture("thinking_session.jsonl");
-        let conversation = Conversation::from_entries(entries).expect("Failed to build conversation");
+        let conversation =
+            Conversation::from_entries(entries).expect("Failed to build conversation");
 
         let exporter = MarkdownExporter::new();
         let options = ExportOptions::default().with_thinking(true);
@@ -316,7 +338,9 @@ mod export {
 
         // Should include thinking content
         assert!(
-            output_str.contains("thinking") || output_str.contains("Thinking") || output_str.contains("345"),
+            output_str.contains("thinking")
+                || output_str.contains("Thinking")
+                || output_str.contains("345"),
             "Should include thinking-related content"
         );
     }
@@ -324,7 +348,8 @@ mod export {
     #[test]
     fn test_html_export() {
         let entries = parse_fixture("simple_session.jsonl");
-        let conversation = Conversation::from_entries(entries).expect("Failed to build conversation");
+        let conversation =
+            Conversation::from_entries(entries).expect("Failed to build conversation");
 
         let exporter = HtmlExporter::new().with_title("Test Export");
         let options = ExportOptions::default();
@@ -337,18 +362,31 @@ mod export {
         let output_str = String::from_utf8(output).expect("Invalid UTF-8");
 
         // Verify HTML structure
-        assert!(output_str.contains("<!DOCTYPE html>"), "Should have DOCTYPE");
+        assert!(
+            output_str.contains("<!DOCTYPE html>"),
+            "Should have DOCTYPE"
+        );
         assert!(output_str.contains("<html"), "Should have html tag");
         assert!(output_str.contains("</html>"), "Should close html tag");
-        assert!(output_str.contains("<title>Test Export</title>"), "Should have custom title");
-        assert!(output_str.contains("message-user"), "Should have user message");
-        assert!(output_str.contains("message-assistant"), "Should have assistant message");
+        assert!(
+            output_str.contains("<title>Test Export</title>"),
+            "Should have custom title"
+        );
+        assert!(
+            output_str.contains("message-user"),
+            "Should have user message"
+        );
+        assert!(
+            output_str.contains("message-assistant"),
+            "Should have assistant message"
+        );
     }
 
     #[test]
     fn test_html_export_dark_theme() {
         let entries = parse_fixture("simple_session.jsonl");
-        let conversation = Conversation::from_entries(entries).expect("Failed to build conversation");
+        let conversation =
+            Conversation::from_entries(entries).expect("Failed to build conversation");
 
         let exporter = HtmlExporter::new().dark_theme(true);
         let options = ExportOptions::default();
@@ -361,13 +399,17 @@ mod export {
         let output_str = String::from_utf8(output).expect("Invalid UTF-8");
 
         // Should use dark class
-        assert!(output_str.contains("class=\"dark\""), "Should use dark theme class");
+        assert!(
+            output_str.contains("class=\"dark\""),
+            "Should use dark theme class"
+        );
     }
 
     #[test]
     fn test_plain_text_export() {
         let entries = parse_fixture("simple_session.jsonl");
-        let conversation = Conversation::from_entries(entries).expect("Failed to build conversation");
+        let conversation =
+            Conversation::from_entries(entries).expect("Failed to build conversation");
 
         let exporter = MarkdownExporter::new().plain_text(true);
         let options = ExportOptions::default();
@@ -380,9 +422,15 @@ mod export {
         let output_str = String::from_utf8(output).expect("Invalid UTF-8");
 
         // Plain text should not contain markdown formatting
-        assert!(!output_str.contains("##"), "Should not have markdown headers");
+        assert!(
+            !output_str.contains("##"),
+            "Should not have markdown headers"
+        );
         assert!(!output_str.contains("```"), "Should not have code fences");
-        assert!(output_str.contains("User") || output_str.contains("user"), "Should have user label");
+        assert!(
+            output_str.contains("User") || output_str.contains("user"),
+            "Should have user label"
+        );
     }
 }
 
@@ -393,7 +441,8 @@ mod analytics {
     #[test]
     fn test_session_analytics() {
         let entries = parse_fixture("simple_session.jsonl");
-        let conversation = Conversation::from_entries(entries).expect("Failed to build conversation");
+        let conversation =
+            Conversation::from_entries(entries).expect("Failed to build conversation");
 
         let analytics = SessionAnalytics::from_conversation(&conversation);
 
@@ -405,7 +454,8 @@ mod analytics {
     #[test]
     fn test_token_usage() {
         let entries = parse_fixture("simple_session.jsonl");
-        let conversation = Conversation::from_entries(entries).expect("Failed to build conversation");
+        let conversation =
+            Conversation::from_entries(entries).expect("Failed to build conversation");
 
         let analytics = SessionAnalytics::from_conversation(&conversation);
         let summary = analytics.summary_report();
@@ -417,7 +467,8 @@ mod analytics {
     #[test]
     fn test_tool_statistics() {
         let entries = parse_fixture("simple_session.jsonl");
-        let conversation = Conversation::from_entries(entries).expect("Failed to build conversation");
+        let conversation =
+            Conversation::from_entries(entries).expect("Failed to build conversation");
 
         let analytics = SessionAnalytics::from_conversation(&conversation);
 
@@ -471,7 +522,10 @@ not valid json here
 
         // In lenient mode, should skip the bad line and parse the valid ones
         let stats = parser.stats();
-        assert!(stats.lines_skipped > 0 || stats.errors.len() > 0, "Should have skipped bad line");
+        assert!(
+            stats.lines_skipped > 0 || !stats.errors.is_empty(),
+            "Should have skipped bad line"
+        );
     }
 
     #[test]
@@ -488,10 +542,10 @@ not valid json here
 
 mod generated_data {
     use super::generators::{generate_session, SessionConfig};
+    use claude_snatch::analytics::SessionAnalytics;
+    use claude_snatch::export::{ExportOptions, Exporter, JsonExporter, MarkdownExporter};
     use claude_snatch::parser::JsonlParser;
     use claude_snatch::reconstruction::Conversation;
-    use claude_snatch::analytics::SessionAnalytics;
-    use claude_snatch::export::{ExportOptions, JsonExporter, MarkdownExporter, Exporter};
 
     #[test]
     fn test_parse_generated_minimal_session() {
@@ -567,7 +621,9 @@ mod generated_data {
         let options = ExportOptions::default();
         let mut output = Vec::new();
 
-        exporter.export_conversation(&conversation, &mut output, &options).unwrap();
+        exporter
+            .export_conversation(&conversation, &mut output, &options)
+            .unwrap();
 
         let output_str = String::from_utf8(output).unwrap();
         let _: serde_json::Value = serde_json::from_str(&output_str).unwrap();
@@ -589,7 +645,9 @@ mod generated_data {
         let options = ExportOptions::default().with_thinking(true);
         let mut output = Vec::new();
 
-        exporter.export_conversation(&conversation, &mut output, &options).unwrap();
+        exporter
+            .export_conversation(&conversation, &mut output, &options)
+            .unwrap();
 
         let output_str = String::from_utf8(output).unwrap();
         assert!(!output_str.is_empty());
@@ -622,10 +680,10 @@ mod generated_data {
 }
 
 mod large_file_handling {
-    use super::generators::{generate_session, generate_large_file, SessionConfig};
+    use super::generators::{generate_large_file, generate_session, SessionConfig};
+    use claude_snatch::export::{ExportOptions, Exporter, JsonExporter};
     use claude_snatch::parser::JsonlParser;
     use claude_snatch::reconstruction::Conversation;
-    use claude_snatch::export::{ExportOptions, JsonExporter, Exporter};
     use std::time::Instant;
 
     #[test]
@@ -659,17 +717,29 @@ mod large_file_handling {
 
         // Show parse stats
         let stats = parser.stats();
-        eprintln!("Parsed {} entries, skipped {}, errors: {}",
-            stats.entries_parsed, stats.lines_skipped, stats.errors.len());
+        eprintln!(
+            "Parsed {} entries, skipped {}, errors: {}",
+            stats.entries_parsed,
+            stats.lines_skipped,
+            stats.errors.len()
+        );
         for (i, err) in stats.errors.iter().take(3).enumerate() {
             eprintln!("Error {}: line {} - {}", i, err.line, err.message);
         }
 
         // 100 exchanges = 200 messages
-        assert_eq!(entries.len(), 200, "Expected 200 entries from 100 exchanges");
+        assert_eq!(
+            entries.len(),
+            200,
+            "Expected 200 entries from 100 exchanges"
+        );
 
         // Parsing should be fast (under 1 second for 200 messages)
-        assert!(parse_time.as_secs() < 1, "Parsing took too long: {:?}", parse_time);
+        assert!(
+            parse_time.as_secs() < 1,
+            "Parsing took too long: {:?}",
+            parse_time
+        );
     }
 
     #[test]
@@ -700,7 +770,11 @@ mod large_file_handling {
         assert_eq!(entries.len(), 1000);
 
         // Parsing should complete in reasonable time
-        assert!(parse_time.as_secs() < 5, "Parsing took too long: {:?}", parse_time);
+        assert!(
+            parse_time.as_secs() < 5,
+            "Parsing took too long: {:?}",
+            parse_time
+        );
 
         eprintln!("Parsed {} entries in {:?}", entries.len(), parse_time);
     }
@@ -720,7 +794,11 @@ mod large_file_handling {
         let reconstruct_time = start.elapsed();
 
         assert_eq!(conversation.len(), 200);
-        assert!(reconstruct_time.as_secs() < 1, "Reconstruction took too long: {:?}", reconstruct_time);
+        assert!(
+            reconstruct_time.as_secs() < 1,
+            "Reconstruction took too long: {:?}",
+            reconstruct_time
+        );
     }
 
     #[test]
@@ -740,10 +818,16 @@ mod large_file_handling {
         let mut output = Vec::new();
 
         let start = Instant::now();
-        exporter.export_conversation(&conversation, &mut output, &options).unwrap();
+        exporter
+            .export_conversation(&conversation, &mut output, &options)
+            .unwrap();
         let export_time = start.elapsed();
 
-        assert!(export_time.as_secs() < 2, "Export took too long: {:?}", export_time);
+        assert!(
+            export_time.as_secs() < 2,
+            "Export took too long: {:?}",
+            export_time
+        );
 
         let output_size = output.len();
         eprintln!("Exported {} bytes in {:?}", output_size, export_time);
@@ -767,7 +851,7 @@ mod large_file_handling {
     }
 
     #[test]
-    #[ignore] // Run with --ignored for stress testing
+    #[ignore = "stress test; run with --ignored"]
     fn stress_test_very_large_file() {
         // Generate a very large file for stress testing
         let config = SessionConfig::huge();
@@ -889,7 +973,7 @@ mod property_tests {
 /// These tests capture expected output formats to detect regressions.
 mod snapshot_tests {
     use super::*;
-    use claude_snatch::export::{ExportOptions, Exporter, MarkdownExporter, JsonExporter};
+    use claude_snatch::export::{ExportOptions, Exporter, JsonExporter, MarkdownExporter};
 
     #[test]
     fn test_markdown_export_snapshot() {
@@ -899,7 +983,9 @@ mod snapshot_tests {
         let exporter = MarkdownExporter::new();
         let options = ExportOptions::default();
         let mut output = Vec::new();
-        exporter.export_conversation(&conversation, &mut output, &options).unwrap();
+        exporter
+            .export_conversation(&conversation, &mut output, &options)
+            .unwrap();
         let markdown = String::from_utf8(output).unwrap();
 
         insta::assert_snapshot!("simple_session_markdown", markdown);
@@ -913,12 +999,17 @@ mod snapshot_tests {
         let exporter = JsonExporter::new().pretty(true);
         let options = ExportOptions::default();
         let mut output = Vec::new();
-        exporter.export_conversation(&conversation, &mut output, &options).unwrap();
+        exporter
+            .export_conversation(&conversation, &mut output, &options)
+            .unwrap();
         let json = String::from_utf8(output).unwrap();
 
         // Redact the timestamp which changes on each run
         let mut settings = insta::Settings::clone_current();
-        settings.add_filter(r#""exported_at": "[^"]+""#, r#""exported_at": "[REDACTED]""#);
+        settings.add_filter(
+            r#""exported_at": "[^"]+""#,
+            r#""exported_at": "[REDACTED]""#,
+        );
         settings.bind(|| {
             insta::assert_snapshot!("simple_session_json", json);
         });
@@ -932,7 +1023,9 @@ mod snapshot_tests {
         let exporter = MarkdownExporter::new();
         let options = ExportOptions::default().with_thinking(true);
         let mut output = Vec::new();
-        exporter.export_conversation(&conversation, &mut output, &options).unwrap();
+        exporter
+            .export_conversation(&conversation, &mut output, &options)
+            .unwrap();
         let markdown = String::from_utf8(output).unwrap();
 
         insta::assert_snapshot!("thinking_session_markdown", markdown);
@@ -947,7 +1040,9 @@ mod snapshot_tests {
         // main_thread_only is true by default in ExportOptions
         let options = ExportOptions::default();
         let mut output = Vec::new();
-        exporter.export_conversation(&conversation, &mut output, &options).unwrap();
+        exporter
+            .export_conversation(&conversation, &mut output, &options)
+            .unwrap();
         let markdown = String::from_utf8(output).unwrap();
 
         insta::assert_snapshot!("branching_session_main_thread", markdown);

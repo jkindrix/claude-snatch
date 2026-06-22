@@ -179,7 +179,12 @@ impl CsvExporter {
                         .message
                         .usage
                         .as_ref()
-                        .map(|u| (u.total_input_tokens().to_string(), u.output_tokens.to_string()))
+                        .map(|u| {
+                            (
+                                u.total_input_tokens().to_string(),
+                                u.output_tokens.to_string(),
+                            )
+                        })
                         .unwrap_or_default();
                     let tool_count = assistant
                         .message
@@ -233,34 +238,48 @@ impl CsvExporter {
     }
 
     /// Export usage statistics to CSV.
-    fn export_usage<W: Write>(
-        &self,
-        writer: &mut W,
-        conversation: &Conversation,
-    ) -> Result<()> {
+    fn export_usage<W: Write>(&self, writer: &mut W, conversation: &Conversation) -> Result<()> {
         let analytics = SessionAnalytics::from_conversation(conversation);
         let summary = analytics.summary_report();
 
         // Header
         if self.include_header {
-            self.write_row(
-                writer,
-                &[
-                    "metric",
-                    "value",
-                ],
-            )?;
+            self.write_row(writer, &["metric", "value"])?;
         }
 
-        self.write_row(writer, &["total_messages", &summary.total_messages.to_string()])?;
-        self.write_row(writer, &["user_messages", &summary.user_messages.to_string()])?;
-        self.write_row(writer, &["assistant_messages", &summary.assistant_messages.to_string()])?;
+        self.write_row(
+            writer,
+            &["total_messages", &summary.total_messages.to_string()],
+        )?;
+        self.write_row(
+            writer,
+            &["user_messages", &summary.user_messages.to_string()],
+        )?;
+        self.write_row(
+            writer,
+            &[
+                "assistant_messages",
+                &summary.assistant_messages.to_string(),
+            ],
+        )?;
         self.write_row(writer, &["total_tokens", &summary.total_tokens.to_string()])?;
         self.write_row(writer, &["input_tokens", &summary.input_tokens.to_string()])?;
-        self.write_row(writer, &["output_tokens", &summary.output_tokens.to_string()])?;
-        self.write_row(writer, &["cache_hit_rate", &format!("{:.2}", summary.cache_hit_rate)])?;
-        self.write_row(writer, &["tool_invocations", &summary.tool_invocations.to_string()])?;
-        self.write_row(writer, &["thinking_blocks", &summary.thinking_blocks.to_string()])?;
+        self.write_row(
+            writer,
+            &["output_tokens", &summary.output_tokens.to_string()],
+        )?;
+        self.write_row(
+            writer,
+            &["cache_hit_rate", &format!("{:.2}", summary.cache_hit_rate)],
+        )?;
+        self.write_row(
+            writer,
+            &["tool_invocations", &summary.tool_invocations.to_string()],
+        )?;
+        self.write_row(
+            writer,
+            &["thinking_blocks", &summary.thinking_blocks.to_string()],
+        )?;
 
         if let Some(cost) = summary.estimated_cost {
             self.write_row(writer, &["estimated_cost_usd", &format!("{:.4}", cost)])?;

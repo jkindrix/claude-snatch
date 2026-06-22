@@ -97,7 +97,7 @@ impl FileHistorySummary {
         }
 
         // Limit files list for performance
-        files.sort_by(|a, b| b.modified_time.cmp(&a.modified_time));
+        files.sort_by_key(|b| std::cmp::Reverse(b.modified_time));
         if files.len() > 100 {
             files.truncate(100);
         }
@@ -247,9 +247,7 @@ fn format_system_time(time: SystemTime) -> String {
     let years_approx = days_since_epoch / 365;
     let year = 1970 + years_approx;
 
-    format!(
-        "{year:04}-01-01T{hours:02}:{minutes:02}:{seconds:02}Z"
-    )
+    format!("{year:04}-01-01T{hours:02}:{minutes:02}:{seconds:02}Z")
 }
 
 /// File version history for a specific source file.
@@ -502,27 +500,21 @@ impl FileVersionHistory {
         })?;
         let contents = v.read_contents()?;
         std::fs::write(dest, contents).map_err(|e| {
-            crate::error::SnatchError::io(
-                format!("Failed to export to {}", dest.display()),
-                e,
-            )
+            crate::error::SnatchError::io(format!("Failed to export to {}", dest.display()), e)
         })
     }
 
     /// Export the latest version to a destination path.
     pub fn export_latest(&self, dest: &Path) -> Result<()> {
-        let latest = self.latest().ok_or_else(|| {
-            crate::error::SnatchError::InvalidArgument {
+        let latest = self
+            .latest()
+            .ok_or_else(|| crate::error::SnatchError::InvalidArgument {
                 name: "source_path".to_string(),
                 reason: "No versions available".to_string(),
-            }
-        })?;
+            })?;
         let contents = latest.read_contents()?;
         std::fs::write(dest, contents).map_err(|e| {
-            crate::error::SnatchError::io(
-                format!("Failed to export to {}", dest.display()),
-                e,
-            )
+            crate::error::SnatchError::io(format!("Failed to export to {}", dest.display()), e)
         })
     }
 

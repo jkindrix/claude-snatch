@@ -563,7 +563,8 @@ impl CacheManager {
         let mut persisted = PersistedCache::new();
 
         for (path, (key, entry)) in guard.entries.iter() {
-            let mtime_secs = key.mtime
+            let mtime_secs = key
+                .mtime
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
@@ -612,12 +613,10 @@ impl CacheManager {
         })?;
         let reader = BufReader::new(file);
 
-        let persisted: PersistedCache<QuickSessionMetadata> =
-            serde_json::from_reader(reader).map_err(|e| {
-                crate::error::SnatchError::SerializationError {
-                    context: "Failed to deserialize cache".to_string(),
-                    source: e,
-                }
+        let persisted: PersistedCache<QuickSessionMetadata> = serde_json::from_reader(reader)
+            .map_err(|e| crate::error::SnatchError::SerializationError {
+                context: "Failed to deserialize cache".to_string(),
+                source: e,
             })?;
 
         // Check version compatibility
@@ -639,8 +638,8 @@ impl CacheManager {
 
             if current_mtime == Some(entry.mtime_secs) {
                 // File hasn't changed, restore cache entry
-                let mtime = SystemTime::UNIX_EPOCH
-                    + std::time::Duration::from_secs(entry.mtime_secs);
+                let mtime =
+                    SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(entry.mtime_secs);
                 let key = CacheKey {
                     path: entry.path.clone(),
                     mtime,

@@ -9,8 +9,8 @@ use std::borrow::Cow;
 use std::io::{self, Write};
 use std::path::Path;
 
-use regex::Regex;
 use once_cell::sync::Lazy;
+use regex::Regex;
 
 use tempfile::NamedTempFile;
 
@@ -507,44 +507,71 @@ pub fn redact_sensitive<'a>(text: &'a str, config: &RedactionConfig) -> Cow<'a, 
 
     // AWS keys (specific patterns)
     if config.aws_keys {
-        result = PATTERNS.aws_access_key.replace_all(&result, placeholder.to_string()).to_string();
-        result = PATTERNS.aws_secret_key.replace_all(&result, |caps: &regex::Captures| {
-            format!("{}={}", &caps[1], placeholder)
-        }).to_string();
+        result = PATTERNS
+            .aws_access_key
+            .replace_all(&result, placeholder.to_string())
+            .to_string();
+        result = PATTERNS
+            .aws_secret_key
+            .replace_all(&result, |caps: &regex::Captures| {
+                format!("{}={}", &caps[1], placeholder)
+            })
+            .to_string();
     }
 
     // GitHub tokens
     if config.api_keys {
-        result = PATTERNS.github_token.replace_all(&result, placeholder).to_string();
+        result = PATTERNS
+            .github_token
+            .replace_all(&result, placeholder)
+            .to_string();
     }
 
     // URL credentials (before general URL patterns)
     if config.url_credentials {
-        result = PATTERNS.url_credentials.replace_all(&result, |caps: &regex::Captures| {
-            // Replace just the credentials part, keep the URL structure
-            let url = &caps[0];
-            PATTERNS.password_url.replace(url, |inner: &regex::Captures| {
-                format!("://{}@", placeholder).replace(&inner[1], placeholder)
-            }).to_string()
-        }).to_string();
+        result = PATTERNS
+            .url_credentials
+            .replace_all(&result, |caps: &regex::Captures| {
+                // Replace just the credentials part, keep the URL structure
+                let url = &caps[0];
+                PATTERNS
+                    .password_url
+                    .replace(url, |inner: &regex::Captures| {
+                        format!("://{}@", placeholder).replace(&inner[1], placeholder)
+                    })
+                    .to_string()
+            })
+            .to_string();
     }
 
     // Password patterns
     if config.passwords {
-        result = PATTERNS.password_env.replace_all(&result, |caps: &regex::Captures| {
-            format!("{}={}", &caps[1], placeholder)
-        }).to_string();
+        result = PATTERNS
+            .password_env
+            .replace_all(&result, |caps: &regex::Captures| {
+                format!("{}={}", &caps[1], placeholder)
+            })
+            .to_string();
     }
 
     // API keys and tokens
     if config.api_keys {
-        result = PATTERNS.bearer_token.replace_all(&result, format!("Bearer {}", placeholder)).to_string();
-        result = PATTERNS.api_key.replace_all(&result, |caps: &regex::Captures| {
-            format!("{}={}", &caps[1], placeholder)
-        }).to_string();
-        result = PATTERNS.generic_secret.replace_all(&result, |caps: &regex::Captures| {
-            format!("{}={}", &caps[1], placeholder)
-        }).to_string();
+        result = PATTERNS
+            .bearer_token
+            .replace_all(&result, format!("Bearer {}", placeholder))
+            .to_string();
+        result = PATTERNS
+            .api_key
+            .replace_all(&result, |caps: &regex::Captures| {
+                format!("{}={}", &caps[1], placeholder)
+            })
+            .to_string();
+        result = PATTERNS
+            .generic_secret
+            .replace_all(&result, |caps: &regex::Captures| {
+                format!("{}={}", &caps[1], placeholder)
+            })
+            .to_string();
     }
 
     // SSN (before phone to avoid conflicts)
@@ -554,7 +581,10 @@ pub fn redact_sensitive<'a>(text: &'a str, config: &RedactionConfig) -> Cow<'a, 
 
     // Credit cards
     if config.credit_cards {
-        result = PATTERNS.credit_card.replace_all(&result, placeholder).to_string();
+        result = PATTERNS
+            .credit_card
+            .replace_all(&result, placeholder)
+            .to_string();
     }
 
     // Email addresses
@@ -683,110 +713,164 @@ pub fn preview_redactions<'a>(text: &'a str, config: &RedactionConfig) -> Cow<'a
     // AWS keys (specific patterns)
     if config.aws_keys {
         if PATTERNS.aws_access_key.is_match(&result) {
-            result = PATTERNS.aws_access_key.replace_all(&result, |caps: &regex::Captures| {
-                format!("[WOULD-REDACT:AwsKey]{}[/WOULD-REDACT]", &caps[0])
-            }).to_string();
+            result = PATTERNS
+                .aws_access_key
+                .replace_all(&result, |caps: &regex::Captures| {
+                    format!("[WOULD-REDACT:AwsKey]{}[/WOULD-REDACT]", &caps[0])
+                })
+                .to_string();
             had_match = true;
         }
         if PATTERNS.aws_secret_key.is_match(&result) {
-            result = PATTERNS.aws_secret_key.replace_all(&result, |caps: &regex::Captures| {
-                format!("{}=[WOULD-REDACT:AwsSecret]{}[/WOULD-REDACT]", &caps[1], &caps[2])
-            }).to_string();
+            result = PATTERNS
+                .aws_secret_key
+                .replace_all(&result, |caps: &regex::Captures| {
+                    format!(
+                        "{}=[WOULD-REDACT:AwsSecret]{}[/WOULD-REDACT]",
+                        &caps[1], &caps[2]
+                    )
+                })
+                .to_string();
             had_match = true;
         }
     }
 
     // GitHub tokens
     if config.api_keys && PATTERNS.github_token.is_match(&result) {
-        result = PATTERNS.github_token.replace_all(&result, |caps: &regex::Captures| {
-            format!("[WOULD-REDACT:GitHubToken]{}[/WOULD-REDACT]", &caps[0])
-        }).to_string();
+        result = PATTERNS
+            .github_token
+            .replace_all(&result, |caps: &regex::Captures| {
+                format!("[WOULD-REDACT:GitHubToken]{}[/WOULD-REDACT]", &caps[0])
+            })
+            .to_string();
         had_match = true;
     }
 
     // URL credentials
     if config.url_credentials && PATTERNS.url_credentials.is_match(&result) {
-        result = PATTERNS.url_credentials.replace_all(&result, |caps: &regex::Captures| {
-            format!("[WOULD-REDACT:UrlCredential]{}[/WOULD-REDACT]", &caps[0])
-        }).to_string();
+        result = PATTERNS
+            .url_credentials
+            .replace_all(&result, |caps: &regex::Captures| {
+                format!("[WOULD-REDACT:UrlCredential]{}[/WOULD-REDACT]", &caps[0])
+            })
+            .to_string();
         had_match = true;
     }
 
     // Password patterns
     if config.passwords && PATTERNS.password_env.is_match(&result) {
-        result = PATTERNS.password_env.replace_all(&result, |caps: &regex::Captures| {
-            format!("{}=[WOULD-REDACT:Password]{}[/WOULD-REDACT]", &caps[1], &caps[2])
-        }).to_string();
+        result = PATTERNS
+            .password_env
+            .replace_all(&result, |caps: &regex::Captures| {
+                format!(
+                    "{}=[WOULD-REDACT:Password]{}[/WOULD-REDACT]",
+                    &caps[1], &caps[2]
+                )
+            })
+            .to_string();
         had_match = true;
     }
 
     // API keys and tokens
     if config.api_keys {
         if PATTERNS.bearer_token.is_match(&result) {
-            result = PATTERNS.bearer_token.replace_all(&result, |caps: &regex::Captures| {
-                format!("[WOULD-REDACT:BearerToken]{}[/WOULD-REDACT]", &caps[0])
-            }).to_string();
+            result = PATTERNS
+                .bearer_token
+                .replace_all(&result, |caps: &regex::Captures| {
+                    format!("[WOULD-REDACT:BearerToken]{}[/WOULD-REDACT]", &caps[0])
+                })
+                .to_string();
             had_match = true;
         }
         if PATTERNS.api_key.is_match(&result) {
-            result = PATTERNS.api_key.replace_all(&result, |caps: &regex::Captures| {
-                format!("{}=[WOULD-REDACT:ApiKey]{}[/WOULD-REDACT]", &caps[1], &caps[2])
-            }).to_string();
+            result = PATTERNS
+                .api_key
+                .replace_all(&result, |caps: &regex::Captures| {
+                    format!(
+                        "{}=[WOULD-REDACT:ApiKey]{}[/WOULD-REDACT]",
+                        &caps[1], &caps[2]
+                    )
+                })
+                .to_string();
             had_match = true;
         }
         if PATTERNS.generic_secret.is_match(&result) {
-            result = PATTERNS.generic_secret.replace_all(&result, |caps: &regex::Captures| {
-                format!("{}=[WOULD-REDACT:Secret]{}[/WOULD-REDACT]", &caps[1], &caps[2])
-            }).to_string();
+            result = PATTERNS
+                .generic_secret
+                .replace_all(&result, |caps: &regex::Captures| {
+                    format!(
+                        "{}=[WOULD-REDACT:Secret]{}[/WOULD-REDACT]",
+                        &caps[1], &caps[2]
+                    )
+                })
+                .to_string();
             had_match = true;
         }
     }
 
     // SSN
     if config.ssn && PATTERNS.ssn.is_match(&result) {
-        result = PATTERNS.ssn.replace_all(&result, |caps: &regex::Captures| {
-            format!("[WOULD-REDACT:SSN]{}[/WOULD-REDACT]", &caps[0])
-        }).to_string();
+        result = PATTERNS
+            .ssn
+            .replace_all(&result, |caps: &regex::Captures| {
+                format!("[WOULD-REDACT:SSN]{}[/WOULD-REDACT]", &caps[0])
+            })
+            .to_string();
         had_match = true;
     }
 
     // Credit cards
     if config.credit_cards && PATTERNS.credit_card.is_match(&result) {
-        result = PATTERNS.credit_card.replace_all(&result, |caps: &regex::Captures| {
-            format!("[WOULD-REDACT:CreditCard]{}[/WOULD-REDACT]", &caps[0])
-        }).to_string();
+        result = PATTERNS
+            .credit_card
+            .replace_all(&result, |caps: &regex::Captures| {
+                format!("[WOULD-REDACT:CreditCard]{}[/WOULD-REDACT]", &caps[0])
+            })
+            .to_string();
         had_match = true;
     }
 
     // Email addresses
     if config.emails && PATTERNS.email.is_match(&result) {
-        result = PATTERNS.email.replace_all(&result, |caps: &regex::Captures| {
-            format!("[WOULD-REDACT:Email]{}[/WOULD-REDACT]", &caps[0])
-        }).to_string();
+        result = PATTERNS
+            .email
+            .replace_all(&result, |caps: &regex::Captures| {
+                format!("[WOULD-REDACT:Email]{}[/WOULD-REDACT]", &caps[0])
+            })
+            .to_string();
         had_match = true;
     }
 
     // IP addresses
     if config.ip_addresses {
         if PATTERNS.ipv4.is_match(&result) {
-            result = PATTERNS.ipv4.replace_all(&result, |caps: &regex::Captures| {
-                format!("[WOULD-REDACT:IPv4]{}[/WOULD-REDACT]", &caps[0])
-            }).to_string();
+            result = PATTERNS
+                .ipv4
+                .replace_all(&result, |caps: &regex::Captures| {
+                    format!("[WOULD-REDACT:IPv4]{}[/WOULD-REDACT]", &caps[0])
+                })
+                .to_string();
             had_match = true;
         }
         if PATTERNS.ipv6.is_match(&result) {
-            result = PATTERNS.ipv6.replace_all(&result, |caps: &regex::Captures| {
-                format!("[WOULD-REDACT:IPv6]{}[/WOULD-REDACT]", &caps[0])
-            }).to_string();
+            result = PATTERNS
+                .ipv6
+                .replace_all(&result, |caps: &regex::Captures| {
+                    format!("[WOULD-REDACT:IPv6]{}[/WOULD-REDACT]", &caps[0])
+                })
+                .to_string();
             had_match = true;
         }
     }
 
     // Phone numbers
     if config.phone_numbers && PATTERNS.phone.is_match(&result) {
-        result = PATTERNS.phone.replace_all(&result, |caps: &regex::Captures| {
-            format!("[WOULD-REDACT:Phone]{}[/WOULD-REDACT]", &caps[0])
-        }).to_string();
+        result = PATTERNS
+            .phone
+            .replace_all(&result, |caps: &regex::Captures| {
+                format!("[WOULD-REDACT:Phone]{}[/WOULD-REDACT]", &caps[0])
+            })
+            .to_string();
         had_match = true;
     }
 
@@ -1034,7 +1118,11 @@ pub fn truncate_path(text: &str, max_len: usize) -> String {
 
     // Reverse to get correct order and join
     end_parts.reverse();
-    let end_portion: String = end_parts.iter().map(|s| format!("/{s}")).collect();
+    let mut end_portion = String::new();
+    for s in &end_parts {
+        end_portion.push('/');
+        end_portion.push_str(s);
+    }
 
     // Construct the final truncated path
     format!("{prefix}{ellipsis}{end_portion}")
@@ -1100,12 +1188,8 @@ pub fn sparkline(values: &[f64], min_val: Option<f64>, max_val: Option<f64>) -> 
     }
 
     // Calculate min/max
-    let min = min_val.unwrap_or_else(|| {
-        values.iter().copied().fold(f64::INFINITY, f64::min)
-    });
-    let max = max_val.unwrap_or_else(|| {
-        values.iter().copied().fold(f64::NEG_INFINITY, f64::max)
-    });
+    let min = min_val.unwrap_or_else(|| values.iter().copied().fold(f64::INFINITY, f64::min));
+    let max = max_val.unwrap_or_else(|| values.iter().copied().fold(f64::NEG_INFINITY, f64::max));
 
     // Handle constant values
     if (max - min).abs() < f64::EPSILON {
@@ -1119,7 +1203,8 @@ pub fn sparkline(values: &[f64], min_val: Option<f64>, max_val: Option<f64>) -> 
         .iter()
         .map(|&v| {
             let normalized = ((v - min) / range).clamp(0.0, 1.0);
-            let index = ((normalized * (block_count - 1.0)).round() as usize).min(SPARKLINE_BLOCKS.len() - 1);
+            let index = ((normalized * (block_count - 1.0)).round() as usize)
+                .min(SPARKLINE_BLOCKS.len() - 1);
             SPARKLINE_BLOCKS[index]
         })
         .collect()
@@ -1134,6 +1219,9 @@ pub fn sparkline_u64(values: &[u64]) -> String {
 /// Generate a labeled sparkline with min/max values.
 ///
 /// Returns a string like "▁▃▅▂█ (0 - 100)"
+// min and max are folded from the same slice, so when every value is identical
+// they are bit-for-bit equal; the exact comparison is intentional.
+#[allow(clippy::float_cmp)]
 pub fn sparkline_with_range(values: &[f64], label: Option<&str>) -> String {
     if values.is_empty() {
         return String::new();
@@ -1172,7 +1260,8 @@ pub fn sparkline_with_trend(values: &[f64]) -> String {
         let first = values[0];
         let last = values[values.len() - 1];
         let threshold = (values.iter().copied().fold(f64::NEG_INFINITY, f64::max)
-            - values.iter().copied().fold(f64::INFINITY, f64::min)) * 0.1;
+            - values.iter().copied().fold(f64::INFINITY, f64::min))
+            * 0.1;
 
         if last > first + threshold {
             "↑"
@@ -1390,7 +1479,10 @@ mod tests {
     fn test_sensitive_data_type_description() {
         assert_eq!(SensitiveDataType::ApiKey.description(), "API key or token");
         assert_eq!(SensitiveDataType::Email.description(), "email address");
-        assert_eq!(SensitiveDataType::Ssn.description(), "Social Security Number");
+        assert_eq!(
+            SensitiveDataType::Ssn.description(),
+            "Social Security Number"
+        );
     }
 
     // Preview redaction tests
@@ -1524,7 +1616,10 @@ mod tests {
     #[test]
     fn test_truncate_path_short() {
         // Path fits within max length - no truncation
-        assert_eq!(super::truncate_path("/home/user/project", 30), "/home/user/project");
+        assert_eq!(
+            super::truncate_path("/home/user/project", 30),
+            "/home/user/project"
+        );
     }
 
     #[test]

@@ -42,11 +42,12 @@ struct TimelineTurnOutput {
 pub fn run(cli: &Cli, args: &TimelineArgs) -> Result<()> {
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
 
-    let session = claude_dir
-        .find_session(&args.session_id)?
-        .ok_or_else(|| SnatchError::SessionNotFound {
-            session_id: args.session_id.clone(),
-        })?;
+    let session =
+        claude_dir
+            .find_session(&args.session_id)?
+            .ok_or_else(|| SnatchError::SessionNotFound {
+                session_id: args.session_id.clone(),
+            })?;
 
     let (entries, unparsed) = session.parse_with_options_counted(cli.max_file_size)?;
     let conversation = Conversation::from_entries(entries)?;
@@ -119,17 +120,11 @@ pub fn run(cli: &Cli, args: &TimelineArgs) -> Result<()> {
                 }
 
                 if !turn.tools_used.is_empty() {
-                    println!(
-                        "        Tools: {}",
-                        turn.tools_used.join(", ")
-                    );
+                    println!("        Tools: {}", turn.tools_used.join(", "));
                 }
 
                 if !turn.files_touched.is_empty() {
-                    println!(
-                        "        Files: {}",
-                        turn.files_touched.join(", ")
-                    );
+                    println!("        Files: {}", turn.files_touched.join(", "));
                 }
 
                 println!();

@@ -102,9 +102,8 @@ impl SqliteExporter {
             })?;
         }
 
-        let conn = Connection::open(path).map_err(|e| {
-            SnatchError::export(format!("Failed to create SQLite database: {}", e))
-        })?;
+        let conn = Connection::open(path)
+            .map_err(|e| SnatchError::export(format!("Failed to create SQLite database: {}", e)))?;
 
         self.export_to_connection(conversation, &conn, options)
     }
@@ -129,9 +128,8 @@ impl SqliteExporter {
             })?;
         }
 
-        let conn = Connection::open(path).map_err(|e| {
-            SnatchError::export(format!("Failed to create SQLite database: {}", e))
-        })?;
+        let conn = Connection::open(path)
+            .map_err(|e| SnatchError::export(format!("Failed to create SQLite database: {}", e)))?;
 
         self.export_to_connection_with_meta(conversation, &conn, options, meta)
     }
@@ -162,7 +160,9 @@ impl SqliteExporter {
         // Enable foreign keys if requested
         if self.enable_foreign_keys {
             conn.execute_batch("PRAGMA foreign_keys = ON;")
-                .map_err(|e| SnatchError::export(format!("Failed to enable foreign keys: {}", e)))?;
+                .map_err(|e| {
+                    SnatchError::export(format!("Failed to enable foreign keys: {}", e))
+                })?;
         }
 
         // Create schema
@@ -502,7 +502,13 @@ impl SqliteExporter {
                     crate::model::message::UserContent::Blocks(blocks) => {
                         // Extract content blocks from user messages (tool results, images, text)
                         for (order, block) in blocks.content.iter().enumerate() {
-                            self.insert_content_block(conn, message_id, block, order as i32, options)?;
+                            self.insert_content_block(
+                                conn,
+                                message_id,
+                                block,
+                                order as i32,
+                                options,
+                            )?;
                         }
                     }
                 }
@@ -518,8 +524,10 @@ impl SqliteExporter {
                 let usage = entry.usage();
                 let input_tokens = usage.map(|u| u.input_tokens as i64);
                 let output_tokens = usage.map(|u| u.output_tokens as i64);
-                let cache_creation_tokens = usage.and_then(|u| u.cache_creation_input_tokens.map(|t| t as i64));
-                let cache_read_tokens = usage.and_then(|u| u.cache_read_input_tokens.map(|t| t as i64));
+                let cache_creation_tokens =
+                    usage.and_then(|u| u.cache_creation_input_tokens.map(|t| t as i64));
+                let cache_read_tokens =
+                    usage.and_then(|u| u.cache_read_input_tokens.map(|t| t as i64));
 
                 // Collect text content
                 let text_content: String = assistant

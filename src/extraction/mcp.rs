@@ -34,10 +34,8 @@ impl McpConfig {
             SnatchError::io(format!("Failed to read MCP config: {}", path.display()), e)
         })?;
 
-        serde_json::from_str(&content).map_err(|e| {
-            SnatchError::ConfigError {
-                message: format!("Failed to parse mcp.json: {e}"),
-            }
+        serde_json::from_str(&content).map_err(|e| SnatchError::ConfigError {
+            message: format!("Failed to parse mcp.json: {e}"),
         })
     }
 

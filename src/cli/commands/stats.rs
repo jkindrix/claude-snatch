@@ -222,11 +222,14 @@ fn compute_stats_parallel(sessions: &[Session], max_file_size: Option<u64>) -> P
     let session_analytics: Vec<SessionAnalytics> = sessions
         .par_iter()
         .filter_map(|session| {
-            session.parse_with_options(max_file_size).ok().and_then(|entries| {
-                Conversation::from_entries(entries)
-                    .ok()
-                    .map(|conv| SessionAnalytics::from_conversation(&conv))
-            })
+            session
+                .parse_with_options(max_file_size)
+                .ok()
+                .and_then(|entries| {
+                    Conversation::from_entries(entries)
+                        .ok()
+                        .map(|conv| SessionAnalytics::from_conversation(&conv))
+                })
         })
         .collect();
 
@@ -280,7 +283,11 @@ pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
             global_analytics.total_usage.usage.total_tokens(),
             global_analytics.total_usage.usage.total_input_tokens(),
             global_analytics.total_usage.usage.output_tokens,
-            global_analytics.total_usage.usage.cache_read_input_tokens.unwrap_or(0),
+            global_analytics
+                .total_usage
+                .usage
+                .cache_read_input_tokens
+                .unwrap_or(0),
             global_analytics.total_usage.estimated_cost.unwrap_or(0.0),
             global_analytics.session_count,
             global_analytics.message_counts.total(),
@@ -320,21 +327,18 @@ pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
     if args.blocks {
         let sessions: Vec<Session> = if let Some(session_id) = &args.session {
             // Blocks for specific session
-            let session = claude_dir
-                .find_session(session_id)?
-                .ok_or_else(|| SnatchError::SessionNotFound {
+            let session = claude_dir.find_session(session_id)?.ok_or_else(|| {
+                SnatchError::SessionNotFound {
                     session_id: session_id.clone(),
-                })?;
+                }
+            })?;
             vec![session]
         } else if let Some(project_filters) = &args.project {
             // Blocks for specific project(s)
             let projects = claude_dir.projects()?;
             let mut matching_projects = Vec::new();
             for filter in project_filters {
-                matching_projects.extend(super::helpers::filter_projects(
-                    projects.clone(),
-                    filter,
-                ));
+                matching_projects.extend(super::helpers::filter_projects(projects.clone(), filter));
             }
 
             if matching_projects.is_empty() {
@@ -358,11 +362,12 @@ pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
 
     if let Some(session_id) = &args.session {
         // Stats for specific session
-        let session = claude_dir
-            .find_session(session_id)?
-            .ok_or_else(|| SnatchError::SessionNotFound {
-                session_id: session_id.clone(),
-            })?;
+        let session =
+            claude_dir
+                .find_session(session_id)?
+                .ok_or_else(|| SnatchError::SessionNotFound {
+                    session_id: session_id.clone(),
+                })?;
 
         let entries = session.parse_with_options(cli.max_file_size)?;
         let conversation = Conversation::from_entries(entries)?;
@@ -374,10 +379,7 @@ pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
         let projects = claude_dir.projects()?;
         let mut matching_projects = Vec::new();
         for filter in project_filters {
-            matching_projects.extend(super::helpers::filter_projects(
-                projects.clone(),
-                filter,
-            ));
+            matching_projects.extend(super::helpers::filter_projects(projects.clone(), filter));
         }
 
         if matching_projects.is_empty() {
@@ -433,7 +435,10 @@ fn output_session_stats(cli: &Cli, args: &StatsArgs, analytics: &SessionAnalytic
 
     match cli.effective_output() {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&StatsOutput::from_session(analytics))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&StatsOutput::from_session(analytics))?
+            );
         }
         OutputFormat::Tsv => {
             println!("metric\tvalue");
@@ -474,24 +479,42 @@ fn output_session_stats(cli: &Cli, args: &StatsArgs, analytics: &SessionAnalytic
 
             // Token usage
             println!("Token Usage:");
-            println!("  Input:  {:>14} tokens", format_number(summary.input_tokens));
-            println!("  Output: {:>14} tokens", format_number(summary.output_tokens));
-            println!("  Total:  {:>14} tokens", format_number(summary.total_tokens));
+            println!(
+                "  Input:  {:>14} tokens",
+                format_number(summary.input_tokens)
+            );
+            println!(
+                "  Output: {:>14} tokens",
+                format_number(summary.output_tokens)
+            );
+            println!(
+                "  Total:  {:>14} tokens",
+                format_number(summary.total_tokens)
+            );
             println!("  Cache Hit Rate: {:.1}%", summary.cache_hit_rate);
             println!();
 
             // Messages
             println!("Messages:");
             println!("  User:      {:>10}", format_count(summary.user_messages));
-            println!("  Assistant: {:>10}", format_count(summary.assistant_messages));
+            println!(
+                "  Assistant: {:>10}",
+                format_count(summary.assistant_messages)
+            );
             println!("  Total:     {:>10}", format_count(summary.total_messages));
             println!();
 
             // Tools
             if summary.tool_invocations > 0 || args.tools || args.all {
                 println!("Tool Usage:");
-                println!("  Total Invocations: {}", format_count(summary.tool_invocations));
-                println!("  Unique Tools:      {}", format_count(summary.unique_tools));
+                println!(
+                    "  Total Invocations: {}",
+                    format_count(summary.tool_invocations)
+                );
+                println!(
+                    "  Unique Tools:      {}",
+                    format_count(summary.unique_tools)
+                );
 
                 if args.tools || args.all {
                     println!();
@@ -549,12 +572,18 @@ fn output_project_stats(
 ) -> Result<()> {
     match cli.effective_output() {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&StatsOutput::from_project(analytics, project_path))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&StatsOutput::from_project(analytics, project_path))?
+            );
         }
         OutputFormat::Tsv => {
             println!("metric\tvalue");
             println!("sessions\t{}", analytics.session_count);
-            println!("total_tokens\t{}", analytics.total_usage.usage.total_tokens());
+            println!(
+                "total_tokens\t{}",
+                analytics.total_usage.usage.total_tokens()
+            );
             println!("tool_invocations\t{}", analytics.message_counts.tool_uses);
         }
         OutputFormat::Compact => {
@@ -575,7 +604,8 @@ fn output_project_stats(
             // Duration
             let total_secs = analytics.total_duration.num_seconds();
             if total_secs > 0 {
-                println!("Total Duration: {}h {}m",
+                println!(
+                    "Total Duration: {}h {}m",
                     total_secs / 3600,
                     (total_secs % 3600) / 60
                 );
@@ -584,13 +614,22 @@ fn output_project_stats(
 
             // Token usage
             println!("Token Usage:");
-            println!("  Total: {} tokens", format_number(analytics.total_usage.usage.total_tokens()));
+            println!(
+                "  Total: {} tokens",
+                format_number(analytics.total_usage.usage.total_tokens())
+            );
             println!();
 
             // Messages
             println!("Messages:");
-            println!("  User:      {}", format_count(analytics.message_counts.user));
-            println!("  Assistant: {}", format_count(analytics.message_counts.assistant));
+            println!(
+                "  User:      {}",
+                format_count(analytics.message_counts.user)
+            );
+            println!(
+                "  Assistant: {}",
+                format_count(analytics.message_counts.assistant)
+            );
             println!();
 
             // Tools
@@ -657,7 +696,8 @@ fn output_multi_project_stats(
     match cli.effective_output() {
         OutputFormat::Json => {
             // Include project list in JSON output
-            let mut output = serde_json::to_value(StatsOutput::from_project(analytics, &projects_label))?;
+            let mut output =
+                serde_json::to_value(StatsOutput::from_project(analytics, &projects_label))?;
             if let Some(obj) = output.as_object_mut() {
                 obj.insert("projects".to_string(), serde_json::json!(project_names));
             }
@@ -667,14 +707,21 @@ fn output_multi_project_stats(
             println!("metric\tvalue");
             println!("project_count\t{}", project_names.len());
             println!("sessions\t{}", analytics.session_count);
-            println!("total_tokens\t{}", analytics.total_usage.usage.total_tokens());
+            println!(
+                "total_tokens\t{}",
+                analytics.total_usage.usage.total_tokens()
+            );
             println!("tool_invocations\t{}", analytics.message_counts.tool_uses);
             if let Some(cost) = analytics.total_usage.estimated_cost {
                 println!("estimated_cost\t{cost:.4}");
             }
         }
         OutputFormat::Compact => {
-            let cost = analytics.total_usage.estimated_cost.map(|c| format!("${c:.2}")).unwrap_or_else(|| "N/A".to_string());
+            let cost = analytics
+                .total_usage
+                .estimated_cost
+                .map(|c| format!("${c:.2}"))
+                .unwrap_or_else(|| "N/A".to_string());
             println!(
                 "projects:{} sessions:{} tokens:{} cost:{}",
                 project_names.len(),
@@ -707,7 +754,8 @@ fn output_multi_project_stats(
             // Duration
             let total_secs = analytics.total_duration.num_seconds();
             if total_secs > 0 {
-                println!("Total Duration: {}h {}m",
+                println!(
+                    "Total Duration: {}h {}m",
                     total_secs / 3600,
                     (total_secs % 3600) / 60
                 );
@@ -716,13 +764,22 @@ fn output_multi_project_stats(
 
             // Token usage
             println!("Token Usage:");
-            println!("  Total: {} tokens", format_number(analytics.total_usage.usage.total_tokens()));
+            println!(
+                "  Total: {} tokens",
+                format_number(analytics.total_usage.usage.total_tokens())
+            );
             println!();
 
             // Messages
             println!("Messages:");
-            println!("  User:      {}", format_count(analytics.message_counts.user));
-            println!("  Assistant: {}", format_count(analytics.message_counts.assistant));
+            println!(
+                "  User:      {}",
+                format_count(analytics.message_counts.user)
+            );
+            println!(
+                "  Assistant: {}",
+                format_count(analytics.message_counts.assistant)
+            );
             println!();
 
             // Tools
@@ -781,19 +838,30 @@ fn output_multi_project_stats(
 fn output_global_stats(cli: &Cli, args: &StatsArgs, analytics: &ProjectAnalytics) -> Result<()> {
     match cli.effective_output() {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&StatsOutput::from_project(analytics, "global"))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&StatsOutput::from_project(analytics, "global"))?
+            );
         }
         OutputFormat::Tsv => {
             println!("metric\tvalue");
             println!("sessions\t{}", analytics.session_count);
-            println!("total_tokens\t{}", analytics.total_usage.usage.total_tokens());
+            println!(
+                "total_tokens\t{}",
+                analytics.total_usage.usage.total_tokens()
+            );
             if let Some(cost) = analytics.total_usage.estimated_cost {
                 println!("estimated_cost\t{cost:.4}");
             }
         }
         OutputFormat::Compact => {
-            let cost = analytics.total_usage.estimated_cost.map(|c| format!("${c:.2}")).unwrap_or_else(|| "N/A".to_string());
-            println!("sessions:{} tokens:{} cost:{}",
+            let cost = analytics
+                .total_usage
+                .estimated_cost
+                .map(|c| format!("${c:.2}"))
+                .unwrap_or_else(|| "N/A".to_string());
+            println!(
+                "sessions:{} tokens:{} cost:{}",
                 analytics.session_count,
                 analytics.total_usage.usage.total_tokens(),
                 cost
@@ -809,7 +877,8 @@ fn output_global_stats(cli: &Cli, args: &StatsArgs, analytics: &ProjectAnalytics
             // Duration
             let total_secs = analytics.total_duration.num_seconds();
             if total_secs > 0 {
-                println!("Total Duration: {}h {}m",
+                println!(
+                    "Total Duration: {}h {}m",
                     total_secs / 3600,
                     (total_secs % 3600) / 60
                 );
@@ -819,16 +888,28 @@ fn output_global_stats(cli: &Cli, args: &StatsArgs, analytics: &ProjectAnalytics
             // Token usage
             let usage = &analytics.total_usage.usage;
             println!("Token Usage:");
-            println!("  Input:  {} tokens", format_number(usage.total_input_tokens()));
+            println!(
+                "  Input:  {} tokens",
+                format_number(usage.total_input_tokens())
+            );
             println!("  Output: {} tokens", format_number(usage.output_tokens));
             println!("  Total:  {} tokens", format_number(usage.total_tokens()));
             println!();
 
             // Messages
             println!("Messages:");
-            println!("  User:      {}", format_count(analytics.message_counts.user));
-            println!("  Assistant: {}", format_count(analytics.message_counts.assistant));
-            println!("  Tool Uses: {}", format_count(analytics.message_counts.tool_uses));
+            println!(
+                "  User:      {}",
+                format_count(analytics.message_counts.user)
+            );
+            println!(
+                "  Assistant: {}",
+                format_count(analytics.message_counts.assistant)
+            );
+            println!(
+                "  Tool Uses: {}",
+                format_count(analytics.message_counts.tool_uses)
+            );
             println!();
 
             // Top tools
@@ -893,13 +974,16 @@ fn output_overview(
 
     match cli.effective_output() {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&OverviewOutput {
-                project_count: stats.project_count,
-                session_count: stats.session_count,
-                subagent_count: stats.subagent_count,
-                total_size_bytes: stats.total_size_bytes,
-                total_size_human: stats.total_size_human(),
-            })?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&OverviewOutput {
+                    project_count: stats.project_count,
+                    session_count: stats.session_count,
+                    subagent_count: stats.subagent_count,
+                    total_size_bytes: stats.total_size_bytes,
+                    total_size_human: stats.total_size_human(),
+                })?
+            );
         }
         OutputFormat::Tsv => {
             println!("metric\tvalue");
@@ -909,7 +993,8 @@ fn output_overview(
             println!("total_size\t{}", stats.total_size_bytes);
         }
         OutputFormat::Compact => {
-            println!("projects:{} sessions:{} size:{}",
+            println!(
+                "projects:{} sessions:{} size:{}",
                 stats.project_count,
                 stats.session_count,
                 stats.total_size_human()
@@ -990,7 +1075,11 @@ fn output_blocks_stats(cli: &Cli, args: &StatsArgs, sessions: &[Session]) -> Res
                     total_output_tokens,
                     total_messages,
                     total_tool_invocations,
-                    estimated_cost: if total_cost > 0.0 { Some(total_cost) } else { None },
+                    estimated_cost: if total_cost > 0.0 {
+                        Some(total_cost)
+                    } else {
+                        None
+                    },
                     highest_block_tokens,
                     token_sparkline,
                     message_sparkline,
@@ -999,7 +1088,9 @@ fn output_blocks_stats(cli: &Cli, args: &StatsArgs, sessions: &[Session]) -> Res
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
         OutputFormat::Tsv => {
-            println!("block_start\tblock_end\tstatus\ttokens\tinput\toutput\tmessages\ttools\tcost");
+            println!(
+                "block_start\tblock_end\tstatus\ttokens\tinput\toutput\tmessages\ttools\tcost"
+            );
             for block in &blocks {
                 println!(
                     "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
@@ -1011,7 +1102,10 @@ fn output_blocks_stats(cli: &Cli, args: &StatsArgs, sessions: &[Session]) -> Res
                     block.output_tokens,
                     block.message_count,
                     block.tool_invocations,
-                    block.estimated_cost.map(|c| format!("{c:.4}")).unwrap_or_default()
+                    block
+                        .estimated_cost
+                        .map(|c| format!("{c:.4}"))
+                        .unwrap_or_default()
                 );
             }
         }
@@ -1037,7 +1131,8 @@ fn output_blocks_stats(cli: &Cli, args: &StatsArgs, sessions: &[Session]) -> Res
             // Show active block prominently if it exists
             if let Some(ref active) = active_block {
                 println!("🟢 ACTIVE BLOCK");
-                println!("  Period:    {} - {} UTC",
+                println!(
+                    "  Period:    {} - {} UTC",
                     active.start.format("%Y-%m-%d %H:%M"),
                     active.end.format("%H:%M")
                 );
@@ -1046,7 +1141,8 @@ fn output_blocks_stats(cli: &Cli, args: &StatsArgs, sessions: &[Session]) -> Res
                     let mins = remaining.num_minutes() % 60;
                     println!("  Remaining: {}h {}m", hours, mins);
                 }
-                println!("  Tokens:    {} (in: {}, out: {})",
+                println!(
+                    "  Tokens:    {} (in: {}, out: {})",
                     format_number(active.total_tokens),
                     format_number(active.input_tokens),
                     format_number(active.output_tokens)
@@ -1058,7 +1154,8 @@ fn output_blocks_stats(cli: &Cli, args: &StatsArgs, sessions: &[Session]) -> Res
                     let bar_width = 40;
                     let filled = ((pct / 100.0) * bar_width as f64) as usize;
                     let empty = bar_width - filled;
-                    println!("  Usage:     [{}{}] {:.1}% of {}",
+                    println!(
+                        "  Usage:     [{}{}] {:.1}% of {}",
                         "█".repeat(filled),
                         "░".repeat(empty),
                         pct,
@@ -1077,9 +1174,15 @@ fn output_blocks_stats(cli: &Cli, args: &StatsArgs, sessions: &[Session]) -> Res
             println!("-------");
             println!("  Total Blocks:      {}", format_count(blocks.len()));
             println!("  Total Tokens:      {}", format_number(total_tokens));
-            println!("  Highest Block:     {} tokens", format_number(highest_block_tokens));
+            println!(
+                "  Highest Block:     {} tokens",
+                format_number(highest_block_tokens)
+            );
             println!("  Total Messages:    {}", format_count(total_messages));
-            println!("  Tool Invocations:  {}", format_count(total_tool_invocations));
+            println!(
+                "  Tool Invocations:  {}",
+                format_count(total_tool_invocations)
+            );
             if total_cost > 0.0 {
                 println!("  Estimated Cost:    ${total_cost:.4}");
             }
@@ -1104,14 +1207,18 @@ fn output_blocks_stats(cli: &Cli, args: &StatsArgs, sessions: &[Session]) -> Res
                 println!("  Messages:  {msg_spark}");
 
                 // Tool invocations trend
-                let tool_values: Vec<u64> = blocks.iter().map(|b| b.tool_invocations as u64).collect();
+                let tool_values: Vec<u64> =
+                    blocks.iter().map(|b| b.tool_invocations as u64).collect();
                 if tool_values.iter().any(|&v| v > 0) {
                     let tool_spark = sparkline_u64(&tool_values);
                     println!("  Tools:     {tool_spark}");
                 }
 
                 // Cost trend if available
-                let cost_values: Vec<f64> = blocks.iter().map(|b| b.estimated_cost.unwrap_or(0.0)).collect();
+                let cost_values: Vec<f64> = blocks
+                    .iter()
+                    .map(|b| b.estimated_cost.unwrap_or(0.0))
+                    .collect();
                 if cost_values.iter().any(|&v| v > 0.0) {
                     let cost_spark = sparkline_with_range(&cost_values, None);
                     println!("  Cost:      {cost_spark}");
@@ -1277,7 +1384,9 @@ fn output_cost_history(cli: &Cli, args: &StatsArgs) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
         OutputFormat::Tsv => {
-            println!("date\ttokens\tinput_tokens\toutput_tokens\tcache_read\tcost\tsessions\tmessages");
+            println!(
+                "date\ttokens\tinput_tokens\toutput_tokens\tcache_read\tcost\tsessions\tmessages"
+            );
             let end = Utc::now().date_naive();
             let start = end - Duration::days(args.days - 1);
 
@@ -1309,10 +1418,7 @@ fn output_cost_history(cli: &Cli, args: &StatsArgs) -> Result<()> {
             };
             println!(
                 "days:{} cost:${:.2} avg:${:.2} trend:{}",
-                stats.active_days,
-                stats.total_cost,
-                stats.avg_daily_cost,
-                trend
+                stats.active_days, stats.total_cost, stats.avg_daily_cost, trend
             );
         }
         OutputFormat::Text => {
@@ -1328,8 +1434,14 @@ fn output_cost_history(cli: &Cli, args: &StatsArgs) -> Result<()> {
             println!("  Avg Daily Cost:  ${:>7.2}", stats.avg_daily_cost);
             println!("  Max Daily Cost:  ${:>7.2}", stats.max_daily_cost);
             println!("  Min Daily Cost:  ${:>7.2}", stats.min_daily_cost);
-            println!("  Total Tokens:    {:>8}", format_number(stats.total_tokens));
-            println!("  Total Sessions:  {:>8}", format_count(stats.total_sessions));
+            println!(
+                "  Total Tokens:    {:>8}",
+                format_number(stats.total_tokens)
+            );
+            println!(
+                "  Total Sessions:  {:>8}",
+                format_count(stats.total_sessions)
+            );
 
             // Trend indicator
             let trend_icon = if stats.trend_direction > 0.01 {
@@ -1435,12 +1547,7 @@ fn output_weekly_costs(cli: &Cli, args: &StatsArgs, history: &CostHistory) -> Re
                 } else {
                     0
                 };
-                println!(
-                    "  {} │ {:>7.2} │ {}",
-                    period,
-                    cost,
-                    "█".repeat(bar_len)
-                );
+                println!("  {} │ {:>7.2} │ {}", period, cost, "█".repeat(bar_len));
             }
 
             println!();
@@ -1524,12 +1631,7 @@ fn output_monthly_costs(cli: &Cli, args: &StatsArgs, history: &CostHistory) -> R
                 } else {
                     0
                 };
-                println!(
-                    "  {} │ ${:>8.2} │ {}",
-                    month,
-                    cost,
-                    "█".repeat(bar_len)
-                );
+                println!("  {} │ ${:>8.2} │ {}", month, cost, "█".repeat(bar_len));
             }
 
             println!();
@@ -1610,13 +1712,15 @@ fn collect_timeline_entries(
         };
         let analytics = SessionAnalytics::from_conversation(&conv);
 
-        let entry = buckets.entry(bucket_key.clone()).or_insert_with(|| TimelineEntry {
-            period: bucket_key,
-            session_count: 0,
-            total_tokens: 0,
-            message_count: 0,
-            estimated_cost: None,
-        });
+        let entry = buckets
+            .entry(bucket_key.clone())
+            .or_insert_with(|| TimelineEntry {
+                period: bucket_key,
+                session_count: 0,
+                total_tokens: 0,
+                message_count: 0,
+                estimated_cost: None,
+            });
 
         entry.session_count += 1;
         entry.total_tokens += analytics.usage.usage.total_tokens();
@@ -1643,7 +1747,10 @@ fn output_timeline(cli: &Cli, args: &StatsArgs, sessions: &[Session]) -> Result<
     let total_sessions: usize = entries.iter().map(|e| e.session_count).sum();
     let total_tokens: u64 = entries.iter().map(|e| e.total_tokens).sum();
     let date_range = (
-        entries.first().map(|e| e.period.clone()).unwrap_or_default(),
+        entries
+            .first()
+            .map(|e| e.period.clone())
+            .unwrap_or_default(),
         entries.last().map(|e| e.period.clone()).unwrap_or_default(),
     );
 
@@ -1667,7 +1774,10 @@ fn output_timeline(cli: &Cli, args: &StatsArgs, sessions: &[Session]) -> Result<
                     entry.session_count,
                     entry.total_tokens,
                     entry.message_count,
-                    entry.estimated_cost.map(|c| format!("{:.4}", c)).unwrap_or_default()
+                    entry
+                        .estimated_cost
+                        .map(|c| format!("{:.4}", c))
+                        .unwrap_or_default()
                 );
             }
         }
@@ -1744,7 +1854,8 @@ fn output_timeline(cli: &Cli, args: &StatsArgs, sessions: &[Session]) -> Result<
                 println!();
                 println!("Session Activity Trend");
                 println!("----------------------");
-                let session_values: Vec<u64> = entries.iter().map(|e| e.session_count as u64).collect();
+                let session_values: Vec<u64> =
+                    entries.iter().map(|e| e.session_count as u64).collect();
                 let spark = sparkline_u64(&session_values);
                 println!("  Sessions: {}", spark);
 
@@ -1822,14 +1933,16 @@ fn collect_token_breakdown(
         let analytics = SessionAnalytics::from_conversation(&conv);
         let usage = &analytics.usage.usage;
 
-        let entry = buckets.entry(bucket_key.clone()).or_insert_with(|| TokenBreakdown {
-            period: bucket_key,
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            total_tokens: 0,
-        });
+        let entry = buckets
+            .entry(bucket_key.clone())
+            .or_insert_with(|| TokenBreakdown {
+                period: bucket_key,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                total_tokens: 0,
+            });
 
         entry.input_tokens += usage.input_tokens;
         entry.output_tokens += usage.output_tokens;
@@ -1912,16 +2025,31 @@ fn output_token_graph(cli: &Cli, args: &StatsArgs, sessions: &[Session]) -> Resu
             // Summary
             println!("Token Breakdown Summary");
             println!("-----------------------");
-            println!("  Input Tokens:       {:>12}", format_number(totals.input_tokens));
-            println!("  Output Tokens:      {:>12}", format_number(totals.output_tokens));
-            println!("  Cache Read Tokens:  {:>12}", format_number(totals.cache_read_tokens));
-            println!("  Cache Write Tokens: {:>12}", format_number(totals.cache_write_tokens));
-            println!("  Total Tokens:       {:>12}", format_number(totals.total_tokens));
+            println!(
+                "  Input Tokens:       {:>12}",
+                format_number(totals.input_tokens)
+            );
+            println!(
+                "  Output Tokens:      {:>12}",
+                format_number(totals.output_tokens)
+            );
+            println!(
+                "  Cache Read Tokens:  {:>12}",
+                format_number(totals.cache_read_tokens)
+            );
+            println!(
+                "  Cache Write Tokens: {:>12}",
+                format_number(totals.cache_write_tokens)
+            );
+            println!(
+                "  Total Tokens:       {:>12}",
+                format_number(totals.total_tokens)
+            );
             println!();
 
             // Stacked bar chart
             let max_total = data.iter().map(|d| d.total_tokens).max().unwrap_or(1);
-            let bar_width = args.graph_width.min(80).max(20);
+            let bar_width = args.graph_width.clamp(20, 80);
 
             println!("Token Usage by Period");
             println!("{}", "-".repeat(bar_width + 25));
@@ -1976,10 +2104,13 @@ fn output_token_graph(cli: &Cli, args: &StatsArgs, sessions: &[Session]) -> Resu
             println!();
             println!("Token Distribution");
             println!("------------------");
-            let input_pct = (totals.input_tokens as f64 / totals.total_tokens.max(1) as f64) * 100.0;
-            let output_pct = (totals.output_tokens as f64 / totals.total_tokens.max(1) as f64) * 100.0;
+            let input_pct =
+                (totals.input_tokens as f64 / totals.total_tokens.max(1) as f64) * 100.0;
+            let output_pct =
+                (totals.output_tokens as f64 / totals.total_tokens.max(1) as f64) * 100.0;
             let cache_pct = ((totals.cache_read_tokens + totals.cache_write_tokens) as f64
-                / totals.total_tokens.max(1) as f64) * 100.0;
+                / totals.total_tokens.max(1) as f64)
+                * 100.0;
 
             println!("  Input:  {:.1}%", input_pct);
             println!("  Output: {:.1}%", output_pct);
@@ -2028,26 +2159,34 @@ fn output_budget_status(cli: &Cli) -> Result<()> {
     match cli.effective_output() {
         OutputFormat::Json => {
             if has_alerts {
-                let alerts: Vec<_> = status.alerts().iter().map(|a| {
-                    serde_json::json!({
-                        "period": a.period,
-                        "spent": a.spent,
-                        "limit": a.limit,
-                        "percent_used": a.percent_used * 100.0,
-                        "remaining": a.remaining,
-                        "status": a.status_indicator(),
+                let alerts: Vec<_> = status
+                    .alerts()
+                    .iter()
+                    .map(|a| {
+                        serde_json::json!({
+                            "period": a.period,
+                            "spent": a.spent,
+                            "limit": a.limit,
+                            "percent_used": a.percent_used * 100.0,
+                            "remaining": a.remaining,
+                            "status": a.status_indicator(),
+                        })
                     })
-                }).collect();
-                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                    "budget_alerts": alerts
-                }))?);
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "budget_alerts": alerts
+                    }))?
+                );
             }
         }
         OutputFormat::Tsv => {
             if has_alerts {
                 println!("period\tspent\tlimit\tpercent_used\tstatus");
                 for alert in status.alerts() {
-                    println!("{}\t{:.2}\t{:.2}\t{:.1}\t{}",
+                    println!(
+                        "{}\t{:.2}\t{:.2}\t{:.1}\t{}",
                         alert.period,
                         alert.spent,
                         alert.limit,
@@ -2059,7 +2198,8 @@ fn output_budget_status(cli: &Cli) -> Result<()> {
         }
         OutputFormat::Compact => {
             for alert in status.alerts() {
-                println!("{}:{} ${:.2}/${:.2} ({:.0}%)",
+                println!(
+                    "{}:{} ${:.2}/${:.2} ({:.0}%)",
                     alert.status_indicator(),
                     alert.period.to_lowercase(),
                     alert.spent,
@@ -2078,20 +2218,32 @@ fn output_budget_status(cli: &Cli) -> Result<()> {
                 let use_color = cli.effective_color();
                 if let Some(ref daily) = status.daily {
                     let bar = progress_bar(daily.percent_used, 20);
-                    println!("  Daily:   ${:>7.2} / ${:.2} [{bar}] {}",
-                        daily.spent, daily.limit, daily.colored_status(use_color));
+                    println!(
+                        "  Daily:   ${:>7.2} / ${:.2} [{bar}] {}",
+                        daily.spent,
+                        daily.limit,
+                        daily.colored_status(use_color)
+                    );
                 }
 
                 if let Some(ref weekly) = status.weekly {
                     let bar = progress_bar(weekly.percent_used, 20);
-                    println!("  Weekly:  ${:>7.2} / ${:.2} [{bar}] {}",
-                        weekly.spent, weekly.limit, weekly.colored_status(use_color));
+                    println!(
+                        "  Weekly:  ${:>7.2} / ${:.2} [{bar}] {}",
+                        weekly.spent,
+                        weekly.limit,
+                        weekly.colored_status(use_color)
+                    );
                 }
 
                 if let Some(ref monthly) = status.monthly {
                     let bar = progress_bar(monthly.percent_used, 20);
-                    println!("  Monthly: ${:>7.2} / ${:.2} [{bar}] {}",
-                        monthly.spent, monthly.limit, monthly.colored_status(use_color));
+                    println!(
+                        "  Monthly: ${:>7.2} / ${:.2} [{bar}] {}",
+                        monthly.spent,
+                        monthly.limit,
+                        monthly.colored_status(use_color)
+                    );
                 }
 
                 if status.any_exceeded() {
@@ -2099,8 +2251,10 @@ fn output_budget_status(cli: &Cli) -> Result<()> {
                     eprintln!("  ⚠️  One or more budgets exceeded!");
                 } else if status.any_warning() {
                     eprintln!();
-                    eprintln!("  ⚠️  Approaching budget limit (>{:.0}% threshold)",
-                        config.budget.warning_threshold * 100.0);
+                    eprintln!(
+                        "  ⚠️  Approaching budget limit (>{:.0}% threshold)",
+                        config.budget.warning_threshold * 100.0
+                    );
                 }
             }
         }

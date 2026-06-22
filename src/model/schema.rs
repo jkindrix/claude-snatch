@@ -125,7 +125,11 @@ impl SchemaChangeWarning {
     /// Format as a warning message.
     #[must_use]
     pub fn format(&self) -> String {
-        let severity = if self.is_breaking { "BREAKING" } else { "WARNING" };
+        let severity = if self.is_breaking {
+            "BREAKING"
+        } else {
+            "WARNING"
+        };
         format!(
             "[{}] Schema changed from {:?} to {:?}: {}. {}",
             severity, self.from, self.to, self.description, self.recommendation
@@ -135,7 +139,10 @@ impl SchemaChangeWarning {
 
 /// Detect schema changes between versions.
 #[must_use]
-pub fn detect_schema_change(from: &SchemaVersion, to: &SchemaVersion) -> Option<SchemaChangeWarning> {
+pub fn detect_schema_change(
+    from: &SchemaVersion,
+    to: &SchemaVersion,
+) -> Option<SchemaChangeWarning> {
     if from == to {
         return None;
     }
@@ -354,11 +361,8 @@ mod tests {
             "uuid": "test"
         });
 
-        let result = SchemaMigration::migrate(
-            &mut value,
-            &SchemaVersion::V1Legacy,
-            &SchemaVersion::V2Lsp,
-        );
+        let result =
+            SchemaMigration::migrate(&mut value, &SchemaVersion::V1Legacy, &SchemaVersion::V2Lsp);
 
         assert!(result.success);
         assert!(result.has_changes());
@@ -380,10 +384,8 @@ mod tests {
 
     #[test]
     fn test_compatibility_warnings() {
-        let warnings = SchemaCompatibility::get_warnings(
-            &SchemaVersion::V1Legacy,
-            &SchemaVersion::V2Lsp,
-        );
+        let warnings =
+            SchemaCompatibility::get_warnings(&SchemaVersion::V1Legacy, &SchemaVersion::V2Lsp);
         assert!(!warnings.is_empty());
     }
 }

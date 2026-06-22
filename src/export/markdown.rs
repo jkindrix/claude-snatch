@@ -30,7 +30,7 @@ use crate::analytics::SessionAnalytics;
 use crate::error::Result;
 use crate::model::{
     content::{ImageSource, StopReason, ThinkingBlock, ToolResult, ToolUse},
-    AssistantMessage, ContentBlock, LogEntry, SystemMessage, SummaryMessage, UserMessage,
+    AssistantMessage, ContentBlock, LogEntry, SummaryMessage, SystemMessage, UserMessage,
 };
 use crate::reconstruction::Conversation;
 
@@ -160,18 +160,26 @@ impl MarkdownExporter {
             } else {
                 writeln!(writer, "## Statistics")?;
             }
-            writeln!(writer, "- **Messages:** {} ({} user, {} assistant)",
-                summary.total_messages,
-                summary.user_messages,
-                summary.assistant_messages
+            writeln!(
+                writer,
+                "- **Messages:** {} ({} user, {} assistant)",
+                summary.total_messages, summary.user_messages, summary.assistant_messages
             )?;
             writeln!(writer, "- **Total Tokens:** {}", summary.total_tokens)?;
             writeln!(writer, "- **Input Tokens:** {}", summary.input_tokens)?;
             writeln!(writer, "- **Output Tokens:** {}", summary.output_tokens)?;
             if summary.cache_hit_rate > 0.0 {
-                writeln!(writer, "- **Cache Hit Rate:** {:.1}%", summary.cache_hit_rate)?;
+                writeln!(
+                    writer,
+                    "- **Cache Hit Rate:** {:.1}%",
+                    summary.cache_hit_rate
+                )?;
             }
-            writeln!(writer, "- **Tool Invocations:** {}", summary.tool_invocations)?;
+            writeln!(
+                writer,
+                "- **Tool Invocations:** {}",
+                summary.tool_invocations
+            )?;
             if summary.thinking_blocks > 0 {
                 writeln!(writer, "- **Thinking Blocks:** {}", summary.thinking_blocks)?;
             }
@@ -258,7 +266,9 @@ impl MarkdownExporter {
         if options.include_usage {
             if let Some(usage) = &assistant.message.usage {
                 writeln!(writer)?;
-                writeln!(writer, "*Tokens: {} in, {} out*",
+                writeln!(
+                    writer,
+                    "*Tokens: {} in, {} out*",
                     usage.total_input_tokens(),
                     usage.output_tokens
                 )?;
@@ -282,7 +292,11 @@ impl MarkdownExporter {
                 // Handle code-only mode - extract code blocks instead of full text
                 if options.is_code_only() {
                     for code_block in extract_code_blocks(&text.text) {
-                        writeln!(writer, "```{}", code_block.language.as_deref().unwrap_or(""))?;
+                        writeln!(
+                            writer,
+                            "```{}",
+                            code_block.language.as_deref().unwrap_or("")
+                        )?;
                         writeln!(writer, "{}", code_block.code)?;
                         writeln!(writer, "```")?;
                         writeln!(writer)?;
@@ -318,11 +332,7 @@ impl MarkdownExporter {
     }
 
     /// Write a thinking block.
-    fn write_thinking<W: Write>(
-        &self,
-        writer: &mut W,
-        thinking: &ThinkingBlock,
-    ) -> Result<()> {
+    fn write_thinking<W: Write>(&self, writer: &mut W, thinking: &ThinkingBlock) -> Result<()> {
         if self.plain_text {
             writeln!(writer, "[THINKING]")?;
             writeln!(writer, "{}", thinking.thinking)?;
@@ -332,7 +342,11 @@ impl MarkdownExporter {
 
             if should_collapse {
                 writeln!(writer, "<details>")?;
-                writeln!(writer, "<summary>💭 Thinking ({} chars)</summary>", thinking.thinking.len())?;
+                writeln!(
+                    writer,
+                    "<summary>💭 Thinking ({} chars)</summary>",
+                    thinking.thinking.len()
+                )?;
                 writeln!(writer)?;
             } else {
                 writeln!(writer, "### 💭 Thinking")?;
@@ -353,15 +367,15 @@ impl MarkdownExporter {
     }
 
     /// Write a tool use block.
-    fn write_tool_use<W: Write>(
-        &self,
-        writer: &mut W,
-        tool_use: &ToolUse,
-    ) -> Result<()> {
+    fn write_tool_use<W: Write>(&self, writer: &mut W, tool_use: &ToolUse) -> Result<()> {
         if self.plain_text {
             writeln!(writer, "[TOOL: {}]", tool_use.name)?;
             writeln!(writer, "ID: {}", tool_use.id)?;
-            writeln!(writer, "Input: {}", serde_json::to_string_pretty(&tool_use.input).unwrap_or_default())?;
+            writeln!(
+                writer,
+                "Input: {}",
+                serde_json::to_string_pretty(&tool_use.input).unwrap_or_default()
+            )?;
             writeln!(writer, "[/TOOL]")?;
         } else {
             // Determine tool icon
@@ -379,7 +393,11 @@ impl MarkdownExporter {
             writeln!(writer)?;
             writeln!(writer, "**Input:**")?;
             writeln!(writer, "```json")?;
-            writeln!(writer, "{}", serde_json::to_string_pretty(&tool_use.input).unwrap_or_default())?;
+            writeln!(
+                writer,
+                "{}",
+                serde_json::to_string_pretty(&tool_use.input).unwrap_or_default()
+            )?;
             writeln!(writer, "```")?;
         }
         writeln!(writer)?;
@@ -414,12 +432,19 @@ impl MarkdownExporter {
         } else {
             let content_len = content_str.len();
             let should_collapse = content_len > self.tool_result_collapse_threshold;
-            let status = if result.is_explicit_error() { "❌ Error" } else { "✅ Result" };
+            let status = if result.is_explicit_error() {
+                "❌ Error"
+            } else {
+                "✅ Result"
+            };
 
             if should_collapse {
                 writeln!(writer, "<details>")?;
-                writeln!(writer, "<summary>{} for `{}` ({} chars)</summary>",
-                    status, result.tool_use_id, content_len)?;
+                writeln!(
+                    writer,
+                    "<summary>{} for `{}` ({} chars)</summary>",
+                    status, result.tool_use_id, content_len
+                )?;
                 writeln!(writer)?;
             } else {
                 writeln!(writer, "#### {} for `{}`", status, result.tool_use_id)?;
@@ -454,8 +479,11 @@ impl MarkdownExporter {
             match &image.source {
                 ImageSource::Base64 { media_type, data } => {
                     // Write as embedded base64 image
-                    writeln!(writer, "![Image](data:{media_type};base64,{}...)",
-                        &data[..std::cmp::min(50, data.len())])?;
+                    writeln!(
+                        writer,
+                        "![Image](data:{media_type};base64,{}...)",
+                        &data[..std::cmp::min(50, data.len())]
+                    )?;
                     writeln!(writer, "*({} base64 encoded)*", data.len())?;
                 }
                 ImageSource::Url { url } => {
@@ -572,21 +600,24 @@ impl MarkdownExporter {
                 LogEntry::User(user) => {
                     let text = match &user.message {
                         crate::model::UserContent::Simple(s) => s.content.clone(),
-                        crate::model::UserContent::Blocks(b) => {
-                            b.content.iter()
-                                .filter_map(|c| match c {
-                                    ContentBlock::Text(t) => Some(t.text.as_str()),
-                                    _ => None,
-                                })
-                                .next()
-                                .unwrap_or("")
-                                .to_string()
-                        }
+                        crate::model::UserContent::Blocks(b) => b
+                            .content
+                            .iter()
+                            .filter_map(|c| match c {
+                                ContentBlock::Text(t) => Some(t.text.as_str()),
+                                _ => None,
+                            })
+                            .next()
+                            .unwrap_or("")
+                            .to_string(),
                     };
                     truncate_preview(&text, 50)
                 }
                 LogEntry::Assistant(assistant) => {
-                    let text = assistant.message.content.iter()
+                    let text = assistant
+                        .message
+                        .content
+                        .iter()
                         .filter_map(|c| match c {
                             ContentBlock::Text(t) => Some(t.text.as_str()),
                             _ => None,
@@ -599,8 +630,11 @@ impl MarkdownExporter {
                 _ => String::new(),
             };
 
-            writeln!(writer, "{}. [{} {}{}](#{}) - {}",
-                message_num, icon, role, time_str, anchor, preview)?;
+            writeln!(
+                writer,
+                "{}. [{} {}{}](#{}) - {}",
+                message_num, icon, role, time_str, anchor, preview
+            )?;
         }
 
         writeln!(writer)?;
@@ -666,8 +700,11 @@ impl Exporter for MarkdownExporter {
 
             for bp in conversation.branch_points() {
                 if let Some(node) = conversation.get_node(bp) {
-                    writeln!(writer, "- Branch point at `{bp}` with {} children",
-                        node.children.len())?;
+                    writeln!(
+                        writer,
+                        "- Branch point at `{bp}` with {} children",
+                        node.children.len()
+                    )?;
                 }
             }
         }
@@ -864,7 +901,9 @@ mod tests {
             signature: "sig".to_string(),
             extra: indexmap::IndexMap::new(),
         };
-        exporter.write_thinking(&mut output, &short_thinking).unwrap();
+        exporter
+            .write_thinking(&mut output, &short_thinking)
+            .unwrap();
         let short_result = String::from_utf8(output.clone()).unwrap();
         assert!(!short_result.contains("<details>"));
         assert!(short_result.contains("### 💭 Thinking"));
@@ -876,7 +915,9 @@ mod tests {
             signature: "sig".to_string(),
             extra: indexmap::IndexMap::new(),
         };
-        exporter.write_thinking(&mut output, &long_thinking).unwrap();
+        exporter
+            .write_thinking(&mut output, &long_thinking)
+            .unwrap();
         let long_result = String::from_utf8(output).unwrap();
         assert!(long_result.contains("<details>"));
         assert!(long_result.contains("<summary>💭 Thinking"));
@@ -892,11 +933,15 @@ mod tests {
         // Short result - should not collapse
         let short_result = ToolResult {
             tool_use_id: "test_id".to_string(),
-            content: Some(crate::model::content::ToolResultContent::String("Short result".to_string())),
+            content: Some(crate::model::content::ToolResultContent::String(
+                "Short result".to_string(),
+            )),
             is_error: None,
             extra: indexmap::IndexMap::new(),
         };
-        exporter.write_tool_result(&mut output, &short_result, &options).unwrap();
+        exporter
+            .write_tool_result(&mut output, &short_result, &options)
+            .unwrap();
         let short_output = String::from_utf8(output.clone()).unwrap();
         assert!(!short_output.contains("<details>"));
 
@@ -904,11 +949,15 @@ mod tests {
         output.clear();
         let long_result = ToolResult {
             tool_use_id: "test_id".to_string(),
-            content: Some(crate::model::content::ToolResultContent::String("x".repeat(6000))),
+            content: Some(crate::model::content::ToolResultContent::String(
+                "x".repeat(6000),
+            )),
             is_error: None,
             extra: indexmap::IndexMap::new(),
         };
-        exporter.write_tool_result(&mut output, &long_result, &options).unwrap();
+        exporter
+            .write_tool_result(&mut output, &long_result, &options)
+            .unwrap();
         let long_output = String::from_utf8(output).unwrap();
         assert!(long_output.contains("<details>"));
         assert!(long_output.contains("</details>"));

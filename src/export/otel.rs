@@ -286,7 +286,11 @@ fn trace_id_from_session(session_id: &str) -> String {
     let mut hasher = DefaultHasher::new();
     session_id.hash(&mut hasher);
     let hash1 = hasher.finish();
-    session_id.chars().rev().collect::<String>().hash(&mut hasher);
+    session_id
+        .chars()
+        .rev()
+        .collect::<String>()
+        .hash(&mut hasher);
     let hash2 = hasher.finish();
 
     format!("{:016x}{:016x}", hash1, hash2)
@@ -312,27 +316,9 @@ fn datetime_to_nanos(dt: &DateTime<Utc>) -> String {
 /// Extract text content from a LogEntry.
 fn extract_text_content(entry: &LogEntry) -> String {
     match entry {
-        LogEntry::User(user) => {
-            match &user.message {
-                crate::model::UserContent::Simple(simple) => simple.content.clone(),
-                crate::model::UserContent::Blocks(blocks) => {
-                    blocks.content
-                        .iter()
-                        .filter_map(|block| {
-                            if let ContentBlock::Text(text) = block {
-                                Some(text.text.as_str())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                }
-            }
-        }
-        LogEntry::Assistant(assistant) => {
-            assistant
-                .message
+        LogEntry::User(user) => match &user.message {
+            crate::model::UserContent::Simple(simple) => simple.content.clone(),
+            crate::model::UserContent::Blocks(blocks) => blocks
                 .content
                 .iter()
                 .filter_map(|block| {
@@ -343,11 +329,22 @@ fn extract_text_content(entry: &LogEntry) -> String {
                     }
                 })
                 .collect::<Vec<_>>()
-                .join("\n")
-        }
-        LogEntry::System(system) => {
-            system.content.clone().unwrap_or_default()
-        }
+                .join("\n"),
+        },
+        LogEntry::Assistant(assistant) => assistant
+            .message
+            .content
+            .iter()
+            .filter_map(|block| {
+                if let ContentBlock::Text(text) = block {
+                    Some(text.text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        LogEntry::System(system) => system.content.clone().unwrap_or_default(),
         _ => String::new(),
     }
 }
@@ -476,13 +473,25 @@ impl OtelExporter {
         }
 
         if total_input_tokens > 0 || total_output_tokens > 0 {
-            root_attributes.push(KeyValue::int("llm.usage.input_tokens", total_input_tokens as i64));
-            root_attributes.push(KeyValue::int("llm.usage.output_tokens", total_output_tokens as i64));
+            root_attributes.push(KeyValue::int(
+                "llm.usage.input_tokens",
+                total_input_tokens as i64,
+            ));
+            root_attributes.push(KeyValue::int(
+                "llm.usage.output_tokens",
+                total_output_tokens as i64,
+            ));
             if total_cache_read > 0 {
-                root_attributes.push(KeyValue::int("llm.usage.cache_read_tokens", total_cache_read as i64));
+                root_attributes.push(KeyValue::int(
+                    "llm.usage.cache_read_tokens",
+                    total_cache_read as i64,
+                ));
             }
             if total_cache_write > 0 {
-                root_attributes.push(KeyValue::int("llm.usage.cache_write_tokens", total_cache_write as i64));
+                root_attributes.push(KeyValue::int(
+                    "llm.usage.cache_write_tokens",
+                    total_cache_write as i64,
+                ));
             }
         }
 
@@ -512,14 +521,18 @@ impl OtelExporter {
             // Look for user message followed by assistant response
             if matches!(entry, LogEntry::User(_)) {
                 turn_index += 1;
-                let turn_span_id = span_id_from_content(&format!("turn-{}", turn_index), turn_index);
+                let turn_span_id =
+                    span_id_from_content(&format!("turn-{}", turn_index), turn_index);
 
                 let turn_start = entry.timestamp().unwrap_or_else(Utc::now);
                 let mut turn_end = turn_start;
                 let mut turn_events = Vec::new();
                 let mut turn_attributes = vec![
                     KeyValue::int("turn.index", turn_index as i64),
-                    KeyValue::string("turn.user_content", self.truncate_content(&extract_text_content(entry), 1000)),
+                    KeyValue::string(
+                        "turn.user_content",
+                        self.truncate_content(&extract_text_content(entry), 1000),
+                    ),
                 ];
 
                 // Check for assistant response
@@ -551,15 +564,15 @@ impl OtelExporter {
                         // Add tool calls as child spans
                         if self.include_tool_details && options.should_include_tool_use() {
                             let tool_calls = extract_tool_calls(assistant_entry);
-                            for (tool_idx, (tool_name, tool_input)) in tool_calls.iter().enumerate() {
+                            for (tool_idx, (tool_name, tool_input)) in tool_calls.iter().enumerate()
+                            {
                                 let tool_span_id = span_id_from_content(
                                     &format!("tool-{}-{}", turn_index, tool_idx),
                                     turn_index * 1000 + tool_idx,
                                 );
 
-                                let mut tool_attrs = vec![
-                                    KeyValue::string("tool.name", tool_name.clone()),
-                                ];
+                                let mut tool_attrs =
+                                    vec![KeyValue::string("tool.name", tool_name.clone())];
 
                                 // Add tool input (truncated)
                                 if let Some(input) = tool_input {
@@ -590,8 +603,14 @@ impl OtelExporter {
 
                         // Add usage to turn
                         if let Some(usage) = assistant_entry.usage() {
-                            turn_attributes.push(KeyValue::int("llm.usage.input_tokens", usage.input_tokens as i64));
-                            turn_attributes.push(KeyValue::int("llm.usage.output_tokens", usage.output_tokens as i64));
+                            turn_attributes.push(KeyValue::int(
+                                "llm.usage.input_tokens",
+                                usage.input_tokens as i64,
+                            ));
+                            turn_attributes.push(KeyValue::int(
+                                "llm.usage.output_tokens",
+                                usage.output_tokens as i64,
+                            ));
                         }
 
                         i += 1; // Skip the assistant entry
@@ -652,10 +671,7 @@ impl OtelExporter {
             .and_then(|e| e.timestamp())
             .unwrap_or_else(Utc::now);
 
-        let end = entries
-            .last()
-            .and_then(|e| e.timestamp())
-            .unwrap_or(start);
+        let end = entries.last().and_then(|e| e.timestamp()).unwrap_or(start);
 
         (start, end)
     }
@@ -678,9 +694,7 @@ impl OtelExporter {
             let span_id = span_id_from_content(&format!("entry-{}", idx), idx);
             let timestamp = entry.timestamp().unwrap_or_else(Utc::now);
 
-            let mut attributes = vec![
-                KeyValue::string("entry.type", entry.message_type()),
-            ];
+            let mut attributes = vec![KeyValue::string("entry.type", entry.message_type())];
 
             if let Some(uuid) = entry.uuid() {
                 attributes.push(KeyValue::string("entry.uuid", uuid.to_string()));
@@ -696,8 +710,14 @@ impl OtelExporter {
 
             // Add usage if available
             if let Some(usage) = entry.usage() {
-                attributes.push(KeyValue::int("llm.usage.input_tokens", usage.input_tokens as i64));
-                attributes.push(KeyValue::int("llm.usage.output_tokens", usage.output_tokens as i64));
+                attributes.push(KeyValue::int(
+                    "llm.usage.input_tokens",
+                    usage.input_tokens as i64,
+                ));
+                attributes.push(KeyValue::int(
+                    "llm.usage.output_tokens",
+                    usage.output_tokens as i64,
+                ));
             }
 
             let span = Span {

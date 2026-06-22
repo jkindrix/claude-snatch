@@ -14,11 +14,10 @@ use super::helpers::{
 
 /// Stop words to exclude from title matching in score.
 const STOP_WORDS: &[&str] = &[
-    "the", "this", "that", "with", "from", "into", "have", "will",
-    "been", "were", "they", "them", "their", "what", "when", "where",
-    "which", "there", "then", "than", "also", "just", "more", "some",
-    "each", "does", "should", "would", "could", "about", "other",
-    "take", "make", "like", "over", "only", "very", "after", "before",
+    "the", "this", "that", "with", "from", "into", "have", "will", "been", "were", "they", "them",
+    "their", "what", "when", "where", "which", "there", "then", "than", "also", "just", "more",
+    "some", "each", "does", "should", "would", "could", "about", "other", "take", "make", "like",
+    "over", "only", "very", "after", "before",
 ];
 
 /// Check if text contains enough significant title keywords.
@@ -90,39 +89,61 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                         ),
                     }
                 })?;
-                store.decisions.iter().filter(|d| d.status == status).collect()
+                store
+                    .decisions
+                    .iter()
+                    .filter(|d| d.status == status)
+                    .collect()
             } else {
                 store.decisions.iter().collect()
             };
 
             let filtered: Vec<_> = if let Some(ref search) = args.search {
                 let search_lower = search.to_lowercase();
-                filtered.into_iter().filter(|d| {
-                    d.title.to_lowercase().contains(&search_lower)
-                        || d.description.as_ref().is_some_and(|desc| desc.to_lowercase().contains(&search_lower))
-                }).collect()
+                filtered
+                    .into_iter()
+                    .filter(|d| {
+                        d.title.to_lowercase().contains(&search_lower)
+                            || d.description
+                                .as_ref()
+                                .is_some_and(|desc| desc.to_lowercase().contains(&search_lower))
+                    })
+                    .collect()
             } else {
                 filtered
             };
 
             let filtered: Vec<_> = if !args.tag.is_empty() {
-                let tag_filters: Vec<String> = args.tag.iter()
+                let tag_filters: Vec<String> = args
+                    .tag
+                    .iter()
                     .flat_map(|t| t.split(',').map(|s| s.trim().to_lowercase()))
                     .collect();
-                filtered.into_iter().filter(|d| {
-                    tag_filters.iter().any(|tf| d.tags.iter().any(|t| t.to_lowercase().contains(tf.as_str())))
-                }).collect()
+                filtered
+                    .into_iter()
+                    .filter(|d| {
+                        tag_filters.iter().any(|tf| {
+                            d.tags
+                                .iter()
+                                .any(|t| t.to_lowercase().contains(tf.as_str()))
+                        })
+                    })
+                    .collect()
             } else {
                 filtered
             };
 
             match cli.effective_output() {
                 OutputFormat::Json => {
-                    let output: Vec<DecisionOutput> = filtered.iter().map(|d| to_output(d)).collect();
-                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                        "project_path": project_path,
-                        "decisions": output,
-                    }))?);
+                    let output: Vec<DecisionOutput> =
+                        filtered.iter().map(|d| to_output(d)).collect();
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "project_path": project_path,
+                            "decisions": output,
+                        }))?
+                    );
                 }
                 _ => {
                     if filtered.is_empty() {
@@ -147,42 +168,50 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                         } else {
                             format!(" [{}]", d.tags.join(", "))
                         };
-                        let session = d.session_id.as_deref()
+                        let session = d
+                            .session_id
+                            .as_deref()
                             .map(|s| format!(" ({})", &s[..s.len().min(8)]))
                             .unwrap_or_default();
-                        println!("  [{status_marker}] #{}: {}{}{}{}", d.id, d.title, conf, tags, session);
+                        println!(
+                            "  [{status_marker}] #{}: {}{}{}{}",
+                            d.id, d.title, conf, tags, session
+                        );
                         if let Some(ref desc) = d.description {
                             println!("      {desc}");
                         }
                     }
                     let active = store.active_decisions().len();
-                    println!(
-                        "\n{} decision(s), {} active",
-                        store.decisions.len(),
-                        active
-                    );
+                    println!("\n{} decision(s), {} active", store.decisions.len(), active);
                 }
             }
         }
 
         "add" => {
-            let title = args.title.as_deref().ok_or_else(|| SnatchError::InvalidArgument {
-                name: "title".into(),
-                reason: "--title is required for add operation".into(),
-            })?;
+            let title = args
+                .title
+                .as_deref()
+                .ok_or_else(|| SnatchError::InvalidArgument {
+                    name: "title".into(),
+                    reason: "--title is required for add operation".into(),
+                })?;
 
             let status = if let Some(ref s) = args.status {
-                Some(DecisionStatus::parse(s).ok_or_else(|| SnatchError::InvalidArgument {
-                    name: "status".into(),
-                    reason: format!(
-                        "Invalid status '{s}'. Use: proposed, confirmed, superseded, abandoned"
-                    ),
-                })?)
+                Some(
+                    DecisionStatus::parse(s).ok_or_else(|| SnatchError::InvalidArgument {
+                        name: "status".into(),
+                        reason: format!(
+                            "Invalid status '{s}'. Use: proposed, confirmed, superseded, abandoned"
+                        ),
+                    })?,
+                )
             } else {
                 None
             };
 
-            let tags: Vec<String> = args.tag.iter()
+            let tags: Vec<String> = args
+                .tag
+                .iter()
                 .flat_map(|t| t.split(',').map(|s| s.trim().to_string()))
                 .filter(|s| !s.is_empty())
                 .collect();
@@ -212,12 +241,15 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
             match cli.effective_output() {
                 OutputFormat::Json => {
                     let decision = store.decisions.iter().find(|d| d.id == id).unwrap();
-                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                        "operation": "add",
-                        "project_path": project_path,
-                        "message": format!("Added decision #{id}"),
-                        "decision": to_output(decision),
-                    }))?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "operation": "add",
+                            "project_path": project_path,
+                            "message": format!("Added decision #{id}"),
+                            "decision": to_output(decision),
+                        }))?
+                    );
                 }
                 _ => println!("Added decision #{id}: {title}"),
             }
@@ -230,12 +262,14 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
             })?;
 
             let status = if let Some(ref s) = args.status {
-                Some(DecisionStatus::parse(s).ok_or_else(|| SnatchError::InvalidArgument {
-                    name: "status".into(),
-                    reason: format!(
-                        "Invalid status '{s}'. Use: proposed, confirmed, superseded, abandoned"
-                    ),
-                })?)
+                Some(
+                    DecisionStatus::parse(s).ok_or_else(|| SnatchError::InvalidArgument {
+                        name: "status".into(),
+                        reason: format!(
+                            "Invalid status '{s}'. Use: proposed, confirmed, superseded, abandoned"
+                        ),
+                    })?,
+                )
             } else {
                 None
             };
@@ -243,14 +277,22 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
             let tags: Option<Vec<String>> = if args.tag.is_empty() {
                 None
             } else {
-                Some(args.tag.iter()
-                    .flat_map(|t| t.split(',').map(|s| s.trim().to_string()))
-                    .filter(|s| !s.is_empty())
-                    .collect())
+                Some(
+                    args.tag
+                        .iter()
+                        .flat_map(|t| t.split(',').map(|s| s.trim().to_string()))
+                        .filter(|s| !s.is_empty())
+                        .collect(),
+                )
             };
 
             let has_related = !args.related_sessions.is_empty();
-            if status.is_none() && args.description.is_none() && args.confidence.is_none() && tags.is_none() && !has_related {
+            if status.is_none()
+                && args.description.is_none()
+                && args.confidence.is_none()
+                && tags.is_none()
+                && !has_related
+            {
                 return Err(SnatchError::InvalidArgument {
                     name: "update".into(),
                     reason: "At least one of --status, --description, --confidence, --tag, or --related-session is required".into(),
@@ -281,16 +323,22 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
             match cli.effective_output() {
                 OutputFormat::Json => {
                     let decision = store.decisions.iter().find(|d| d.id == id).unwrap();
-                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                        "operation": "update",
-                        "project_path": project_path,
-                        "message": format!("Updated decision #{id}"),
-                        "decision": to_output(decision),
-                    }))?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "operation": "update",
+                            "project_path": project_path,
+                            "message": format!("Updated decision #{id}"),
+                            "decision": to_output(decision),
+                        }))?
+                    );
                 }
                 _ => {
                     let decision = store.decisions.iter().find(|d| d.id == id).unwrap();
-                    println!("Updated decision #{id}: [{}] {}", decision.status, decision.title);
+                    println!(
+                        "Updated decision #{id}: [{}] {}",
+                        decision.status, decision.title
+                    );
                 }
             }
         }
@@ -312,11 +360,14 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
 
             match cli.effective_output() {
                 OutputFormat::Json => {
-                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                        "operation": "remove",
-                        "project_path": project_path,
-                        "message": format!("Removed decision #{id}"),
-                    }))?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "operation": "remove",
+                            "project_path": project_path,
+                            "message": format!("Removed decision #{id}"),
+                        }))?
+                    );
                 }
                 _ => println!("Removed decision #{id}"),
             }
@@ -327,10 +378,12 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                 name: "id".into(),
                 reason: "--id is required for supersede operation".into(),
             })?;
-            let by = args.superseded_by.ok_or_else(|| SnatchError::InvalidArgument {
-                name: "superseded-by".into(),
-                reason: "--superseded-by is required for supersede operation".into(),
-            })?;
+            let by = args
+                .superseded_by
+                .ok_or_else(|| SnatchError::InvalidArgument {
+                    name: "superseded-by".into(),
+                    reason: "--superseded-by is required for supersede operation".into(),
+                })?;
 
             let mut store = load_decisions(project_dir)?;
             if !store.supersede_decision(id, by) {
@@ -344,16 +397,29 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
             match cli.effective_output() {
                 OutputFormat::Json => {
                     let decision = store.decisions.iter().find(|d| d.id == id).unwrap();
-                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                        "operation": "supersede",
-                        "project_path": project_path,
-                        "message": format!("Decision #{id} superseded by #{by}"),
-                        "decision": to_output(decision),
-                    }))?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "operation": "supersede",
+                            "project_path": project_path,
+                            "message": format!("Decision #{id} superseded by #{by}"),
+                            "decision": to_output(decision),
+                        }))?
+                    );
                 }
                 _ => {
-                    let old_title = store.decisions.iter().find(|d| d.id == id).map(|d| d.title.as_str()).unwrap_or("?");
-                    let new_title = store.decisions.iter().find(|d| d.id == by).map(|d| d.title.as_str()).unwrap_or("?");
+                    let old_title = store
+                        .decisions
+                        .iter()
+                        .find(|d| d.id == id)
+                        .map(|d| d.title.as_str())
+                        .unwrap_or("?");
+                    let new_title = store
+                        .decisions
+                        .iter()
+                        .find(|d| d.id == by)
+                        .map(|d| d.title.as_str())
+                        .unwrap_or("?");
                     println!("Decision #{id} '{old_title}' superseded by #{by} '{new_title}'");
                 }
             }
@@ -456,6 +522,7 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                         if text_lower.contains(&title_lower)
                             || title_matches_text(&title_keywords, &text_lower)
                         {
+                            #[allow(clippy::needless_range_loop)]
                             for j in (i + 1)..main_entries.len().min(i + 4) {
                                 if has_tool_calls(main_entries[j]) {
                                     found_implementation = true;
@@ -481,7 +548,9 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                     if let Some(text) = extract_text(entry) {
                         let text_lower = text.to_lowercase();
                         if (text_lower.contains(&title_lower)
-                            || title_lower.split_whitespace().all(|w| text_lower.contains(w)))
+                            || title_lower
+                                .split_whitespace()
+                                .all(|w| text_lower.contains(w)))
                             && has_options_pattern(&text)
                         {
                             found_options = true;
@@ -495,9 +564,15 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
 
                 // Signal 4: User correction found (negative signal)
                 let correction_patterns = [
-                    "no, ", "no that's wrong", "that's not what i",
-                    "i said ", "i meant ", "not what i asked",
-                    "wrong ", "incorrect", "don't do that",
+                    "no, ",
+                    "no that's wrong",
+                    "that's not what i",
+                    "i said ",
+                    "i meant ",
+                    "not what i asked",
+                    "wrong ",
+                    "incorrect",
+                    "don't do that",
                 ];
                 let mut found_correction = false;
                 for entry in &main_entries {
@@ -506,13 +581,14 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                     }
                     if let Some(text) = extract_text(entry) {
                         let text_lower = text.to_lowercase();
-                        if correction_patterns.iter().any(|p| text_lower.starts_with(p) || text_lower.contains(p)) {
-                            if text_lower.contains(&title_lower)
-                                || title_matches_text(&title_keywords, &text_lower)
-                            {
-                                found_correction = true;
-                                break;
-                            }
+                        if correction_patterns
+                            .iter()
+                            .any(|p| text_lower.starts_with(p) || text_lower.contains(p))
+                            && (text_lower.contains(&title_lower)
+                                || title_matches_text(&title_keywords, &text_lower))
+                        {
+                            found_correction = true;
+                            break;
                         }
                     }
                 }
@@ -528,17 +604,19 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                 let mut cross_session_implementations = 0u32;
                 if let Ok(all_sessions) = project.sessions() {
                     // Skip sessions already included in primary scoring
-                    let skip_ids: std::collections::HashSet<&str> = std::iter::once(session_id.as_str())
-                        .chain(decision.references.iter().map(|s| s.as_str()))
-                        .collect();
+                    let skip_ids: std::collections::HashSet<&str> =
+                        std::iter::once(session_id.as_str())
+                            .chain(decision.references.iter().map(|s| s.as_str()))
+                            .collect();
                     for other_session in &all_sessions {
                         if skip_ids.contains(other_session.session_id()) {
                             continue;
                         }
-                        let other_entries = match other_session.parse_with_options(cli.max_file_size) {
-                            Ok(e) => e,
-                            Err(_) => continue,
-                        };
+                        let other_entries =
+                            match other_session.parse_with_options(cli.max_file_size) {
+                                Ok(e) => e,
+                                Err(_) => continue,
+                            };
                         let other_main = main_thread_entries(&other_entries);
                         let mut topic_mentioned = false;
                         for (i, entry) in other_main.iter().enumerate() {
@@ -564,6 +642,7 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                                     }
                                 }
                                 // Check for implementation nearby
+                                #[allow(clippy::needless_range_loop)]
                                 for j in (i + 1)..other_main.len().min(i + 4) {
                                     if has_tool_calls(other_main[j]) {
                                         cross_session_implementations += 1;
@@ -604,15 +683,19 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
 
             match cli.effective_output() {
                 OutputFormat::Json => {
-                    let output: Vec<DecisionOutput> = store.decisions.iter().map(|d| to_output(d)).collect();
-                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                        "operation": "score",
-                        "project_path": project_path,
-                        "scored": scored_count,
-                        "skipped_no_session_id": skipped_no_id,
-                        "skipped_session_not_found": skipped_not_found,
-                        "decisions": output,
-                    }))?);
+                    let output: Vec<DecisionOutput> =
+                        store.decisions.iter().map(|d| to_output(d)).collect();
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "operation": "score",
+                            "project_path": project_path,
+                            "scored": scored_count,
+                            "skipped_no_session_id": skipped_no_id,
+                            "skipped_session_not_found": skipped_not_found,
+                            "decisions": output,
+                        }))?
+                    );
                 }
                 _ => {
                     let mut skip_parts = Vec::new();
@@ -635,7 +718,12 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                             DecisionStatus::Superseded => "~",
                             DecisionStatus::Abandoned => "-",
                         };
-                        println!("  [{status_marker}] #{}: {} → {:.0}%", d.id, d.title, d.confidence * 100.0);
+                        println!(
+                            "  [{status_marker}] #{}: {} → {:.0}%",
+                            d.id,
+                            d.title,
+                            d.confidence * 100.0
+                        );
                     }
                 }
             }
@@ -652,14 +740,17 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
 
             match cli.effective_output() {
                 OutputFormat::Json => {
-                    let output: Vec<DecisionOutput> = store.decisions.iter().map(|d| to_output(d)).collect();
+                    let output: Vec<DecisionOutput> =
+                        store.decisions.iter().map(|d| to_output(d)).collect();
                     println!("{}", serde_json::to_string_pretty(&output)?);
                 }
                 _ => {
                     // Markdown export
                     println!("# Decisions — {project_path}\n");
-                    let mut by_status: std::collections::BTreeMap<&str, Vec<&crate::decisions::Decision>> =
-                        std::collections::BTreeMap::new();
+                    let mut by_status: std::collections::BTreeMap<
+                        &str,
+                        Vec<&crate::decisions::Decision>,
+                    > = std::collections::BTreeMap::new();
                     for d in &store.decisions {
                         let key = match d.status {
                             DecisionStatus::Confirmed => "Confirmed",
@@ -685,9 +776,8 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                                 meta.push(format!("Session: {}", &sid[..sid.len().min(8)]));
                             }
                             if !d.references.is_empty() {
-                                let refs: Vec<&str> = d.references.iter()
-                                    .map(|r| &r[..r.len().min(8)])
-                                    .collect();
+                                let refs: Vec<&str> =
+                                    d.references.iter().map(|r| &r[..r.len().min(8)]).collect();
                                 meta.push(format!("Related: {}", refs.join(", ")));
                             }
                             if let Some(by) = d.superseded_by {
@@ -703,7 +793,8 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
         "import" => {
             return Err(SnatchError::InvalidArgument {
                 name: "operation".into(),
-                reason: "Import is not yet implemented. Use 'add' to create decisions manually.".into(),
+                reason: "Import is not yet implemented. Use 'add' to create decisions manually."
+                    .into(),
             });
         }
 

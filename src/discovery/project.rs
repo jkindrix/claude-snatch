@@ -110,9 +110,7 @@ impl Project {
                 e,
             )
         })? {
-            let entry = entry.map_err(|e| {
-                SnatchError::io("Failed to read directory entry", e)
-            })?;
+            let entry = entry.map_err(|e| SnatchError::io("Failed to read directory entry", e))?;
 
             let path = entry.path();
             if is_session_file(&path) && has_content(&path) {
@@ -151,12 +149,20 @@ impl Project {
 
     /// List only main sessions (excluding subagent sessions).
     pub fn main_sessions(&self) -> Result<Vec<Session>> {
-        Ok(self.sessions()?.into_iter().filter(|s| !s.is_subagent()).collect())
+        Ok(self
+            .sessions()?
+            .into_iter()
+            .filter(|s| !s.is_subagent())
+            .collect())
     }
 
     /// List only subagent sessions.
     pub fn subagent_sessions(&self) -> Result<Vec<Session>> {
-        Ok(self.sessions()?.into_iter().filter(|s| s.is_subagent()).collect())
+        Ok(self
+            .sessions()?
+            .into_iter()
+            .filter(|s| s.is_subagent())
+            .collect())
     }
 
     /// Find a session by its ID (supports both full and prefix matching).
@@ -210,11 +216,9 @@ impl Project {
     /// chains are included — standalone sessions are not in the map.
     pub fn session_chains(&self) -> Result<std::collections::HashMap<String, SessionChain>> {
         let sessions = self.main_sessions()?;
-        let pairs: Vec<(&str, &std::path::Path)> = sessions
-            .iter()
-            .map(|s| (s.session_id(), s.path()))
-            .collect();
-        Ok(detect_chains(pairs.into_iter()))
+        Ok(detect_chains(
+            sessions.iter().map(|s| (s.session_id(), s.path())),
+        ))
     }
 
     /// Parse all entries from a session chain as a unified entry list.
@@ -227,9 +231,7 @@ impl Project {
             .map(|s| (s.session_id(), s.path()))
             .collect();
 
-        chain.parse_entries(|file_id| {
-            session_map.get(file_id).map(|p| p.to_path_buf())
-        })
+        chain.parse_entries(|file_id| session_map.get(file_id).map(|p| p.to_path_buf()))
     }
 
     /// Get the number of sessions in this project.
@@ -297,7 +299,8 @@ impl Project {
     /// This is a non-failing version that always returns a path.
     #[must_use]
     pub fn best_path(&self) -> String {
-        self.authoritative_path().unwrap_or_else(|_| self.decoded_path.clone())
+        self.authoritative_path()
+            .unwrap_or_else(|_| self.decoded_path.clone())
     }
 
     /// Get project metadata summary.

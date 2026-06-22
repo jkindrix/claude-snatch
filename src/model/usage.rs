@@ -129,7 +129,9 @@ impl Usage {
         }
 
         if let Some(other_cache) = &other.cache_creation {
-            let cache = self.cache_creation.get_or_insert_with(CacheCreationDetails::default);
+            let cache = self
+                .cache_creation
+                .get_or_insert_with(CacheCreationDetails::default);
             if let Some(tokens) = other_cache.ephemeral_5m_input_tokens {
                 *cache.ephemeral_5m_input_tokens.get_or_insert(0) += tokens;
             }
@@ -139,7 +141,9 @@ impl Usage {
         }
 
         if let Some(other_tools) = &other.server_tool_use {
-            let tools = self.server_tool_use.get_or_insert_with(ServerToolUse::default);
+            let tools = self
+                .server_tool_use
+                .get_or_insert_with(ServerToolUse::default);
             if let Some(count) = other_tools.web_search_requests {
                 *tools.web_search_requests.get_or_insert(0) += count;
             }
@@ -238,8 +242,8 @@ impl ModelPricing {
     pub fn claude_opus_4_5() -> Self {
         Self {
             model: "claude-opus-4-5-20251101".to_string(),
-            input_per_million: 15.0,    // $15/M input
-            output_per_million: 75.0,   // $75/M output
+            input_per_million: 15.0,        // $15/M input
+            output_per_million: 75.0,       // $75/M output
             cache_write_per_million: 18.75, // 1.25x input
             cache_read_per_million: 1.5,    // 0.1x input
         }
@@ -250,10 +254,10 @@ impl ModelPricing {
     pub fn claude_sonnet_4() -> Self {
         Self {
             model: "claude-sonnet-4-20250514".to_string(),
-            input_per_million: 3.0,     // $3/M input
-            output_per_million: 15.0,   // $15/M output
-            cache_write_per_million: 3.75,  // 1.25x input
-            cache_read_per_million: 0.3,    // 0.1x input
+            input_per_million: 3.0,        // $3/M input
+            output_per_million: 15.0,      // $15/M output
+            cache_write_per_million: 3.75, // 1.25x input
+            cache_read_per_million: 0.3,   // 0.1x input
         }
     }
 
@@ -262,10 +266,10 @@ impl ModelPricing {
     pub fn claude_haiku_3_5() -> Self {
         Self {
             model: "claude-3-5-haiku-20241022".to_string(),
-            input_per_million: 1.0,     // $1/M input
-            output_per_million: 5.0,    // $5/M output
-            cache_write_per_million: 1.25,  // 1.25x input
-            cache_read_per_million: 0.1,    // 0.1x input
+            input_per_million: 1.0,        // $1/M input
+            output_per_million: 5.0,       // $5/M output
+            cache_write_per_million: 1.25, // 1.25x input
+            cache_read_per_million: 0.1,   // 0.1x input
         }
     }
 
@@ -274,7 +278,8 @@ impl ModelPricing {
     pub fn calculate_cost(&self, usage: &Usage) -> CostEstimate {
         let input_cost = (usage.input_tokens as f64 / 1_000_000.0) * self.input_per_million;
         let output_cost = (usage.output_tokens as f64 / 1_000_000.0) * self.output_per_million;
-        let cache_write_cost = (usage.cache_creation_input_tokens.unwrap_or(0) as f64 / 1_000_000.0)
+        let cache_write_cost = (usage.cache_creation_input_tokens.unwrap_or(0) as f64
+            / 1_000_000.0)
             * self.cache_write_per_million;
         let cache_read_cost = (usage.cache_read_input_tokens.unwrap_or(0) as f64 / 1_000_000.0)
             * self.cache_read_per_million;
@@ -376,6 +381,9 @@ impl AggregatedUsage {
 
 #[cfg(test)]
 mod tests {
+    // Test assertions compare exactly-representable float values (0.0, integer-valued
+    // costs/scores); the float_cmp lint is a false positive for these.
+    #![allow(clippy::float_cmp)]
     use super::*;
 
     #[test]

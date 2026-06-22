@@ -6,7 +6,9 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use std::io::BufReader;
 use std::io::Cursor;
 
-use claude_snatch::export::{ExportOptions, Exporter, JsonExporter, MarkdownExporter, TextExporter};
+use claude_snatch::export::{
+    ExportOptions, Exporter, JsonExporter, MarkdownExporter, TextExporter,
+};
 use claude_snatch::parser::JsonlParser;
 use claude_snatch::reconstruction::Conversation;
 
@@ -71,17 +73,13 @@ fn bench_parser(c: &mut Criterion) {
             });
         });
 
-        group.bench_with_input(
-            BenchmarkId::new("parse_lenient", size),
-            &data,
-            |b, data| {
-                b.iter(|| {
-                    let mut parser = JsonlParser::new().with_lenient(true);
-                    let entries = parser.parse_str(data);
-                    black_box(entries)
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("parse_lenient", size), &data, |b, data| {
+            b.iter(|| {
+                let mut parser = JsonlParser::new().with_lenient(true);
+                let entries = parser.parse_str(data);
+                black_box(entries)
+            });
+        });
     }
 
     group.finish();

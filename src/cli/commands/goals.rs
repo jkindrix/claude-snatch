@@ -7,7 +7,6 @@ use crate::cli::{Cli, GoalsArgs, OutputFormat};
 use crate::error::{Result, SnatchError};
 use crate::goals::{load_goals, save_goals, GoalStatus};
 
-
 /// JSON output for goals list.
 #[derive(serde::Serialize)]
 struct GoalsListOutput {
@@ -96,10 +95,13 @@ pub fn run(cli: &Cli, args: &GoalsArgs) -> Result<()> {
         }
 
         "add" => {
-            let text = args.text.as_deref().ok_or_else(|| SnatchError::InvalidArgument {
-                name: "text".into(),
-                reason: "--text is required for add operation".into(),
-            })?;
+            let text = args
+                .text
+                .as_deref()
+                .ok_or_else(|| SnatchError::InvalidArgument {
+                    name: "text".into(),
+                    reason: "--text is required for add operation".into(),
+                })?;
 
             let mut store = load_goals(project_dir)?;
             let id = store.add_goal(text.to_string(), args.progress.clone());
@@ -134,12 +136,16 @@ pub fn run(cli: &Cli, args: &GoalsArgs) -> Result<()> {
             })?;
 
             let status = match args.status.as_deref() {
-                Some(s) => Some(GoalStatus::parse(s).ok_or_else(|| SnatchError::InvalidArgument {
-                    name: "status".into(),
-                    reason: format!(
-                        "Invalid status '{s}'. Use: open, in_progress, done, abandoned"
-                    ),
-                })?),
+                Some(s) => {
+                    Some(
+                        GoalStatus::parse(s).ok_or_else(|| SnatchError::InvalidArgument {
+                            name: "status".into(),
+                            reason: format!(
+                                "Invalid status '{s}'. Use: open, in_progress, done, abandoned"
+                            ),
+                        })?,
+                    )
+                }
                 None => None,
             };
 

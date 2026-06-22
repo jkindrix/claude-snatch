@@ -53,7 +53,10 @@ pub struct ChainMember {
 ///
 /// Reads at most `max_lines` to find the first entry with a `sessionId` field.
 /// Returns `(sessionId, slug, timestamp)` if found.
-fn extract_session_link(path: &Path, max_lines: usize) -> Option<(String, Option<String>, Option<DateTime<Utc>>)> {
+fn extract_session_link(
+    path: &Path,
+    max_lines: usize,
+) -> Option<(String, Option<String>, Option<DateTime<Utc>>)> {
     let file = std::fs::File::open(path).ok()?;
     let reader = BufReader::new(file);
 
@@ -192,7 +195,10 @@ pub fn detect_chains<'a>(
     let mut groups: HashMap<String, Vec<String>> = HashMap::new();
     for (file_id, root_id) in &root_for {
         if member_map.contains_key(file_id.as_str()) {
-            groups.entry(root_id.clone()).or_default().push(file_id.clone());
+            groups
+                .entry(root_id.clone())
+                .or_default()
+                .push(file_id.clone());
         }
     }
 
@@ -216,12 +222,15 @@ pub fn detect_chains<'a>(
         loop {
             let last = ordered.last().unwrap().clone();
             // Find the member whose internal_session_id == last (i.e., continues from last)
-            let next = remaining.iter().find(|id| {
-                member_map
-                    .get(id.as_str())
-                    .map(|m| m.internal_session_id == last)
-                    .unwrap_or(false)
-            }).cloned();
+            let next = remaining
+                .iter()
+                .find(|id| {
+                    member_map
+                        .get(id.as_str())
+                        .map(|m| m.internal_session_id == last)
+                        .unwrap_or(false)
+                })
+                .cloned();
             match next {
                 Some(id) => {
                     remaining.remove(&id);
@@ -341,7 +350,12 @@ mod tests {
     use std::io::Write;
     use tempfile::TempDir;
 
-    fn write_jsonl(dir: &Path, name: &str, session_id: &str, slug: Option<&str>) -> std::path::PathBuf {
+    fn write_jsonl(
+        dir: &Path,
+        name: &str,
+        session_id: &str,
+        slug: Option<&str>,
+    ) -> std::path::PathBuf {
         let path = dir.join(format!("{name}.jsonl"));
         let mut file = std::fs::File::create(&path).unwrap();
         let slug_field = slug
@@ -374,10 +388,7 @@ mod tests {
         let root_path = write_jsonl(dir.path(), root_id, root_id, Some("cool-session"));
         let cont_path = write_jsonl(dir.path(), cont_id, root_id, Some("cool-session"));
 
-        let sessions: Vec<(&str, &Path)> = vec![
-            (root_id, &root_path),
-            (cont_id, &cont_path),
-        ];
+        let sessions: Vec<(&str, &Path)> = vec![(root_id, &root_path), (cont_id, &cont_path)];
         let chains = detect_chains(sessions.into_iter());
 
         assert_eq!(chains.len(), 1);
@@ -399,11 +410,8 @@ mod tests {
         let b_path = write_jsonl(dir.path(), "bbb", "aaa", Some("slug"));
         let c_path = write_jsonl(dir.path(), "ccc", "bbb", Some("slug"));
 
-        let sessions: Vec<(&str, &Path)> = vec![
-            ("aaa", &a_path),
-            ("bbb", &b_path),
-            ("ccc", &c_path),
-        ];
+        let sessions: Vec<(&str, &Path)> =
+            vec![("aaa", &a_path), ("bbb", &b_path), ("ccc", &c_path)];
         let chains = detect_chains(sessions.into_iter());
 
         assert_eq!(chains.len(), 1);
@@ -420,10 +428,7 @@ mod tests {
         let b1 = write_jsonl(dir.path(), "b1", "b1", Some("chain-b"));
         let b2 = write_jsonl(dir.path(), "b2", "b1", Some("chain-b"));
 
-        let sessions: Vec<(&str, &Path)> = vec![
-            ("a1", &a1), ("a2", &a2),
-            ("b1", &b1), ("b2", &b2),
-        ];
+        let sessions: Vec<(&str, &Path)> = vec![("a1", &a1), ("a2", &a2), ("b1", &b1), ("b2", &b2)];
         let chains = detect_chains(sessions.into_iter());
 
         assert_eq!(chains.len(), 2);
@@ -450,16 +455,13 @@ mod tests {
         let root_path = write_jsonl(dir.path(), "root", "root", Some("slug"));
         let cont_path = write_jsonl(dir.path(), "cont", "root", Some("slug"));
 
-        let sessions: Vec<(&str, &Path)> = vec![
-            ("root", &root_path),
-            ("cont", &cont_path),
-        ];
+        let sessions: Vec<(&str, &Path)> = vec![("root", &root_path), ("cont", &cont_path)];
         let chains = detect_chains(sessions.into_iter());
         let chain = chains.get("root").unwrap();
 
-        let entries = chain.parse_entries(|file_id| {
-            Some(dir.path().join(format!("{file_id}.jsonl")))
-        }).unwrap();
+        let entries = chain
+            .parse_entries(|file_id| Some(dir.path().join(format!("{file_id}.jsonl"))))
+            .unwrap();
 
         // Each file has 1 user entry, so chain should have 2
         assert_eq!(entries.len(), 2);
@@ -482,7 +484,11 @@ mod tests {
         let path = dir.path().join("test.jsonl");
         let mut file = std::fs::File::create(&path).unwrap();
         // First line is file-history-snapshot (no sessionId)
-        writeln!(file, r#"{{"type": "file-history-snapshot", "messageId": "x", "snapshot": {{}}}}"#).unwrap();
+        writeln!(
+            file,
+            r#"{{"type": "file-history-snapshot", "messageId": "x", "snapshot": {{}}}}"#
+        )
+        .unwrap();
         // Second line has sessionId
         writeln!(file, r#"{{"type": "user", "sessionId": "the-id", "slug": "the-slug", "timestamp": "2026-01-01T00:00:00Z", "message": {{"role": "user", "content": "hi"}}}}"#).unwrap();
 

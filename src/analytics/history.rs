@@ -57,6 +57,7 @@ impl CostDataPoint {
     }
 
     /// Create a cost data point with values.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_values(
         date: NaiveDate,
         tokens: u64,
@@ -171,18 +172,19 @@ impl CostHistory {
             return Ok(Self::new());
         }
 
-        let file = fs::File::open(path).map_err(|e| SnatchError::io(
-            format!("Failed to open cost history file: {}", path.display()),
-            e,
-        ))?;
+        let file = fs::File::open(path).map_err(|e| {
+            SnatchError::io(
+                format!("Failed to open cost history file: {}", path.display()),
+                e,
+            )
+        })?;
 
         let reader = BufReader::new(file);
-        let history: Self = serde_json::from_reader(reader).map_err(|e| {
-            SnatchError::SerializationError {
+        let history: Self =
+            serde_json::from_reader(reader).map_err(|e| SnatchError::SerializationError {
                 context: format!("Failed to parse cost history: {}", path.display()),
                 source: e,
-            }
-        })?;
+            })?;
 
         Ok(history)
     }
@@ -196,18 +198,22 @@ impl CostHistory {
     pub fn save_to(&self, path: &PathBuf) -> Result<()> {
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| SnatchError::io(
-                format!("Failed to create directory: {}", parent.display()),
-                e,
-            ))?;
+            fs::create_dir_all(parent).map_err(|e| {
+                SnatchError::io(
+                    format!("Failed to create directory: {}", parent.display()),
+                    e,
+                )
+            })?;
         }
 
         // Write atomically using temp file
         let temp_path = path.with_extension("json.tmp");
-        let file = fs::File::create(&temp_path).map_err(|e| SnatchError::io(
-            format!("Failed to create temp file: {}", temp_path.display()),
-            e,
-        ))?;
+        let file = fs::File::create(&temp_path).map_err(|e| {
+            SnatchError::io(
+                format!("Failed to create temp file: {}", temp_path.display()),
+                e,
+            )
+        })?;
 
         let writer = BufWriter::new(file);
         serde_json::to_writer_pretty(writer, self).map_err(|e| {
@@ -218,10 +224,12 @@ impl CostHistory {
         })?;
 
         // Atomically rename
-        fs::rename(&temp_path, path).map_err(|e| SnatchError::io(
-            format!("Failed to rename temp file to: {}", path.display()),
-            e,
-        ))?;
+        fs::rename(&temp_path, path).map_err(|e| {
+            SnatchError::io(
+                format!("Failed to rename temp file to: {}", path.display()),
+                e,
+            )
+        })?;
 
         Ok(())
     }
@@ -234,6 +242,7 @@ impl CostHistory {
     }
 
     /// Record or update cost data for today.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_today(
         &mut self,
         tokens: u64,
@@ -296,14 +305,15 @@ impl CostHistory {
         let active_days = points.len();
 
         // Calculate non-zero costs for min calculation
-        let non_zero_costs: Vec<f64> = points.iter()
-            .map(|p| p.cost)
-            .filter(|&c| c > 0.0)
-            .collect();
+        let non_zero_costs: Vec<f64> = points.iter().map(|p| p.cost).filter(|&c| c > 0.0).collect();
 
         let max_daily_cost = points.iter().map(|p| p.cost).fold(0.0_f64, f64::max);
         let min_daily_cost = non_zero_costs.iter().copied().fold(f64::INFINITY, f64::min);
-        let min_daily_cost = if min_daily_cost.is_infinite() { 0.0 } else { min_daily_cost };
+        let min_daily_cost = if min_daily_cost.is_infinite() {
+            0.0
+        } else {
+            min_daily_cost
+        };
 
         let avg_daily_cost = if active_days > 0 {
             total_cost / active_days as f64
@@ -359,8 +369,8 @@ impl CostHistory {
     /// Get statistics for the current month.
     pub fn stats_this_month(&self) -> CostPeriodStats {
         let today = Utc::now().date_naive();
-        let first_of_month = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
-            .unwrap_or(today);
+        let first_of_month =
+            NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today);
         self.stats_range(first_of_month, today)
     }
 
@@ -370,8 +380,16 @@ impl CostHistory {
             return CostPeriodStats::default();
         }
 
-        let first = self.daily.keys().next().and_then(|k| NaiveDate::parse_from_str(k, "%Y-%m-%d").ok());
-        let last = self.daily.keys().last().and_then(|k| NaiveDate::parse_from_str(k, "%Y-%m-%d").ok());
+        let first = self
+            .daily
+            .keys()
+            .next()
+            .and_then(|k| NaiveDate::parse_from_str(k, "%Y-%m-%d").ok());
+        let last = self
+            .daily
+            .keys()
+            .last()
+            .and_then(|k| NaiveDate::parse_from_str(k, "%Y-%m-%d").ok());
 
         match (first, last) {
             (Some(start), Some(end)) => self.stats_range(start, end),
@@ -391,13 +409,17 @@ impl CostHistory {
 
     /// Get the first recorded date.
     pub fn first_date(&self) -> Option<NaiveDate> {
-        self.daily.keys().next()
+        self.daily
+            .keys()
+            .next()
             .and_then(|k| NaiveDate::parse_from_str(k, "%Y-%m-%d").ok())
     }
 
     /// Get the last recorded date.
     pub fn last_date(&self) -> Option<NaiveDate> {
-        self.daily.keys().last()
+        self.daily
+            .keys()
+            .last()
             .and_then(|k| NaiveDate::parse_from_str(k, "%Y-%m-%d").ok())
     }
 
@@ -414,7 +436,9 @@ impl CostHistory {
 
     /// Export history as CSV string.
     pub fn to_csv(&self) -> String {
-        let mut csv = String::from("date,tokens,input_tokens,output_tokens,cache_read_tokens,cost,sessions,messages\n");
+        let mut csv = String::from(
+            "date,tokens,input_tokens,output_tokens,cache_read_tokens,cost,sessions,messages\n",
+        );
         for (date, point) in &self.daily {
             csv.push_str(&format!(
                 "{},{},{},{},{},{:.6},{},{}\n",
@@ -443,7 +467,11 @@ impl CostHistory {
             let points = self.range(week_start, week_end);
             let week_cost: f64 = points.iter().map(|p| p.cost).sum();
 
-            let label = format!("{} - {}", week_start.format("%m/%d"), week_end.format("%m/%d"));
+            let label = format!(
+                "{} - {}",
+                week_start.format("%m/%d"),
+                week_end.format("%m/%d")
+            );
             result.push((label, week_cost));
         }
 
@@ -503,12 +531,10 @@ fn calculate_trend(values: &[f64]) -> f64 {
     let n = values.len() as f64;
     let sum_x: f64 = (0..values.len()).map(|i| i as f64).sum();
     let sum_y: f64 = values.iter().sum();
-    let sum_xy: f64 = values.iter().enumerate()
-        .map(|(i, v)| i as f64 * v)
-        .sum();
+    let sum_xy: f64 = values.iter().enumerate().map(|(i, v)| i as f64 * v).sum();
     let sum_x2: f64 = (0..values.len()).map(|i| (i * i) as f64).sum();
 
-    let denominator = n * sum_x2 - sum_x * sum_x;
+    let denominator = n * sum_x2 - sum_x.powi(2);
     if denominator.abs() < f64::EPSILON {
         return 0.0;
     }
@@ -518,6 +544,9 @@ fn calculate_trend(values: &[f64]) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    // Test assertions compare exactly-representable float values (0.0, integer-valued
+    // costs/scores); the float_cmp lint is a false positive for these.
+    #![allow(clippy::float_cmp)]
     use super::*;
 
     #[test]
@@ -533,9 +562,7 @@ mod tests {
     #[test]
     fn test_cost_data_point_with_values() {
         let date = NaiveDate::from_ymd_opt(2025, 1, 15).unwrap();
-        let point = CostDataPoint::with_values(
-            date, 1000, 600, 400, 100, 0.05, 5, 20,
-        );
+        let point = CostDataPoint::with_values(date, 1000, 600, 400, 100, 0.05, 5, 20);
 
         assert_eq!(point.date, date);
         assert_eq!(point.tokens, 1000);
@@ -628,7 +655,9 @@ mod tests {
     fn test_cost_history_serialization() {
         let mut history = CostHistory::new();
         let date = NaiveDate::from_ymd_opt(2025, 1, 15).unwrap();
-        history.record(CostDataPoint::with_values(date, 1000, 600, 400, 100, 0.05, 5, 20));
+        history.record(CostDataPoint::with_values(
+            date, 1000, 600, 400, 100, 0.05, 5, 20,
+        ));
 
         let json = serde_json::to_string(&history).unwrap();
         let loaded: CostHistory = serde_json::from_str(&json).unwrap();
@@ -642,7 +671,9 @@ mod tests {
     fn test_cost_history_to_csv() {
         let mut history = CostHistory::new();
         let date = NaiveDate::from_ymd_opt(2025, 1, 15).unwrap();
-        history.record(CostDataPoint::with_values(date, 1000, 600, 400, 100, 0.05, 5, 20));
+        history.record(CostDataPoint::with_values(
+            date, 1000, 600, 400, 100, 0.05, 5, 20,
+        ));
 
         let csv = history.to_csv();
         assert!(csv.contains("date,tokens,input_tokens"));

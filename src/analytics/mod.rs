@@ -48,10 +48,7 @@ pub mod history;
 use chrono::{DateTime, Datelike, Duration, Utc};
 use indexmap::IndexMap;
 
-use crate::model::{
-    usage::AggregatedUsage,
-    AssistantMessage, ContentBlock, LogEntry,
-};
+use crate::model::{usage::AggregatedUsage, AssistantMessage, ContentBlock, LogEntry};
 use crate::reconstruction::Conversation;
 
 /// Session analytics aggregator.
@@ -123,7 +120,10 @@ impl SessionAnalytics {
                 for result in tool_results {
                     if result.is_explicit_error() {
                         self.message_counts.tool_errors += 1;
-                        *self.error_counts.entry("tool_error".to_string()).or_insert(0) += 1;
+                        *self
+                            .error_counts
+                            .entry("tool_error".to_string())
+                            .or_insert(0) += 1;
                     }
                 }
             }
@@ -136,7 +136,10 @@ impl SessionAnalytics {
 
                 if let Some(subtype) = &system.subtype {
                     if *subtype == crate::model::SystemSubtype::ApiError {
-                        *self.error_counts.entry("api_error".to_string()).or_insert(0) += 1;
+                        *self
+                            .error_counts
+                            .entry("api_error".to_string())
+                            .or_insert(0) += 1;
                     }
                 }
             }
@@ -206,7 +209,11 @@ impl SessionAnalytics {
     }
 
     /// Track file modification from a tool use.
-    fn track_file_modification(&mut self, tool_use: &crate::model::content::ToolUse, timestamp: Option<DateTime<Utc>>) {
+    fn track_file_modification(
+        &mut self,
+        tool_use: &crate::model::content::ToolUse,
+        timestamp: Option<DateTime<Utc>>,
+    ) {
         match tool_use.name.as_str() {
             "Edit" => {
                 if let (Some(file_path), Some(old_string), Some(new_string)) = (
@@ -214,7 +221,8 @@ impl SessionAnalytics {
                     tool_use.input.get("old_string").and_then(|v| v.as_str()),
                     tool_use.input.get("new_string").and_then(|v| v.as_str()),
                 ) {
-                    self.file_stats.record_edit(file_path, old_string, new_string, timestamp);
+                    self.file_stats
+                        .record_edit(file_path, old_string, new_string, timestamp);
                 }
             }
             "Write" => {
@@ -272,7 +280,11 @@ impl SessionAnalytics {
     pub fn top_tools(&self, n: usize) -> Vec<(&str, usize)> {
         let mut tools: Vec<_> = self.tool_counts.iter().collect();
         tools.sort_by(|a, b| b.1.cmp(a.1));
-        tools.into_iter().take(n).map(|(k, v)| (k.as_str(), *v)).collect()
+        tools
+            .into_iter()
+            .take(n)
+            .map(|(k, v)| (k.as_str(), *v))
+            .collect()
     }
 
     /// Get total error count.
@@ -284,8 +296,12 @@ impl SessionAnalytics {
     /// Get error breakdown by type.
     #[must_use]
     pub fn error_breakdown(&self) -> Vec<(&str, usize)> {
-        let mut errors: Vec<_> = self.error_counts.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-        errors.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut errors: Vec<_> = self
+            .error_counts
+            .iter()
+            .map(|(k, v)| (k.as_str(), *v))
+            .collect();
+        errors.sort_by_key(|b| std::cmp::Reverse(b.1));
         errors
     }
 
@@ -394,11 +410,7 @@ impl ThinkingStats {
     /// Average thinking block length.
     #[must_use]
     pub fn average_length(&self) -> usize {
-        if self.block_count == 0 {
-            0
-        } else {
-            self.total_chars / self.block_count
-        }
+        self.total_chars.checked_div(self.block_count).unwrap_or(0)
     }
 }
 
@@ -438,7 +450,13 @@ pub struct FileModificationEntry {
 
 impl FileModificationStats {
     /// Record a file modification from an Edit tool call.
-    pub fn record_edit(&mut self, file_path: &str, old_string: &str, new_string: &str, timestamp: Option<DateTime<Utc>>) {
+    pub fn record_edit(
+        &mut self,
+        file_path: &str,
+        old_string: &str,
+        new_string: &str,
+        timestamp: Option<DateTime<Utc>>,
+    ) {
         let entry = self.files.entry(file_path.to_string()).or_default();
         entry.modification_count += 1;
 
@@ -466,7 +484,10 @@ impl FileModificationStats {
         }
 
         // Track extension
-        if let Some(ext) = std::path::Path::new(file_path).extension().and_then(|e| e.to_str()) {
+        if let Some(ext) = std::path::Path::new(file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+        {
             *self.extensions.entry(ext.to_string()).or_insert(0) += 1;
         }
 
@@ -475,7 +496,12 @@ impl FileModificationStats {
     }
 
     /// Record a file creation from a Write tool call.
-    pub fn record_write(&mut self, file_path: &str, content: &str, timestamp: Option<DateTime<Utc>>) {
+    pub fn record_write(
+        &mut self,
+        file_path: &str,
+        content: &str,
+        timestamp: Option<DateTime<Utc>>,
+    ) {
         let entry = self.files.entry(file_path.to_string()).or_default();
         entry.modification_count += 1;
 
@@ -493,7 +519,10 @@ impl FileModificationStats {
         }
 
         // Track extension
-        if let Some(ext) = std::path::Path::new(file_path).extension().and_then(|e| e.to_str()) {
+        if let Some(ext) = std::path::Path::new(file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+        {
             *self.extensions.entry(ext.to_string()).or_insert(0) += 1;
         }
 
@@ -505,8 +534,12 @@ impl FileModificationStats {
     #[must_use]
     pub fn top_files(&self, n: usize) -> Vec<(&str, &FileModificationEntry)> {
         let mut files: Vec<_> = self.files.iter().collect();
-        files.sort_by(|a, b| b.1.modification_count.cmp(&a.1.modification_count));
-        files.into_iter().take(n).map(|(k, v)| (k.as_str(), v)).collect()
+        files.sort_by_key(|b| std::cmp::Reverse(b.1.modification_count));
+        files
+            .into_iter()
+            .take(n)
+            .map(|(k, v)| (k.as_str(), v))
+            .collect()
     }
 
     /// Get most common file extensions.
@@ -514,7 +547,10 @@ impl FileModificationStats {
     pub fn top_extensions(&self, n: usize) -> Vec<(&str, usize)> {
         let mut exts: Vec<_> = self.extensions.iter().collect();
         exts.sort_by(|a, b| b.1.cmp(a.1));
-        exts.into_iter().take(n).map(|(k, v)| (k.as_str(), *v)).collect()
+        exts.into_iter()
+            .take(n)
+            .map(|(k, v)| (k.as_str(), *v))
+            .collect()
     }
 
     /// Get total unique files modified.
@@ -682,23 +718,25 @@ impl UsagePrediction {
         let monthly_cost_projection = cost_per_hour.map(|c| c * 8.0 * 22.0);
 
         // Calculate time to limit
-        let (hours_to_limit, messages_to_limit, usage_percentage) = if let Some(limit) = monthly_limit {
-            let remaining = limit.saturating_sub(analytics.usage.usage.total_tokens());
-            let hours = if tokens_per_hour > 0.0 {
-                Some(remaining as f64 / tokens_per_hour)
+        let (hours_to_limit, messages_to_limit, usage_percentage) =
+            if let Some(limit) = monthly_limit {
+                let remaining = limit.saturating_sub(analytics.usage.usage.total_tokens());
+                let hours = if tokens_per_hour > 0.0 {
+                    Some(remaining as f64 / tokens_per_hour)
+                } else {
+                    None
+                };
+                let messages = if messages_per_hour > 0.0 {
+                    Some((remaining as f64 / (total_tokens / total_messages.max(1.0))) as u64)
+                } else {
+                    None
+                };
+                let percentage =
+                    Some(analytics.usage.usage.total_tokens() as f64 / limit as f64 * 100.0);
+                (hours, messages, percentage)
             } else {
-                None
+                (None, None, None)
             };
-            let messages = if messages_per_hour > 0.0 {
-                Some((remaining as f64 / (total_tokens / total_messages.max(1.0))) as u64)
-            } else {
-                None
-            };
-            let percentage = Some(analytics.usage.usage.total_tokens() as f64 / limit as f64 * 100.0);
-            (hours, messages, percentage)
-        } else {
-            (None, None, None)
-        };
 
         Self {
             tokens_per_hour,
@@ -861,10 +899,12 @@ impl UsageTrends {
 
         for (timestamp, analytics) in sessions {
             let bucket_key = granularity.bucket_key(*timestamp);
-            let entry = buckets.entry(bucket_key.clone()).or_insert_with(|| TrendDataPoint {
-                bucket: bucket_key,
-                ..Default::default()
-            });
+            let entry = buckets
+                .entry(bucket_key.clone())
+                .or_insert_with(|| TrendDataPoint {
+                    bucket: bucket_key,
+                    ..Default::default()
+                });
 
             entry.tokens += analytics.usage.usage.total_tokens();
             entry.messages += analytics.message_counts.total();
@@ -899,7 +939,9 @@ impl UsageTrends {
             let n = data_points.len() as f64;
             let sum_x: f64 = (0..data_points.len()).map(|i| i as f64).sum();
             let sum_y: f64 = data_points.iter().map(|d| d.tokens as f64).sum();
-            let sum_xy: f64 = data_points.iter().enumerate()
+            let sum_xy: f64 = data_points
+                .iter()
+                .enumerate()
                 .map(|(i, d)| i as f64 * d.tokens as f64)
                 .sum();
             let sum_x2: f64 = (0..data_points.len()).map(|i| (i * i) as f64).sum();
@@ -948,7 +990,9 @@ impl UsageTrends {
         }
 
         let mut chart = String::new();
-        let max_label_len = self.data_points.iter()
+        let max_label_len = self
+            .data_points
+            .iter()
             .map(|d| d.bucket.len())
             .max()
             .unwrap_or(10);
@@ -956,7 +1000,8 @@ impl UsageTrends {
         let bar_width = width.saturating_sub(max_label_len + 3);
 
         for point in &self.data_points {
-            let bar_len = ((point.tokens as f64 / self.peak_tokens as f64) * bar_width as f64) as usize;
+            let bar_len =
+                ((point.tokens as f64 / self.peak_tokens as f64) * bar_width as f64) as usize;
             let bar = "█".repeat(bar_len.max(1));
             chart.push_str(&format!(
                 "{:>width$} │{}\n",
@@ -993,9 +1038,7 @@ impl ResponseTimeStats {
         let mut response_times: Vec<f64> = Vec::new();
 
         // Get entries sorted by timestamp
-        let mut entries: Vec<_> = conversation.nodes().values()
-            .map(|n| &n.entry)
-            .collect();
+        let mut entries: Vec<_> = conversation.nodes().values().map(|n| &n.entry).collect();
 
         entries.sort_by_key(|e| e.timestamp());
 
@@ -1009,7 +1052,8 @@ impl ResponseTimeStats {
                 }
                 LogEntry::Assistant(assistant) => {
                     if let Some(user_time) = prev_user_time {
-                        let response_time = (assistant.timestamp - user_time).num_milliseconds() as f64 / 1000.0;
+                        let response_time =
+                            (assistant.timestamp - user_time).num_milliseconds() as f64 / 1000.0;
                         if response_time > 0.0 && response_time < 3600.0 {
                             // Only count reasonable response times (< 1 hour)
                             response_times.push(response_time);
@@ -1260,7 +1304,8 @@ impl SessionDiff {
             assistant_diff: b.message_counts.assistant as i64 - a.message_counts.assistant as i64,
             total_diff: b.message_counts.total() as i64 - a.message_counts.total() as i64,
             tool_use_diff: b.message_counts.tool_uses as i64 - a.message_counts.tool_uses as i64,
-            thinking_diff: b.message_counts.thinking_blocks as i64 - a.message_counts.thinking_blocks as i64,
+            thinking_diff: b.message_counts.thinking_blocks as i64
+                - a.message_counts.thinking_blocks as i64,
         };
 
         // Usage diff
@@ -1272,7 +1317,8 @@ impl SessionDiff {
             total_diff: b_usage.total_tokens() as i64 - a_usage.total_tokens() as i64,
             cache_read_diff: b_usage.cache_read_input_tokens.unwrap_or(0) as i64
                 - a_usage.cache_read_input_tokens.unwrap_or(0) as i64,
-            cost_diff: b.usage.estimated_cost.unwrap_or(0.0) - a.usage.estimated_cost.unwrap_or(0.0),
+            cost_diff: b.usage.estimated_cost.unwrap_or(0.0)
+                - a.usage.estimated_cost.unwrap_or(0.0),
         };
 
         // Tool differences
@@ -1304,16 +1350,19 @@ impl SessionDiff {
     }
 
     /// Compare two conversations directly.
-    pub fn from_conversations(
-        a: &Conversation,
-        b: &Conversation,
-    ) -> Self {
+    pub fn from_conversations(a: &Conversation, b: &Conversation) -> Self {
         let analytics_a = SessionAnalytics::from_conversation(a);
         let analytics_b = SessionAnalytics::from_conversation(b);
 
         // Try to get session IDs from first entries
-        let session_a_id = a.chronological_entries().first().and_then(|e| e.session_id());
-        let session_b_id = b.chronological_entries().first().and_then(|e| e.session_id());
+        let session_a_id = a
+            .chronological_entries()
+            .first()
+            .and_then(|e| e.session_id());
+        let session_b_id = b
+            .chronological_entries()
+            .first()
+            .and_then(|e| e.session_id());
 
         Self::from_analytics(&analytics_a, &analytics_b, session_a_id, session_b_id)
     }
@@ -1324,7 +1373,11 @@ impl SessionDiff {
 
         // Duration
         if self.duration_diff.diff_minutes.abs() > 5 {
-            let direction = if self.duration_diff.diff_minutes > 0 { "longer" } else { "shorter" };
+            let direction = if self.duration_diff.diff_minutes > 0 {
+                "longer"
+            } else {
+                "shorter"
+            };
             summary.push(format!(
                 "Session B is {} minutes {}",
                 self.duration_diff.diff_minutes.abs(),
@@ -1334,7 +1387,11 @@ impl SessionDiff {
 
         // Messages
         if self.message_diff.total_diff != 0 {
-            let direction = if self.message_diff.total_diff > 0 { "more" } else { "fewer" };
+            let direction = if self.message_diff.total_diff > 0 {
+                "more"
+            } else {
+                "fewer"
+            };
             summary.push(format!(
                 "{} {} messages in session B",
                 self.message_diff.total_diff.abs(),
@@ -1344,7 +1401,11 @@ impl SessionDiff {
 
         // Tokens
         if self.usage_diff.total_diff.abs() > 1000 {
-            let direction = if self.usage_diff.total_diff > 0 { "more" } else { "fewer" };
+            let direction = if self.usage_diff.total_diff > 0 {
+                "more"
+            } else {
+                "fewer"
+            };
             summary.push(format!(
                 "{} {} tokens used in session B",
                 self.usage_diff.total_diff.abs(),
@@ -1354,7 +1415,11 @@ impl SessionDiff {
 
         // Cost
         if self.usage_diff.cost_diff.abs() > 0.01 {
-            let direction = if self.usage_diff.cost_diff > 0.0 { "more" } else { "less" };
+            let direction = if self.usage_diff.cost_diff > 0.0 {
+                "more"
+            } else {
+                "less"
+            };
             summary.push(format!(
                 "${:.2} {} spent in session B",
                 self.usage_diff.cost_diff.abs(),
@@ -1410,8 +1475,14 @@ impl SessionDiff {
         lines.push("Messages:".to_string());
         lines.push(format!("  Total: {:+}", self.message_diff.total_diff));
         lines.push(format!("  User: {:+}", self.message_diff.user_diff));
-        lines.push(format!("  Assistant: {:+}", self.message_diff.assistant_diff));
-        lines.push(format!("  Tool uses: {:+}", self.message_diff.tool_use_diff));
+        lines.push(format!(
+            "  Assistant: {:+}",
+            self.message_diff.assistant_diff
+        ));
+        lines.push(format!(
+            "  Tool uses: {:+}",
+            self.message_diff.tool_use_diff
+        ));
         lines.push(String::new());
 
         // Usage
@@ -1423,7 +1494,10 @@ impl SessionDiff {
         lines.push(String::new());
 
         // Tools
-        if !self.tools_only_in_a.is_empty() || !self.tools_only_in_b.is_empty() || !self.tools_diff.is_empty() {
+        if !self.tools_only_in_a.is_empty()
+            || !self.tools_only_in_b.is_empty()
+            || !self.tools_diff.is_empty()
+        {
             lines.push("Tools:".to_string());
             if !self.tools_only_in_a.is_empty() {
                 lines.push(format!("  Only in A: {}", self.tools_only_in_a.join(", ")));
@@ -1492,7 +1566,11 @@ impl ProjectAnalytics {
 
         // Merge tools_by_name
         for (tool, count) in &session.usage.tools_by_name {
-            *self.total_usage.tools_by_name.entry(tool.clone()).or_insert(0) += count;
+            *self
+                .total_usage
+                .tools_by_name
+                .entry(tool.clone())
+                .or_insert(0) += count;
         }
 
         // Merge message counts
@@ -1576,7 +1654,11 @@ impl CategoryScore {
         } else {
             100.0
         };
-        Self { found, total, percentage }
+        Self {
+            found,
+            total,
+            percentage,
+        }
     }
 }
 
@@ -1638,7 +1720,8 @@ impl FidelityScore {
                         has_tool_results = true;
                         // Check for structured (array) tool results
                         for result in &results {
-                            if let Some(crate::model::ToolResultContent::Array(_)) = &result.content {
+                            if let Some(crate::model::ToolResultContent::Array(_)) = &result.content
+                            {
                                 has_tool_structured_output = true;
                             }
                         }
@@ -1688,38 +1771,55 @@ impl FidelityScore {
 
         // Calculate category scores
         score.core_content = CategoryScore::new(
-            [has_user_text, has_assistant_text, has_thinking, has_tool_calls,
-             has_tool_results, has_tool_ids, has_images].iter().filter(|&&x| x).count() + 3, // +3 for always present
+            [
+                has_user_text,
+                has_assistant_text,
+                has_thinking,
+                has_tool_calls,
+                has_tool_results,
+                has_tool_ids,
+                has_images,
+            ]
+            .iter()
+            .filter(|&&x| x)
+            .count()
+                + 3, // +3 for always present
             10,
         );
 
         score.identity_linking = CategoryScore::new(
-            [has_timestamps, has_uuids, has_parent_uuids, has_session_id].iter().filter(|&&x| x).count() + 2,
+            [has_timestamps, has_uuids, has_parent_uuids, has_session_id]
+                .iter()
+                .filter(|&&x| x)
+                .count()
+                + 2,
             7,
         );
 
         score.usage_tokens = CategoryScore::new(
-            [has_model, has_usage, has_cache_stats].iter().filter(|&&x| x).count() + 3,
+            [has_model, has_usage, has_cache_stats]
+                .iter()
+                .filter(|&&x| x)
+                .count()
+                + 3,
             11,
         );
 
-        score.environment = CategoryScore::new(
-            [has_cwd, has_version].iter().filter(|&&x| x).count() + 1,
-            4,
-        );
+        score.environment =
+            CategoryScore::new([has_cwd, has_version].iter().filter(|&&x| x).count() + 1, 4);
 
-        score.agent_hierarchy = CategoryScore::new(
-            [has_sidechain].iter().filter(|&&x| x).count() + 2,
-            4,
-        );
+        score.agent_hierarchy =
+            CategoryScore::new([has_sidechain].iter().filter(|&&x| x).count() + 2, 4);
 
-        score.error_recovery = CategoryScore::new(
-            [has_api_error].iter().filter(|&&x| x).count() + 2,
-            7,
-        );
+        score.error_recovery =
+            CategoryScore::new([has_api_error].iter().filter(|&&x| x).count() + 2, 7);
 
         score.system_metadata = CategoryScore::new(
-            [has_system_events, has_thinking_metadata].iter().filter(|&&x| x).count() + 3,
+            [has_system_events, has_thinking_metadata]
+                .iter()
+                .filter(|&&x| x)
+                .count()
+                + 3,
             9,
         );
 
@@ -1738,7 +1838,10 @@ impl FidelityScore {
             &score.error_recovery,
             &score.system_metadata,
             &score.specialized,
-        ].iter().map(|c| c.found).sum();
+        ]
+        .iter()
+        .map(|c| c.found)
+        .sum();
 
         let total_possible: usize = [
             &score.core_content,
@@ -1749,7 +1852,10 @@ impl FidelityScore {
             &score.error_recovery,
             &score.system_metadata,
             &score.specialized,
-        ].iter().map(|c| c.total).sum();
+        ]
+        .iter()
+        .map(|c| c.total)
+        .sum();
 
         score.overall_score = (total_found as f64 / total_possible as f64) * 100.0;
 
@@ -1763,13 +1869,19 @@ impl FidelityScore {
 
         // Generate recommendations
         if !has_thinking {
-            score.recommendations.push("Enable thinking blocks for complete extraction".to_string());
+            score
+                .recommendations
+                .push("Enable thinking blocks for complete extraction".to_string());
         }
         if !has_cache_stats {
-            score.recommendations.push("Cache statistics may not be available in older sessions".to_string());
+            score
+                .recommendations
+                .push("Cache statistics may not be available in older sessions".to_string());
         }
         if !has_tool_calls && !has_tool_results {
-            score.recommendations.push("No tool usage detected - may be a conversation-only session".to_string());
+            score
+                .recommendations
+                .push("No tool usage detected - may be a conversation-only session".to_string());
         }
 
         score
@@ -1779,24 +1891,45 @@ impl FidelityScore {
     #[must_use]
     pub fn report(&self) -> String {
         let mut report = String::new();
-        report.push_str(&format!("Fidelity Score: {:.1}% (Grade: {})\n", self.overall_score, self.grade));
+        report.push_str(&format!(
+            "Fidelity Score: {:.1}% (Grade: {})\n",
+            self.overall_score, self.grade
+        ));
         report.push_str("\nCategory Breakdown:\n");
-        report.push_str(&format!("  Core Content:      {}/{} ({:.0}%)\n",
-            self.core_content.found, self.core_content.total, self.core_content.percentage));
-        report.push_str(&format!("  Identity/Linking:  {}/{} ({:.0}%)\n",
-            self.identity_linking.found, self.identity_linking.total, self.identity_linking.percentage));
-        report.push_str(&format!("  Usage/Tokens:      {}/{} ({:.0}%)\n",
-            self.usage_tokens.found, self.usage_tokens.total, self.usage_tokens.percentage));
-        report.push_str(&format!("  Environment:       {}/{} ({:.0}%)\n",
-            self.environment.found, self.environment.total, self.environment.percentage));
-        report.push_str(&format!("  Agent Hierarchy:   {}/{} ({:.0}%)\n",
-            self.agent_hierarchy.found, self.agent_hierarchy.total, self.agent_hierarchy.percentage));
-        report.push_str(&format!("  Error Recovery:    {}/{} ({:.0}%)\n",
-            self.error_recovery.found, self.error_recovery.total, self.error_recovery.percentage));
-        report.push_str(&format!("  System Metadata:   {}/{} ({:.0}%)\n",
-            self.system_metadata.found, self.system_metadata.total, self.system_metadata.percentage));
-        report.push_str(&format!("  Specialized:       {}/{} ({:.0}%)\n",
-            self.specialized.found, self.specialized.total, self.specialized.percentage));
+        report.push_str(&format!(
+            "  Core Content:      {}/{} ({:.0}%)\n",
+            self.core_content.found, self.core_content.total, self.core_content.percentage
+        ));
+        report.push_str(&format!(
+            "  Identity/Linking:  {}/{} ({:.0}%)\n",
+            self.identity_linking.found,
+            self.identity_linking.total,
+            self.identity_linking.percentage
+        ));
+        report.push_str(&format!(
+            "  Usage/Tokens:      {}/{} ({:.0}%)\n",
+            self.usage_tokens.found, self.usage_tokens.total, self.usage_tokens.percentage
+        ));
+        report.push_str(&format!(
+            "  Environment:       {}/{} ({:.0}%)\n",
+            self.environment.found, self.environment.total, self.environment.percentage
+        ));
+        report.push_str(&format!(
+            "  Agent Hierarchy:   {}/{} ({:.0}%)\n",
+            self.agent_hierarchy.found, self.agent_hierarchy.total, self.agent_hierarchy.percentage
+        ));
+        report.push_str(&format!(
+            "  Error Recovery:    {}/{} ({:.0}%)\n",
+            self.error_recovery.found, self.error_recovery.total, self.error_recovery.percentage
+        ));
+        report.push_str(&format!(
+            "  System Metadata:   {}/{} ({:.0}%)\n",
+            self.system_metadata.found, self.system_metadata.total, self.system_metadata.percentage
+        ));
+        report.push_str(&format!(
+            "  Specialized:       {}/{} ({:.0}%)\n",
+            self.specialized.found, self.specialized.total, self.specialized.percentage
+        ));
 
         if !self.recommendations.is_empty() {
             report.push_str("\nRecommendations:\n");
@@ -1811,6 +1944,9 @@ impl FidelityScore {
 
 #[cfg(test)]
 mod tests {
+    // Test assertions compare exactly-representable float values (0.0, integer-valued
+    // costs/scores); the float_cmp lint is a false positive for these.
+    #![allow(clippy::float_cmp)]
     use super::*;
 
     #[test]
@@ -1982,7 +2118,9 @@ mod tests {
         score.grade = 'C';
         score.core_content = CategoryScore::new(8, 10);
         score.identity_linking = CategoryScore::new(5, 7);
-        score.recommendations.push("Test recommendation".to_string());
+        score
+            .recommendations
+            .push("Test recommendation".to_string());
 
         let report = score.report();
         assert!(report.contains("Fidelity Score: 75.5%"));
@@ -1998,7 +2136,10 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
 
-        assert_eq!(TrendGranularity::Hourly.bucket_key(timestamp), "2025-06-15 14:00");
+        assert_eq!(
+            TrendGranularity::Hourly.bucket_key(timestamp),
+            "2025-06-15 14:00"
+        );
         assert_eq!(TrendGranularity::Daily.bucket_key(timestamp), "2025-06-15");
         assert_eq!(TrendGranularity::Monthly.bucket_key(timestamp), "2025-06");
     }
@@ -2049,8 +2190,16 @@ mod tests {
         let trends = UsageTrends {
             granularity: Some(TrendGranularity::Daily),
             data_points: vec![
-                TrendDataPoint { bucket: "2025-01".to_string(), tokens: 100, ..Default::default() },
-                TrendDataPoint { bucket: "2025-02".to_string(), tokens: 200, ..Default::default() },
+                TrendDataPoint {
+                    bucket: "2025-01".to_string(),
+                    tokens: 100,
+                    ..Default::default()
+                },
+                TrendDataPoint {
+                    bucket: "2025-02".to_string(),
+                    tokens: 200,
+                    ..Default::default()
+                },
             ],
             peak_tokens: 200,
             peak_bucket: Some("2025-02".to_string()),

@@ -65,11 +65,7 @@ impl SyntaxHighlighter {
             let spans: Vec<Span<'static>> = ranges
                 .into_iter()
                 .map(|(style, text)| {
-                    let fg = Color::Rgb(
-                        style.foreground.r,
-                        style.foreground.g,
-                        style.foreground.b,
-                    );
+                    let fg = Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
 
                     let mut ratatui_style = Style::default().fg(fg);
 
@@ -113,10 +109,8 @@ impl SyntaxHighlighter {
                         Style::default().fg(Color::DarkGray),
                     )));
                     for code_line in highlighted {
-                        let mut bordered_spans = vec![Span::styled(
-                            "│ ",
-                            Style::default().fg(Color::DarkGray),
-                        )];
+                        let mut bordered_spans =
+                            vec![Span::styled("│ ", Style::default().fg(Color::DarkGray))];
                         bordered_spans.extend(code_line.spans);
                         lines.push(Line::from(bordered_spans));
                     }
@@ -160,10 +154,8 @@ impl SyntaxHighlighter {
                 Style::default().fg(Color::DarkGray),
             )));
             for code_line in highlighted {
-                let mut bordered_spans = vec![Span::styled(
-                    "│ ",
-                    Style::default().fg(Color::DarkGray),
-                )];
+                let mut bordered_spans =
+                    vec![Span::styled("│ ", Style::default().fg(Color::DarkGray))];
                 bordered_spans.extend(code_line.spans);
                 lines.push(Line::from(bordered_spans));
             }

@@ -63,7 +63,9 @@ fn show_session_info(
             p.best_path() == summary.project_path || p.decoded_path() == summary.project_path
         })?;
         let chains = project.session_chains().ok()?;
-        chains.into_values().find(|c| c.contains(&summary.session_id))
+        chains
+            .into_values()
+            .find(|c| c.contains(&summary.session_id))
     });
 
     match cli.effective_output() {
@@ -77,64 +79,7 @@ fn show_session_info(
                 Err(_) => None,
             };
 
-            let (user_messages, assistant_messages, primary_model, tools_summary,
-                 estimated_cost, input_tokens, output_tokens,
-                 files_modified, files_created, lines_added, lines_removed) =
-                if let Some(ref a) = analytics {
-                    // Collect tool counts into a HashMap
-                    let tools: HashMap<String, usize> = a.tool_counts.iter()
-                        .map(|(k, v)| (k.clone(), *v))
-                        .collect();
-
-                    // Collect file paths: edited files vs created files
-                    let edited: Vec<String> = a.file_stats.files.keys()
-                        .cloned()
-                        .collect();
-                    // We don't have separate created-vs-edited file lists in FileModificationStats,
-                    // but we have the counts. Use the file list as "files_modified".
-
-                    (
-                        Some(a.message_counts.user),
-                        Some(a.message_counts.assistant),
-                        a.primary_model().map(|s| s.to_string()),
-                        if tools.is_empty() { None } else { Some(tools) },
-                        a.usage.estimated_cost,
-                        Some(a.usage.usage.input_tokens + a.usage.usage.cache_read_input_tokens.unwrap_or(0)),
-                        Some(a.usage.usage.output_tokens),
-                        if edited.is_empty() { None } else { Some(edited) },
-                        None::<Vec<String>>, // files_created not separately tracked at path level
-                        Some(a.file_stats.total_lines_added),
-                        Some(a.file_stats.total_lines_removed),
-                    )
-                } else {
-                    (None, None, None, None, None, None, None, None, None, None, None)
-                };
-
-            println!("{}", serde_json::to_string_pretty(&SessionInfoOutput {
-                session_id: summary.session_id.clone(),
-                slug: summary.slug.clone(),
-                project_path: summary.project_path.clone(),
-                is_subagent: summary.is_subagent,
-                parent_session_id: summary.parent_session_id.clone(),
-                chain_id: chain_info.as_ref().map(|c| c.root_id.clone()),
-                chain_length: chain_info.as_ref().map(|c| c.len()),
-                chain_position: chain_info.as_ref().and_then(|c| c.position_of(&summary.session_id)),
-                file_size: summary.file_size,
-                file_size_human: summary.file_size_human.clone(),
-                entry_count: summary.entry_count,
-                unparsed_count: summary.unparsed_count,
-                message_count: summary.message_count,
-                compaction_count: summary.compaction_count,
-                start_time: summary.start_time.map(|t| t.to_rfc3339()),
-                end_time: summary.end_time.map(|t| t.to_rfc3339()),
-                duration_human: summary.duration_human(),
-                state: format!("{:?}", summary.state),
-                version: summary.version.clone(),
-                path: session.path().to_string_lossy().to_string(),
-                name: session_meta.and_then(|m| m.name.clone()),
-                tags: session_meta.map(|m| m.tags.clone()).unwrap_or_default(),
-                bookmarked: session_meta.is_some_and(|m| m.bookmarked),
-                outcome: session_meta.and_then(|m| m.outcome.map(|o| o.to_string())),
+            let (
                 user_messages,
                 assistant_messages,
                 primary_model,
@@ -146,7 +91,84 @@ fn show_session_info(
                 files_created,
                 lines_added,
                 lines_removed,
-            })?);
+            ) = if let Some(ref a) = analytics {
+                // Collect tool counts into a HashMap
+                let tools: HashMap<String, usize> =
+                    a.tool_counts.iter().map(|(k, v)| (k.clone(), *v)).collect();
+
+                // Collect file paths: edited files vs created files
+                let edited: Vec<String> = a.file_stats.files.keys().cloned().collect();
+                // We don't have separate created-vs-edited file lists in FileModificationStats,
+                // but we have the counts. Use the file list as "files_modified".
+
+                (
+                    Some(a.message_counts.user),
+                    Some(a.message_counts.assistant),
+                    a.primary_model().map(|s| s.to_string()),
+                    if tools.is_empty() { None } else { Some(tools) },
+                    a.usage.estimated_cost,
+                    Some(
+                        a.usage.usage.input_tokens
+                            + a.usage.usage.cache_read_input_tokens.unwrap_or(0),
+                    ),
+                    Some(a.usage.usage.output_tokens),
+                    if edited.is_empty() {
+                        None
+                    } else {
+                        Some(edited)
+                    },
+                    None::<Vec<String>>, // files_created not separately tracked at path level
+                    Some(a.file_stats.total_lines_added),
+                    Some(a.file_stats.total_lines_removed),
+                )
+            } else {
+                (
+                    None, None, None, None, None, None, None, None, None, None, None,
+                )
+            };
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&SessionInfoOutput {
+                    session_id: summary.session_id.clone(),
+                    slug: summary.slug.clone(),
+                    project_path: summary.project_path.clone(),
+                    is_subagent: summary.is_subagent,
+                    parent_session_id: summary.parent_session_id.clone(),
+                    chain_id: chain_info.as_ref().map(|c| c.root_id.clone()),
+                    chain_length: chain_info.as_ref().map(|c| c.len()),
+                    chain_position: chain_info
+                        .as_ref()
+                        .and_then(|c| c.position_of(&summary.session_id)),
+                    file_size: summary.file_size,
+                    file_size_human: summary.file_size_human.clone(),
+                    entry_count: summary.entry_count,
+                    unparsed_count: summary.unparsed_count,
+                    message_count: summary.message_count,
+                    compaction_count: summary.compaction_count,
+                    start_time: summary.start_time.map(|t| t.to_rfc3339()),
+                    end_time: summary.end_time.map(|t| t.to_rfc3339()),
+                    duration_human: summary.duration_human(),
+                    state: format!("{:?}", summary.state),
+                    version: summary.version.clone(),
+                    path: session.path().to_string_lossy().to_string(),
+                    name: session_meta.and_then(|m| m.name.clone()),
+                    tags: session_meta.map(|m| m.tags.clone()).unwrap_or_default(),
+                    bookmarked: session_meta.is_some_and(|m| m.bookmarked),
+                    outcome: session_meta.and_then(|m| m.outcome.map(|o| o.to_string())),
+                    user_messages,
+                    assistant_messages,
+                    primary_model,
+                    tools_summary,
+                    estimated_cost,
+                    input_tokens,
+                    output_tokens,
+                    files_modified,
+                    files_created,
+                    lines_added,
+                    lines_removed,
+                })?
+            );
         }
         OutputFormat::Tsv => {
             println!("field\tvalue");
@@ -171,7 +193,8 @@ fn show_session_info(
             }
         }
         OutputFormat::Compact => {
-            println!("{}:{}:{}",
+            println!(
+                "{}:{}:{}",
                 summary.short_id(),
                 summary.entry_count,
                 summary.file_size_human
@@ -186,13 +209,25 @@ fn show_session_info(
                 println!("Slug:         {slug}");
             }
             println!("Project:      {}", summary.project_path);
-            println!("Type:         {}", if summary.is_subagent { "Subagent" } else { "Main" });
+            println!(
+                "Type:         {}",
+                if summary.is_subagent {
+                    "Subagent"
+                } else {
+                    "Main"
+                }
+            );
             if let Some(ref parent) = summary.parent_session_id {
                 println!("Parent:       {}", parent);
             }
             if let Some(ref chain) = chain_info {
                 let pos = chain.position_of(&summary.session_id).unwrap_or(0) + 1;
-                println!("Chain:        part {}/{} (root: {})", pos, chain.len(), &chain.root_id[..8.min(chain.root_id.len())]);
+                println!(
+                    "Chain:        part {}/{} (root: {})",
+                    pos,
+                    chain.len(),
+                    &chain.root_id[..8.min(chain.root_id.len())]
+                );
             }
             println!("Status:       {:?}", summary.state);
             if summary.compaction_count > 0 {
@@ -221,7 +256,11 @@ fn show_session_info(
             // Show tool result artifacts info
             let (tr_count, tr_size) = session.tool_result_stats();
             if tr_count > 0 {
-                println!("Tool Results: {} files ({})", tr_count, crate::discovery::format_size(tr_size));
+                println!(
+                    "Tool Results: {} files ({})",
+                    tr_count,
+                    crate::discovery::format_size(tr_size)
+                );
             }
             println!();
 
@@ -235,7 +274,8 @@ fn show_session_info(
                 } else {
                     "Ended"
                 };
-                println!("{label}:{}{}",
+                println!(
+                    "{label}:{}{}",
                     if label.len() < 8 { "        " } else { "  " },
                     end.format("%Y-%m-%d %H:%M:%S UTC")
                 );
@@ -254,7 +294,10 @@ fn show_session_info(
 
             // Show tags, bookmarks, name, and outcome if present
             if let Some(meta) = session_meta {
-                let has_metadata = meta.name.is_some() || !meta.tags.is_empty() || meta.bookmarked || meta.outcome.is_some();
+                let has_metadata = meta.name.is_some()
+                    || !meta.tags.is_empty()
+                    || meta.bookmarked
+                    || meta.outcome.is_some();
                 if has_metadata {
                     println!();
                     if let Some(name) = &meta.name {
@@ -291,7 +334,8 @@ fn show_session_info(
                 println!("------------");
                 let entries = session.parse_with_options(cli.max_file_size)?;
                 for (i, entry) in entries.iter().enumerate() {
-                    println!("[{}] {}: {}",
+                    println!(
+                        "[{}] {}: {}",
                         i,
                         entry.message_type(),
                         entry.uuid().unwrap_or("no-uuid")
@@ -321,7 +365,10 @@ fn show_session_info(
 }
 
 /// Show tree structure of a session.
-fn show_tree_structure(session: &crate::discovery::Session, max_file_size: Option<u64>) -> Result<()> {
+fn show_tree_structure(
+    session: &crate::discovery::Session,
+    max_file_size: Option<u64>,
+) -> Result<()> {
     let entries = session.parse_with_options(max_file_size)?;
     let conversation = Conversation::from_entries(entries)?;
     let stats = conversation.statistics();
@@ -343,7 +390,8 @@ fn show_tree_structure(session: &crate::discovery::Session, max_file_size: Optio
         println!("Branch Points:");
         for bp in conversation.branch_points() {
             if let Some(node) = conversation.get_node(bp) {
-                println!("  {} ({} children at depth {})",
+                println!(
+                    "  {} ({} children at depth {})",
                     &bp[..8.min(bp.len())],
                     node.children.len(),
                     node.depth
@@ -356,11 +404,16 @@ fn show_tree_structure(session: &crate::discovery::Session, max_file_size: Optio
 }
 
 /// Show a specific entry.
-fn show_entry(session: &crate::discovery::Session, uuid: &str, max_file_size: Option<u64>) -> Result<()> {
+fn show_entry(
+    session: &crate::discovery::Session,
+    uuid: &str,
+    max_file_size: Option<u64>,
+) -> Result<()> {
     let entries = session.parse_with_options(max_file_size)?;
 
     for entry in &entries {
-        if entry.uuid() == Some(uuid) || entry.uuid().map(|u| u.starts_with(uuid)).unwrap_or(false) {
+        if entry.uuid() == Some(uuid) || entry.uuid().map(|u| u.starts_with(uuid)).unwrap_or(false)
+        {
             println!("Entry: {}", entry.uuid().unwrap_or("unknown"));
             println!("Type: {}", entry.message_type());
             println!();
@@ -374,7 +427,11 @@ fn show_entry(session: &crate::discovery::Session, uuid: &str, max_file_size: Op
 }
 
 /// Show a preview of the first N messages.
-fn show_message_preview(session: &crate::discovery::Session, n: usize, max_file_size: Option<u64>) -> Result<()> {
+fn show_message_preview(
+    session: &crate::discovery::Session,
+    n: usize,
+    max_file_size: Option<u64>,
+) -> Result<()> {
     let entries = session.parse_with_options(max_file_size)?;
 
     let mut count = 0;
@@ -449,7 +506,10 @@ fn truncate_preview(text: &str, max_len: usize) -> String {
 }
 
 /// Show files touched during the session.
-fn show_files_touched(session: &crate::discovery::Session, max_file_size: Option<u64>) -> Result<()> {
+fn show_files_touched(
+    session: &crate::discovery::Session,
+    max_file_size: Option<u64>,
+) -> Result<()> {
     let entries = session.parse_with_options(max_file_size)?;
 
     let mut files_read: HashSet<String> = HashSet::new();
@@ -468,17 +528,23 @@ fn show_files_touched(session: &crate::discovery::Session, max_file_size: Option
                     let input = &tool_use.input;
                     match tool_name {
                         "Read" => {
-                            if let Some(path) = input.get("file_path").and_then(serde_json::Value::as_str) {
+                            if let Some(path) =
+                                input.get("file_path").and_then(serde_json::Value::as_str)
+                            {
                                 files_read.insert(path.to_string());
                             }
                         }
                         "Write" => {
-                            if let Some(path) = input.get("file_path").and_then(serde_json::Value::as_str) {
+                            if let Some(path) =
+                                input.get("file_path").and_then(serde_json::Value::as_str)
+                            {
                                 files_created.insert(path.to_string());
                             }
                         }
                         "Edit" => {
-                            if let Some(path) = input.get("file_path").and_then(serde_json::Value::as_str) {
+                            if let Some(path) =
+                                input.get("file_path").and_then(serde_json::Value::as_str)
+                            {
                                 files_written.insert(path.to_string());
                             }
                         }
@@ -549,15 +615,18 @@ fn show_project_info(
 
     match cli.effective_output() {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&ProjectInfoOutput {
-                path: project.decoded_path().to_string(),
-                encoded_name: project.encoded_name().to_string(),
-                session_count: sessions.len(),
-                main_sessions: main_count,
-                subagent_sessions: subagent_count,
-                total_size,
-                total_size_human: crate::discovery::format_size(total_size),
-            })?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&ProjectInfoOutput {
+                    path: project.decoded_path().to_string(),
+                    encoded_name: project.encoded_name().to_string(),
+                    session_count: sessions.len(),
+                    main_sessions: main_count,
+                    subagent_sessions: subagent_count,
+                    total_size,
+                    total_size_human: crate::discovery::format_size(total_size),
+                })?
+            );
         }
         OutputFormat::Tsv => {
             println!("field\tvalue");
@@ -566,7 +635,12 @@ fn show_project_info(
             println!("size\t{}", total_size);
         }
         OutputFormat::Compact => {
-            println!("{}:{}:{}", project.decoded_path(), sessions.len(), crate::discovery::format_size(total_size));
+            println!(
+                "{}:{}:{}",
+                project.decoded_path(),
+                sessions.len(),
+                crate::discovery::format_size(total_size)
+            );
         }
         OutputFormat::Text => {
             println!("Project Information");
@@ -579,7 +653,10 @@ fn show_project_info(
             println!("  Main:         {main_count}");
             println!("  Subagents:    {subagent_count}");
             println!();
-            println!("Total Size:     {}", crate::discovery::format_size(total_size));
+            println!(
+                "Total Size:     {}",
+                crate::discovery::format_size(total_size)
+            );
 
             if args.paths {
                 println!();
@@ -590,8 +667,13 @@ fn show_project_info(
             println!();
             println!("Sessions:");
             for session in &sessions {
-                let subagent = if session.is_subagent() { " [subagent]" } else { "" };
-                println!("  {}{} ({})",
+                let subagent = if session.is_subagent() {
+                    " [subagent]"
+                } else {
+                    ""
+                };
+                println!(
+                    "  {}{} ({})",
                     &session.session_id()[..8.min(session.session_id().len())],
                     subagent,
                     session.file_size_human()
@@ -613,16 +695,19 @@ fn show_directory_info(
 
     match cli.effective_output() {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&DirectoryInfoOutput {
-                root_path: claude_dir.root().to_string_lossy().to_string(),
-                project_count: stats.project_count,
-                session_count: stats.session_count,
-                subagent_count: stats.subagent_count,
-                total_size: stats.total_size_bytes,
-                total_size_human: stats.total_size_human(),
-                has_file_history: stats.has_file_history,
-                backup_file_count: stats.backup_file_count,
-            })?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&DirectoryInfoOutput {
+                    root_path: claude_dir.root().to_string_lossy().to_string(),
+                    project_count: stats.project_count,
+                    session_count: stats.session_count,
+                    subagent_count: stats.subagent_count,
+                    total_size: stats.total_size_bytes,
+                    total_size_human: stats.total_size_human(),
+                    has_file_history: stats.has_file_history,
+                    backup_file_count: stats.backup_file_count,
+                })?
+            );
         }
         OutputFormat::Tsv => {
             println!("field\tvalue");
@@ -632,7 +717,8 @@ fn show_directory_info(
             println!("size\t{}", stats.total_size_bytes);
         }
         OutputFormat::Compact => {
-            println!("{}:{}:{}",
+            println!(
+                "{}:{}:{}",
                 claude_dir.root().display(),
                 stats.project_count,
                 stats.session_count
@@ -658,7 +744,10 @@ fn show_directory_info(
                 println!();
                 println!("Paths:");
                 println!("  Projects:     {}", claude_dir.projects_dir().display());
-                println!("  File History: {}", claude_dir.file_history_dir().display());
+                println!(
+                    "  File History: {}",
+                    claude_dir.file_history_dir().display()
+                );
                 println!("  Settings:     {}", claude_dir.settings_path().display());
                 println!("  CLAUDE.md:    {}", claude_dir.claude_md_path().display());
                 println!("  MCP Config:   {}", claude_dir.mcp_config_path().display());
@@ -711,7 +800,6 @@ struct SessionInfoOutput {
     outcome: Option<String>,
 
     // ── Analytics fields (computed on demand) ──
-
     /// User message count.
     #[serde(skip_serializing_if = "Option::is_none")]
     user_messages: Option<usize>,
@@ -806,7 +894,10 @@ mod tests {
             user_messages: Some(12),
             assistant_messages: Some(13),
             primary_model: Some("claude-sonnet-4-20250514".to_string()),
-            tools_summary: Some(HashMap::from([("Read".to_string(), 5), ("Edit".to_string(), 3)])),
+            tools_summary: Some(HashMap::from([
+                ("Read".to_string(), 5),
+                ("Edit".to_string(), 3),
+            ])),
             estimated_cost: Some(0.42),
             input_tokens: Some(50000),
             output_tokens: Some(10000),

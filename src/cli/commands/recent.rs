@@ -56,9 +56,14 @@ pub fn run(cli: &Cli, args: &RecentArgs) -> Result<()> {
     if let Some(project_filter) = &args.project {
         let projects = claude_dir.projects()?;
         let matched = super::helpers::filter_projects(projects, project_filter);
-        let matched_paths: Vec<String> = matched.iter().map(|p| p.decoded_path().to_string()).collect();
+        let matched_paths: Vec<String> = matched
+            .iter()
+            .map(|p| p.decoded_path().to_string())
+            .collect();
         sessions.retain(|s| {
-            matched_paths.iter().any(|mp| s.project_path().contains(mp.as_str()))
+            matched_paths
+                .iter()
+                .any(|mp| s.project_path().contains(mp.as_str()))
         });
     }
 
@@ -86,10 +91,24 @@ pub fn run(cli: &Cli, args: &RecentArgs) -> Result<()> {
             for session in &sessions {
                 let id = session.session_id();
                 let tags = tag_store.get(id);
-                let name = tags.and_then(|t| t.name.as_ref()).map(|n| n.as_str()).unwrap_or("");
+                let name = tags
+                    .and_then(|t| t.name.as_ref())
+                    .map(|n| n.as_str())
+                    .unwrap_or("");
                 let project = session.project_path();
-                let modified = session.modified_datetime().with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string();
-                println!("{}\t{}\t{}\t{}\t{}", &id[..8.min(id.len())], project, modified, session.file_size(), name);
+                let modified = session
+                    .modified_datetime()
+                    .with_timezone(&Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string();
+                println!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    &id[..8.min(id.len())],
+                    project,
+                    modified,
+                    session.file_size(),
+                    name
+                );
             }
         }
         OutputFormat::Compact => {
@@ -141,7 +160,8 @@ fn print_session_line(session: &Session, tag_store: &TagStore) -> Result<()> {
     let display_name = truncate_path(&name_or_project, 45);
 
     // Modification time
-    let time_str = session.modified_datetime()
+    let time_str = session
+        .modified_datetime()
         .with_timezone(&Local)
         .format("%Y-%m-%d %H:%M")
         .to_string();

@@ -6,9 +6,9 @@
 
 use std::collections::HashMap;
 
+use crate::analytics::SessionAnalytics;
 use crate::error::Result;
 use crate::model::LogEntry;
-use crate::analytics::SessionAnalytics;
 
 use super::project::Project;
 use super::session::Session;
@@ -45,7 +45,11 @@ impl AgentNode {
 
     /// Count total sessions in this subtree.
     pub fn total_sessions(&self) -> usize {
-        1 + self.children.iter().map(|c| c.total_sessions()).sum::<usize>()
+        1 + self
+            .children
+            .iter()
+            .map(|c| c.total_sessions())
+            .sum::<usize>()
     }
 
     /// Flatten the hierarchy into a list with depth info.
@@ -116,7 +120,10 @@ impl HierarchyBuilder {
             // attach only if that parent is among the known main sessions.
             if let Some(dir_parent) = subagent.parent_session_id().map(str::to_string) {
                 if main_sessions.iter().any(|m| m.session_id() == dir_parent) {
-                    parent_to_children.entry(dir_parent).or_default().push(subagent);
+                    parent_to_children
+                        .entry(dir_parent)
+                        .or_default()
+                        .push(subagent);
                 } else {
                     unassigned_subagents.push(subagent);
                 }
@@ -185,7 +192,7 @@ impl HierarchyBuilder {
         }
 
         // Sort by modification time (newest first)
-        nodes.sort_by(|a, b| b.session.modified_time().cmp(&a.session.modified_time()));
+        nodes.sort_by_key(|b| std::cmp::Reverse(b.session.modified_time()));
 
         Ok(nodes)
     }
@@ -247,7 +254,12 @@ impl AggregatedStats {
         let mut main_count = 0;
         let mut subagent_count = 0;
 
-        Self::collect_analytics(node, &mut analytics_list, &mut main_count, &mut subagent_count)?;
+        Self::collect_analytics(
+            node,
+            &mut analytics_list,
+            &mut main_count,
+            &mut subagent_count,
+        )?;
 
         let mut stats = Self::from_analytics(&analytics_list);
         stats.main_sessions = main_count;
@@ -296,7 +308,10 @@ pub fn collect_hierarchy_entries(node: &AgentNode) -> Result<Vec<(String, LogEnt
     entries.sort_by_key(|(_, timestamp, _, _)| *timestamp);
 
     // Return with session labels
-    Ok(entries.into_iter().map(|(label, _, _, entry)| (label, entry)).collect())
+    Ok(entries
+        .into_iter()
+        .map(|(label, _, _, entry)| (label, entry))
+        .collect())
 }
 
 /// Recursively collect entries with timestamps.

@@ -86,8 +86,8 @@ pub mod async_io;
 pub mod cache;
 pub mod cli;
 pub mod config;
-pub mod discovery;
 pub mod decisions;
+pub mod discovery;
 pub mod error;
 pub mod export;
 pub mod extraction;
@@ -96,8 +96,8 @@ pub mod git;
 pub mod goals;
 pub mod index;
 pub mod message_tags;
-pub mod notes;
 pub mod model;
+pub mod notes;
 pub mod parser;
 pub mod reconstruction;
 pub mod tags;
@@ -130,10 +130,8 @@ pub const FILE_HISTORY_DIR_NAME: &str = "filehistory";
 /// Prelude module for convenient imports.
 pub mod prelude {
 
-    pub use crate::api::{SnatchClient, ExportFormat, ExportOptionsBuilder};
+    pub use crate::api::{ExportFormat, ExportOptionsBuilder, SnatchClient};
     pub use crate::error::{Result, SnatchError};
-    pub use crate::model::{
-        AssistantMessage, ContentBlock, LogEntry, SchemaVersion, UserMessage,
-    };
+    pub use crate::model::{AssistantMessage, ContentBlock, LogEntry, SchemaVersion, UserMessage};
     pub use crate::parser::JsonlParser;
 }

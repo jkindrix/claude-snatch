@@ -36,11 +36,11 @@
 //! }
 //! ```
 
-mod tree;
 mod thread;
+mod tree;
 
-pub use tree::*;
 pub use thread::*;
+pub use tree::*;
 
 use std::collections::HashMap;
 
@@ -414,7 +414,9 @@ impl Conversation {
             }
             main_thread.push(current.clone());
             loop {
-                let Some(node) = nodes.get(&current) else { break };
+                let Some(node) = nodes.get(&current) else {
+                    break;
+                };
                 if node.children.is_empty() {
                     break;
                 }
@@ -526,13 +528,11 @@ impl Conversation {
     #[must_use]
     pub fn chronological_entries(&self) -> Vec<&LogEntry> {
         let mut entries: Vec<_> = self.nodes.values().map(|n| &n.entry).collect();
-        entries.sort_by(|a, b| {
-            match (a.timestamp(), b.timestamp()) {
-                (Some(ta), Some(tb)) => ta.cmp(&tb),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
-            }
+        entries.sort_by(|a, b| match (a.timestamp(), b.timestamp()) {
+            (Some(ta), Some(tb)) => ta.cmp(&tb),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
         });
         entries
     }
@@ -658,9 +658,7 @@ impl ConversationStats {
 }
 
 /// Reconstruct a conversation from a session.
-pub fn reconstruct_from_session(
-    session: &crate::discovery::Session,
-) -> Result<Conversation> {
+pub fn reconstruct_from_session(session: &crate::discovery::Session) -> Result<Conversation> {
     let entries = session.parse()?;
     Conversation::from_entries(entries)
 }
@@ -668,9 +666,9 @@ pub fn reconstruct_from_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{SystemMessage, SystemSubtype, UserContent, UserMessage, UserSimpleContent};
     use chrono::Utc;
     use indexmap::IndexMap;
-    use crate::model::{SystemMessage, SystemSubtype, UserContent, UserMessage, UserSimpleContent};
 
     fn make_user_entry(uuid: &str, parent: Option<&str>) -> LogEntry {
         LogEntry::User(UserMessage {
@@ -914,7 +912,10 @@ mod tests {
         ];
         let conv = Conversation::from_entries(entries).unwrap();
         let thread: Vec<&str> = conv.main_thread().iter().map(String::as_str).collect();
-        assert!(thread.contains(&"u1"), "preamble lost from main thread: {thread:?}");
+        assert!(
+            thread.contains(&"u1"),
+            "preamble lost from main thread: {thread:?}"
+        );
     }
 
     #[test]

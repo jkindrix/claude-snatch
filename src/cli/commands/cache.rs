@@ -18,7 +18,9 @@ pub fn run(_cli: &Cli, args: &CacheArgs) -> Result<()> {
                 eprintln!("Caching is enabled by default. To persist, edit config with: snatch config set cache.enabled true");
                 Ok(())
             } else if *disable {
-                eprintln!("To disable caching, edit config with: snatch config set cache.enabled false");
+                eprintln!(
+                    "To disable caching, edit config with: snatch config set cache.enabled false"
+                );
                 Ok(())
             } else {
                 show_status()
@@ -38,7 +40,10 @@ fn show_stats() -> Result<()> {
     println!();
 
     println!("Metadata Cache:");
-    println!("  Entries: {} / {}", stats.metadata.entry_count, stats.metadata.max_entries);
+    println!(
+        "  Entries: {} / {}",
+        stats.metadata.entry_count, stats.metadata.max_entries
+    );
     println!(
         "  Size: {} / {} ({:.1}%)",
         format_size(stats.metadata.current_size as u64),
@@ -48,7 +53,10 @@ fn show_stats() -> Result<()> {
     println!();
 
     println!("Entries Cache:");
-    println!("  Entries: {} / {}", stats.entries.entry_count, stats.entries.max_entries);
+    println!(
+        "  Entries: {} / {}",
+        stats.entries.entry_count, stats.entries.max_entries
+    );
     println!(
         "  Size: {} / {} ({:.1}%)",
         format_size(stats.entries.current_size as u64),

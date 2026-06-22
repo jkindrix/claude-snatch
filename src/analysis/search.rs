@@ -108,6 +108,7 @@ fn snap_char_boundary_right(s: &str, idx: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::trivial_regex)]
     use super::*;
 
     /// Build a System LogEntry from JSON for testing.
@@ -160,6 +161,9 @@ mod tests {
         // The emoji is 4 bytes. Make sure we snap correctly.
         let emoji_start = s.find('😀').unwrap();
         assert_eq!(snap_char_boundary_left(s, emoji_start + 1), emoji_start);
-        assert_eq!(snap_char_boundary_right(s, emoji_start + 1), emoji_start + 4);
+        assert_eq!(
+            snap_char_boundary_right(s, emoji_start + 1),
+            emoji_start + 4
+        );
     }
 }

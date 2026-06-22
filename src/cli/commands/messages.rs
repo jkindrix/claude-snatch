@@ -63,11 +63,12 @@ struct ToolDetailOutput {
 pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
 
-    let session = claude_dir
-        .find_session(&args.session_id)?
-        .ok_or_else(|| SnatchError::SessionNotFound {
-            session_id: args.session_id.clone(),
-        })?;
+    let session =
+        claude_dir
+            .find_session(&args.session_id)?
+            .ok_or_else(|| SnatchError::SessionNotFound {
+                session_id: args.session_id.clone(),
+            })?;
 
     let project_path = session.project_path().to_string();
     let (entries, unparsed) = session.parse_with_options_counted(cli.max_file_size)?;
@@ -119,10 +120,14 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
         main_entries.retain(|e| {
             if let Some(ts) = e.timestamp() {
                 if let Some(ref a) = after {
-                    if ts < *a { return false; }
+                    if ts < *a {
+                        return false;
+                    }
                 }
                 if let Some(ref b) = before {
-                    if ts > *b { return false; }
+                    if ts > *b {
+                        return false;
+                    }
                 }
                 true
             } else {
@@ -163,7 +168,14 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
             let messages: Vec<MessageOutput> = paginated
                 .iter()
                 .filter_map(|(orig_idx, entry)| {
-                    build_message_output(*orig_idx, entry, detail, truncate_len, include_thinking, thinking_max_len)
+                    build_message_output(
+                        *orig_idx,
+                        entry,
+                        detail,
+                        truncate_len,
+                        include_thinking,
+                        thinking_max_len,
+                    )
                 })
                 .collect();
 
@@ -208,14 +220,19 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                 match detail {
                     "overview" => {
                         if let Some(text) = extract_user_prompt_text(entry) {
-                            println!("[{orig_idx}] {timestamp} user: {}", truncate_text(&text, truncate_len));
+                            println!(
+                                "[{orig_idx}] {timestamp} user: {}",
+                                truncate_text(&text, truncate_len)
+                            );
                         }
                     }
                     "conversation" => {
                         let content = match entry {
                             LogEntry::User(_) => extract_user_prompt_text(entry)
                                 .map(|t| truncate_text(&t, truncate_len)),
-                            LogEntry::Assistant(_) => extract_assistant_summary(entry, truncate_len),
+                            LogEntry::Assistant(_) => {
+                                extract_assistant_summary(entry, truncate_len)
+                            }
                             _ => None,
                         };
                         if let Some(text) = content {
@@ -231,7 +248,9 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                         let content = match entry {
                             LogEntry::User(_) => extract_user_prompt_text(entry)
                                 .map(|t| truncate_text(&t, truncate_len)),
-                            LogEntry::Assistant(_) => extract_assistant_summary(entry, truncate_len),
+                            LogEntry::Assistant(_) => {
+                                extract_assistant_summary(entry, truncate_len)
+                            }
                             LogEntry::System(sys) => sys.content.clone(),
                             _ => None,
                         };
@@ -267,7 +286,9 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                         let content = match entry {
                             LogEntry::User(_) => extract_user_prompt_text(entry)
                                 .map(|t| truncate_text(&t, truncate_len)),
-                            LogEntry::Assistant(_) => extract_assistant_summary(entry, truncate_len),
+                            LogEntry::Assistant(_) => {
+                                extract_assistant_summary(entry, truncate_len)
+                            }
                             LogEntry::System(sys) => sys.content.clone(),
                             _ => None,
                         };
@@ -296,10 +317,8 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                         }
                         for t in &tool_uses {
                             let summary = extract_tool_input_summary(&t.name, &t.input);
-                            let detail_str: Vec<String> = summary
-                                .iter()
-                                .map(|(k, v)| format!("{k}={v}"))
-                                .collect();
+                            let detail_str: Vec<String> =
+                                summary.iter().map(|(k, v)| format!("{k}={v}")).collect();
                             println!("    > {} {}", t.name, detail_str.join(" "));
                         }
                         if let Some(thinking) = thinking {
@@ -330,8 +349,7 @@ fn build_message_output(
 
     match detail {
         "overview" => {
-            let content = extract_user_prompt_text(entry)
-                .map(|t| truncate_text(&t, truncate_len));
+            let content = extract_user_prompt_text(entry).map(|t| truncate_text(&t, truncate_len));
             Some(MessageOutput {
                 index,
                 msg_type,
@@ -347,8 +365,9 @@ fn build_message_output(
         }
         "conversation" => {
             let content = match entry {
-                LogEntry::User(_) => extract_user_prompt_text(entry)
-                    .map(|t| truncate_text(&t, truncate_len)),
+                LogEntry::User(_) => {
+                    extract_user_prompt_text(entry).map(|t| truncate_text(&t, truncate_len))
+                }
                 LogEntry::Assistant(_) => extract_assistant_summary(entry, truncate_len),
                 _ => None,
             };
@@ -366,14 +385,19 @@ fn build_message_output(
                 model: get_model(entry),
                 tool_calls: None,
                 tool_details: None,
-                has_thinking: if has_thinking(entry) { Some(true) } else { None },
+                has_thinking: if has_thinking(entry) {
+                    Some(true)
+                } else {
+                    None
+                },
                 thinking_preview: thinking,
             })
         }
         "standard" => {
             let content = match entry {
-                LogEntry::User(_) => extract_user_prompt_text(entry)
-                    .map(|t| truncate_text(&t, truncate_len)),
+                LogEntry::User(_) => {
+                    extract_user_prompt_text(entry).map(|t| truncate_text(&t, truncate_len))
+                }
                 LogEntry::Assistant(_) => extract_assistant_summary(entry, truncate_len),
                 LogEntry::System(sys) => sys.content.clone(),
                 _ => None,
@@ -391,17 +415,26 @@ fn build_message_output(
                 content,
                 git_branch,
                 model: get_model(entry),
-                tool_calls: if tool_names.is_empty() { None } else { Some(tool_names) },
+                tool_calls: if tool_names.is_empty() {
+                    None
+                } else {
+                    Some(tool_names)
+                },
                 tool_details: None,
-                has_thinking: if has_thinking(entry) { Some(true) } else { None },
+                has_thinking: if has_thinking(entry) {
+                    Some(true)
+                } else {
+                    None
+                },
                 thinking_preview: thinking,
             })
         }
         _ => {
             // "full"
             let content = match entry {
-                LogEntry::User(_) => extract_user_prompt_text(entry)
-                    .map(|t| truncate_text(&t, truncate_len)),
+                LogEntry::User(_) => {
+                    extract_user_prompt_text(entry).map(|t| truncate_text(&t, truncate_len))
+                }
                 LogEntry::Assistant(_) => extract_assistant_summary(entry, truncate_len),
                 LogEntry::System(sys) => sys.content.clone(),
                 _ => None,
@@ -436,9 +469,21 @@ fn build_message_output(
                 content,
                 git_branch,
                 model: get_model(entry),
-                tool_calls: if tool_names.is_empty() { None } else { Some(tool_names) },
-                tool_details: if tool_details.is_empty() { None } else { Some(tool_details) },
-                has_thinking: if has_thinking(entry) { Some(true) } else { None },
+                tool_calls: if tool_names.is_empty() {
+                    None
+                } else {
+                    Some(tool_names)
+                },
+                tool_details: if tool_details.is_empty() {
+                    None
+                } else {
+                    Some(tool_details)
+                },
+                has_thinking: if has_thinking(entry) {
+                    Some(true)
+                } else {
+                    None
+                },
                 thinking_preview: thinking,
             })
         }

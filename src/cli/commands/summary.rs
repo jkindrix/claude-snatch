@@ -35,12 +35,12 @@ fn parse_period(period: &str) -> Result<Duration> {
         });
     }
 
-    let amount: i64 = s_lower[..numeric_end].parse().map_err(|_| {
-        SnatchError::InvalidArgument {
+    let amount: i64 = s_lower[..numeric_end]
+        .parse()
+        .map_err(|_| SnatchError::InvalidArgument {
             name: "period".to_string(),
             reason: format!("Invalid number in period: {}", &s_lower[..numeric_end]),
-        }
-    })?;
+        })?;
 
     let unit = &s_lower[numeric_end..];
     match unit {
@@ -101,7 +101,8 @@ pub fn run(cli: &Cli, args: &SummaryArgs) -> Result<()> {
     }
 
     // Count sessions per project
-    let mut project_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut project_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for session in &recent_sessions {
         let project = session.project_path().to_string();
         *project_counts.entry(project).or_insert(0) += 1;
@@ -109,7 +110,7 @@ pub fn run(cli: &Cli, args: &SummaryArgs) -> Result<()> {
 
     // Get top projects
     let mut top_projects: Vec<_> = project_counts.into_iter().collect();
-    top_projects.sort_by(|a, b| b.1.cmp(&a.1));
+    top_projects.sort_by_key(|b| std::cmp::Reverse(b.1));
     let top_projects: Vec<ProjectInfo> = top_projects
         .into_iter()
         .take(5)
@@ -120,11 +121,14 @@ pub fn run(cli: &Cli, args: &SummaryArgs) -> Result<()> {
     let session_analytics: Vec<SessionAnalytics> = recent_sessions
         .par_iter()
         .filter_map(|session| {
-            session.parse_with_options(cli.max_file_size).ok().and_then(|entries| {
-                Conversation::from_entries(entries)
-                    .ok()
-                    .map(|conv| SessionAnalytics::from_conversation(&conv))
-            })
+            session
+                .parse_with_options(cli.max_file_size)
+                .ok()
+                .and_then(|entries| {
+                    Conversation::from_entries(entries)
+                        .ok()
+                        .map(|conv| SessionAnalytics::from_conversation(&conv))
+                })
         })
         .collect();
 
@@ -158,7 +162,10 @@ pub fn run(cli: &Cli, args: &SummaryArgs) -> Result<()> {
             println!("period\t{}", args.period);
             println!("projects\t{num_projects}");
             println!("sessions\t{num_sessions}");
-            println!("total_tokens\t{}", combined.total_usage.usage.total_tokens());
+            println!(
+                "total_tokens\t{}",
+                combined.total_usage.usage.total_tokens()
+            );
             println!("tool_invocations\t{}", combined.message_counts.tool_uses);
             if let Some(cost) = combined.total_usage.estimated_cost {
                 println!("estimated_cost\t{cost:.4}");
@@ -270,7 +277,12 @@ pub fn run_quick_summary(cli: &Cli) -> Result<()> {
         }
         OutputFormat::Tsv => {
             println!("sessions_24h\tprojects_24h\ttotal_sessions");
-            println!("{}\t{}\t{}", recent_sessions.len(), project_set.len(), total_sessions);
+            println!(
+                "{}\t{}\t{}",
+                recent_sessions.len(),
+                project_set.len(),
+                total_sessions
+            );
         }
         OutputFormat::Compact => {
             println!(

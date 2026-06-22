@@ -112,7 +112,10 @@ impl SearchIndex {
         // Ensure directory exists
         if !path.exists() {
             std::fs::create_dir_all(path).map_err(|e| {
-                SnatchError::io(format!("Failed to create index directory: {}", path.display()), e)
+                SnatchError::io(
+                    format!("Failed to create index directory: {}", path.display()),
+                    e,
+                )
             })?;
         }
 
@@ -120,13 +123,11 @@ impl SearchIndex {
 
         // Try to open existing index, or create new one
         let index = if path.join("meta.json").exists() {
-            Index::open_in_dir(path).map_err(|e| {
-                SnatchError::IndexError(format!("Failed to open index: {}", e))
-            })?
+            Index::open_in_dir(path)
+                .map_err(|e| SnatchError::IndexError(format!("Failed to open index: {}", e)))?
         } else {
-            Index::create_in_dir(path, schema.clone()).map_err(|e| {
-                SnatchError::IndexError(format!("Failed to create index: {}", e))
-            })?
+            Index::create_in_dir(path, schema.clone())
+                .map_err(|e| SnatchError::IndexError(format!("Failed to create index: {}", e)))?
         };
 
         // Create reader with reload on commit
@@ -187,19 +188,45 @@ impl SearchIndex {
         entry: &LogEntry,
     ) -> Result<()> {
         // Field lookups - these fields are added by build_schema() and always exist
-        let session_id_field = self.schema.get_field(fields::SESSION_ID).expect("schema field");
-        let project_field = self.schema.get_field(fields::PROJECT).expect("schema field");
+        let session_id_field = self
+            .schema
+            .get_field(fields::SESSION_ID)
+            .expect("schema field");
+        let project_field = self
+            .schema
+            .get_field(fields::PROJECT)
+            .expect("schema field");
         let uuid_field = self.schema.get_field(fields::UUID).expect("schema field");
-        let timestamp_field = self.schema.get_field(fields::TIMESTAMP).expect("schema field");
-        let message_type_field = self.schema.get_field(fields::MESSAGE_TYPE).expect("schema field");
+        let timestamp_field = self
+            .schema
+            .get_field(fields::TIMESTAMP)
+            .expect("schema field");
+        let message_type_field = self
+            .schema
+            .get_field(fields::MESSAGE_TYPE)
+            .expect("schema field");
         let model_field = self.schema.get_field(fields::MODEL).expect("schema field");
-        let content_field = self.schema.get_field(fields::CONTENT).expect("schema field");
-        let thinking_field = self.schema.get_field(fields::THINKING).expect("schema field");
-        let tool_name_field = self.schema.get_field(fields::TOOL_NAME).expect("schema field");
-        let tool_input_field = self.schema.get_field(fields::TOOL_INPUT).expect("schema field");
+        let content_field = self
+            .schema
+            .get_field(fields::CONTENT)
+            .expect("schema field");
+        let thinking_field = self
+            .schema
+            .get_field(fields::THINKING)
+            .expect("schema field");
+        let tool_name_field = self
+            .schema
+            .get_field(fields::TOOL_NAME)
+            .expect("schema field");
+        let tool_input_field = self
+            .schema
+            .get_field(fields::TOOL_INPUT)
+            .expect("schema field");
 
         let uuid = entry.uuid().unwrap_or("").to_string();
-        let timestamp = entry.timestamp().map_or_else(String::new, |t| t.to_rfc3339());
+        let timestamp = entry
+            .timestamp()
+            .map_or_else(String::new, |t| t.to_rfc3339());
         let message_type = entry.message_type().to_string();
 
         match entry {
@@ -217,14 +244,18 @@ impl SearchIndex {
                         .join("\n"),
                 };
 
-                writer.add_document(doc!(
-                    session_id_field => session_id,
-                    project_field => project,
-                    uuid_field => uuid,
-                    timestamp_field => timestamp,
-                    message_type_field => message_type,
-                    content_field => content
-                )).map_err(|e| SnatchError::IndexError(format!("Failed to add document: {}", e)))?;
+                writer
+                    .add_document(doc!(
+                        session_id_field => session_id,
+                        project_field => project,
+                        uuid_field => uuid,
+                        timestamp_field => timestamp,
+                        message_type_field => message_type,
+                        content_field => content
+                    ))
+                    .map_err(|e| {
+                        SnatchError::IndexError(format!("Failed to add document: {}", e))
+                    })?;
             }
             LogEntry::Assistant(assistant) => {
                 let model = assistant.message.model.clone();
@@ -276,30 +307,39 @@ impl SearchIndex {
                     doc.add_text(tool_input_field, input);
                 }
 
-                writer.add_document(doc)
-                    .map_err(|e| SnatchError::IndexError(format!("Failed to add document: {}", e)))?;
+                writer.add_document(doc).map_err(|e| {
+                    SnatchError::IndexError(format!("Failed to add document: {}", e))
+                })?;
             }
             LogEntry::System(system) => {
                 if let Some(content) = &system.content {
-                    writer.add_document(doc!(
+                    writer
+                        .add_document(doc!(
+                            session_id_field => session_id,
+                            project_field => project,
+                            uuid_field => uuid,
+                            timestamp_field => timestamp,
+                            message_type_field => message_type,
+                            content_field => content.clone()
+                        ))
+                        .map_err(|e| {
+                            SnatchError::IndexError(format!("Failed to add document: {}", e))
+                        })?;
+                }
+            }
+            LogEntry::Summary(summary) => {
+                writer
+                    .add_document(doc!(
                         session_id_field => session_id,
                         project_field => project,
                         uuid_field => uuid,
                         timestamp_field => timestamp,
                         message_type_field => message_type,
-                        content_field => content.clone()
-                    )).map_err(|e| SnatchError::IndexError(format!("Failed to add document: {}", e)))?;
-                }
-            }
-            LogEntry::Summary(summary) => {
-                writer.add_document(doc!(
-                    session_id_field => session_id,
-                    project_field => project,
-                    uuid_field => uuid,
-                    timestamp_field => timestamp,
-                    message_type_field => message_type,
-                    content_field => summary.summary.clone()
-                )).map_err(|e| SnatchError::IndexError(format!("Failed to add document: {}", e)))?;
+                        content_field => summary.summary.clone()
+                    ))
+                    .map_err(|e| {
+                        SnatchError::IndexError(format!("Failed to add document: {}", e))
+                    })?;
             }
             _ => {}
         }
@@ -340,7 +380,8 @@ impl SearchIndex {
                         let project = session.project_path();
 
                         for entry in &entries {
-                            if let Err(e) = self.index_entry(&mut writer, session_id, project, entry)
+                            if let Err(e) =
+                                self.index_entry(&mut writer, session_id, project, entry)
                             {
                                 errors.push((session.session_id().to_string(), e.to_string()));
                             } else {
@@ -386,7 +427,10 @@ impl SearchIndex {
 
     /// Delete documents for a specific session.
     pub fn delete_session(&self, session_id: &str) -> Result<()> {
-        let session_id_field = self.schema.get_field(fields::SESSION_ID).expect("schema field");
+        let session_id_field = self
+            .schema
+            .get_field(fields::SESSION_ID)
+            .expect("schema field");
         let term = tantivy::Term::from_field_text(session_id_field, session_id);
 
         let writer = self.writer.write();
@@ -399,19 +443,31 @@ impl SearchIndex {
         let searcher = self.reader.searcher();
 
         // Parse query - search content by default
-        let content_field = self.schema.get_field(fields::CONTENT).expect("schema field");
-        let thinking_field = self.schema.get_field(fields::THINKING).expect("schema field");
-        let tool_input_field = self.schema.get_field(fields::TOOL_INPUT).expect("schema field");
+        let content_field = self
+            .schema
+            .get_field(fields::CONTENT)
+            .expect("schema field");
+        let thinking_field = self
+            .schema
+            .get_field(fields::THINKING)
+            .expect("schema field");
+        let tool_input_field = self
+            .schema
+            .get_field(fields::TOOL_INPUT)
+            .expect("schema field");
 
-        let query_parser =
-            QueryParser::for_index(&self.index, vec![content_field, thinking_field, tool_input_field]);
+        let query_parser = QueryParser::for_index(
+            &self.index,
+            vec![content_field, thinking_field, tool_input_field],
+        );
 
-        let parsed_query = query_parser.parse_query(query).map_err(|e| {
-            SnatchError::InvalidArgument {
-                name: "query".to_string(),
-                reason: e.to_string(),
-            }
-        })?;
+        let parsed_query =
+            query_parser
+                .parse_query(query)
+                .map_err(|e| SnatchError::InvalidArgument {
+                    name: "query".to_string(),
+                    reason: e.to_string(),
+                })?;
 
         let top_docs = searcher
             .search(&parsed_query, &TopDocs::with_limit(limit))
@@ -431,7 +487,11 @@ impl SearchIndex {
             let message_type = self.get_text_field(&doc, fields::MESSAGE_TYPE);
             let model = {
                 let m = self.get_text_field(&doc, fields::MODEL);
-                if m.is_empty() { None } else { Some(m) }
+                if m.is_empty() {
+                    None
+                } else {
+                    Some(m)
+                }
             };
             let content = self.get_text_field(&doc, fields::CONTENT);
 
@@ -557,9 +617,10 @@ impl SearchIndex {
         use tantivy::query::AllQuery;
 
         let searcher = self.reader.searcher();
-        let field = self.schema.get_field(field_name).map_err(|_| {
-            SnatchError::IndexError(format!("Field not found: {}", field_name))
-        })?;
+        let field = self
+            .schema
+            .get_field(field_name)
+            .map_err(|_| SnatchError::IndexError(format!("Field not found: {}", field_name)))?;
 
         // Collect all documents
         let doc_addresses = searcher
@@ -598,7 +659,12 @@ impl SearchIndex {
     }
 
     /// Search by a specific field value only.
-    pub fn search_by_field(&self, field_name: &str, value: &str, limit: usize) -> Result<Vec<SearchHit>> {
+    pub fn search_by_field(
+        &self,
+        field_name: &str,
+        value: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
         let query_str = format!("{}:{}", field_name, value);
         self.search(&query_str, limit)
     }
@@ -742,7 +808,9 @@ pub struct BackgroundIndexHandle {
 impl BackgroundIndexHandle {
     /// Check if indexing is still running.
     pub fn is_running(&self) -> bool {
-        self.thread_handle.as_ref().is_some_and(|h| !h.is_finished())
+        self.thread_handle
+            .as_ref()
+            .is_some_and(|h| !h.is_finished())
     }
 
     /// Get the latest progress (non-blocking).
@@ -799,7 +867,9 @@ impl SearchIndex {
                             let project = session.project_path();
 
                             for entry in &entries {
-                                if let Err(e) = index.index_entry(&mut writer, session_id, project, entry) {
+                                if let Err(e) =
+                                    index.index_entry(&mut writer, session_id, project, entry)
+                                {
                                     errors.push((session.session_id().to_string(), e.to_string()));
                                 } else {
                                     documents_indexed += 1;

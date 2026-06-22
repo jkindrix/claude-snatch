@@ -27,6 +27,10 @@ pub fn launch(project: Option<&str>, session: Option<&str>) -> Result<()> {
 }
 
 /// Launch the TUI application with a specific theme.
-pub fn launch_with_theme(project: Option<&str>, session: Option<&str>, theme: Option<&str>) -> Result<()> {
+pub fn launch_with_theme(
+    project: Option<&str>,
+    session: Option<&str>,
+    theme: Option<&str>,
+) -> Result<()> {
     app::run_with_theme(project, session, theme)
 }

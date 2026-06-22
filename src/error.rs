@@ -261,7 +261,11 @@ impl SnatchError {
 
     /// Create a new parse error with source.
     #[must_use]
-    pub fn parse_with_source(line: usize, message: impl Into<String>, source: serde_json::Error) -> Self {
+    pub fn parse_with_source(
+        line: usize,
+        message: impl Into<String>,
+        source: serde_json::Error,
+    ) -> Self {
         Self::ParseError {
             line,
             message: message.into(),
@@ -308,7 +312,10 @@ impl SnatchError {
     pub const fn exit_code(&self) -> i32 {
         match self {
             Self::ParseError { .. } => 2,
-            Self::FileNotFound { .. } | Self::SessionNotFound { .. } | Self::AmbiguousSessionPrefix { .. } | Self::ProjectNotFound { .. } => 3,
+            Self::FileNotFound { .. }
+            | Self::SessionNotFound { .. }
+            | Self::AmbiguousSessionPrefix { .. }
+            | Self::ProjectNotFound { .. } => 3,
             Self::PermissionDenied { .. } => 4,
             Self::ConfigError { .. } => 5,
             Self::ExportError { .. } => 6,

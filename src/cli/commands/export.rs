@@ -10,7 +10,9 @@ use chrono::Utc;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::cli::{Cli, ContentFilter, ExportArgs, ExportFormatArg};
-use crate::config::{default_templates_dir, list_templates, load_template, create_sample_template, ExportTemplate};
+use crate::config::{
+    create_sample_template, default_templates_dir, list_templates, load_template, ExportTemplate,
+};
 use crate::discovery::{Session, SessionFilter};
 use crate::error::{Result, SnatchError};
 use crate::export::{
@@ -65,7 +67,8 @@ pub fn run(cli: &Cli, args: &ExportArgs) -> Result<()> {
         if !is_gh_cli_available() {
             return Err(SnatchError::ConfigError {
                 message: "GitHub CLI (gh) is not installed or not in PATH. \
-                    Install from https://cli.github.com/ and run 'gh auth login'".to_string(),
+                    Install from https://cli.github.com/ and run 'gh auth login'"
+                    .to_string(),
             });
         }
 
@@ -79,7 +82,8 @@ pub fn run(cli: &Cli, args: &ExportArgs) -> Result<()> {
         // Gist doesn't support --all (too many gists would be created)
         if args.all {
             return Err(SnatchError::ConfigError {
-                message: "--gist is not compatible with --all. Export a single session.".to_string(),
+                message: "--gist is not compatible with --all. Export a single session."
+                    .to_string(),
             });
         }
 
@@ -96,7 +100,8 @@ pub fn run(cli: &Cli, args: &ExportArgs) -> Result<()> {
         // Clipboard doesn't support --all
         if args.all {
             return Err(SnatchError::ConfigError {
-                message: "--clipboard is not compatible with --all. Export a single session.".to_string(),
+                message: "--clipboard is not compatible with --all. Export a single session."
+                    .to_string(),
             });
         }
 
@@ -147,11 +152,12 @@ fn export_single_session(cli: &Cli, args: &ExportArgs, session_id: &str) -> Resu
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
 
     // Find the session
-    let session = claude_dir
-        .find_session(session_id)?
-        .ok_or_else(|| SnatchError::SessionNotFound {
-            session_id: session_id.to_string(),
-        })?;
+    let session =
+        claude_dir
+            .find_session(session_id)?
+            .ok_or_else(|| SnatchError::SessionNotFound {
+                session_id: session_id.to_string(),
+            })?;
 
     // Handle template initialization
     if let Some(ref template_name) = args.template {
@@ -206,12 +212,16 @@ fn resolve_persisted_outputs(entries: &mut [LogEntry], session: &Session) {
         return;
     };
     for entry in entries.iter_mut() {
-        let LogEntry::User(user) = entry else { continue };
+        let LogEntry::User(user) = entry else {
+            continue;
+        };
         let crate::model::message::UserContent::Blocks(blocks) = &mut user.message else {
             continue;
         };
         for block in &mut blocks.content {
-            let ContentBlock::ToolResult(tr) = block else { continue };
+            let ContentBlock::ToolResult(tr) = block else {
+                continue;
+            };
             let Some(crate::model::content::ToolResultContent::String(s)) = &tr.content else {
                 continue;
             };
@@ -292,7 +302,7 @@ fn export_session_to_gist(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
     let filename = format!("session-{short_id}.{ext}");
 
     // Generate description
-    let description = args.gist_description.as_deref().unwrap_or_else(|| {
+    let description = args.gist_description.as_deref().unwrap_or({
         // Default description would be generated, but we can't return a reference
         // to a temporary, so we use a static default
         "Claude Code session export"
@@ -325,27 +335,29 @@ fn export_session_to_gist(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
 
 /// Export a session combined with its subagent transcripts.
 fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Result<()> {
-    use crate::discovery::{HierarchyBuilder, collect_hierarchy_entries};
+    use crate::discovery::{collect_hierarchy_entries, HierarchyBuilder};
 
     // Get the project for this session
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
     let projects = claude_dir.projects()?;
 
     // Find the project containing this session
-    let project = projects.iter().find(|p| {
-        p.decoded_path() == session.project_path()
-    }).ok_or_else(|| SnatchError::ProjectNotFound {
-        project_path: session.project_path().to_string(),
-    })?;
+    let project = projects
+        .iter()
+        .find(|p| p.decoded_path() == session.project_path())
+        .ok_or_else(|| SnatchError::ProjectNotFound {
+            project_path: session.project_path().to_string(),
+        })?;
 
     // Build hierarchy for the project
     let hierarchy = HierarchyBuilder::new().build_for_project(project)?;
 
     // Find the node for this session
-    let node = find_node_by_session_id(&hierarchy, session.session_id())
-        .ok_or_else(|| SnatchError::SessionNotFound {
+    let node = find_node_by_session_id(&hierarchy, session.session_id()).ok_or_else(|| {
+        SnatchError::SessionNotFound {
             session_id: session.session_id().to_string(),
-        })?;
+        }
+    })?;
 
     // Collect all entries from the hierarchy
     let labeled_entries = collect_hierarchy_entries(node)?;
@@ -443,9 +455,7 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
                 conversation_to_jsonl(&conversation, &mut output, args.main_thread)?;
             }
             ExportFormatArg::Html => {
-                let exporter = HtmlExporter::new()
-                    .with_toc(args.toc)
-                    .dark_theme(args.dark);
+                let exporter = HtmlExporter::new().with_toc(args.toc).dark_theme(args.dark);
                 exporter.export_conversation(&conversation, &mut output, &options)?;
             }
             ExportFormatArg::Text => {
@@ -503,9 +513,7 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
                 conversation_to_jsonl(&conversation, &mut output, args.main_thread)?;
             }
             ExportFormatArg::Html => {
-                let exporter = HtmlExporter::new()
-                    .with_toc(args.toc)
-                    .dark_theme(args.dark);
+                let exporter = HtmlExporter::new().with_toc(args.toc).dark_theme(args.dark);
                 exporter.export_conversation(&conversation, &mut output, &options)?;
             }
             ExportFormatArg::Text => {
@@ -631,7 +639,10 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
         if output.is_dir() {
             output.clone()
         } else {
-            output.parent().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+            output
+                .parent()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."))
         }
     } else {
         // Default to current directory for multi-session export
@@ -641,7 +652,13 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
     // Ensure output directory exists
     if !output_dir.exists() {
         std::fs::create_dir_all(&output_dir).map_err(|e| {
-            SnatchError::io(format!("Failed to create output directory: {}", output_dir.display()), e)
+            SnatchError::io(
+                format!(
+                    "Failed to create output directory: {}",
+                    output_dir.display()
+                ),
+                e,
+            )
         })?;
     }
 
@@ -655,7 +672,9 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
         let pb = ProgressBar::new(sessions.len() as u64);
         pb.set_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+                .template(
+                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+                )
                 .expect("Invalid progress bar template")
                 .progress_chars("#>-"),
         );
@@ -740,7 +759,9 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
 
     // SQLite export requires an output file
     let output_path = args.output_file.as_ref().ok_or_else(|| {
-        SnatchError::export("SQLite export requires an output file (--output <path.db>)".to_string())
+        SnatchError::export(
+            "SQLite export requires an output file (--output <path.db>)".to_string(),
+        )
     })?;
 
     // Build session filter
@@ -790,16 +811,18 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
     if output_path.exists() {
         std::fs::remove_file(output_path).map_err(|e| {
             SnatchError::io(
-                format!("Failed to remove existing database: {}", output_path.display()),
+                format!(
+                    "Failed to remove existing database: {}",
+                    output_path.display()
+                ),
                 e,
             )
         })?;
     }
 
     // Create database connection
-    let conn = Connection::open(output_path).map_err(|e| {
-        SnatchError::export(format!("Failed to create SQLite database: {}", e))
-    })?;
+    let conn = Connection::open(output_path)
+        .map_err(|e| SnatchError::export(format!("Failed to create SQLite database: {}", e)))?;
 
     // Create exporter and schema
     let exporter = SqliteExporter::new()
@@ -825,7 +848,9 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
         let pb = ProgressBar::new(sessions.len() as u64);
         pb.set_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+                .template(
+                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+                )
                 .expect("Invalid progress bar template")
                 .progress_chars("#>-"),
         );
@@ -852,7 +877,12 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
                             git_branch: None,
                             git_commit: None,
                         };
-                        match exporter.export_to_connection_with_meta(&conversation, &conn, &options, Some(&meta)) {
+                        match exporter.export_to_connection_with_meta(
+                            &conversation,
+                            &conn,
+                            &options,
+                            Some(&meta),
+                        ) {
                             Ok(()) => {
                                 exported_count += 1;
                                 if cli.verbose {
@@ -870,7 +900,11 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
                     Err(e) => {
                         error_count += 1;
                         if !cli.quiet {
-                            eprintln!("Failed to build conversation for {}: {}", session.session_id(), e);
+                            eprintln!(
+                                "Failed to build conversation for {}: {}",
+                                session.session_id(),
+                                e
+                            );
                         }
                     }
                 }
@@ -996,7 +1030,11 @@ fn export_session(
             };
             exporter.export_to_file_with_meta(&conversation, path, &options, Some(&meta))?;
             if args.session.is_some() && !cli.quiet {
-                eprintln!("Exported {} entries to {}", conversation.len(), path.display());
+                eprintln!(
+                    "Exported {} entries to {}",
+                    conversation.len(),
+                    path.display()
+                );
             }
             return Ok(true);
         } else {
@@ -1074,9 +1112,7 @@ fn export_session(
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
             ExportFormatArg::Html => {
-                let exporter = HtmlExporter::new()
-                    .with_toc(args.toc)
-                    .dark_theme(args.dark);
+                let exporter = HtmlExporter::new().with_toc(args.toc).dark_theme(args.dark);
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
             ExportFormatArg::Sqlite => {
@@ -1093,7 +1129,11 @@ fn export_session(
         atomic.finish()?;
 
         if args.session.is_some() && !cli.quiet {
-            eprintln!("Exported {} entries to {}", conversation.len(), path.display());
+            eprintln!(
+                "Exported {} entries to {}",
+                conversation.len(),
+                path.display()
+            );
         }
     } else {
         // Write to stdout (no atomic write needed)
@@ -1128,9 +1168,7 @@ fn export_session(
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
             ExportFormatArg::Html => {
-                let exporter = HtmlExporter::new()
-                    .with_toc(args.toc)
-                    .dark_theme(args.dark);
+                let exporter = HtmlExporter::new().with_toc(args.toc).dark_theme(args.dark);
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
             ExportFormatArg::Sqlite => {
@@ -1301,16 +1339,20 @@ fn upload_to_gist(
 
     // Write content to stdin
     if let Some(stdin) = child.stdin.as_mut() {
-        stdin.write_all(content.as_bytes()).map_err(|e| SnatchError::ExportError {
-            message: format!("Failed to write to gh stdin: {e}"),
-            source: Some(Box::new(e)),
-        })?;
+        stdin
+            .write_all(content.as_bytes())
+            .map_err(|e| SnatchError::ExportError {
+                message: format!("Failed to write to gh stdin: {e}"),
+                source: Some(Box::new(e)),
+            })?;
     }
 
-    let output = child.wait_with_output().map_err(|e| SnatchError::ExportError {
-        message: format!("Failed to wait for gh CLI: {e}"),
-        source: Some(Box::new(e)),
-    })?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| SnatchError::ExportError {
+            message: format!("Failed to wait for gh CLI: {e}"),
+            source: Some(Box::new(e)),
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1334,6 +1376,7 @@ fn upload_to_gist(
 }
 
 /// Export a conversation to a string for gist upload.
+#[allow(clippy::fn_params_excessive_bools)]
 fn export_to_string(
     conversation: &Conversation,
     format: ExportFormatArg,
@@ -1374,9 +1417,7 @@ fn export_to_string(
             exporter.export_conversation(conversation, &mut buffer, options)?;
         }
         ExportFormatArg::Html => {
-            let exporter = HtmlExporter::new()
-                .with_toc(toc)
-                .dark_theme(dark);
+            let exporter = HtmlExporter::new().with_toc(toc).dark_theme(dark);
             exporter.export_conversation(conversation, &mut buffer, options)?;
         }
         ExportFormatArg::Sqlite => {
@@ -1444,7 +1485,11 @@ fn export_session_with_template(
                     });
                 }
                 if !cli.quiet {
-                    eprintln!("Copied {} entries to clipboard using template '{}'.", conversation.len(), template_name);
+                    eprintln!(
+                        "Copied {} entries to clipboard using template '{}'.",
+                        conversation.len(),
+                        template_name
+                    );
                 }
             }
             Err(e) => {
@@ -1646,7 +1691,8 @@ fn render_entry(entry: &LogEntry, template: &ExportTemplate) -> String {
                     ContentBlock::ToolUse(tool) => {
                         if let Some(ref tmpl) = template.tool_use_template {
                             if !tmpl.is_empty() {
-                                let input_str = serde_json::to_string(&tool.input).unwrap_or_default();
+                                let input_str =
+                                    serde_json::to_string(&tool.input).unwrap_or_default();
                                 result.push_str(
                                     &tmpl
                                         .replace("{{tool_name}}", &tool.name)

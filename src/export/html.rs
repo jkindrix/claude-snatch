@@ -117,17 +117,20 @@ impl HtmlExporter {
     }
 
     /// Write the HTML header.
-    fn write_document_start<W: Write>(
-        &self,
-        writer: &mut W,
-        title: &str,
-    ) -> Result<()> {
+    fn write_document_start<W: Write>(&self, writer: &mut W, title: &str) -> Result<()> {
         writeln!(writer, "<!DOCTYPE html>")?;
         writeln!(writer, "<html lang=\"en\">")?;
         writeln!(writer, "<head>")?;
         writeln!(writer, "  <meta charset=\"UTF-8\">")?;
-        writeln!(writer, "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">")?;
-        writeln!(writer, "  <meta name=\"generator\" content=\"claude-snatch {}\">", crate::VERSION)?;
+        writeln!(
+            writer,
+            "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+        )?;
+        writeln!(
+            writer,
+            "  <meta name=\"generator\" content=\"claude-snatch {}\">",
+            crate::VERSION
+        )?;
         writeln!(writer, "  <title>{}</title>", escape_html(title))?;
 
         if self.inline_styles {
@@ -157,7 +160,9 @@ impl HtmlExporter {
     /// Write inline CSS styles.
     fn write_styles<W: Write>(&self, writer: &mut W) -> Result<()> {
         writeln!(writer, "  <style>")?;
-        writeln!(writer, r#"
+        writeln!(
+            writer,
+            r#"
     :root {{
       --bg-color: #ffffff;
       --text-color: #1a1a1a;
@@ -516,7 +521,8 @@ impl HtmlExporter {
         padding: 20px;
       }}
     }}
-  "#)?;
+  "#
+        )?;
         writeln!(writer, "  </style>")?;
         Ok(())
     }
@@ -530,7 +536,9 @@ impl HtmlExporter {
         }
 
         // Add toggle script
-        writeln!(writer, r#"<script>
+        writeln!(
+            writer,
+            r#"<script>
 document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
   header.addEventListener('click', () => {{
     const body = header.nextElementSibling;
@@ -539,11 +547,14 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
     if (icon) icon.classList.toggle('collapsed');
   }});
 }});
-</script>"#)?;
+</script>"#
+        )?;
 
         // Add TOC script if enabled
         if self.include_toc {
-            writeln!(writer, r#"<script>
+            writeln!(
+                writer,
+                r#"<script>
 (function() {{
   // Populate TOC from messages
   const tocList = document.getElementById('toc-list');
@@ -615,7 +626,8 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
     }});
   }});
 }})();
-</script>"#)?;
+</script>"#
+            )?;
         }
 
         writeln!(writer, "</body>")?;
@@ -643,20 +655,32 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
         // Messages
         writeln!(writer, "    <div class=\"stat-item\">")?;
         writeln!(writer, "      <div class=\"stat-label\">Messages</div>")?;
-        writeln!(writer, "      <div class=\"stat-value\">{}</div>", summary.total_messages)?;
+        writeln!(
+            writer,
+            "      <div class=\"stat-value\">{}</div>",
+            summary.total_messages
+        )?;
         writeln!(writer, "    </div>")?;
 
         // Tokens
         writeln!(writer, "    <div class=\"stat-item\">")?;
         writeln!(writer, "      <div class=\"stat-label\">Tokens</div>")?;
-        writeln!(writer, "      <div class=\"stat-value\">{}</div>", summary.total_tokens)?;
+        writeln!(
+            writer,
+            "      <div class=\"stat-value\">{}</div>",
+            summary.total_tokens
+        )?;
         writeln!(writer, "    </div>")?;
 
         // Tool invocations
         if summary.tool_invocations > 0 {
             writeln!(writer, "    <div class=\"stat-item\">")?;
             writeln!(writer, "      <div class=\"stat-label\">Tool Uses</div>")?;
-            writeln!(writer, "      <div class=\"stat-value\">{}</div>", summary.tool_invocations)?;
+            writeln!(
+                writer,
+                "      <div class=\"stat-value\">{}</div>",
+                summary.tool_invocations
+            )?;
             writeln!(writer, "    </div>")?;
         }
 
@@ -672,7 +696,11 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
             };
             writeln!(writer, "    <div class=\"stat-item\">")?;
             writeln!(writer, "      <div class=\"stat-label\">Duration</div>")?;
-            writeln!(writer, "      <div class=\"stat-value\">{}</div>", duration_str)?;
+            writeln!(
+                writer,
+                "      <div class=\"stat-value\">{}</div>",
+                duration_str
+            )?;
             writeln!(writer, "    </div>")?;
         }
 
@@ -701,8 +729,11 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
         writeln!(writer, "  <div class=\"message-header\">")?;
         writeln!(writer, "    <span class=\"message-role\">User</span>")?;
         if options.include_timestamps {
-            writeln!(writer, "    <span class=\"message-timestamp\">{}</span>",
-                format_timestamp(&user.timestamp))?;
+            writeln!(
+                writer,
+                "    <span class=\"message-timestamp\">{}</span>",
+                format_timestamp(&user.timestamp)
+            )?;
         }
         writeln!(writer, "  </div>")?;
 
@@ -742,8 +773,11 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
         writeln!(writer, "  <div class=\"message-header\">")?;
         writeln!(writer, "    <span class=\"message-role\">Assistant</span>")?;
         if options.include_timestamps {
-            writeln!(writer, "    <span class=\"message-timestamp\">{}</span>",
-                format_timestamp(&assistant.timestamp))?;
+            writeln!(
+                writer,
+                "    <span class=\"message-timestamp\">{}</span>",
+                format_timestamp(&assistant.timestamp)
+            )?;
         }
         writeln!(writer, "  </div>")?;
 
@@ -784,8 +818,11 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
         writeln!(writer, "  <div class=\"message-header\">")?;
         writeln!(writer, "    <span class=\"message-role\">System</span>")?;
         if options.include_timestamps {
-            writeln!(writer, "    <span class=\"message-timestamp\">{}</span>",
-                format_timestamp(&system.timestamp))?;
+            writeln!(
+                writer,
+                "    <span class=\"message-timestamp\">{}</span>",
+                format_timestamp(&system.timestamp)
+            )?;
         }
         writeln!(writer, "  </div>")?;
 
@@ -802,15 +839,31 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
 
     /// Write a thinking block.
     fn write_thinking<W: Write>(&self, writer: &mut W, thinking: &ThinkingBlock) -> Result<()> {
-        let collapsed_class = if self.collapse_thinking { " collapsed" } else { "" };
-        let icon_class = if self.collapse_thinking { " collapsed" } else { "" };
+        let collapsed_class = if self.collapse_thinking {
+            " collapsed"
+        } else {
+            ""
+        };
+        let icon_class = if self.collapse_thinking {
+            " collapsed"
+        } else {
+            ""
+        };
 
         writeln!(writer, "    <div class=\"thinking\">")?;
         writeln!(writer, "      <div class=\"thinking-header\">")?;
         writeln!(writer, "        <span>Thinking</span>")?;
-        writeln!(writer, "        <span class=\"toggle-icon{}\">▼</span>", icon_class)?;
+        writeln!(
+            writer,
+            "        <span class=\"toggle-icon{}\">▼</span>",
+            icon_class
+        )?;
         writeln!(writer, "      </div>")?;
-        writeln!(writer, "      <div class=\"thinking-body{}\">", collapsed_class)?;
+        writeln!(
+            writer,
+            "      <div class=\"thinking-body{}\">",
+            collapsed_class
+        )?;
         writeln!(writer, "        <p>{}</p>", escape_html(&thinking.thinking))?;
         writeln!(writer, "      </div>")?;
         writeln!(writer, "    </div>")?;
@@ -820,17 +873,36 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
 
     /// Write a tool use block.
     fn write_tool_use<W: Write>(&self, writer: &mut W, tool_use: &ToolUse) -> Result<()> {
-        let collapsed_class = if self.collapse_tools { " collapsed" } else { "" };
-        let icon_class = if self.collapse_tools { " collapsed" } else { "" };
+        let collapsed_class = if self.collapse_tools {
+            " collapsed"
+        } else {
+            ""
+        };
+        let icon_class = if self.collapse_tools {
+            " collapsed"
+        } else {
+            ""
+        };
 
         writeln!(writer, "    <div class=\"tool-use\">")?;
         writeln!(writer, "      <div class=\"tool-header\">")?;
-        writeln!(writer, "        <span class=\"tool-name\">Tool: {}</span>", escape_html(&tool_use.name))?;
-        writeln!(writer, "        <span class=\"toggle-icon{}\">▼</span>", icon_class)?;
+        writeln!(
+            writer,
+            "        <span class=\"tool-name\">Tool: {}</span>",
+            escape_html(&tool_use.name)
+        )?;
+        writeln!(
+            writer,
+            "        <span class=\"toggle-icon{}\">▼</span>",
+            icon_class
+        )?;
         writeln!(writer, "      </div>")?;
         writeln!(writer, "      <div class=\"tool-body{}\">", collapsed_class)?;
-        writeln!(writer, "        <pre><code>{}</code></pre>",
-            escape_html(&serde_json::to_string_pretty(&tool_use.input).unwrap_or_default()))?;
+        writeln!(
+            writer,
+            "        <pre><code>{}</code></pre>",
+            escape_html(&serde_json::to_string_pretty(&tool_use.input).unwrap_or_default())
+        )?;
         writeln!(writer, "      </div>")?;
         writeln!(writer, "    </div>")?;
 
@@ -839,20 +911,43 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
 
     /// Write a tool result block.
     fn write_tool_result<W: Write>(&self, writer: &mut W, result: &ToolResult) -> Result<()> {
-        let collapsed_class = if self.collapse_tools { " collapsed" } else { "" };
-        let icon_class = if self.collapse_tools { " collapsed" } else { "" };
+        let collapsed_class = if self.collapse_tools {
+            " collapsed"
+        } else {
+            ""
+        };
+        let icon_class = if self.collapse_tools {
+            " collapsed"
+        } else {
+            ""
+        };
 
-        let status = if result.is_explicit_error() { "Error" } else { "Result" };
+        let status = if result.is_explicit_error() {
+            "Error"
+        } else {
+            "Result"
+        };
 
         writeln!(writer, "    <div class=\"tool-result\">")?;
         writeln!(writer, "      <div class=\"tool-header\">")?;
-        writeln!(writer, "        <span class=\"tool-name\">Tool {}</span>", status)?;
-        writeln!(writer, "        <span class=\"toggle-icon{}\">▼</span>", icon_class)?;
+        writeln!(
+            writer,
+            "        <span class=\"tool-name\">Tool {}</span>",
+            status
+        )?;
+        writeln!(
+            writer,
+            "        <span class=\"toggle-icon{}\">▼</span>",
+            icon_class
+        )?;
         writeln!(writer, "      </div>")?;
         writeln!(writer, "      <div class=\"tool-body{}\">", collapsed_class)?;
         let content = result.content_as_string().unwrap_or("[complex content]");
-        writeln!(writer, "        <pre><code>{}</code></pre>",
-            escape_html(content))?;
+        writeln!(
+            writer,
+            "        <pre><code>{}</code></pre>",
+            escape_html(content)
+        )?;
         writeln!(writer, "      </div>")?;
         writeln!(writer, "    </div>")?;
 
@@ -866,12 +961,20 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
         match &image.source {
             ImageSource::Base64 { media_type, data } if self.inline_images => {
                 // Inline as data URL
-                writeln!(writer, "      <img src=\"data:{};base64,{}\" alt=\"User-provided image\" />",
-                    escape_html(media_type), data)?;
+                writeln!(
+                    writer,
+                    "      <img src=\"data:{};base64,{}\" alt=\"User-provided image\" />",
+                    escape_html(media_type),
+                    data
+                )?;
                 if let Some(size) = image.source.approximate_size() {
                     let size_str = format_bytes(size);
-                    writeln!(writer, "      <div class=\"image-caption\">{} image ({})</div>",
-                        escape_html(media_type), size_str)?;
+                    writeln!(
+                        writer,
+                        "      <div class=\"image-caption\">{} image ({})</div>",
+                        escape_html(media_type),
+                        size_str
+                    )?;
                 }
             }
             ImageSource::Base64 { media_type, data } => {
@@ -879,32 +982,60 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
                 if let Some(size) = image.source.approximate_size() {
                     let size_str = format_bytes(size);
                     writeln!(writer, "      <div class=\"image-error\">")?;
-                    writeln!(writer, "        [Image: {} ({}) - base64 data available]",
-                        escape_html(media_type), size_str)?;
+                    writeln!(
+                        writer,
+                        "        [Image: {} ({}) - base64 data available]",
+                        escape_html(media_type),
+                        size_str
+                    )?;
                     writeln!(writer, "      </div>")?;
                 } else {
                     writeln!(writer, "      <div class=\"image-error\">")?;
-                    writeln!(writer, "        [Image: {} - base64 data {}]",
-                        escape_html(media_type), if data.is_empty() { "empty" } else { "available" })?;
+                    writeln!(
+                        writer,
+                        "        [Image: {} - base64 data {}]",
+                        escape_html(media_type),
+                        if data.is_empty() {
+                            "empty"
+                        } else {
+                            "available"
+                        }
+                    )?;
                     writeln!(writer, "      </div>")?;
                 }
             }
             ImageSource::Url { url } => {
                 // External URL - embed or link based on settings
                 if self.inline_images {
-                    writeln!(writer, "      <img src=\"{}\" alt=\"External image\" />", escape_html(url))?;
-                    writeln!(writer, "      <div class=\"image-caption\">Source: {}</div>", escape_html(url))?;
+                    writeln!(
+                        writer,
+                        "      <img src=\"{}\" alt=\"External image\" />",
+                        escape_html(url)
+                    )?;
+                    writeln!(
+                        writer,
+                        "      <div class=\"image-caption\">Source: {}</div>",
+                        escape_html(url)
+                    )?;
                 } else {
                     writeln!(writer, "      <div class=\"image-error\">")?;
-                    writeln!(writer, "        <a href=\"{}\" target=\"_blank\">[External image: {}]</a>",
-                        escape_html(url), escape_html(url))?;
+                    writeln!(
+                        writer,
+                        "        <a href=\"{}\" target=\"_blank\">[External image: {}]</a>",
+                        escape_html(url),
+                        escape_html(url)
+                    )?;
                     writeln!(writer, "      </div>")?;
                 }
             }
             ImageSource::File { file_id } => {
                 // Files API reference (beta feature) - show file ID
                 writeln!(writer, "      <div class=\"image-error\">")?;
-                writeln!(writer, "        [Files API image: {}]", escape_html(file_id))?;
+                writeln!(
+                    writer,
+                    "        [Files API image: {}]",
+                    escape_html(file_id)
+                )?;
                 writeln!(writer, "      </div>")?;
             }
         }
@@ -921,7 +1052,10 @@ impl Exporter for HtmlExporter {
         writer: &mut W,
         options: &ExportOptions,
     ) -> Result<()> {
-        let title = self.title.clone().unwrap_or_else(|| "Claude Code Conversation".to_string());
+        let title = self
+            .title
+            .clone()
+            .unwrap_or_else(|| "Claude Code Conversation".to_string());
         self.write_document_start(writer, &title)?;
         self.write_session_header(writer, conversation)?;
 
@@ -957,7 +1091,10 @@ impl Exporter for HtmlExporter {
         writer: &mut W,
         options: &ExportOptions,
     ) -> Result<()> {
-        let title = self.title.clone().unwrap_or_else(|| "Claude Code Conversation".to_string());
+        let title = self
+            .title
+            .clone()
+            .unwrap_or_else(|| "Claude Code Conversation".to_string());
         self.write_document_start(writer, &title)?;
 
         for entry in entries {
@@ -1033,9 +1170,7 @@ mod tests {
 
     #[test]
     fn test_html_exporter_with_toc() {
-        let exporter = HtmlExporter::new()
-            .with_toc(true)
-            .dark_theme(false);
+        let exporter = HtmlExporter::new().with_toc(true).dark_theme(false);
 
         assert!(exporter.include_toc);
         assert!(!exporter.dark_theme);
@@ -1082,13 +1217,11 @@ mod tests {
 
     #[test]
     fn test_html_exporter_inline_images() {
-        let exporter = HtmlExporter::new()
-            .inline_images(true);
+        let exporter = HtmlExporter::new().inline_images(true);
 
         assert!(exporter.inline_images);
 
-        let disabled = HtmlExporter::new()
-            .inline_images(false);
+        let disabled = HtmlExporter::new().inline_images(false);
 
         assert!(!disabled.inline_images);
     }

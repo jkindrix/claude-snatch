@@ -7,7 +7,6 @@ use crate::cli::{Cli, NotesArgs, OutputFormat};
 use crate::error::{Result, SnatchError};
 use crate::notes::{load_notes, save_notes};
 
-
 /// JSON output for notes list.
 #[derive(serde::Serialize)]
 struct NotesListOutput {
@@ -86,10 +85,13 @@ pub fn run(cli: &Cli, args: &NotesArgs) -> Result<()> {
         }
 
         "add" => {
-            let text = args.text.as_deref().ok_or_else(|| SnatchError::InvalidArgument {
-                name: "text".into(),
-                reason: "--text is required for add operation".into(),
-            })?;
+            let text = args
+                .text
+                .as_deref()
+                .ok_or_else(|| SnatchError::InvalidArgument {
+                    name: "text".into(),
+                    reason: "--text is required for add operation".into(),
+                })?;
 
             let mut store = load_notes(project_dir)?;
             let id = store.add_note(text.to_string(), args.session_id.clone());

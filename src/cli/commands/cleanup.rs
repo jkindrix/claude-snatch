@@ -4,7 +4,7 @@
 
 use std::io::{self, Write};
 
-use crate::cli::{Cli, CleanupArgs, OutputFormat};
+use crate::cli::{CleanupArgs, Cli, OutputFormat};
 use crate::discovery::{Session, SessionFilter, SessionState};
 use crate::error::{Result, SnatchError};
 
@@ -229,11 +229,7 @@ pub fn run(cli: &Cli, args: &CleanupArgs) -> Result<()> {
             }
             Err(e) => {
                 failed += 1;
-                eprintln!(
-                    "Failed to delete {}: {}",
-                    session.session_id(),
-                    e
-                );
+                eprintln!("Failed to delete {}: {}", session.session_id(), e);
             }
         }
     }

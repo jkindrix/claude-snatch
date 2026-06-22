@@ -152,9 +152,7 @@ impl Theme {
 
     /// Get style for user messages.
     pub fn user_style(&self) -> Style {
-        Style::default()
-            .fg(self.user)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(self.user).add_modifier(Modifier::BOLD)
     }
 
     /// Get style for assistant messages.
@@ -178,9 +176,7 @@ impl Theme {
 
     /// Get style for errors.
     pub fn error_style(&self) -> Style {
-        Style::default()
-            .fg(self.error)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(self.error).add_modifier(Modifier::BOLD)
     }
 
     /// Get style for warnings.

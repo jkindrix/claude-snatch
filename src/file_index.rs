@@ -50,17 +50,15 @@ impl FileIndex {
             for entry in &entries {
                 if let LogEntry::FileHistorySnapshot(snapshot) = entry {
                     for (file_path, backup) in &snapshot.snapshot.tracked_file_backups {
-                        index
-                            .entries
-                            .entry(file_path.clone())
-                            .or_default()
-                            .push(FileModification {
+                        index.entries.entry(file_path.clone()).or_default().push(
+                            FileModification {
                                 session_id: sid.clone(),
                                 project_path: project_path.clone(),
                                 message_id: snapshot.message_id.clone(),
                                 timestamp: backup.backup_time,
                                 version: backup.version,
-                            });
+                            },
+                        );
                     }
                 }
             }

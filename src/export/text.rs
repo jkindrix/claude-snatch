@@ -11,7 +11,7 @@ use crate::analytics::SessionAnalytics;
 use crate::error::Result;
 use crate::model::{
     content::{ThinkingBlock, ToolResult, ToolUse},
-    AssistantMessage, ContentBlock, LogEntry, SystemMessage, SummaryMessage, UserMessage,
+    AssistantMessage, ContentBlock, LogEntry, SummaryMessage, SystemMessage, UserMessage,
 };
 use crate::reconstruction::Conversation;
 
@@ -79,7 +79,11 @@ impl TextExporter {
     /// Write a separator line.
     fn write_separator<W: Write>(&self, writer: &mut W) -> Result<()> {
         if self.use_separators {
-            let width = if self.line_width > 0 { self.line_width } else { 60 };
+            let width = if self.line_width > 0 {
+                self.line_width
+            } else {
+                60
+            };
             let sep: String = std::iter::repeat(self.separator_char).take(width).collect();
             writeln!(writer, "{sep}")?;
         }
@@ -165,10 +169,10 @@ impl TextExporter {
             let summary = analytics.summary_report();
             writeln!(writer)?;
             writeln!(writer, "STATISTICS:")?;
-            writeln!(writer, "  Messages: {} ({} user, {} assistant)",
-                summary.total_messages,
-                summary.user_messages,
-                summary.assistant_messages
+            writeln!(
+                writer,
+                "  Messages: {} ({} user, {} assistant)",
+                summary.total_messages, summary.user_messages, summary.assistant_messages
             )?;
             writeln!(writer, "  Total Tokens: {}", summary.total_tokens)?;
             writeln!(writer, "  Input Tokens: {}", summary.input_tokens)?;
@@ -198,15 +202,13 @@ impl TextExporter {
         match &user.message {
             crate::model::UserContent::Simple(simple) => !simple.content.trim().is_empty(),
             crate::model::UserContent::Blocks(blocks) => {
-                blocks.content.iter().any(|block| {
-                    match block {
-                        ContentBlock::Text(t) => !t.text.trim().is_empty(),
-                        ContentBlock::ToolResult(_) => options.should_include_tool_results(),
-                        ContentBlock::ToolUse(_) => options.should_include_tool_use(),
-                        ContentBlock::Thinking(_) => options.should_include_thinking(),
-                        ContentBlock::Image(_) => true,
-                        ContentBlock::Unknown => false,
-                    }
+                blocks.content.iter().any(|block| match block {
+                    ContentBlock::Text(t) => !t.text.trim().is_empty(),
+                    ContentBlock::ToolResult(_) => options.should_include_tool_results(),
+                    ContentBlock::ToolUse(_) => options.should_include_tool_use(),
+                    ContentBlock::Thinking(_) => options.should_include_thinking(),
+                    ContentBlock::Image(_) => true,
+                    ContentBlock::Unknown => false,
                 })
             }
         }
@@ -270,7 +272,9 @@ impl TextExporter {
         if options.include_usage {
             if let Some(usage) = &assistant.message.usage {
                 writeln!(writer)?;
-                writeln!(writer, "  [Tokens: {} in, {} out]",
+                writeln!(
+                    writer,
+                    "  [Tokens: {} in, {} out]",
                     usage.total_input_tokens(),
                     usage.output_tokens
                 )?;
@@ -323,11 +327,7 @@ impl TextExporter {
     }
 
     /// Write a thinking block.
-    fn write_thinking<W: Write>(
-        &self,
-        writer: &mut W,
-        thinking: &ThinkingBlock,
-    ) -> Result<()> {
+    fn write_thinking<W: Write>(&self, writer: &mut W, thinking: &ThinkingBlock) -> Result<()> {
         writeln!(writer, "  [THINKING]")?;
         for line in thinking.thinking.lines() {
             writeln!(writer, "  | {}", self.wrap_text(line).trim())?;
@@ -338,11 +338,7 @@ impl TextExporter {
     }
 
     /// Write a tool use block.
-    fn write_tool_use<W: Write>(
-        &self,
-        writer: &mut W,
-        tool_use: &ToolUse,
-    ) -> Result<()> {
+    fn write_tool_use<W: Write>(&self, writer: &mut W, tool_use: &ToolUse) -> Result<()> {
         writeln!(writer, "  [TOOL: {}]", tool_use.name)?;
         writeln!(writer, "  ID: {}", tool_use.id)?;
         let input = serde_json::to_string_pretty(&tool_use.input).unwrap_or_default();
@@ -355,12 +351,12 @@ impl TextExporter {
     }
 
     /// Write a tool result block.
-    fn write_tool_result<W: Write>(
-        &self,
-        writer: &mut W,
-        result: &ToolResult,
-    ) -> Result<()> {
-        let status = if result.is_explicit_error() { "ERROR" } else { "OK" };
+    fn write_tool_result<W: Write>(&self, writer: &mut W, result: &ToolResult) -> Result<()> {
+        let status = if result.is_explicit_error() {
+            "ERROR"
+        } else {
+            "OK"
+        };
         writeln!(writer, "  [RESULT: {} ({})]", result.tool_use_id, status)?;
 
         let content_str = match &result.content {

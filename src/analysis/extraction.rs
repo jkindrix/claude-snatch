@@ -100,9 +100,7 @@ pub fn extract_user_prompt_text(entry: &LogEntry) -> Option<String> {
                     .content
                     .iter()
                     .filter_map(|c| match c {
-                        ContentBlock::Text(t) if !t.text.trim().is_empty() => {
-                            Some(t.text.trim())
-                        }
+                        ContentBlock::Text(t) if !t.text.trim().is_empty() => Some(t.text.trim()),
                         _ => None,
                     })
                     .collect();
@@ -232,11 +230,7 @@ pub fn extract_files_from_tools(entries: &[&LogEntry]) -> Vec<String> {
             for tool_use in assistant.message.tool_uses() {
                 match tool_use.name.as_str() {
                     "Write" | "Edit" | "Read" => {
-                        if let Some(fp) = tool_use
-                            .input
-                            .get("file_path")
-                            .and_then(|v| v.as_str())
-                        {
+                        if let Some(fp) = tool_use.input.get("file_path").and_then(|v| v.as_str()) {
                             let basename = std::path::Path::new(fp)
                                 .file_name()
                                 .and_then(|n| n.to_str())
@@ -450,10 +444,7 @@ mod tests {
         let input =
             serde_json::json!({"file_path": "/home/user/src/main.rs", "content": "fn main() {}"});
         let summary = extract_tool_input_summary("Write", &input);
-        assert_eq!(
-            summary.get("file_path").unwrap(),
-            "/home/user/src/main.rs"
-        );
+        assert_eq!(summary.get("file_path").unwrap(), "/home/user/src/main.rs");
         assert!(!summary.contains_key("content"));
     }
 
@@ -475,11 +466,19 @@ mod tests {
 
     #[test]
     fn test_is_noise_text_local_command() {
-        assert!(is_noise_text("<local-command-caveat>Caveat: blah</local-command-caveat>"));
-        assert!(is_noise_text("<local-command-stdout>Reconnected to snatch.</local-command-stdout>"));
-        assert!(is_noise_text("<local-command-stderr>error output</local-command-stderr>"));
+        assert!(is_noise_text(
+            "<local-command-caveat>Caveat: blah</local-command-caveat>"
+        ));
+        assert!(is_noise_text(
+            "<local-command-stdout>Reconnected to snatch.</local-command-stdout>"
+        ));
+        assert!(is_noise_text(
+            "<local-command-stderr>error output</local-command-stderr>"
+        ));
         assert!(is_noise_text("<command-name>/compact</command-name>"));
-        assert!(is_noise_text("<system-reminder>Some reminder</system-reminder>"));
+        assert!(is_noise_text(
+            "<system-reminder>Some reminder</system-reminder>"
+        ));
     }
 
     #[test]

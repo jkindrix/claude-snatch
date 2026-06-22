@@ -15,6 +15,9 @@ use crate::discovery::Session;
 use crate::error::{Result, SnatchError};
 use crate::model::{ContentBlock, LogEntry};
 
+/// (project_path, match_count, last_modified) for a session's search matches.
+type SessionMatchCount = (String, usize, Option<SystemTime>);
+
 /// Fuzzy matching result with score.
 #[derive(Debug)]
 struct FuzzyMatch {
@@ -224,9 +227,10 @@ fn get_entry_tokens(entry: &LogEntry) -> Option<u64> {
     match entry {
         LogEntry::Assistant(msg) => {
             // Get total tokens from usage info
-            msg.message.usage.as_ref().map(|u| {
-                u.input_tokens + u.output_tokens
-            })
+            msg.message
+                .usage
+                .as_ref()
+                .map(|u| u.input_tokens + u.output_tokens)
         }
         _ => None,
     }
@@ -238,7 +242,10 @@ fn matches_model(entry: &LogEntry, model_filter: &str) -> bool {
     match entry {
         LogEntry::Assistant(msg) => {
             // Check if assistant message has model info in the message
-            msg.message.model.to_lowercase().contains(&model_filter_lower)
+            msg.message
+                .model
+                .to_lowercase()
+                .contains(&model_filter_lower)
         }
         _ => true, // Non-assistant messages don't have model info, so don't filter them out
     }
@@ -359,51 +366,82 @@ fn extract_text_for_scope<'a>(entry: &'a LogEntry, scope: &BatchScope) -> Vec<&'
         (LogEntry::User(user), BatchScope::Default | BatchScope::User | BatchScope::All) => {
             match &user.message {
                 crate::model::UserContent::Simple(s) => vec![s.content.as_str()],
-                crate::model::UserContent::Blocks(b) => {
-                    b.content.iter().filter_map(|c| {
-                        if let ContentBlock::Text(t) = c { Some(t.text.as_str()) } else { None }
-                    }).collect()
-                }
+                crate::model::UserContent::Blocks(b) => b
+                    .content
+                    .iter()
+                    .filter_map(|c| {
+                        if let ContentBlock::Text(t) = c {
+                            Some(t.text.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect(),
             }
         }
         // Thinking (additive): user text is included
-        (LogEntry::User(user), BatchScope::Thinking) => {
-            match &user.message {
-                crate::model::UserContent::Simple(s) => vec![s.content.as_str()],
-                crate::model::UserContent::Blocks(b) => {
-                    b.content.iter().filter_map(|c| {
-                        if let ContentBlock::Text(t) = c { Some(t.text.as_str()) } else { None }
-                    }).collect()
+        (LogEntry::User(user), BatchScope::Thinking) => match &user.message {
+            crate::model::UserContent::Simple(s) => vec![s.content.as_str()],
+            crate::model::UserContent::Blocks(b) => b
+                .content
+                .iter()
+                .filter_map(|c| {
+                    if let ContentBlock::Text(t) = c {
+                        Some(t.text.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        },
+        (
+            LogEntry::Assistant(assistant),
+            BatchScope::Default | BatchScope::Assistant | BatchScope::All,
+        ) => assistant
+            .message
+            .content
+            .iter()
+            .filter_map(|block| {
+                if let ContentBlock::Text(t) = block {
+                    Some(t.text.as_str())
+                } else {
+                    None
                 }
-            }
-        }
-        (LogEntry::Assistant(assistant), BatchScope::Default | BatchScope::Assistant | BatchScope::All) => {
-            assistant.message.content.iter().filter_map(|block| {
-                if let ContentBlock::Text(t) = block { Some(t.text.as_str()) } else { None }
-            }).collect()
-        }
+            })
+            .collect(),
         // Thinking (additive): assistant text + thinking blocks
-        (LogEntry::Assistant(assistant), BatchScope::Thinking) => {
-            assistant.message.content.iter().filter_map(|block| {
-                match block {
-                    ContentBlock::Text(t) => Some(t.text.as_str()),
-                    ContentBlock::Thinking(t) => Some(t.thinking.as_str()),
-                    _ => None,
-                }
-            }).collect()
-        }
+        (LogEntry::Assistant(assistant), BatchScope::Thinking) => assistant
+            .message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text(t) => Some(t.text.as_str()),
+                ContentBlock::Thinking(t) => Some(t.thinking.as_str()),
+                _ => None,
+            })
+            .collect(),
         // ThinkingOnly (exclusive): thinking blocks only
-        (LogEntry::Assistant(assistant), BatchScope::ThinkingOnly) => {
-            assistant.message.content.iter().filter_map(|block| {
-                if let ContentBlock::Thinking(t) = block { Some(t.thinking.as_str()) } else { None }
-            }).collect()
-        }
+        (LogEntry::Assistant(assistant), BatchScope::ThinkingOnly) => assistant
+            .message
+            .content
+            .iter()
+            .filter_map(|block| {
+                if let ContentBlock::Thinking(t) = block {
+                    Some(t.thinking.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect(),
         // Tools scope tool-use inputs are owned strings — handled separately
         (LogEntry::Assistant(_), BatchScope::Tools) => vec![],
         (LogEntry::System(sys), BatchScope::Default | BatchScope::Thinking | BatchScope::All) => {
             sys.content.as_deref().into_iter().collect()
         }
-        (LogEntry::Summary(summary), BatchScope::Default | BatchScope::Thinking | BatchScope::All) => {
+        (
+            LogEntry::Summary(summary),
+            BatchScope::Default | BatchScope::Thinking | BatchScope::All,
+        ) => {
             vec![summary.summary.as_str()]
         }
         _ => vec![],
@@ -428,7 +466,8 @@ fn count_tool_matches(entry: &LogEntry, regex: &Regex) -> usize {
                     }
                     ContentBlock::ToolResult(result) => {
                         if let Some(content) = &result.content {
-                            if let crate::model::content::ToolResultContent::String(text) = content {
+                            if let crate::model::content::ToolResultContent::String(text) = content
+                            {
                                 count += regex.find_iter(text).count();
                             }
                         }
@@ -492,12 +531,18 @@ fn parse_patterns_tsv(path: &std::path::Path) -> Result<Vec<BatchPattern>> {
             });
         }
         let scope = BatchScope::from_tsv_flag(fields[3])?;
-        let regex = RegexBuilder::new(fields[4])
-            .build()
-            .map_err(|e| SnatchError::InvalidArgument {
-                name: "pattern".to_string(),
-                reason: format!("Line {}: invalid regex '{}': {}", line_num + 1, fields[4], e),
-            })?;
+        let regex =
+            RegexBuilder::new(fields[4])
+                .build()
+                .map_err(|e| SnatchError::InvalidArgument {
+                    name: "pattern".to_string(),
+                    reason: format!(
+                        "Line {}: invalid regex '{}': {}",
+                        line_num + 1,
+                        fields[4],
+                        e
+                    ),
+                })?;
         patterns.push(BatchPattern {
             label: format!("{}\t{}\t{}", fields[0], fields[1], fields[2]),
             regex,
@@ -512,11 +557,12 @@ fn collect_sessions(cli: &Cli, args: &SearchArgs) -> Result<Vec<Session>> {
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
 
     let mut sessions = if let Some(session_id) = &args.session {
-        let session = claude_dir
-            .find_session(session_id)?
-            .ok_or_else(|| SnatchError::SessionNotFound {
-                session_id: session_id.clone(),
-            })?;
+        let session =
+            claude_dir
+                .find_session(session_id)?
+                .ok_or_else(|| SnatchError::SessionNotFound {
+                    session_id: session_id.clone(),
+                })?;
         vec![session]
     } else if let Some(project_filter) = &args.project {
         let projects = claude_dir.projects()?;
@@ -539,7 +585,7 @@ fn collect_sessions(cli: &Cli, args: &SearchArgs) -> Result<Vec<Session>> {
 
     // Apply --recent N (most recent sessions by modification time)
     if let Some(n) = args.recent {
-        sessions.sort_by(|a, b| b.modified_time().cmp(&a.modified_time()));
+        sessions.sort_by_key(|b| std::cmp::Reverse(b.modified_time()));
         sessions.truncate(n);
     }
 
@@ -570,7 +616,9 @@ fn run_batch(cli: &Cli, args: &SearchArgs, patterns: Vec<BatchPattern>) -> Resul
         let pb = ProgressBar::new(session_count as u64);
         pb.set_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.cyan} [{bar:40.cyan/dim}] {pos}/{len} sessions ({eta} remaining)")
+                .template(
+                    "{spinner:.cyan} [{bar:40.cyan/dim}] {pos}/{len} sessions ({eta} remaining)",
+                )
                 .unwrap()
                 .progress_chars("█▓░"),
         );
@@ -642,23 +690,31 @@ fn output_batch_aggregate(
     match cli.effective_output() {
         OutputFormat::Json => {
             if is_tsv_mode {
-                let entries: Vec<serde_json::Value> = patterns.iter().enumerate().map(|(i, p)| {
-                    let parts: Vec<&str> = p.label.splitn(3, '\t').collect();
-                    serde_json::json!({
-                        "category": parts.first().unwrap_or(&""),
-                        "subcategory": parts.get(1).unwrap_or(&""),
-                        "label": parts.get(2).unwrap_or(&""),
-                        "count": counts[i],
+                let entries: Vec<serde_json::Value> = patterns
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        let parts: Vec<&str> = p.label.splitn(3, '\t').collect();
+                        serde_json::json!({
+                            "category": parts.first().unwrap_or(&""),
+                            "subcategory": parts.get(1).unwrap_or(&""),
+                            "label": parts.get(2).unwrap_or(&""),
+                            "count": counts[i],
+                        })
                     })
-                }).collect();
+                    .collect();
                 println!("{}", serde_json::to_string_pretty(&entries)?);
             } else {
-                let map: Vec<serde_json::Value> = patterns.iter().enumerate().map(|(i, p)| {
-                    serde_json::json!({
-                        "pattern": p.label,
-                        "count": counts[i],
+                let map: Vec<serde_json::Value> = patterns
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        serde_json::json!({
+                            "pattern": p.label,
+                            "count": counts[i],
+                        })
                     })
-                }).collect();
+                    .collect();
                 println!("{}", serde_json::to_string_pretty(&map)?);
             }
         }
@@ -683,7 +739,9 @@ fn output_batch_aggregate(
                     let cat = parts.first().unwrap_or(&"");
                     let label = parts.get(2).unwrap_or(&"");
                     if *cat != prev_cat {
-                        if !prev_cat.is_empty() { println!(); }
+                        if !prev_cat.is_empty() {
+                            println!();
+                        }
                         println!("=== {} ===", cat.to_uppercase());
                         prev_cat = cat.to_string();
                     }
@@ -709,38 +767,44 @@ fn output_batch_breakdown(
 ) -> Result<()> {
     match cli.effective_output() {
         OutputFormat::Json => {
-            let entries: Vec<serde_json::Value> = patterns.iter().enumerate().map(|(i, p)| {
-                let parts: Vec<&str> = p.label.splitn(3, '\t').collect();
-                let sessions: Vec<serde_json::Value> = {
-                    let mut sess: Vec<_> = per_session[i].iter().collect();
-                    sess.sort_by(|a, b| (b.1).0.cmp(&(a.1).0));
-                    sess.iter().map(|(sid, (count, modified))| {
-                        let mut val = serde_json::json!({
-                            "session_id": sid,
-                            "count": count,
-                        });
-                        if let Some(time) = modified {
-                            val["date"] = serde_json::Value::String(format_date(time));
-                        }
-                        val
-                    }).collect()
-                };
-                if is_tsv_mode {
-                    serde_json::json!({
-                        "category": parts.first().unwrap_or(&""),
-                        "subcategory": parts.get(1).unwrap_or(&""),
-                        "label": parts.get(2).unwrap_or(&""),
-                        "count": counts[i],
-                        "sessions": sessions,
-                    })
-                } else {
-                    serde_json::json!({
-                        "pattern": p.label,
-                        "count": counts[i],
-                        "sessions": sessions,
-                    })
-                }
-            }).collect();
+            let entries: Vec<serde_json::Value> = patterns
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let parts: Vec<&str> = p.label.splitn(3, '\t').collect();
+                    let sessions: Vec<serde_json::Value> = {
+                        let mut sess: Vec<_> = per_session[i].iter().collect();
+                        sess.sort_by_key(|b| std::cmp::Reverse((b.1).0));
+                        sess.iter()
+                            .map(|(sid, (count, modified))| {
+                                let mut val = serde_json::json!({
+                                    "session_id": sid,
+                                    "count": count,
+                                });
+                                if let Some(time) = modified {
+                                    val["date"] = serde_json::Value::String(format_date(time));
+                                }
+                                val
+                            })
+                            .collect()
+                    };
+                    if is_tsv_mode {
+                        serde_json::json!({
+                            "category": parts.first().unwrap_or(&""),
+                            "subcategory": parts.get(1).unwrap_or(&""),
+                            "label": parts.get(2).unwrap_or(&""),
+                            "count": counts[i],
+                            "sessions": sessions,
+                        })
+                    } else {
+                        serde_json::json!({
+                            "pattern": p.label,
+                            "count": counts[i],
+                            "sessions": sessions,
+                        })
+                    }
+                })
+                .collect();
             println!("{}", serde_json::to_string_pretty(&entries)?);
         }
         _ => {
@@ -755,7 +819,9 @@ fn output_batch_breakdown(
                     let cat = parts.first().unwrap_or(&"");
                     let label = parts.get(2).unwrap_or(&"");
                     if *cat != prev_cat {
-                        if !prev_cat.is_empty() { println!(); }
+                        if !prev_cat.is_empty() {
+                            println!();
+                        }
                         println!("=== {} ===", cat.to_uppercase());
                         prev_cat = cat.to_string();
                     }
@@ -766,7 +832,7 @@ fn output_batch_breakdown(
 
                 // Per-session breakdown
                 let mut sess: Vec<_> = per_session[i].iter().collect();
-                sess.sort_by(|a, b| (b.1).0.cmp(&(a.1).0));
+                sess.sort_by_key(|b| std::cmp::Reverse((b.1).0));
                 for (sid, (count, modified)) in &sess {
                     let short_id = &sid[..8.min(sid.len())];
                     let date_str = modified
@@ -871,7 +937,7 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
     let mut all_results = Vec::new();
     let mut sessions_with_matches: HashSet<String> = HashSet::new();
     // Maps session_id -> (project_path, match_count, modified_time)
-    let mut match_counts: std::collections::HashMap<String, (String, usize, Option<SystemTime>)> =
+    let mut match_counts: std::collections::HashMap<String, SessionMatchCount> =
         std::collections::HashMap::new();
 
     // Create progress bar for interactive sessions with many sessions
@@ -953,8 +1019,7 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
                         session_match_count += 1;
 
                         if !args.files_only {
-                            let (phase, minutes_in, post_compaction) =
-                                phase_ctx.classify(entry);
+                            let (phase, minutes_in, post_compaction) = phase_ctx.classify(entry);
 
                             let result = SearchResult {
                                 session_id: session.session_id().to_string(),
@@ -1027,7 +1092,7 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
 
     // Sort results by relevance if requested
     if args.sort && !all_results.is_empty() {
-        all_results.sort_by(|a, b| b.score.cmp(&a.score));
+        all_results.sort_by_key(|b| std::cmp::Reverse(b.score));
     }
 
     // Output results based on mode
@@ -1084,7 +1149,7 @@ fn format_date(time: &SystemTime) -> String {
 fn output_count(
     cli: &Cli,
     args: &SearchArgs,
-    match_counts: &std::collections::HashMap<String, (String, usize, Option<SystemTime>)>,
+    match_counts: &std::collections::HashMap<String, SessionMatchCount>,
     total: usize,
 ) -> Result<()> {
     // --quiet with --count: output only the total
@@ -1130,9 +1195,8 @@ fn output_count(
                 println!("{}", total);
             } else {
                 // Multiple sessions - show per-session counts with project
-                let mut counts: Vec<(&String, &(String, usize, Option<SystemTime>))> =
-                    match_counts.iter().collect();
-                counts.sort_by(|a, b| (b.1).1.cmp(&(a.1).1));
+                let mut counts: Vec<(&String, &SessionMatchCount)> = match_counts.iter().collect();
+                counts.sort_by_key(|b| std::cmp::Reverse((b.1).1));
 
                 for (session_id, (project, count, modified)) in counts {
                     let short_id = &session_id[..8.min(session_id.len())];
@@ -1157,7 +1221,7 @@ fn output_count(
 /// Output one line per session with match count (--aggregate-by-session).
 fn output_aggregate(
     cli: &Cli,
-    match_counts: &std::collections::HashMap<String, (String, usize, Option<SystemTime>)>,
+    match_counts: &std::collections::HashMap<String, SessionMatchCount>,
     total: usize,
 ) -> Result<()> {
     if match_counts.is_empty() {
@@ -1182,7 +1246,10 @@ fn output_aggregate(
                 })
                 .collect();
             entries.sort_by(|a, b| {
-                b["count"].as_u64().unwrap_or(0).cmp(&a["count"].as_u64().unwrap_or(0))
+                b["count"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    .cmp(&a["count"].as_u64().unwrap_or(0))
             });
             let output = serde_json::json!({
                 "total": total,
@@ -1191,9 +1258,8 @@ fn output_aggregate(
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
         _ => {
-            let mut counts: Vec<(&String, &(String, usize, Option<SystemTime>))> =
-                match_counts.iter().collect();
-            counts.sort_by(|a, b| (b.1).1.cmp(&(a.1).1));
+            let mut counts: Vec<(&String, &SessionMatchCount)> = match_counts.iter().collect();
+            counts.sort_by_key(|b| std::cmp::Reverse((b.1).1));
 
             for (session_id, (_project, count, modified)) in &counts {
                 let short_id = &session_id[..8.min(session_id.len())];
@@ -1203,7 +1269,11 @@ fn output_aggregate(
                     .unwrap_or_else(|| "unknown".to_string());
                 println!("{}  {}  {} matches", date_str, short_id, count);
             }
-            println!("\nTotal: {} matches across {} sessions", total, counts.len());
+            println!(
+                "\nTotal: {} matches across {} sessions",
+                total,
+                counts.len()
+            );
         }
     }
     Ok(())
@@ -1252,7 +1322,8 @@ fn output_full_results(
         }
         OutputFormat::Compact => {
             for result in all_results {
-                println!("{} ({}):{}: {}",
+                println!(
+                    "{} ({}):{}: {}",
                     &result.session_id[..8.min(result.session_id.len())],
                     result.project,
                     result.location,
@@ -1282,14 +1353,16 @@ fn output_full_results(
             for result in all_results {
                 if result.session_id != current_session {
                     current_session = result.session_id.clone();
-                    println!("Session: {} ({})",
+                    println!(
+                        "Session: {} ({})",
                         &result.session_id[..8.min(result.session_id.len())],
                         result.project
                     );
                 }
 
                 println!();
-                let phase_info = match (&result.phase, &result.minutes_in, &result.post_compaction) {
+                let phase_info = match (&result.phase, &result.minutes_in, &result.post_compaction)
+                {
                     (Some(phase), Some(mins), Some(post_c)) => {
                         let compact_marker = if *post_c { " post-compact" } else { "" };
                         format!(" ({phase}, {mins}m in{compact_marker})")
@@ -1303,7 +1376,12 @@ fn output_full_results(
                 } else {
                     String::new()
                 };
-                println!("  [{}]{}{}", format_match_label(&result.entry_type, &result.location), phase_info, uuid_suffix);
+                println!(
+                    "  [{}]{}{}",
+                    format_match_label(&result.entry_type, &result.location),
+                    phase_info,
+                    uuid_suffix
+                );
 
                 if args.context > 0 && !result.context_before.is_empty() {
                     for line in result.context_before.lines() {
@@ -1487,18 +1565,22 @@ impl Matcher<'_> {
     fn is_match(&self, text: &str) -> bool {
         match self {
             Matcher::Regex(regex) => regex.is_match(text),
-            Matcher::Fuzzy { pattern, ignore_case, threshold } => {
-                fuzzy_match(pattern, text, *ignore_case, *threshold).is_some()
-            }
+            Matcher::Fuzzy {
+                pattern,
+                ignore_case,
+                threshold,
+            } => fuzzy_match(pattern, text, *ignore_case, *threshold).is_some(),
         }
     }
 
     fn find_matches_in(&self, text: &str, location: &str, context: usize) -> Vec<Match> {
         match self {
             Matcher::Regex(regex) => find_matches(text, regex, location, context),
-            Matcher::Fuzzy { pattern, ignore_case, threshold } => {
-                find_fuzzy_matches(text, pattern, location, context, *ignore_case, *threshold)
-            }
+            Matcher::Fuzzy {
+                pattern,
+                ignore_case,
+                threshold,
+            } => find_fuzzy_matches(text, pattern, location, context, *ignore_case, *threshold),
         }
     }
 }
@@ -1524,14 +1606,15 @@ fn search_entry(entry: &LogEntry, regex: &Regex, args: &SearchArgs) -> Vec<Match
             // Search user content (skip when --thinking-only is set)
             let text = match &user.message {
                 crate::model::UserContent::Simple(s) => s.content.clone(),
-                crate::model::UserContent::Blocks(b) => {
-                    b.content.iter().filter_map(|c| {
-                        match c {
-                            ContentBlock::Text(t) => Some(t.text.as_str()),
-                            _ => None,
-                        }
-                    }).collect::<Vec<_>>().join("\n")
-                }
+                crate::model::UserContent::Blocks(b) => b
+                    .content
+                    .iter()
+                    .filter_map(|c| match c {
+                        ContentBlock::Text(t) => Some(t.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
             };
 
             if matcher.is_match(&text) {
@@ -1544,25 +1627,48 @@ fn search_entry(entry: &LogEntry, regex: &Regex, args: &SearchArgs) -> Vec<Match
                     ContentBlock::Text(text) if !args.thinking_only => {
                         // Skip assistant text when --thinking-only is set
                         if matcher.is_match(&text.text) {
-                            matches.extend(matcher.find_matches_in(&text.text, "assistant text", args.context));
+                            matches.extend(matcher.find_matches_in(
+                                &text.text,
+                                "assistant text",
+                                args.context,
+                            ));
                         }
                     }
-                    ContentBlock::Thinking(thinking) if args.thinking || args.thinking_only || args.all => {
+                    ContentBlock::Thinking(thinking)
+                        if args.thinking || args.thinking_only || args.all =>
+                    {
                         if matcher.is_match(&thinking.thinking) {
-                            matches.extend(matcher.find_matches_in(&thinking.thinking, "thinking", args.context));
+                            matches.extend(matcher.find_matches_in(
+                                &thinking.thinking,
+                                "thinking",
+                                args.context,
+                            ));
                         }
                     }
-                    ContentBlock::ToolUse(tool) if !args.thinking_only && (args.tools || args.all) => {
+                    ContentBlock::ToolUse(tool)
+                        if !args.thinking_only && (args.tools || args.all) =>
+                    {
                         let input_str = serde_json::to_string(&tool.input).unwrap_or_default();
                         if matcher.is_match(&input_str) {
-                            matches.extend(matcher.find_matches_in(&input_str, &format!("tool:{}", tool.name), args.context));
+                            matches.extend(matcher.find_matches_in(
+                                &input_str,
+                                &format!("tool:{}", tool.name),
+                                args.context,
+                            ));
                         }
                     }
-                    ContentBlock::ToolResult(result) if !args.thinking_only && (args.tools || args.all) => {
+                    ContentBlock::ToolResult(result)
+                        if !args.thinking_only && (args.tools || args.all) =>
+                    {
                         if let Some(content) = &result.content {
-                            if let crate::model::content::ToolResultContent::String(text) = content {
+                            if let crate::model::content::ToolResultContent::String(text) = content
+                            {
                                 if matcher.is_match(text) {
-                                    matches.extend(matcher.find_matches_in(text, "tool result", args.context));
+                                    matches.extend(matcher.find_matches_in(
+                                        text,
+                                        "tool result",
+                                        args.context,
+                                    ));
                                 }
                             }
                         }
@@ -1645,12 +1751,16 @@ fn calculate_regex_score(line: &str, matched: &str, match_start: usize) -> u8 {
     score += coverage * 20.0;
 
     // Bonus for word boundary matches (0-10 points)
-    let at_word_start = match_start == 0 ||
-        !line.chars().nth(match_start.saturating_sub(1))
+    let at_word_start = match_start == 0
+        || !line
+            .chars()
+            .nth(match_start.saturating_sub(1))
             .map(|c| c.is_alphanumeric())
             .unwrap_or(false);
-    let at_word_end = match_start + matched.len() >= line.len() ||
-        !line.chars().nth(match_start + matched.len())
+    let at_word_end = match_start + matched.len() >= line.len()
+        || !line
+            .chars()
+            .nth(match_start + matched.len())
             .map(|c| c.is_alphanumeric())
             .unwrap_or(false);
 
@@ -1714,11 +1824,8 @@ fn find_fuzzy_matches(
                 let context_after = lines[(line_num + 1)..end].join("\n");
 
                 // Expand matched_text to word boundaries for readability
-                let expanded_text = expand_to_word_boundaries(
-                    line,
-                    fuzzy_result.start,
-                    fuzzy_result.end,
-                );
+                let expanded_text =
+                    expand_to_word_boundaries(line, fuzzy_result.start, fuzzy_result.end);
 
                 matches.push(Match {
                     location: location.to_string(),
@@ -1761,6 +1868,7 @@ fn format_match_label(entry_type: &str, location: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::trivial_regex)]
     use super::*;
 
     #[test]
@@ -1897,7 +2005,11 @@ mod tests {
     fn test_regex_score_word_boundary() {
         // Full word match at start should score high
         let score1 = calculate_regex_score("hello world", "hello", 0);
-        assert!(score1 >= 75, "Start + word boundary should score >= 75, got {}", score1);
+        assert!(
+            score1 >= 75,
+            "Start + word boundary should score >= 75, got {}",
+            score1
+        );
 
         // Match in middle without word boundary should score lower
         let score2 = calculate_regex_score("the hello world", "ello", 5);
@@ -1905,7 +2017,10 @@ mod tests {
 
         // Match at word boundary in middle
         let score3 = calculate_regex_score("the hello world", "hello", 4);
-        assert!(score3 > score2, "Word boundary match should score higher than partial");
+        assert!(
+            score3 > score2,
+            "Word boundary match should score higher than partial"
+        );
     }
 
     #[test]
@@ -1914,12 +2029,15 @@ mod tests {
         let score_full = calculate_regex_score("hello", "hello", 0);
         let score_partial = calculate_regex_score("hello world", "hello", 0);
 
-        assert!(score_full > score_partial, "Full coverage should score higher");
+        assert!(
+            score_full > score_partial,
+            "Full coverage should score higher"
+        );
     }
 
     #[test]
     fn test_matches_git_branch_exact() {
-        use crate::model::{UserMessage, UserContent, UserSimpleContent};
+        use crate::model::{UserContent, UserMessage, UserSimpleContent};
         use chrono::Utc;
         use indexmap::IndexMap;
 
@@ -1962,7 +2080,7 @@ mod tests {
 
     #[test]
     fn test_matches_git_branch_none() {
-        use crate::model::{UserMessage, UserContent, UserSimpleContent};
+        use crate::model::{UserContent, UserMessage, UserSimpleContent};
         use chrono::Utc;
         use indexmap::IndexMap;
 
@@ -2045,5 +2163,4 @@ mod tests {
         let result = expand_to_word_boundaries("", 0, 0);
         assert_eq!(result, "");
     }
-
 }

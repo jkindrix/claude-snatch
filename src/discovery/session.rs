@@ -50,20 +50,18 @@ impl Session {
             return Err(SnatchError::FileNotFound { path });
         }
 
-        let filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| SnatchError::InvalidSessionFile {
-                path: path.clone(),
-                reason: "Invalid filename".to_string(),
-            })?;
-
-        let file_info = parse_session_filename(filename).ok_or_else(|| {
+        let filename = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
             SnatchError::InvalidSessionFile {
                 path: path.clone(),
-                reason: "Not a valid session filename".to_string(),
+                reason: "Invalid filename".to_string(),
             }
         })?;
+
+        let file_info =
+            parse_session_filename(filename).ok_or_else(|| SnatchError::InvalidSessionFile {
+                path: path.clone(),
+                reason: "Not a valid session filename".to_string(),
+            })?;
 
         let metadata = std::fs::metadata(&path).map_err(|e| {
             SnatchError::io(format!("Failed to read metadata for {}", path.display()), e)
@@ -279,24 +277,22 @@ impl Session {
         let end_time = entries.iter().rev().find_map(|e| e.timestamp());
         // Get version from first entry that has one
         let version = entries.iter().find_map(|e| e.version().map(String::from));
-        let schema_version = version
-            .as_deref()
-            .map(SchemaVersion::from_version_string);
+        let schema_version = version.as_deref().map(SchemaVersion::from_version_string);
 
         // Extract the working directory from the first entry that has it
         // This is the authoritative project path from the JSONL file
         let extracted_cwd = entries.iter().find_map(|e| e.cwd().map(String::from));
 
         // Extract git branch from the first entry that has it
-        let git_branch = entries.iter().find_map(|e| e.git_branch().map(String::from));
+        let git_branch = entries
+            .iter()
+            .find_map(|e| e.git_branch().map(String::from));
 
         // Extract slug from the first entry that has it
         let slug = entries.iter().find_map(|e| e.slug().map(String::from));
 
         // Check if content indicates this is a subagent (parentUuid on first entry)
-        let content_is_subagent = entries.first()
-            .and_then(|e| e.parent_uuid())
-            .is_some();
+        let content_is_subagent = entries.first().and_then(|e| e.parent_uuid()).is_some();
 
         // Count message types and compaction events
         let mut user_count = 0;
@@ -390,7 +386,11 @@ impl Session {
             let stem = self.path.file_stem()?.to_str()?;
             parent.join(stem).join("tool-results")
         };
-        if dir.is_dir() { Some(dir) } else { None }
+        if dir.is_dir() {
+            Some(dir)
+        } else {
+            None
+        }
     }
 
     /// Count external tool result files and their total size.
@@ -418,7 +418,9 @@ impl Session {
     /// directory name if the JSONL doesn't contain a `cwd` field.
     pub fn authoritative_project_path(&self) -> Result<String> {
         let meta = self.quick_metadata_cached()?;
-        Ok(meta.extracted_cwd.unwrap_or_else(|| self.project_path.clone()))
+        Ok(meta
+            .extracted_cwd
+            .unwrap_or_else(|| self.project_path.clone()))
     }
 }
 
@@ -498,11 +500,7 @@ impl QuickSessionMetadata {
             } else if total_secs < 3600 {
                 format!("{}m {}s", total_secs / 60, total_secs % 60)
             } else {
-                format!(
-                    "{}h {}m",
-                    total_secs / 3600,
-                    (total_secs % 3600) / 60
-                )
+                format!("{}h {}m", total_secs / 3600, (total_secs % 3600) / 60)
             }
         })
     }
@@ -561,11 +559,7 @@ impl SessionSummary {
             } else if total_secs < 3600 {
                 format!("{}m {}s", total_secs / 60, total_secs % 60)
             } else {
-                format!(
-                    "{}h {}m",
-                    total_secs / 3600,
-                    (total_secs % 3600) / 60
-                )
+                format!("{}h {}m", total_secs / 3600, (total_secs % 3600) / 60)
             }
         })
     }
@@ -668,10 +662,12 @@ impl SessionFilter {
         if self.modified_after.is_some() || self.modified_before.is_some() {
             let (start, end) = match session.quick_metadata_cached() {
                 Ok(meta) => {
-                    let start = meta.start_time
+                    let start = meta
+                        .start_time
                         .map(|t| SystemTime::from(t))
                         .unwrap_or_else(|| session.modified_time());
-                    let end = meta.end_time
+                    let end = meta
+                        .end_time
                         .map(|t| SystemTime::from(t))
                         .unwrap_or_else(|| session.modified_time());
                     (start, end)

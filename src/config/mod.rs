@@ -74,14 +74,16 @@ impl Config {
             SnatchError::io(format!("Failed to read config file: {}", path.display()), e)
         })?;
 
-        toml::from_str(&content).map_err(|e| {
-            SnatchError::InvalidConfig {
-                message: e.to_string(),
-            }
+        toml::from_str(&content).map_err(|e| SnatchError::InvalidConfig {
+            message: e.to_string(),
         })
     }
 
     /// Merge another config into this one (other takes precedence).
+    // warning_threshold has no Option/sentinel, so a non-default value is detected
+    // by exact comparison against its literal default (0.8); both sides come from
+    // the same literal, so the bit patterns match.
+    #[allow(clippy::float_cmp)]
     pub fn merge_from(&mut self, other: &Config) {
         // Merge export format config
         if other.default_format.format != "markdown" {
@@ -154,10 +156,8 @@ impl Config {
     /// The config is written to a temporary file first, then atomically
     /// renamed to the target path.
     pub fn save_to(&self, path: &Path) -> Result<()> {
-        let content = toml::to_string_pretty(self).map_err(|e| {
-            SnatchError::InvalidConfig {
-                message: format!("Failed to serialize config: {e}"),
-            }
+        let content = toml::to_string_pretty(self).map_err(|e| SnatchError::InvalidConfig {
+            message: format!("Failed to serialize config: {e}"),
         })?;
 
         // Use atomic write - it handles parent directory creation
@@ -318,19 +318,23 @@ impl BudgetConfig {
 
     /// Check budget status against current costs.
     pub fn check(&self, daily_cost: f64, weekly_cost: f64, monthly_cost: f64) -> BudgetStatus {
-        let daily = self.daily_limit.map(|limit| {
-            BudgetAlert::new("Daily", daily_cost, limit, self.warning_threshold)
-        });
+        let daily = self
+            .daily_limit
+            .map(|limit| BudgetAlert::new("Daily", daily_cost, limit, self.warning_threshold));
 
-        let weekly = self.weekly_limit.map(|limit| {
-            BudgetAlert::new("Weekly", weekly_cost, limit, self.warning_threshold)
-        });
+        let weekly = self
+            .weekly_limit
+            .map(|limit| BudgetAlert::new("Weekly", weekly_cost, limit, self.warning_threshold));
 
-        let monthly = self.monthly_limit.map(|limit| {
-            BudgetAlert::new("Monthly", monthly_cost, limit, self.warning_threshold)
-        });
+        let monthly = self
+            .monthly_limit
+            .map(|limit| BudgetAlert::new("Monthly", monthly_cost, limit, self.warning_threshold));
 
-        BudgetStatus { daily, weekly, monthly }
+        BudgetStatus {
+            daily,
+            weekly,
+            monthly,
+        }
     }
 }
 
@@ -490,10 +494,8 @@ fn default_cache_ttl() -> u64 {
 
 /// Get the default configuration path.
 pub fn default_config_path() -> Result<PathBuf> {
-    let config_dir = dirs::config_dir().ok_or_else(|| {
-        SnatchError::Unsupported {
-            feature: "config directory discovery".to_string(),
-        }
+    let config_dir = dirs::config_dir().ok_or_else(|| SnatchError::Unsupported {
+        feature: "config directory discovery".to_string(),
     })?;
 
     Ok(config_dir.join("claude-snatch").join("config.toml"))
@@ -501,10 +503,8 @@ pub fn default_config_path() -> Result<PathBuf> {
 
 /// Get the default cache directory.
 pub fn default_cache_dir() -> Result<PathBuf> {
-    let cache_dir = dirs::cache_dir().ok_or_else(|| {
-        SnatchError::Unsupported {
-            feature: "cache directory discovery".to_string(),
-        }
+    let cache_dir = dirs::cache_dir().ok_or_else(|| SnatchError::Unsupported {
+        feature: "cache directory discovery".to_string(),
     })?;
 
     Ok(cache_dir.join("claude-snatch"))
@@ -512,10 +512,8 @@ pub fn default_cache_dir() -> Result<PathBuf> {
 
 /// Get the default templates directory.
 pub fn default_templates_dir() -> Result<PathBuf> {
-    let config_dir = dirs::config_dir().ok_or_else(|| {
-        SnatchError::Unsupported {
-            feature: "config directory discovery".to_string(),
-        }
+    let config_dir = dirs::config_dir().ok_or_else(|| SnatchError::Unsupported {
+        feature: "config directory discovery".to_string(),
     })?;
 
     Ok(config_dir.join("claude-snatch").join("templates"))
@@ -577,15 +575,16 @@ impl ExportTemplate {
     /// Load a template from a file.
     pub fn load_from(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path).map_err(|e| {
-            SnatchError::io(format!("Failed to read template file: {}", path.display()), e)
+            SnatchError::io(
+                format!("Failed to read template file: {}", path.display()),
+                e,
+            )
         })?;
 
         // Try TOML first
         if path.extension().map(|e| e == "toml").unwrap_or(false) {
-            toml::from_str(&content).map_err(|e| {
-                SnatchError::InvalidConfig {
-                    message: format!("Failed to parse template: {}", e),
-                }
+            toml::from_str(&content).map_err(|e| SnatchError::InvalidConfig {
+                message: format!("Failed to parse template: {}", e),
             })
         } else {
             // For non-TOML files, treat the whole content as a simple template
@@ -625,7 +624,13 @@ pub fn list_templates() -> Result<Vec<ExportTemplate>> {
     let mut templates = Vec::new();
 
     let entries = std::fs::read_dir(&templates_dir).map_err(|e| {
-        SnatchError::io(format!("Failed to read templates directory: {}", templates_dir.display()), e)
+        SnatchError::io(
+            format!(
+                "Failed to read templates directory: {}",
+                templates_dir.display()
+            ),
+            e,
+        )
     })?;
 
     for entry in entries.flatten() {
@@ -658,7 +663,11 @@ pub fn load_template(name: &str) -> Result<ExportTemplate> {
     }
 
     Err(SnatchError::ConfigError {
-        message: format!("Template '{}' not found in {}", name, templates_dir.display()),
+        message: format!(
+            "Template '{}' not found in {}",
+            name,
+            templates_dir.display()
+        ),
     })
 }
 
@@ -668,7 +677,13 @@ pub fn create_sample_template() -> Result<PathBuf> {
 
     // Create templates directory if it doesn't exist
     std::fs::create_dir_all(&templates_dir).map_err(|e| {
-        SnatchError::io(format!("Failed to create templates directory: {}", templates_dir.display()), e)
+        SnatchError::io(
+            format!(
+                "Failed to create templates directory: {}",
+                templates_dir.display()
+            ),
+            e,
+        )
     })?;
 
     let sample_path = templates_dir.join("summary.toml");
@@ -723,7 +738,10 @@ tool_result_template = ""  # Empty string = skip tool results in summary
 "#;
 
     std::fs::write(&sample_path, sample_content).map_err(|e| {
-        SnatchError::io(format!("Failed to write sample template: {}", sample_path.display()), e)
+        SnatchError::io(
+            format!("Failed to write sample template: {}", sample_path.display()),
+            e,
+        )
     })?;
 
     Ok(sample_path)
@@ -782,8 +800,9 @@ truncate_at = 3000
 
         std::fs::write(
             temp_dir.path().join(PROJECT_CONFIG_FILENAME),
-            project_config
-        ).unwrap();
+            project_config,
+        )
+        .unwrap();
 
         let config = Config::load_for_project(temp_dir.path()).unwrap();
 

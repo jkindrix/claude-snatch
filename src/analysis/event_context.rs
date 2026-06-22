@@ -11,8 +11,7 @@ use chrono::{DateTime, Utc};
 use crate::model::message::LogEntry;
 
 use super::extraction::{
-    extract_assistant_summary, extract_tool_names, extract_user_prompt_text,
-    truncate_text,
+    extract_assistant_summary, extract_tool_names, extract_user_prompt_text, truncate_text,
 };
 
 /// Parameters for contextual zoom.
@@ -82,11 +81,11 @@ fn entry_to_turn(entry: &LogEntry, index: usize, max_text_len: usize) -> Context
     let timestamp = entry.timestamp();
 
     let text = match entry {
-        LogEntry::User(_) => extract_user_prompt_text(entry)
-            .map(|t| truncate_text(&t, max_text_len)),
+        LogEntry::User(_) => {
+            extract_user_prompt_text(entry).map(|t| truncate_text(&t, max_text_len))
+        }
         LogEntry::Assistant(_) => extract_assistant_summary(entry, max_text_len),
-        LogEntry::System(sys) => sys.content.as_ref()
-            .map(|t| truncate_text(t, max_text_len)),
+        LogEntry::System(sys) => sys.content.as_ref().map(|t| truncate_text(t, max_text_len)),
         _ => None,
     };
 
@@ -112,7 +111,9 @@ pub fn find_event_context(
     // Find the target entry index
     let target_idx = if let Some(ref msg_id) = params.message_id {
         entries.iter().position(|e| {
-            e.uuid().map(|u| u == msg_id || u.starts_with(msg_id)).unwrap_or(false)
+            e.uuid()
+                .map(|u| u == msg_id || u.starts_with(msg_id))
+                .unwrap_or(false)
         })
     } else if let Some(target_ts) = params.timestamp {
         // Find closest entry by timestamp
@@ -153,6 +154,7 @@ pub fn find_event_context(
     let mut related_files = Vec::new();
     let mut error_count = 0usize;
 
+    #[allow(clippy::needless_range_loop)]
     for i in start..end {
         if let LogEntry::Assistant(a) = entries[i] {
             for tool in a.message.tool_uses() {

@@ -307,13 +307,9 @@ fn decode_with_special_chars(content: &str) -> Option<String> {
                 let underscore_path = format!("{}{}", test_with_underscore, lookahead);
                 let period_path = format!("{}{}", test_with_period, lookahead);
 
-                if Path::new(&underscore_path).exists()
-                    || path_prefix_exists(&underscore_path)
-                {
+                if Path::new(&underscore_path).exists() || path_prefix_exists(&underscore_path) {
                     result.push('_');
-                } else if Path::new(&period_path).exists()
-                    || path_prefix_exists(&period_path)
-                {
+                } else if Path::new(&period_path).exists() || path_prefix_exists(&period_path) {
                     result.push('.');
                 } else {
                     // Default to underscore as it's more common
@@ -456,9 +452,7 @@ fn try_combine_segments_with_periods(
 
         if path_exists || could_be_prefix {
             // Recursively try the rest
-            if let Some(result) =
-                try_combine_segments_with_periods(parts, end, test_path.clone())
-            {
+            if let Some(result) = try_combine_segments_with_periods(parts, end, test_path.clone()) {
                 // Verify the full result exists
                 if Path::new(&result).exists() {
                     return Some(result);
@@ -500,7 +494,11 @@ fn has_matching_prefix(path_str: &str) -> bool {
             let prefix = file_name.to_string_lossy();
             if let Ok(entries) = std::fs::read_dir(parent) {
                 for entry in entries.flatten() {
-                    if entry.file_name().to_string_lossy().starts_with(prefix.as_ref()) {
+                    if entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(prefix.as_ref())
+                    {
                         return true;
                     }
                 }
@@ -553,7 +551,7 @@ fn generate_segment_variants(segment: &str) -> Vec<String> {
 
             for (bit_idx, &pos) in positions.iter().enumerate() {
                 if (mask >> bit_idx) & 1 == 1 {
-                    variant.replace_range(pos..pos + 1, ".");
+                    variant.replace_range(pos..=pos, ".");
                 }
             }
 
@@ -616,7 +614,7 @@ pub fn parse_session_filename(filename: &str) -> Option<SessionFileInfo> {
 /// Information extracted from a session filename.
 #[derive(Debug, Clone)]
 pub struct SessionFileInfo {
-    /// Session identifier (UUID or agent-<hash>).
+    /// Session identifier (UUID or `agent-<hash>`).
     pub session_id: String,
     /// Whether this is a subagent session.
     pub is_subagent: bool,
@@ -651,9 +649,7 @@ pub fn normalize_path(path: &Path) -> PathBuf {
 /// Check if a path appears to be a valid session file.
 #[must_use]
 pub fn is_session_file(path: &Path) -> bool {
-    path.extension()
-        .map(|ext| ext == "jsonl")
-        .unwrap_or(false)
+    path.extension().map(|ext| ext == "jsonl").unwrap_or(false)
         && path
             .file_name()
             .and_then(|n| n.to_str())
@@ -699,17 +695,26 @@ mod tests {
 
     #[test]
     fn test_encode_project_path() {
-        assert_eq!(encode_project_path("/home/user/project"), "-home-user-project");
+        assert_eq!(
+            encode_project_path("/home/user/project"),
+            "-home-user-project"
+        );
         assert_eq!(encode_project_path("/"), "-");
         assert_eq!(encode_project_path("/a/b/c"), "-a-b-c");
         // Paths with hyphens are percent-encoded
-        assert_eq!(encode_project_path("/home/user/my-project"), "-home-user-my%2Dproject");
+        assert_eq!(
+            encode_project_path("/home/user/my-project"),
+            "-home-user-my%2Dproject"
+        );
     }
 
     #[test]
     fn test_decode_project_path_with_percent_encoding() {
         // Paths with percent-encoded hyphens are decoded correctly
-        assert_eq!(decode_project_path("-home-user-my%2Dproject"), "/home/user/my-project");
+        assert_eq!(
+            decode_project_path("-home-user-my%2Dproject"),
+            "/home/user/my-project"
+        );
     }
 
     #[test]
@@ -925,10 +930,7 @@ mod tests {
         // The temp directory itself should be found as a prefix
         let parent = temp_dir.parent();
         if let Some(p) = parent {
-            let partial_name = temp_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
+            let partial_name = temp_dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if !partial_name.is_empty() && partial_name.len() > 2 {
                 let prefix_path = p.join(&partial_name[..2]);
                 // This might or might not find a match depending on directory contents

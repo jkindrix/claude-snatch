@@ -35,7 +35,10 @@ pub struct ResolvedSession {
 }
 
 /// Resolve a session ID to a parsed conversation.
-pub fn resolve_session(server: &SnatchServer, session_id: &str) -> Result<ResolvedSession, ToolOutput> {
+pub fn resolve_session(
+    server: &SnatchServer,
+    session_id: &str,
+) -> Result<ResolvedSession, ToolOutput> {
     let claude_dir = server.get_claude_dir().map_err(ToolOutput::error)?;
 
     let session = claude_dir
@@ -142,7 +145,10 @@ pub struct ResolvedProject {
 ///
 /// Uses substring match against decoded project paths. Returns error if
 /// no match or ambiguous (multiple matches).
-pub fn resolve_project(server: &SnatchServer, project_filter: &str) -> Result<ResolvedProject, ToolOutput> {
+pub fn resolve_project(
+    server: &SnatchServer,
+    project_filter: &str,
+) -> Result<ResolvedProject, ToolOutput> {
     let claude_dir = server.get_claude_dir().map_err(ToolOutput::error)?;
     let projects = claude_dir
         .projects()
@@ -215,7 +221,12 @@ pub fn parse_timestamp_param(s: &str) -> Result<chrono::DateTime<chrono::Utc>, S
         "h" | "hr" | "hours" => chrono::Duration::hours(amount),
         "d" | "day" | "days" => chrono::Duration::days(amount),
         "w" | "week" | "weeks" => chrono::Duration::weeks(amount),
-        _ => return Err(format!("Unknown time unit '{}'. Use s, m, h, d, or w", unit)),
+        _ => {
+            return Err(format!(
+                "Unknown time unit '{}'. Use s, m, h, d, or w",
+                unit
+            ))
+        }
     };
 
     Ok(Utc::now() - duration)

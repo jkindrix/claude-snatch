@@ -41,7 +41,10 @@ fn build_type_filter(args: &DiffArgs) -> Option<HashSet<String>> {
 }
 
 /// Filter log entries by message type.
-fn filter_entries_by_type(entries: Vec<LogEntry>, type_filter: &Option<HashSet<String>>) -> Vec<LogEntry> {
+fn filter_entries_by_type(
+    entries: Vec<LogEntry>,
+    type_filter: Option<&HashSet<String>>,
+) -> Vec<LogEntry> {
     match type_filter {
         None => entries, // No filter, return all
         Some(types) => entries
@@ -71,12 +74,25 @@ pub fn run(cli: &Cli, args: &DiffArgs) -> Result<()> {
 }
 
 /// Run line-based diff comparison.
-fn run_line_diff(cli: &Cli, args: &DiffArgs, first_path: &PathBuf, second_path: &PathBuf) -> Result<()> {
+fn run_line_diff(
+    cli: &Cli,
+    args: &DiffArgs,
+    first_path: &PathBuf,
+    second_path: &PathBuf,
+) -> Result<()> {
     // Read and compare the files
-    let first_content = fs::read_to_string(first_path)
-        .map_err(|e| SnatchError::io(format!("Failed to read first file: {}", first_path.display()), e))?;
-    let second_content = fs::read_to_string(second_path)
-        .map_err(|e| SnatchError::io(format!("Failed to read second file: {}", second_path.display()), e))?;
+    let first_content = fs::read_to_string(first_path).map_err(|e| {
+        SnatchError::io(
+            format!("Failed to read first file: {}", first_path.display()),
+            e,
+        )
+    })?;
+    let second_content = fs::read_to_string(second_path).map_err(|e| {
+        SnatchError::io(
+            format!("Failed to read second file: {}", second_path.display()),
+            e,
+        )
+    })?;
 
     // Perform the diff
     let diff = JsonlDiff::compare(&first_content, &second_content);
@@ -96,7 +112,12 @@ fn run_line_diff(cli: &Cli, args: &DiffArgs, first_path: &PathBuf, second_path: 
 }
 
 /// Run semantic diff comparison.
-fn run_semantic_diff(cli: &Cli, args: &DiffArgs, first_path: &PathBuf, second_path: &PathBuf) -> Result<()> {
+fn run_semantic_diff(
+    cli: &Cli,
+    args: &DiffArgs,
+    first_path: &PathBuf,
+    second_path: &PathBuf,
+) -> Result<()> {
     // Parse both files as JSONL
     let mut parser = JsonlParser::new().with_lenient(true);
 
@@ -105,8 +126,8 @@ fn run_semantic_diff(cli: &Cli, args: &DiffArgs, first_path: &PathBuf, second_pa
 
     // Apply message type filter if specified
     let type_filter = build_type_filter(args);
-    let first_entries = filter_entries_by_type(first_entries, &type_filter);
-    let second_entries = filter_entries_by_type(second_entries, &type_filter);
+    let first_entries = filter_entries_by_type(first_entries, type_filter.as_ref());
+    let second_entries = filter_entries_by_type(second_entries, type_filter.as_ref());
 
     // Build conversation trees
     let first_conv = Conversation::from_entries(first_entries)?;
@@ -117,8 +138,10 @@ fn run_semantic_diff(cli: &Cli, args: &DiffArgs, first_path: &PathBuf, second_pa
 
     // Output based on format
     match cli.effective_output() {
-        OutputFormat::Json => print_semantic_diff_json(&diff, first_path, second_path, &type_filter)?,
-        _ => print_semantic_diff_text(&diff, first_path, second_path, args, &type_filter)?,
+        OutputFormat::Json => {
+            print_semantic_diff_json(&diff, first_path, second_path, type_filter.as_ref())?;
+        }
+        _ => print_semantic_diff_text(&diff, first_path, second_path, args, type_filter.as_ref())?,
     }
 
     // Exit with appropriate code
@@ -159,7 +182,12 @@ fn resolve_targets(cli: &Cli, args: &DiffArgs) -> Result<(PathBuf, PathBuf)> {
 }
 
 /// Print line-based diff output in text format.
-fn print_line_diff_text(diff: &JsonlDiff, first: &PathBuf, second: &PathBuf, args: &DiffArgs) -> Result<()> {
+fn print_line_diff_text(
+    diff: &JsonlDiff,
+    first: &PathBuf,
+    second: &PathBuf,
+    args: &DiffArgs,
+) -> Result<()> {
     if diff.is_identical() {
         println!("Files are identical.");
         return Ok(());
@@ -247,11 +275,20 @@ fn print_line_diff_json(diff: &JsonlDiff, first: &PathBuf, second: &PathBuf) -> 
 }
 
 /// Print semantic diff output in text format.
-fn print_semantic_diff_text(diff: &ConversationDiff, first: &PathBuf, second: &PathBuf, args: &DiffArgs, type_filter: &Option<HashSet<String>>) -> Result<()> {
+fn print_semantic_diff_text(
+    diff: &ConversationDiff,
+    first: &PathBuf,
+    second: &PathBuf,
+    args: &DiffArgs,
+    type_filter: Option<&HashSet<String>>,
+) -> Result<()> {
     if diff.is_identical() {
         if let Some(types) = type_filter {
             let types_str: Vec<&str> = types.iter().map(String::as_str).collect();
-            println!("Conversations are semantically identical (filtered to: {}).", types_str.join(", "));
+            println!(
+                "Conversations are semantically identical (filtered to: {}).",
+                types_str.join(", ")
+            );
         } else {
             println!("Conversations are semantically identical.");
         }
@@ -280,8 +317,14 @@ fn print_semantic_diff_text(diff: &ConversationDiff, first: &PathBuf, second: &P
     if !args.summary_only {
         // Message type breakdown
         println!("Message Type Breakdown:");
-        println!("  A: {} user, {} assistant", diff.first_user_count, diff.first_assistant_count);
-        println!("  B: {} user, {} assistant", diff.second_user_count, diff.second_assistant_count);
+        println!(
+            "  A: {} user, {} assistant",
+            diff.first_user_count, diff.first_assistant_count
+        );
+        println!(
+            "  B: {} user, {} assistant",
+            diff.second_user_count, diff.second_assistant_count
+        );
         println!();
 
         // Branch analysis
@@ -297,7 +340,12 @@ fn print_semantic_diff_text(diff: &ConversationDiff, first: &PathBuf, second: &P
 }
 
 /// Print semantic diff output in JSON format.
-fn print_semantic_diff_json(diff: &ConversationDiff, first: &PathBuf, second: &PathBuf, type_filter: &Option<HashSet<String>>) -> Result<()> {
+fn print_semantic_diff_json(
+    diff: &ConversationDiff,
+    first: &PathBuf,
+    second: &PathBuf,
+    type_filter: Option<&HashSet<String>>,
+) -> Result<()> {
     let filter_types: Option<Vec<&String>> = type_filter.as_ref().map(|t| t.iter().collect());
 
     let output = serde_json::json!({
@@ -349,12 +397,10 @@ pub fn compare_conversations(first: &Conversation, second: &Conversation) -> Con
     };
 
     // Compare by UUIDs from nodes
-    let first_uuids: std::collections::HashSet<&str> = first.nodes().keys()
-        .map(String::as_str)
-        .collect();
-    let second_uuids: std::collections::HashSet<&str> = second.nodes().keys()
-        .map(String::as_str)
-        .collect();
+    let first_uuids: std::collections::HashSet<&str> =
+        first.nodes().keys().map(String::as_str).collect();
+    let second_uuids: std::collections::HashSet<&str> =
+        second.nodes().keys().map(String::as_str).collect();
 
     diff.added_messages = second_uuids.difference(&first_uuids).count();
     diff.removed_messages = first_uuids.difference(&second_uuids).count();
@@ -451,6 +497,9 @@ mod tests {
 
     #[test]
     fn test_truncate_line_long() {
-        assert_eq!(truncate_line("hello world this is a long line", 15), "hello world ...");
+        assert_eq!(
+            truncate_line("hello world this is a long line", 15),
+            "hello world ..."
+        );
     }
 }

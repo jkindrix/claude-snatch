@@ -8,8 +8,8 @@
 use chrono::{DateTime, Utc};
 
 use crate::analysis::extraction::{
-    extract_assistant_summary, extract_thinking_text, extract_tool_names,
-    extract_user_prompt_text, is_human_prompt, truncate_text,
+    extract_assistant_summary, extract_thinking_text, extract_tool_names, extract_user_prompt_text,
+    is_human_prompt, truncate_text,
 };
 use crate::discovery::Session;
 use crate::file_index::FileIndex;
@@ -82,19 +82,18 @@ pub fn analyze_file_evolution(
     }
 
     // Build a session lookup for quick access
-    let session_map: std::collections::HashMap<&str, &Session> = sessions
-        .iter()
-        .map(|s| (s.session_id(), s))
-        .collect();
+    let session_map: std::collections::HashMap<&str, &Session> =
+        sessions.iter().map(|s| (s.session_id(), s)).collect();
 
     let mut results = Vec::new();
 
     for (file_path, modifications) in matches {
         let total_changes = modifications.len();
-        let mut unique_sessions: Vec<&str> = modifications.iter()
+        let mut unique_sessions: Vec<&str> = modifications
+            .iter()
             .map(|m| m.session_id.as_str())
             .collect();
-        unique_sessions.sort();
+        unique_sessions.sort_unstable();
         unique_sessions.dedup();
         let sessions_involved = unique_sessions.len();
 
@@ -114,7 +113,9 @@ pub fn analyze_file_evolution(
             // Find the entry matching the message_id
             let target_idx = entries.iter().position(|e| {
                 e.uuid()
-                    .map(|u| u == modification.message_id || u.starts_with(&modification.message_id))
+                    .map(|u| {
+                        u == modification.message_id || u.starts_with(&modification.message_id)
+                    })
                     .unwrap_or(false)
             });
 
@@ -167,6 +168,7 @@ fn extract_change_context(
     let mut had_errors = false;
 
     // Scan the window for context
+    #[allow(clippy::needless_range_loop)]
     for i in start..end {
         let entry = &entries[i];
 

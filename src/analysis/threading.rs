@@ -141,7 +141,7 @@ pub fn thread_topic(
 
             // Filter to decision-point exchanges only
             if params.decisions_only {
-                let is_decision = entry_text.as_ref().map_or(false, |t| looks_like_decision(t));
+                let is_decision = entry_text.as_ref().is_some_and(|t| looks_like_decision(t));
                 if !is_decision {
                     let paired_assistant = if entry.message_type() == "user" {
                         ((idx + 1)..main.len())
@@ -152,7 +152,7 @@ pub fn thread_topic(
                     };
                     let paired_is_decision = paired_assistant
                         .as_ref()
-                        .map_or(false, |t| looks_like_decision(t));
+                        .is_some_and(|t| looks_like_decision(t));
                     if !paired_is_decision {
                         continue;
                     }
@@ -210,7 +210,7 @@ pub fn thread_topic(
         }
     }
 
-    exchanges.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    exchanges.sort_by_key(|a| a.timestamp);
     exchanges.truncate(params.limit);
 
     let session_ids: HashSet<&str> = exchanges.iter().map(|e| e.session_id.as_str()).collect();

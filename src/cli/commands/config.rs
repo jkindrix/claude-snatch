@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use crate::cli::{Cli, ConfigArgs, ConfigAction, OutputFormat};
+use crate::cli::{Cli, ConfigAction, ConfigArgs, OutputFormat};
 use crate::config::{default_config_path, Config};
 use crate::discovery::format_size;
 use crate::error::{Result, SnatchError};
@@ -36,9 +36,18 @@ fn show_config(cli: &Cli) -> Result<()> {
 
             println!("[default_format]");
             println!("  format = \"{}\"", config.default_format.format);
-            println!("  include_thinking = {}", config.default_format.include_thinking);
-            println!("  include_tool_use = {}", config.default_format.include_tool_use);
-            println!("  include_timestamps = {}", config.default_format.include_timestamps);
+            println!(
+                "  include_thinking = {}",
+                config.default_format.include_thinking
+            );
+            println!(
+                "  include_tool_use = {}",
+                config.default_format.include_tool_use
+            );
+            println!(
+                "  include_timestamps = {}",
+                config.default_format.include_timestamps
+            );
             println!("  pretty_json = {}", config.default_format.pretty_json);
             println!();
 
@@ -90,7 +99,10 @@ fn show_config(cli: &Cli) -> Result<()> {
             } else {
                 println!("  monthly_limit = # not set");
             }
-            println!("  warning_threshold = {:.0}%", config.budget.warning_threshold * 100.0);
+            println!(
+                "  warning_threshold = {:.0}%",
+                config.budget.warning_threshold * 100.0
+            );
             println!("  show_in_stats = {}", config.budget.show_in_stats);
         }
     }
@@ -119,27 +131,37 @@ fn get_config_value(cli: &Cli, key: &str) -> Result<()> {
         "display.context_lines" => config.display.context_lines.to_string(),
 
         "cache.enabled" => config.cache.enabled.to_string(),
-        "cache.directory" => config.cache.directory
+        "cache.directory" => config
+            .cache
+            .directory
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "(auto-detect)".to_string()),
         "cache.max_size" => config.cache.max_size.to_string(),
         "cache.ttl_seconds" => config.cache.ttl_seconds.to_string(),
 
-        "budget.daily_limit" => config.budget.daily_limit
+        "budget.daily_limit" => config
+            .budget
+            .daily_limit
             .map(|v| format!("{:.2}", v))
             .unwrap_or_else(|| "(not set)".to_string()),
-        "budget.weekly_limit" => config.budget.weekly_limit
+        "budget.weekly_limit" => config
+            .budget
+            .weekly_limit
             .map(|v| format!("{:.2}", v))
             .unwrap_or_else(|| "(not set)".to_string()),
-        "budget.monthly_limit" => config.budget.monthly_limit
+        "budget.monthly_limit" => config
+            .budget
+            .monthly_limit
             .map(|v| format!("{:.2}", v))
             .unwrap_or_else(|| "(not set)".to_string()),
         "budget.warning_threshold" => format!("{:.0}", config.budget.warning_threshold * 100.0),
         "budget.show_in_stats" => config.budget.show_in_stats.to_string(),
 
-        _ => return Err(SnatchError::ConfigError {
-            message: format!("Unknown configuration key: {key}"),
-        }),
+        _ => {
+            return Err(SnatchError::ConfigError {
+                message: format!("Unknown configuration key: {key}"),
+            })
+        }
     };
 
     match cli.effective_output() {
@@ -229,9 +251,11 @@ fn set_config_value(_cli: &Cli, key: &str, value: &str) -> Result<()> {
             config.budget.show_in_stats = parse_bool(value)?;
         }
 
-        _ => return Err(SnatchError::ConfigError {
-            message: format!("Unknown configuration key: {key}"),
-        }),
+        _ => {
+            return Err(SnatchError::ConfigError {
+                message: format!("Unknown configuration key: {key}"),
+            })
+        }
     }
 
     config.save()?;
@@ -318,7 +342,9 @@ fn parse_optional_f64(s: &str) -> Result<Option<f64>> {
         "none" | "unset" | "clear" | "0" | "" => Ok(None),
         _ => {
             let v = s.parse().map_err(|_| SnatchError::ConfigError {
-                message: format!("Invalid decimal number: {s}. Use a number like 100.00 or 'none' to clear."),
+                message: format!(
+                    "Invalid decimal number: {s}. Use a number like 100.00 or 'none' to clear."
+                ),
             })?;
             Ok(Some(v))
         }

@@ -78,17 +78,43 @@ pub enum PrioritySource {
 impl std::fmt::Display for PrioritySource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PrioritySource::RecurringError { tool, count, sessions } => {
-                write!(f, "error: [{}] {}x across {} sessions", tool, count, sessions)
+            PrioritySource::RecurringError {
+                tool,
+                count,
+                sessions,
+            } => {
+                write!(
+                    f,
+                    "error: [{}] {}x across {} sessions",
+                    tool, count, sessions
+                )
             }
-            PrioritySource::FileChurn { path, edits, sessions } => {
-                write!(f, "churn: {} ({} edits, {} sessions)", path, edits, sessions)
+            PrioritySource::FileChurn {
+                path,
+                edits,
+                sessions,
+            } => {
+                write!(
+                    f,
+                    "churn: {} ({} edits, {} sessions)",
+                    path, edits, sessions
+                )
             }
             PrioritySource::OpenGoal { id, text, status } => {
                 write!(f, "goal #{}: {} ({})", id, text, status)
             }
-            PrioritySource::ProposedDecision { id, title, confidence } => {
-                write!(f, "decision #{}: {} ({:.0}% confidence)", id, title, confidence * 100.0)
+            PrioritySource::ProposedDecision {
+                id,
+                title,
+                confidence,
+            } => {
+                write!(
+                    f,
+                    "decision #{}: {} ({:.0}% confidence)",
+                    id,
+                    title,
+                    confidence * 100.0
+                )
             }
         }
     }
@@ -188,7 +214,11 @@ pub fn suggest_priorities(
                 open_goals += 1;
                 let is_in_progress = matches!(goal.status, GoalStatus::InProgress);
                 let score = if is_in_progress { 8.0 } else { 5.0 };
-                let status_str = if is_in_progress { "in_progress" } else { "open" };
+                let status_str = if is_in_progress {
+                    "in_progress"
+                } else {
+                    "open"
+                };
                 items.push(PriorityItem {
                     rank: 0,
                     category: "goal".to_string(),
@@ -230,7 +260,11 @@ pub fn suggest_priorities(
     let mut merged = deduplicate_by_file(&mut items);
 
     // Sort by score descending
-    merged.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    merged.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     merged.truncate(params.max_priorities);
 
     // Assign ranks

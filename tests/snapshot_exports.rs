@@ -7,8 +7,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 
 use claude_snatch::export::{
-    CsvExporter, ExportOptions, Exporter, JsonExporter, MarkdownExporter, TextExporter,
-    XmlExporter,
+    CsvExporter, ExportOptions, Exporter, JsonExporter, MarkdownExporter, TextExporter, XmlExporter,
 };
 use claude_snatch::model::LogEntry;
 use claude_snatch::parser::JsonlParser;

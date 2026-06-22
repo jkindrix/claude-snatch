@@ -10,8 +10,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 
 use crate::analysis::decision_detection::{
-    detect_decisions, extract_decision_sentence, extract_first_prose_line,
-    CandidateDecision, DetectParams,
+    detect_decisions, extract_decision_sentence, extract_first_prose_line, CandidateDecision,
+    DetectParams,
 };
 use crate::cli::{Cli, DetectArgs};
 use crate::decisions::{load_decisions, save_decisions};
@@ -21,14 +21,17 @@ use super::helpers::{self, truncate, SessionCollectParams};
 
 /// Run the detect command.
 pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
-    let sessions = helpers::collect_sessions(cli, &SessionCollectParams {
-        session: args.session.as_deref(),
-        project: args.project.as_deref(),
-        since: args.since.as_deref(),
-        until: args.until.as_deref(),
-        recent: args.recent,
-        no_subagents: args.no_subagents,
-    })?;
+    let sessions = helpers::collect_sessions(
+        cli,
+        &SessionCollectParams {
+            session: args.session.as_deref(),
+            project: args.project.as_deref(),
+            since: args.since.as_deref(),
+            until: args.until.as_deref(),
+            recent: args.recent,
+            no_subagents: args.no_subagents,
+        },
+    )?;
 
     let topic_regex = if let Some(ref topic) = args.topic {
         Some(Regex::new(topic).map_err(|e| SnatchError::InvalidArgument {
@@ -52,7 +55,11 @@ pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
         pb.finish_and_clear();
     }
 
-    let limit = if args.no_limit { usize::MAX } else { args.limit };
+    let limit = if args.no_limit {
+        usize::MAX
+    } else {
+        args.limit
+    };
 
     let params = DetectParams {
         min_confidence: args.min_confidence,
@@ -72,10 +79,13 @@ pub fn run(cli: &Cli, args: &DetectArgs) -> Result<()> {
 
     // Register confirmed candidates to the decision registry
     if args.register || args.dry_run {
-        let project_filter = args.project.as_deref().ok_or_else(|| SnatchError::InvalidArgument {
-            name: "project".into(),
-            reason: "--project is required with --register".into(),
-        })?;
+        let project_filter =
+            args.project
+                .as_deref()
+                .ok_or_else(|| SnatchError::InvalidArgument {
+                    name: "project".into(),
+                    reason: "--project is required with --register".into(),
+                })?;
 
         let project = super::helpers::resolve_single_project(cli, project_filter)?;
 
@@ -179,7 +189,10 @@ fn output_json(candidates: &[CandidateDecision]) {
         })
         .collect();
 
-    println!("{}", serde_json::to_string_pretty(&entries).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&entries).unwrap_or_default()
+    );
 }
 
 fn output_text(cli: &Cli, candidates: &[CandidateDecision]) {

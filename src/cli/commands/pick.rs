@@ -14,10 +14,7 @@ use crate::util::truncate_path;
 use super::get_claude_dir;
 
 /// Format a session for display in the picker.
-fn format_session_item(
-    session: &crate::discovery::Session,
-    show_project: bool,
-) -> String {
+fn format_session_item(session: &crate::discovery::Session, show_project: bool) -> String {
     let mut line = String::new();
 
     // Session ID (short)
@@ -25,7 +22,10 @@ fn format_session_item(
     write!(line, "{short_id}").unwrap();
 
     // Modified time
-    if let Ok(modified) = session.modified_time().duration_since(std::time::UNIX_EPOCH) {
+    if let Ok(modified) = session
+        .modified_time()
+        .duration_since(std::time::UNIX_EPOCH)
+    {
         let secs = modified.as_secs();
         let dt = chrono::DateTime::from_timestamp(secs as i64, 0);
         if let Some(dt) = dt {

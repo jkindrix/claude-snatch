@@ -8,9 +8,7 @@
 
 use std::collections::HashMap;
 
-use crate::analysis::lessons::{
-    extract_lessons, ErrorFixPair, LessonOptions, UserCorrectionEntry,
-};
+use crate::analysis::lessons::{extract_lessons, ErrorFixPair, LessonOptions, UserCorrectionEntry};
 use crate::discovery::Session;
 
 /// Parameters for project-level lesson aggregation.
@@ -110,7 +108,11 @@ fn normalize_error(tool_name: &str, error: &str) -> String {
     if let Some(first_line) = s.lines().next() {
         let trimmed = first_line.trim();
         if trimmed.len() > 10 {
-            return format!("{}:{}", tool_name, trimmed.chars().take(120).collect::<String>());
+            return format!(
+                "{}:{}",
+                tool_name,
+                trimmed.chars().take(120).collect::<String>()
+            );
         }
     }
 
@@ -172,11 +174,17 @@ pub fn aggregate_project_lessons(
             let mut sessions: Vec<String> = entries.iter().map(|(_, sid)| sid.clone()).collect();
             sessions.dedup();
             let last_seen = entries.first().and_then(|(p, _)| p.timestamp.clone());
-            let example_resolution = entries.first().and_then(|(p, _)| p.resolution_summary.clone());
-            let tool_name = entries.first().map(|(p, _)| p.tool_name.clone()).unwrap_or_default();
+            let example_resolution = entries
+                .first()
+                .and_then(|(p, _)| p.resolution_summary.clone());
+            let tool_name = entries
+                .first()
+                .map(|(p, _)| p.tool_name.clone())
+                .unwrap_or_default();
 
             // Use first entry's error_preview as the display pattern
-            let error_pattern = entries.first()
+            let error_pattern = entries
+                .first()
                 .map(|(p, _)| p.error_preview.clone())
                 .unwrap_or(pattern);
 
@@ -191,15 +199,24 @@ pub fn aggregate_project_lessons(
         })
         .collect();
 
-    recurring_errors.sort_by(|a, b| b.count.cmp(&a.count));
+    recurring_errors.sort_by_key(|b| std::cmp::Reverse(b.count));
     recurring_errors.truncate(params.limit);
 
     // Cluster corrections by simple keyword matching
-    let mut correction_clusters: HashMap<String, Vec<(UserCorrectionEntry, String)>> = HashMap::new();
+    let mut correction_clusters: HashMap<String, Vec<(UserCorrectionEntry, String)>> =
+        HashMap::new();
     for (correction, sid) in all_corrections {
         // Use first 60 chars as a rough cluster key
-        let key = correction.user_text.chars().take(60).collect::<String>().to_lowercase();
-        correction_clusters.entry(key).or_default().push((correction, sid));
+        let key = correction
+            .user_text
+            .chars()
+            .take(60)
+            .collect::<String>()
+            .to_lowercase();
+        correction_clusters
+            .entry(key)
+            .or_default()
+            .push((correction, sid));
     }
 
     let mut recurring_corrections: Vec<RecurringCorrection> = correction_clusters
@@ -209,19 +226,26 @@ pub fn aggregate_project_lessons(
             let count = entries.len();
             let mut sessions: Vec<String> = entries.iter().map(|(_, sid)| sid.clone()).collect();
             sessions.dedup();
-            let examples: Vec<String> = entries.iter()
+            let examples: Vec<String> = entries
+                .iter()
                 .take(3)
                 .map(|(c, _)| c.user_text.clone())
                 .collect();
-            let pattern = entries.first()
+            let pattern = entries
+                .first()
                 .map(|(c, _)| c.user_text.clone())
                 .unwrap_or_default();
 
-            RecurringCorrection { pattern, count, sessions, examples }
+            RecurringCorrection {
+                pattern,
+                count,
+                sessions,
+                examples,
+            }
         })
         .collect();
 
-    recurring_corrections.sort_by(|a, b| b.count.cmp(&a.count));
+    recurring_corrections.sort_by_key(|b| std::cmp::Reverse(b.count));
     recurring_corrections.truncate(params.limit);
 
     // Error-prone files (populated during clustering if file paths available)
@@ -235,7 +259,7 @@ pub fn aggregate_project_lessons(
             sessions,
         })
         .collect();
-    error_prone_files.sort_by(|a, b| b.error_count.cmp(&a.error_count));
+    error_prone_files.sort_by_key(|b| std::cmp::Reverse(b.error_count));
     error_prone_files.truncate(20);
 
     // Top failure modes (tool → count)
@@ -244,7 +268,7 @@ pub fn aggregate_project_lessons(
         *tool_counts.entry(re.tool_name.clone()).or_default() += re.count;
     }
     let mut top_failure_modes: Vec<(String, usize)> = tool_counts.into_iter().collect();
-    top_failure_modes.sort_by(|a, b| b.1.cmp(&a.1));
+    top_failure_modes.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     ProjectLessonsResult {
         recurring_errors,

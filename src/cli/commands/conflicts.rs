@@ -40,14 +40,17 @@ pub fn run(cli: &Cli, args: &ConflictsArgs) -> Result<()> {
 
     // === Approach 2: Search-based detection ===
     if let Some(ref topic) = args.topic {
-        let sessions = helpers::collect_sessions(cli, &SessionCollectParams {
-            session: None,
-            project: args.project.as_deref(),
-            since: args.since.as_deref(),
-            until: args.until.as_deref(),
-            recent: None,
-            no_subagents: args.no_subagents,
-        })?;
+        let sessions = helpers::collect_sessions(
+            cli,
+            &SessionCollectParams {
+                session: None,
+                project: args.project.as_deref(),
+                since: args.since.as_deref(),
+                until: args.until.as_deref(),
+                recent: None,
+                no_subagents: args.no_subagents,
+            },
+        )?;
 
         let session_count = sessions.len();
         let show_progress = session_count > 10 && std::io::stderr().is_terminal() && !cli.quiet;
@@ -131,7 +134,10 @@ fn output_json(conflicts: &[ConflictPair]) {
         })
         .collect();
 
-    println!("{}", serde_json::to_string_pretty(&entries).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&entries).unwrap_or_default()
+    );
 }
 
 fn output_text(cli: &Cli, conflicts: &[ConflictPair]) {
@@ -155,7 +161,8 @@ fn output_text(cli: &Cli, conflicts: &[ConflictPair]) {
         println!();
         println!(
             "    EARLIER ({} [{}]):",
-            earlier_date, short_id(&conflict.earlier_session)
+            earlier_date,
+            short_id(&conflict.earlier_session)
         );
         for line in truncate(&conflict.earlier_text, 300).lines() {
             println!("      {}", line);
@@ -163,7 +170,8 @@ fn output_text(cli: &Cli, conflicts: &[ConflictPair]) {
         println!();
         println!(
             "    LATER ({} [{}]):",
-            later_date, short_id(&conflict.later_session)
+            later_date,
+            short_id(&conflict.later_session)
         );
         for line in truncate(&conflict.later_text, 300).lines() {
             println!("      {}", line);

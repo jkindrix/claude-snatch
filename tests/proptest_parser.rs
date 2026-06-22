@@ -154,7 +154,7 @@ proptest! {
         let _ = parser.parse_str(&content);
 
         let rate = parser.stats().success_rate();
-        prop_assert!(rate >= 0.0 && rate <= 100.0, "Rate out of bounds: {}", rate);
+        prop_assert!((0.0..=100.0).contains(&rate), "Rate out of bounds: {}", rate);
     }
 }
 
@@ -173,11 +173,11 @@ mod edge_cases {
     #[test]
     fn unicode_edge_cases() {
         let cases = [
-            "\u{FEFF}", // BOM
-            "\u{200B}", // Zero-width space
-            "\u{FFFD}", // Replacement character
-            "🦀",       // Emoji
-            "日本語",   // CJK
+            "\u{FEFF}",                    // BOM
+            "\u{200B}",                    // Zero-width space
+            "\u{FFFD}",                    // Replacement character
+            "🦀",                          // Emoji
+            "日本語",                      // CJK
             "\u{1F600}\u{1F601}\u{1F602}", // Multiple emoji
         ];
 

@@ -191,7 +191,11 @@ impl JsonlParser {
                 SnatchError::io(format!("Failed to get metadata for {}", path.display()), e)
             })?;
             let file_size = metadata.len();
-            trace!(file_size, max_size = self.max_file_size, "Checking file size limit");
+            trace!(
+                file_size,
+                max_size = self.max_file_size,
+                "Checking file size limit"
+            );
 
             if file_size > self.max_file_size {
                 // Log at debug level since the error message already conveys this information
@@ -235,7 +239,10 @@ impl JsonlParser {
                         warn!(line = line_num, error = %e, "I/O error reading line, skipping");
                         continue;
                     }
-                    return Err(SnatchError::io(format!("Failed to read line {line_num}"), e));
+                    return Err(SnatchError::io(
+                        format!("Failed to read line {line_num}"),
+                        e,
+                    ));
                 }
             };
 
@@ -288,7 +295,8 @@ impl JsonlParser {
 
     /// Parse a single JSON line.
     fn parse_line(&self, line: &str, line_num: usize) -> Result<LogEntry> {
-        serde_json::from_str(line).map_err(|e| SnatchError::parse_with_source(line_num, e.to_string(), e))
+        serde_json::from_str(line)
+            .map_err(|e| SnatchError::parse_with_source(line_num, e.to_string(), e))
     }
 
     /// Parse JSONL from a string.
@@ -356,7 +364,11 @@ impl RawLogEntry {
     /// Create from entry and raw JSON.
     #[must_use]
     pub fn new(entry: LogEntry, raw: String, line_num: usize) -> Self {
-        Self { entry, raw, line_num }
+        Self {
+            entry,
+            raw,
+            line_num,
+        }
     }
 }
 
@@ -500,10 +512,7 @@ invalid json line
         let mut parser = JsonlParser::new();
         let _ = parser.parse_str(json).unwrap();
 
-        assert_eq!(
-            parser.schema_version(),
-            Some(&SchemaVersion::V2Lsp)
-        );
+        assert_eq!(parser.schema_version(), Some(&SchemaVersion::V2Lsp));
     }
 
     #[test]

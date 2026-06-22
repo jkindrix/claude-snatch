@@ -82,26 +82,35 @@ impl AsyncWriter {
         // Ensure parent directory exists
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).await.map_err(|e| {
-                SnatchError::io(format!("Failed to create directory: {}", parent.display()), e)
+                SnatchError::io(
+                    format!("Failed to create directory: {}", parent.display()),
+                    e,
+                )
             })?;
         }
 
         // Write to temp file
         let mut file = fs::File::create(&self.temp_path).await.map_err(|e| {
-            SnatchError::io(format!("Failed to create temp file: {}", self.temp_path.display()), e)
+            SnatchError::io(
+                format!("Failed to create temp file: {}", self.temp_path.display()),
+                e,
+            )
         })?;
 
-        file.write_all(content.as_bytes()).await.map_err(|e| {
-            SnatchError::io("Failed to write content", e)
-        })?;
+        file.write_all(content.as_bytes())
+            .await
+            .map_err(|e| SnatchError::io("Failed to write content", e))?;
 
-        file.flush().await.map_err(|e| {
-            SnatchError::io("Failed to flush file", e)
-        })?;
+        file.flush()
+            .await
+            .map_err(|e| SnatchError::io("Failed to flush file", e))?;
 
         // Atomic rename
         fs::rename(&self.temp_path, &self.path).await.map_err(|e| {
-            SnatchError::io(format!("Failed to rename temp file to: {}", self.path.display()), e)
+            SnatchError::io(
+                format!("Failed to rename temp file to: {}", self.path.display()),
+                e,
+            )
         })?;
 
         Ok(())
@@ -112,26 +121,35 @@ impl AsyncWriter {
         // Ensure parent directory exists
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).await.map_err(|e| {
-                SnatchError::io(format!("Failed to create directory: {}", parent.display()), e)
+                SnatchError::io(
+                    format!("Failed to create directory: {}", parent.display()),
+                    e,
+                )
             })?;
         }
 
         // Write to temp file
         let mut file = fs::File::create(&self.temp_path).await.map_err(|e| {
-            SnatchError::io(format!("Failed to create temp file: {}", self.temp_path.display()), e)
+            SnatchError::io(
+                format!("Failed to create temp file: {}", self.temp_path.display()),
+                e,
+            )
         })?;
 
-        file.write_all(content).await.map_err(|e| {
-            SnatchError::io("Failed to write content", e)
-        })?;
+        file.write_all(content)
+            .await
+            .map_err(|e| SnatchError::io("Failed to write content", e))?;
 
-        file.flush().await.map_err(|e| {
-            SnatchError::io("Failed to flush file", e)
-        })?;
+        file.flush()
+            .await
+            .map_err(|e| SnatchError::io("Failed to flush file", e))?;
 
         // Atomic rename
         fs::rename(&self.temp_path, &self.path).await.map_err(|e| {
-            SnatchError::io(format!("Failed to rename temp file to: {}", self.path.display()), e)
+            SnatchError::io(
+                format!("Failed to rename temp file to: {}", self.path.display()),
+                e,
+            )
         })?;
 
         Ok(())
@@ -141,17 +159,17 @@ impl AsyncWriter {
 /// Read a file asynchronously.
 pub async fn read_file(path: impl AsRef<Path>) -> Result<String> {
     let path = path.as_ref();
-    fs::read_to_string(path).await.map_err(|e| {
-        SnatchError::io(format!("Failed to read file: {}", path.display()), e)
-    })
+    fs::read_to_string(path)
+        .await
+        .map_err(|e| SnatchError::io(format!("Failed to read file: {}", path.display()), e))
 }
 
 /// Read a file as bytes asynchronously.
 pub async fn read_file_bytes(path: impl AsRef<Path>) -> Result<Vec<u8>> {
     let path = path.as_ref();
-    fs::read(path).await.map_err(|e| {
-        SnatchError::io(format!("Failed to read file: {}", path.display()), e)
-    })
+    fs::read(path)
+        .await
+        .map_err(|e| SnatchError::io(format!("Failed to read file: {}", path.display()), e))
 }
 
 /// Write a file asynchronously with atomic semantics.
@@ -174,37 +192,40 @@ pub async fn file_exists(path: impl AsRef<Path>) -> bool {
 /// Get file metadata asynchronously.
 pub async fn file_metadata(path: impl AsRef<Path>) -> Result<std::fs::Metadata> {
     let path = path.as_ref();
-    fs::metadata(path).await.map_err(|e| {
-        SnatchError::io(format!("Failed to get metadata: {}", path.display()), e)
-    })
+    fs::metadata(path)
+        .await
+        .map_err(|e| SnatchError::io(format!("Failed to get metadata: {}", path.display()), e))
 }
 
 /// Create a directory and all parent directories asynchronously.
 pub async fn create_dir_all(path: impl AsRef<Path>) -> Result<()> {
     let path = path.as_ref();
-    fs::create_dir_all(path).await.map_err(|e| {
-        SnatchError::io(format!("Failed to create directory: {}", path.display()), e)
-    })
+    fs::create_dir_all(path)
+        .await
+        .map_err(|e| SnatchError::io(format!("Failed to create directory: {}", path.display()), e))
 }
 
 /// Remove a file asynchronously.
 pub async fn remove_file(path: impl AsRef<Path>) -> Result<()> {
     let path = path.as_ref();
-    fs::remove_file(path).await.map_err(|e| {
-        SnatchError::io(format!("Failed to remove file: {}", path.display()), e)
-    })
+    fs::remove_file(path)
+        .await
+        .map_err(|e| SnatchError::io(format!("Failed to remove file: {}", path.display()), e))
 }
 
 /// Read a directory asynchronously.
 pub async fn read_dir(path: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
     let path = path.as_ref();
-    let mut entries = fs::read_dir(path).await.map_err(|e| {
-        SnatchError::io(format!("Failed to read directory: {}", path.display()), e)
-    })?;
+    let mut entries = fs::read_dir(path)
+        .await
+        .map_err(|e| SnatchError::io(format!("Failed to read directory: {}", path.display()), e))?;
 
     let mut paths = Vec::new();
     while let Some(entry) = entries.next_entry().await.map_err(|e| {
-        SnatchError::io(format!("Failed to read directory entry: {}", path.display()), e)
+        SnatchError::io(
+            format!("Failed to read directory entry: {}", path.display()),
+            e,
+        )
     })? {
         paths.push(entry.path());
     }
@@ -232,49 +253,51 @@ pub async fn export_conversation_async<W: std::io::Write + Send + 'static>(
     options: crate::export::ExportOptions,
 ) -> Result<()> {
     use crate::export::{
-        CsvExporter, ExportFormat, Exporter, HtmlExporter, JsonExporter,
-        MarkdownExporter, OtelExporter, TextExporter, XmlExporter,
+        CsvExporter, ExportFormat, Exporter, HtmlExporter, JsonExporter, MarkdownExporter,
+        OtelExporter, TextExporter, XmlExporter,
     };
 
     // Run the export in a blocking task
-    tokio::task::spawn_blocking(move || {
-        match format {
-            ExportFormat::Markdown => {
-                let exporter = MarkdownExporter::new();
-                exporter.export_conversation(&conversation, &mut writer, &options)
-            }
-            ExportFormat::Json | ExportFormat::JsonPretty => {
-                let exporter = JsonExporter::new()
-                    .pretty(matches!(format, ExportFormat::JsonPretty));
-                exporter.export_conversation(&conversation, &mut writer, &options)
-            }
-            ExportFormat::Html => {
-                let exporter = HtmlExporter::new();
-                exporter.export_conversation(&conversation, &mut writer, &options)
-            }
-            ExportFormat::Text => {
-                let exporter = TextExporter::new();
-                exporter.export_conversation(&conversation, &mut writer, &options)
-            }
-            ExportFormat::Csv => {
-                let exporter = CsvExporter::new();
-                exporter.export_conversation(&conversation, &mut writer, &options)
-            }
-            ExportFormat::Xml => {
-                let exporter = XmlExporter::new();
-                exporter.export_conversation(&conversation, &mut writer, &options)
-            }
-            ExportFormat::Otel => {
-                let exporter = OtelExporter::new();
-                exporter.export_conversation(&conversation, &mut writer, &options)
-            }
-            ExportFormat::Sqlite => {
-                Err(SnatchError::unsupported("SQLite async export - use synchronous export"))
-            }
+    tokio::task::spawn_blocking(move || match format {
+        ExportFormat::Markdown => {
+            let exporter = MarkdownExporter::new();
+            exporter.export_conversation(&conversation, &mut writer, &options)
         }
+        ExportFormat::Json | ExportFormat::JsonPretty => {
+            let exporter = JsonExporter::new().pretty(matches!(format, ExportFormat::JsonPretty));
+            exporter.export_conversation(&conversation, &mut writer, &options)
+        }
+        ExportFormat::Html => {
+            let exporter = HtmlExporter::new();
+            exporter.export_conversation(&conversation, &mut writer, &options)
+        }
+        ExportFormat::Text => {
+            let exporter = TextExporter::new();
+            exporter.export_conversation(&conversation, &mut writer, &options)
+        }
+        ExportFormat::Csv => {
+            let exporter = CsvExporter::new();
+            exporter.export_conversation(&conversation, &mut writer, &options)
+        }
+        ExportFormat::Xml => {
+            let exporter = XmlExporter::new();
+            exporter.export_conversation(&conversation, &mut writer, &options)
+        }
+        ExportFormat::Otel => {
+            let exporter = OtelExporter::new();
+            exporter.export_conversation(&conversation, &mut writer, &options)
+        }
+        ExportFormat::Sqlite => Err(SnatchError::unsupported(
+            "SQLite async export - use synchronous export",
+        )),
     })
     .await
-    .map_err(|e| SnatchError::io("Export task failed", std::io::Error::new(std::io::ErrorKind::Other, e)))?
+    .map_err(|e| {
+        SnatchError::io(
+            "Export task failed",
+            std::io::Error::new(std::io::ErrorKind::Other, e),
+        )
+    })?
 }
 
 #[cfg(test)]

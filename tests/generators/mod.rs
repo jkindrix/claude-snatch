@@ -181,7 +181,7 @@ pub fn generate_session<W: Write>(config: &SessionConfig, writer: &mut W) -> std
 
         writeln!(writer, "{}", serde_json::to_string(&user_entry)?)?;
         parent_uuid = Some(user_uuid);
-        current_time = current_time + Duration::seconds(1);
+        current_time += Duration::seconds(1);
         message_count += 1;
 
         // Generate assistant message
@@ -238,7 +238,7 @@ pub fn generate_session<W: Write>(config: &SessionConfig, writer: &mut W) -> std
 
         writeln!(writer, "{}", serde_json::to_string(&assistant_entry)?)?;
         parent_uuid = Some(assistant_uuid);
-        current_time = current_time + Duration::seconds(2);
+        current_time += Duration::seconds(2);
         message_count += 1;
     }
 
@@ -300,7 +300,10 @@ fn generate_user_text(idx: usize, avg_length: usize) -> String {
 
     // Pad to approximate desired length
     let padding = if base.len() < avg_length {
-        format!(" Additional context: {}", "relevant details ".repeat((avg_length - base.len()) / 18))
+        format!(
+            " Additional context: {}",
+            "relevant details ".repeat((avg_length - base.len()) / 18)
+        )
     } else {
         String::new()
     };
@@ -334,7 +337,11 @@ fn generate_assistant_text(idx: usize, avg_length: usize) -> String {
     // Pad to approximate desired length
     if base.len() < avg_length {
         let additional = "This approach ensures maintainability and follows Rust idioms. ";
-        format!("{} {}", base, additional.repeat((avg_length - base.len()) / additional.len() + 1))
+        format!(
+            "{} {}",
+            base,
+            additional.repeat((avg_length - base.len()) / additional.len() + 1)
+        )
     } else {
         base
     }
@@ -357,14 +364,22 @@ fn generate_thinking_text(idx: usize, avg_length: usize) -> String {
         "Testing this thoroughly requires both unit tests and integration tests.",
     ];
 
-    let base = format!("{} {}", thoughts[idx % thoughts.len()], analysis_parts[idx % analysis_parts.len()]);
+    let base = format!(
+        "{} {}",
+        thoughts[idx % thoughts.len()],
+        analysis_parts[idx % analysis_parts.len()]
+    );
 
     // Pad to approximate desired length
     if base.len() < avg_length {
         let reasoning = "Considering the architecture and design patterns used in this codebase, \
                          the best approach would be to maintain consistency with existing patterns \
                          while introducing improvements where possible. ";
-        format!("{}\n\n{}", base, reasoning.repeat((avg_length - base.len()) / reasoning.len() + 1))
+        format!(
+            "{}\n\n{}",
+            base,
+            reasoning.repeat((avg_length - base.len()) / reasoning.len() + 1)
+        )
     } else {
         base
     }
@@ -462,9 +477,8 @@ mod tests {
         generate_large_file(3, 2, &mut buffer).unwrap();
 
         let content = String::from_utf8(buffer).unwrap();
-        let lines: Vec<&str> = content.lines().collect();
 
         // 3 sessions * 2 exchanges * 2 messages = 12 lines
-        assert_eq!(lines.len(), 12);
+        assert_eq!(content.lines().count(), 12);
     }
 }

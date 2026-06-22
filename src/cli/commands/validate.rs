@@ -17,11 +17,12 @@ pub fn run(cli: &Cli, args: &ValidateArgs) -> Result<()> {
     let sessions = if args.all {
         claude_dir.all_sessions()?
     } else if let Some(session_id) = &args.session {
-        let session = claude_dir
-            .find_session(session_id)?
-            .ok_or_else(|| SnatchError::SessionNotFound {
-                session_id: session_id.clone(),
-            })?;
+        let session =
+            claude_dir
+                .find_session(session_id)?
+                .ok_or_else(|| SnatchError::SessionNotFound {
+                    session_id: session_id.clone(),
+                })?;
         vec![session]
     } else {
         // Validate most recent sessions by default
@@ -44,12 +45,15 @@ pub fn run(cli: &Cli, args: &ValidateArgs) -> Result<()> {
     // Output results
     match cli.effective_output() {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&ValidationReport {
-                sessions_validated: all_results.len(),
-                total_errors,
-                total_warnings,
-                results: all_results,
-            })?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&ValidationReport {
+                    sessions_validated: all_results.len(),
+                    total_errors,
+                    total_warnings,
+                    results: all_results,
+                })?
+            );
         }
         OutputFormat::Tsv => {
             println!("session\terrors\twarnings\tvalid");

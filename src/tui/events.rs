@@ -8,7 +8,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+use crossterm::event::{
+    self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, MouseEvent,
+};
 
 /// Application events.
 #[allow(dead_code)]
@@ -141,37 +143,51 @@ impl Default for KeyBindings {
 impl KeyBindings {
     /// Check if a key matches quit binding.
     pub fn is_quit(&self, key: &KeyEvent) -> bool {
-        self.quit.iter().any(|k| k.code == key.code && k.modifiers == key.modifiers)
+        self.quit
+            .iter()
+            .any(|k| k.code == key.code && k.modifiers == key.modifiers)
     }
 
     /// Check if a key matches up binding.
     pub fn is_up(&self, key: &KeyEvent) -> bool {
-        self.up.iter().any(|k| k.code == key.code && k.modifiers == key.modifiers)
+        self.up
+            .iter()
+            .any(|k| k.code == key.code && k.modifiers == key.modifiers)
     }
 
     /// Check if a key matches down binding.
     pub fn is_down(&self, key: &KeyEvent) -> bool {
-        self.down.iter().any(|k| k.code == key.code && k.modifiers == key.modifiers)
+        self.down
+            .iter()
+            .any(|k| k.code == key.code && k.modifiers == key.modifiers)
     }
 
     /// Check if a key matches left binding.
     pub fn is_left(&self, key: &KeyEvent) -> bool {
-        self.left.iter().any(|k| k.code == key.code && k.modifiers == key.modifiers)
+        self.left
+            .iter()
+            .any(|k| k.code == key.code && k.modifiers == key.modifiers)
     }
 
     /// Check if a key matches right binding.
     pub fn is_right(&self, key: &KeyEvent) -> bool {
-        self.right.iter().any(|k| k.code == key.code && k.modifiers == key.modifiers)
+        self.right
+            .iter()
+            .any(|k| k.code == key.code && k.modifiers == key.modifiers)
     }
 
     /// Check if a key matches select binding.
     pub fn is_select(&self, key: &KeyEvent) -> bool {
-        self.select.iter().any(|k| k.code == key.code && k.modifiers == key.modifiers)
+        self.select
+            .iter()
+            .any(|k| k.code == key.code && k.modifiers == key.modifiers)
     }
 
     /// Check if a key matches back binding.
     pub fn is_back(&self, key: &KeyEvent) -> bool {
-        self.back.iter().any(|k| k.code == key.code && k.modifiers == key.modifiers)
+        self.back
+            .iter()
+            .any(|k| k.code == key.code && k.modifiers == key.modifiers)
     }
 
     /// Format a key event for display in help text.

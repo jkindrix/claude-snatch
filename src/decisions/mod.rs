@@ -194,7 +194,10 @@ impl DecisionStore {
 
     /// Get all active decisions (proposed or confirmed).
     pub fn active_decisions(&self) -> Vec<&Decision> {
-        self.decisions.iter().filter(|d| d.status.is_active()).collect()
+        self.decisions
+            .iter()
+            .filter(|d| d.status.is_active())
+            .collect()
     }
 
     /// Format active decisions for hook injection.
@@ -216,7 +219,10 @@ impl DecisionStore {
             } else {
                 format!(" [{}]", d.tags.join(", "))
             };
-            lines.push(format!("- [{}] #{}: {}{}{}", d.status, d.id, d.title, conf, tags));
+            lines.push(format!(
+                "- [{}] #{}: {}{}{}",
+                d.status, d.id, d.title, conf, tags
+            ));
         }
         Some(lines.join("\n"))
     }
@@ -256,25 +262,47 @@ pub fn save_decisions(project_dir: &Path, store: &DecisionStore) -> Result<()> {
             source,
         })?;
     }
-    let json = serde_json::to_string_pretty(store).map_err(|source| SnatchError::SerializationError {
-        context: "Failed to serialize decisions".to_string(),
-        source,
-    })?;
+    let json =
+        serde_json::to_string_pretty(store).map_err(|source| SnatchError::SerializationError {
+            context: "Failed to serialize decisions".to_string(),
+            source,
+        })?;
     atomic_write(&path, json.as_bytes())
 }
 
 #[cfg(test)]
 mod tests {
+    // Test assertions compare exactly-representable float values (0.0, integer-valued
+    // costs/scores); the float_cmp lint is a false positive for these.
+    #![allow(clippy::float_cmp)]
     use super::*;
 
     #[test]
     fn test_decision_status_parse() {
-        assert_eq!(DecisionStatus::parse("proposed"), Some(DecisionStatus::Proposed));
-        assert_eq!(DecisionStatus::parse("confirmed"), Some(DecisionStatus::Confirmed));
-        assert_eq!(DecisionStatus::parse("superseded"), Some(DecisionStatus::Superseded));
-        assert_eq!(DecisionStatus::parse("replaced"), Some(DecisionStatus::Superseded));
-        assert_eq!(DecisionStatus::parse("abandoned"), Some(DecisionStatus::Abandoned));
-        assert_eq!(DecisionStatus::parse("CONFIRMED"), Some(DecisionStatus::Confirmed));
+        assert_eq!(
+            DecisionStatus::parse("proposed"),
+            Some(DecisionStatus::Proposed)
+        );
+        assert_eq!(
+            DecisionStatus::parse("confirmed"),
+            Some(DecisionStatus::Confirmed)
+        );
+        assert_eq!(
+            DecisionStatus::parse("superseded"),
+            Some(DecisionStatus::Superseded)
+        );
+        assert_eq!(
+            DecisionStatus::parse("replaced"),
+            Some(DecisionStatus::Superseded)
+        );
+        assert_eq!(
+            DecisionStatus::parse("abandoned"),
+            Some(DecisionStatus::Abandoned)
+        );
+        assert_eq!(
+            DecisionStatus::parse("CONFIRMED"),
+            Some(DecisionStatus::Confirmed)
+        );
         assert_eq!(DecisionStatus::parse("bogus"), None);
     }
 
@@ -289,8 +317,20 @@ mod tests {
     #[test]
     fn test_add_decision() {
         let mut store = DecisionStore::default();
-        let id1 = store.add_decision("No Drop trait".into(), Some("Manual resource management".into()), None, None, vec!["memory".into()]);
-        let id2 = store.add_decision("Use MVS".into(), None, Some("abc123".into()), Some(0.9), vec![]);
+        let id1 = store.add_decision(
+            "No Drop trait".into(),
+            Some("Manual resource management".into()),
+            None,
+            None,
+            vec!["memory".into()],
+        );
+        let id2 = store.add_decision(
+            "Use MVS".into(),
+            None,
+            Some("abc123".into()),
+            Some(0.9),
+            vec![],
+        );
 
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
@@ -361,7 +401,13 @@ mod tests {
     #[test]
     fn test_format_decisions_for_injection() {
         let mut store = DecisionStore::default();
-        store.add_decision("No Drop trait".into(), None, None, Some(0.9), vec!["memory".into()]);
+        store.add_decision(
+            "No Drop trait".into(),
+            None,
+            None,
+            Some(0.9),
+            vec!["memory".into()],
+        );
         store.update_decision(1, Some(DecisionStatus::Confirmed), None, None, None);
         store.add_decision("Use MVS".into(), None, None, None, vec![]);
 
@@ -386,7 +432,13 @@ mod tests {
         assert!(store.decisions.is_empty());
 
         let mut store = DecisionStore::default();
-        store.add_decision("Test decision".into(), Some("Details".into()), Some("sess1".into()), Some(0.85), vec!["tag1".into()]);
+        store.add_decision(
+            "Test decision".into(),
+            Some("Details".into()),
+            Some("sess1".into()),
+            Some(0.85),
+            vec!["tag1".into()],
+        );
         store.update_decision(1, Some(DecisionStatus::Confirmed), None, None, None);
 
         save_decisions(project_dir, &store).unwrap();
@@ -404,7 +456,13 @@ mod tests {
     fn test_serde_roundtrip() {
         let mut store = DecisionStore::default();
         store.add_decision("D1".into(), None, None, None, vec![]);
-        store.add_decision("D2".into(), Some("desc".into()), None, Some(0.5), vec!["a".into(), "b".into()]);
+        store.add_decision(
+            "D2".into(),
+            Some("desc".into()),
+            None,
+            Some(0.5),
+            vec!["a".into(), "b".into()],
+        );
         store.supersede_decision(1, 2);
 
         let json = serde_json::to_string_pretty(&store).unwrap();

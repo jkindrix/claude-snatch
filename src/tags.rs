@@ -188,10 +188,8 @@ impl TagStore {
             SnatchError::io(format!("Failed to read tags file: {}", path.display()), e)
         })?;
 
-        serde_json::from_str(&content).map_err(|e| {
-            SnatchError::InvalidConfig {
-                message: format!("Invalid tags file: {e}"),
-            }
+        serde_json::from_str(&content).map_err(|e| SnatchError::InvalidConfig {
+            message: format!("Invalid tags file: {e}"),
         })
     }
 
@@ -203,11 +201,10 @@ impl TagStore {
 
     /// Save tag store to a specific path.
     pub fn save_to(&self, path: &Path) -> Result<()> {
-        let content = serde_json::to_string_pretty(self).map_err(|e| {
-            SnatchError::InvalidConfig {
+        let content =
+            serde_json::to_string_pretty(self).map_err(|e| SnatchError::InvalidConfig {
                 message: format!("Failed to serialize tags: {e}"),
-            }
-        })?;
+            })?;
 
         atomic_write(path, content.as_bytes())?;
         Ok(())
@@ -451,7 +448,11 @@ impl TagStore {
     pub fn resolve_id<'a>(&'a self, short_id: &str) -> Option<&'a str> {
         if self.sessions.contains_key(short_id) {
             // Return the stored key, not the input
-            return self.sessions.keys().find(|k| *k == short_id).map(|s| s.as_str());
+            return self
+                .sessions
+                .keys()
+                .find(|k| *k == short_id)
+                .map(|s| s.as_str());
         }
         self.sessions
             .keys()
@@ -686,7 +687,11 @@ mod tests {
         let loaded: TagStore = serde_json::from_str(&json).unwrap();
 
         assert_eq!(loaded.sessions.len(), 2);
-        assert!(loaded.get("session1").unwrap().tags.contains(&"feature".to_string()));
+        assert!(loaded
+            .get("session1")
+            .unwrap()
+            .tags
+            .contains(&"feature".to_string()));
         assert!(loaded.get("session2").unwrap().bookmarked);
     }
 
@@ -697,11 +702,17 @@ mod tests {
 
         // Set outcome
         store.set_outcome(session_id, Some(SessionOutcome::Success));
-        assert_eq!(store.get(session_id).unwrap().outcome, Some(SessionOutcome::Success));
+        assert_eq!(
+            store.get(session_id).unwrap().outcome,
+            Some(SessionOutcome::Success)
+        );
 
         // Change outcome
         store.set_outcome(session_id, Some(SessionOutcome::Failed));
-        assert_eq!(store.get(session_id).unwrap().outcome, Some(SessionOutcome::Failed));
+        assert_eq!(
+            store.get(session_id).unwrap().outcome,
+            Some(SessionOutcome::Failed)
+        );
 
         // Clear outcome
         store.set_outcome(session_id, None);
@@ -750,15 +761,42 @@ mod tests {
 
     #[test]
     fn test_outcome_parse() {
-        assert_eq!("success".parse::<SessionOutcome>().unwrap(), SessionOutcome::Success);
-        assert_eq!("s".parse::<SessionOutcome>().unwrap(), SessionOutcome::Success);
-        assert_eq!("partial".parse::<SessionOutcome>().unwrap(), SessionOutcome::Partial);
-        assert_eq!("p".parse::<SessionOutcome>().unwrap(), SessionOutcome::Partial);
-        assert_eq!("failed".parse::<SessionOutcome>().unwrap(), SessionOutcome::Failed);
-        assert_eq!("fail".parse::<SessionOutcome>().unwrap(), SessionOutcome::Failed);
-        assert_eq!("f".parse::<SessionOutcome>().unwrap(), SessionOutcome::Failed);
-        assert_eq!("abandoned".parse::<SessionOutcome>().unwrap(), SessionOutcome::Abandoned);
-        assert_eq!("a".parse::<SessionOutcome>().unwrap(), SessionOutcome::Abandoned);
+        assert_eq!(
+            "success".parse::<SessionOutcome>().unwrap(),
+            SessionOutcome::Success
+        );
+        assert_eq!(
+            "s".parse::<SessionOutcome>().unwrap(),
+            SessionOutcome::Success
+        );
+        assert_eq!(
+            "partial".parse::<SessionOutcome>().unwrap(),
+            SessionOutcome::Partial
+        );
+        assert_eq!(
+            "p".parse::<SessionOutcome>().unwrap(),
+            SessionOutcome::Partial
+        );
+        assert_eq!(
+            "failed".parse::<SessionOutcome>().unwrap(),
+            SessionOutcome::Failed
+        );
+        assert_eq!(
+            "fail".parse::<SessionOutcome>().unwrap(),
+            SessionOutcome::Failed
+        );
+        assert_eq!(
+            "f".parse::<SessionOutcome>().unwrap(),
+            SessionOutcome::Failed
+        );
+        assert_eq!(
+            "abandoned".parse::<SessionOutcome>().unwrap(),
+            SessionOutcome::Abandoned
+        );
+        assert_eq!(
+            "a".parse::<SessionOutcome>().unwrap(),
+            SessionOutcome::Abandoned
+        );
         assert!("invalid".parse::<SessionOutcome>().is_err());
     }
 
@@ -771,7 +809,10 @@ mod tests {
         let json = serde_json::to_string(&store).unwrap();
         let loaded: TagStore = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(loaded.get("session1").unwrap().outcome, Some(SessionOutcome::Success));
+        assert_eq!(
+            loaded.get("session1").unwrap().outcome,
+            Some(SessionOutcome::Success)
+        );
     }
 
     #[test]

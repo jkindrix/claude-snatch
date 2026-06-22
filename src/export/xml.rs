@@ -231,18 +231,53 @@ impl XmlExporter {
         if options.include_usage {
             let summary = analytics.summary_report();
             self.write_open_tag(writer, 2, "usage", &[])?;
-            self.write_text_element(writer, 3, "total-messages", &summary.total_messages.to_string())?;
-            self.write_text_element(writer, 3, "user-messages", &summary.user_messages.to_string())?;
-            self.write_text_element(writer, 3, "assistant-messages", &summary.assistant_messages.to_string())?;
+            self.write_text_element(
+                writer,
+                3,
+                "total-messages",
+                &summary.total_messages.to_string(),
+            )?;
+            self.write_text_element(
+                writer,
+                3,
+                "user-messages",
+                &summary.user_messages.to_string(),
+            )?;
+            self.write_text_element(
+                writer,
+                3,
+                "assistant-messages",
+                &summary.assistant_messages.to_string(),
+            )?;
             self.write_text_element(writer, 3, "total-tokens", &summary.total_tokens.to_string())?;
             self.write_text_element(writer, 3, "input-tokens", &summary.input_tokens.to_string())?;
-            self.write_text_element(writer, 3, "output-tokens", &summary.output_tokens.to_string())?;
+            self.write_text_element(
+                writer,
+                3,
+                "output-tokens",
+                &summary.output_tokens.to_string(),
+            )?;
             if summary.cache_hit_rate > 0.0 {
-                self.write_text_element(writer, 3, "cache-hit-rate", &format!("{:.2}", summary.cache_hit_rate))?;
+                self.write_text_element(
+                    writer,
+                    3,
+                    "cache-hit-rate",
+                    &format!("{:.2}", summary.cache_hit_rate),
+                )?;
             }
-            self.write_text_element(writer, 3, "tool-invocations", &summary.tool_invocations.to_string())?;
+            self.write_text_element(
+                writer,
+                3,
+                "tool-invocations",
+                &summary.tool_invocations.to_string(),
+            )?;
             if summary.thinking_blocks > 0 {
-                self.write_text_element(writer, 3, "thinking-blocks", &summary.thinking_blocks.to_string())?;
+                self.write_text_element(
+                    writer,
+                    3,
+                    "thinking-blocks",
+                    &summary.thinking_blocks.to_string(),
+                )?;
             }
             if let Some(model) = &summary.primary_model {
                 self.write_text_element(writer, 3, "primary-model", model)?;
@@ -277,14 +312,10 @@ impl XmlExporter {
                 attrs.push(("parent-uuid", parent));
             }
 
-            let attrs_owned: Vec<(&str, String)> = attrs
-                .into_iter()
-                .map(|(k, v)| (k, v.to_string()))
-                .collect();
-            let attrs_ref: Vec<(&str, &str)> = attrs_owned
-                .iter()
-                .map(|(k, v)| (*k, v.as_str()))
-                .collect();
+            let attrs_owned: Vec<(&str, String)> =
+                attrs.into_iter().map(|(k, v)| (k, v.to_string())).collect();
+            let attrs_ref: Vec<(&str, &str)> =
+                attrs_owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
             self.write_open_tag(writer, 2, "message", &attrs_ref)?;
 
@@ -343,13 +374,33 @@ impl XmlExporter {
             if options.include_usage {
                 if let Some(usage) = &assistant.message.usage {
                     self.write_open_tag(writer, 3, "usage", &[])?;
-                    self.write_text_element(writer, 4, "input-tokens", &usage.total_input_tokens().to_string())?;
-                    self.write_text_element(writer, 4, "output-tokens", &usage.output_tokens.to_string())?;
+                    self.write_text_element(
+                        writer,
+                        4,
+                        "input-tokens",
+                        &usage.total_input_tokens().to_string(),
+                    )?;
+                    self.write_text_element(
+                        writer,
+                        4,
+                        "output-tokens",
+                        &usage.output_tokens.to_string(),
+                    )?;
                     if let Some(cache_read) = usage.cache_read_input_tokens {
-                        self.write_text_element(writer, 4, "cache-read-tokens", &cache_read.to_string())?;
+                        self.write_text_element(
+                            writer,
+                            4,
+                            "cache-read-tokens",
+                            &cache_read.to_string(),
+                        )?;
                     }
                     if let Some(cache_creation) = usage.cache_creation_input_tokens {
-                        self.write_text_element(writer, 4, "cache-creation-tokens", &cache_creation.to_string())?;
+                        self.write_text_element(
+                            writer,
+                            4,
+                            "cache-creation-tokens",
+                            &cache_creation.to_string(),
+                        )?;
                     }
                     self.write_close_tag(writer, 3, "usage")?;
                 }
@@ -575,10 +626,7 @@ impl Exporter for XmlExporter {
         // Root element
         let mut root_attrs = vec![];
         if self.include_schema {
-            root_attrs.push((
-                "xmlns:xsi",
-                "http://www.w3.org/2001/XMLSchema-instance",
-            ));
+            root_attrs.push(("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance"));
         }
         self.write_open_tag(writer, 0, "conversation", &root_attrs)?;
 

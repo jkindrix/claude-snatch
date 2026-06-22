@@ -449,8 +449,12 @@ impl FilterState {
             parts.push(self.message_type.display_name().to_string());
         }
         if self.date_from.is_some() || self.date_to.is_some() {
-            let from = self.date_from.map_or("*".to_string(), |d| d.format("%m/%d").to_string());
-            let to = self.date_to.map_or("*".to_string(), |d| d.format("%m/%d").to_string());
+            let from = self
+                .date_from
+                .map_or("*".to_string(), |d| d.format("%m/%d").to_string());
+            let to = self
+                .date_to
+                .map_or("*".to_string(), |d| d.format("%m/%d").to_string());
             parts.push(format!("{from}-{to}"));
         }
         if self.errors_only {
@@ -1145,9 +1149,7 @@ impl AppState {
         let tree_selected = if tree_items.is_empty() { None } else { Some(0) };
 
         // Load theme by name or use default
-        let theme = theme_name
-            .and_then(Theme::from_name)
-            .unwrap_or_default();
+        let theme = theme_name.and_then(Theme::from_name).unwrap_or_default();
 
         Ok(Self {
             claude_dir,
@@ -1375,7 +1377,8 @@ impl AppState {
             self.entry_display_cache.clear();
         } else if self.current_project.is_some() {
             self.current_project = None;
-            self.tree_items = self.projects
+            self.tree_items = self
+                .projects
                 .iter()
                 .map(|p| p.decoded_path().to_string())
                 .collect();
@@ -1786,7 +1789,10 @@ impl AppState {
 
         for session_id in &session_ids {
             let Some(session) = self.claude_dir.find_session(session_id)? else {
-                errors.push(format!("Session not found: {}", &session_id[..8.min(session_id.len())]));
+                errors.push(format!(
+                    "Session not found: {}",
+                    &session_id[..8.min(session_id.len())]
+                ));
                 continue;
             };
 
@@ -1809,8 +1815,11 @@ impl AppState {
             };
 
             // Determine output path
-            let output_path = output_dir
-                .join(format!("session_{}.{}", &session_id[..8.min(session_id.len())], extension));
+            let output_path = output_dir.join(format!(
+                "session_{}.{}",
+                &session_id[..8.min(session_id.len())],
+                extension
+            ));
 
             // Export the session
             match self.export_conversation_to_file(&conversation, &output_path, &format, &options) {
@@ -1865,9 +1874,11 @@ impl AppState {
         // Determine output path
         let format = self.export_dialog.selected_format();
         let extension = format.extension();
-        let output_path = std::env::current_dir()
-            .unwrap_or_default()
-            .join(format!("session_{}.{}", &session_id[..8.min(session_id.len())], extension));
+        let output_path = std::env::current_dir().unwrap_or_default().join(format!(
+            "session_{}.{}",
+            &session_id[..8.min(session_id.len())],
+            extension
+        ));
 
         self.export_conversation_to_file(&conversation, &output_path, &format, &options)?;
 
@@ -1903,13 +1914,12 @@ impl AppState {
                 exporter.export_conversation(conversation, &mut writer, options)?;
             }
             ExportFormat::Json | ExportFormat::JsonPretty => {
-                let exporter = JsonExporter::new()
-                    .pretty(matches!(format, ExportFormat::JsonPretty));
+                let exporter =
+                    JsonExporter::new().pretty(matches!(format, ExportFormat::JsonPretty));
                 exporter.export_conversation(conversation, &mut writer, options)?;
             }
             ExportFormat::Html => {
-                let exporter = HtmlExporter::new()
-                    .dark_theme(true);
+                let exporter = HtmlExporter::new().dark_theme(true);
                 exporter.export_conversation(conversation, &mut writer, options)?;
             }
             ExportFormat::Text => {
@@ -2018,7 +2028,10 @@ impl AppState {
 
             // Save to disk
             if let Err(e) = self.tag_store.save() {
-                self.status_message = Some(StatusMessage::error(format!("Failed to save bookmark: {}", e)));
+                self.status_message = Some(StatusMessage::error(format!(
+                    "Failed to save bookmark: {}",
+                    e
+                )));
                 return;
             }
 
@@ -2035,9 +2048,13 @@ impl AppState {
             };
 
             if !is_bookmarked {
-                self.status_message = Some(StatusMessage::info(format!("★ Bookmarked {}", short_id)));
+                self.status_message =
+                    Some(StatusMessage::info(format!("★ Bookmarked {}", short_id)));
             } else {
-                self.status_message = Some(StatusMessage::info(format!("Removed bookmark from {}", short_id)));
+                self.status_message = Some(StatusMessage::info(format!(
+                    "Removed bookmark from {}",
+                    short_id
+                )));
             }
 
             // Refresh tree if in session list view to update display
@@ -2076,7 +2093,9 @@ impl AppState {
             self.filter_state.input_buffer = current_name;
             self.naming_session_id = Some(session_id);
 
-            self.status_message = Some(StatusMessage::info("Enter session name (Enter to confirm, Esc to cancel)"));
+            self.status_message = Some(StatusMessage::info(
+                "Enter session name (Enter to confirm, Esc to cancel)",
+            ));
         } else {
             self.status_message = Some(StatusMessage::warning("No session selected"));
         }
@@ -2091,7 +2110,11 @@ impl AppState {
         };
 
         let name = self.filter_state.input_buffer.trim().to_string();
-        let name_opt = if name.is_empty() { None } else { Some(name.clone()) };
+        let name_opt = if name.is_empty() {
+            None
+        } else {
+            Some(name.clone())
+        };
 
         // Set the name
         self.tag_store.set_name(&session_id, name_opt.clone());
@@ -2117,9 +2140,15 @@ impl AppState {
         };
 
         if let Some(ref n) = name_opt {
-            self.status_message = Some(StatusMessage::info(format!("Named {} as \"{}\"", short_id, n)));
+            self.status_message = Some(StatusMessage::info(format!(
+                "Named {} as \"{}\"",
+                short_id, n
+            )));
         } else {
-            self.status_message = Some(StatusMessage::info(format!("Cleared name for {}", short_id)));
+            self.status_message = Some(StatusMessage::info(format!(
+                "Cleared name for {}",
+                short_id
+            )));
         }
 
         // Clean up input state
@@ -2207,7 +2236,10 @@ impl AppState {
     pub fn toggle_filter(&mut self) {
         self.filter_state.active = !self.filter_state.active;
         if self.filter_state.active {
-            self.status_message = Some(StatusMessage::info(format!("Filter: {}", self.filter_state.summary())));
+            self.status_message = Some(StatusMessage::info(format!(
+                "Filter: {}",
+                self.filter_state.summary()
+            )));
         } else {
             self.status_message = Some(StatusMessage::info("Filter panel closed"));
         }
@@ -2216,14 +2248,20 @@ impl AppState {
     /// Cycle through message type filters (forward).
     pub fn cycle_message_filter(&mut self) {
         self.filter_state.message_type.next();
-        self.status_message = Some(StatusMessage::info(format!("Filter: {}", self.filter_state.message_type.display_name())));
+        self.status_message = Some(StatusMessage::info(format!(
+            "Filter: {}",
+            self.filter_state.message_type.display_name()
+        )));
         self.update_conversation_display();
     }
 
     /// Cycle through message type filters (backward).
     pub fn reverse_cycle_message_filter(&mut self) {
         self.filter_state.message_type.prev();
-        self.status_message = Some(StatusMessage::info(format!("Filter: {}", self.filter_state.message_type.display_name())));
+        self.status_message = Some(StatusMessage::info(format!(
+            "Filter: {}",
+            self.filter_state.message_type.display_name()
+        )));
         self.update_conversation_display();
     }
 
@@ -2232,7 +2270,11 @@ impl AppState {
         self.filter_state.errors_only = !self.filter_state.errors_only;
         self.status_message = Some(StatusMessage::info(format!(
             "Errors only: {}",
-            if self.filter_state.errors_only { "ON" } else { "OFF" }
+            if self.filter_state.errors_only {
+                "ON"
+            } else {
+                "OFF"
+            }
         )));
         self.update_conversation_display();
     }
@@ -2259,7 +2301,9 @@ impl AppState {
     /// Start entering model filter.
     pub fn start_model_input(&mut self) {
         self.filter_state.start_model_input();
-        self.status_message = Some(StatusMessage::info("Enter model filter (e.g., 'sonnet', 'opus'):"));
+        self.status_message = Some(StatusMessage::info(
+            "Enter model filter (e.g., 'sonnet', 'opus'):",
+        ));
     }
 
     /// Handle character input during filter entry.
@@ -2289,11 +2333,16 @@ impl AppState {
         }
 
         if self.filter_state.confirm_input() {
-            self.status_message = Some(StatusMessage::info(format!("Filter: {}", self.filter_state.summary())));
+            self.status_message = Some(StatusMessage::info(format!(
+                "Filter: {}",
+                self.filter_state.summary()
+            )));
             self.update_conversation_display();
         } else if matches!(mode, InputMode::DateFrom | InputMode::DateTo) {
             // Error could be invalid format or invalid range (from > to)
-            self.status_message = Some(StatusMessage::error("Invalid date. Use YYYY-MM-DD and ensure 'from' ≤ 'to'"));
+            self.status_message = Some(StatusMessage::error(
+                "Invalid date. Use YYYY-MM-DD and ensure 'from' ≤ 'to'",
+            ));
         }
     }
 
@@ -2377,14 +2426,19 @@ impl AppState {
         match arboard::Clipboard::new() {
             Ok(mut clipboard) => {
                 if let Err(e) = clipboard.set_text(&text) {
-                    self.status_message = Some(StatusMessage::error(format!("Clipboard error: {e}")));
+                    self.status_message =
+                        Some(StatusMessage::error(format!("Clipboard error: {e}")));
                 } else {
                     let len = text.len();
-                    self.status_message = Some(StatusMessage::success(format!("Copied {len} characters to clipboard")));
+                    self.status_message = Some(StatusMessage::success(format!(
+                        "Copied {len} characters to clipboard"
+                    )));
                 }
             }
             Err(e) => {
-                self.status_message = Some(StatusMessage::error(format!("Clipboard not available: {e}")));
+                self.status_message = Some(StatusMessage::error(format!(
+                    "Clipboard not available: {e}"
+                )));
             }
         }
         Ok(())
@@ -2401,7 +2455,8 @@ impl AppState {
         self.conversation_lines
             .iter()
             .map(|line| {
-                line.spans.iter()
+                line.spans
+                    .iter()
                     .map(|span| span.content.to_string())
                     .collect::<Vec<_>>()
                     .join("")
@@ -2426,14 +2481,19 @@ impl AppState {
         match arboard::Clipboard::new() {
             Ok(mut clipboard) => {
                 if let Err(e) = clipboard.set_text(text) {
-                    self.status_message = Some(StatusMessage::error(format!("Clipboard error: {e}")));
+                    self.status_message =
+                        Some(StatusMessage::error(format!("Clipboard error: {e}")));
                 } else {
                     let lines = text.lines().count();
-                    self.status_message = Some(StatusMessage::success(format!("Copied code block ({lines} lines)")));
+                    self.status_message = Some(StatusMessage::success(format!(
+                        "Copied code block ({lines} lines)"
+                    )));
                 }
             }
             Err(e) => {
-                self.status_message = Some(StatusMessage::error(format!("Clipboard not available: {e}")));
+                self.status_message = Some(StatusMessage::error(format!(
+                    "Clipboard not available: {e}"
+                )));
             }
         }
         Ok(())
@@ -2507,25 +2567,31 @@ impl AppState {
         let temp_path = std::env::temp_dir().join(format!("snatch-{}.md", short_id));
 
         // Write content to temp file
-        std::fs::write(&temp_path, &content).map_err(|e| {
-            crate::error::SnatchError::io("Failed to create temporary file", e)
-        })?;
+        std::fs::write(&temp_path, &content)
+            .map_err(|e| crate::error::SnatchError::io("Failed to create temporary file", e))?;
 
         // Open editor
-        let status = std::process::Command::new(&editor)
-            .arg(&temp_path)
-            .status();
+        let status = std::process::Command::new(&editor).arg(&temp_path).status();
 
         match status {
             Ok(exit_status) => {
                 if exit_status.success() {
-                    self.status_message = Some(StatusMessage::success(format!("Editor closed ({})", editor)));
+                    self.status_message = Some(StatusMessage::success(format!(
+                        "Editor closed ({})",
+                        editor
+                    )));
                 } else {
-                    self.status_message = Some(StatusMessage::warning(format!("Editor exited with code: {:?}", exit_status.code())));
+                    self.status_message = Some(StatusMessage::warning(format!(
+                        "Editor exited with code: {:?}",
+                        exit_status.code()
+                    )));
                 }
             }
             Err(e) => {
-                self.status_message = Some(StatusMessage::error(format!("Failed to open editor '{}': {}", editor, e)));
+                self.status_message = Some(StatusMessage::error(format!(
+                    "Failed to open editor '{}': {}",
+                    editor, e
+                )));
             }
         }
 
@@ -2567,10 +2633,16 @@ impl AppState {
                 std::thread::spawn(move || {
                     let _ = child.wait();
                 });
-                self.status_message = Some(StatusMessage::success(format!("Launched Claude Code for session {}", &session_id[..8.min(session_id.len())])));
+                self.status_message = Some(StatusMessage::success(format!(
+                    "Launched Claude Code for session {}",
+                    &session_id[..8.min(session_id.len())]
+                )));
             }
             Err(e) => {
-                self.status_message = Some(StatusMessage::error(format!("Failed to launch Claude Code: {}. Is it installed?", e)));
+                self.status_message = Some(StatusMessage::error(format!(
+                    "Failed to launch Claude Code: {}. Is it installed?",
+                    e
+                )));
             }
         }
 
@@ -2858,9 +2930,10 @@ impl AppState {
             (MessageTypeFilter::System, LogEntry::System(_)) => {}
             (MessageTypeFilter::Tools, LogEntry::Assistant(a)) => {
                 // Only show if entry has tool use/result blocks
-                let has_tools = a.message.content.iter().any(|b| {
-                    matches!(b, ContentBlock::ToolUse(_) | ContentBlock::ToolResult(_))
-                });
+                let has_tools =
+                    a.message.content.iter().any(|b| {
+                        matches!(b, ContentBlock::ToolUse(_) | ContentBlock::ToolResult(_))
+                    });
                 if !has_tools {
                     return false;
                 }
@@ -2871,9 +2944,11 @@ impl AppState {
         // Check errors-only filter
         if self.filter_state.errors_only {
             let has_error = match entry {
-                LogEntry::Assistant(a) => a.message.content.iter().any(|b| {
-                    matches!(b, ContentBlock::ToolResult(r) if r.is_explicit_error())
-                }),
+                LogEntry::Assistant(a) => a
+                    .message
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolResult(r) if r.is_explicit_error())),
                 _ => false,
             };
             if !has_error {
@@ -2884,9 +2959,11 @@ impl AppState {
         // Check thinking-only filter
         if self.filter_state.thinking_only {
             let has_thinking = match entry {
-                LogEntry::Assistant(a) => a.message.content.iter().any(|b| {
-                    matches!(b, ContentBlock::Thinking(_))
-                }),
+                LogEntry::Assistant(a) => a
+                    .message
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Thinking(_))),
                 _ => false,
             };
             if !has_thinking {
@@ -2896,12 +2973,13 @@ impl AppState {
 
         // Check tools-only filter
         if self.filter_state.tools_only {
-            let has_tools = match entry {
-                LogEntry::Assistant(a) => a.message.content.iter().any(|b| {
-                    matches!(b, ContentBlock::ToolUse(_) | ContentBlock::ToolResult(_))
-                }),
-                _ => false,
-            };
+            let has_tools =
+                match entry {
+                    LogEntry::Assistant(a) => a.message.content.iter().any(|b| {
+                        matches!(b, ContentBlock::ToolUse(_) | ContentBlock::ToolResult(_))
+                    }),
+                    _ => false,
+                };
             if !has_tools {
                 return false;
             }
@@ -3007,16 +3085,15 @@ impl AppState {
 
                     let text = match &user.message {
                         crate::model::UserContent::Simple(s) => s.content.clone(),
-                        crate::model::UserContent::Blocks(b) => {
-                            b.content
-                                .iter()
-                                .filter_map(|c| match c {
-                                    crate::model::ContentBlock::Text(t) => Some(t.text.clone()),
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        }
+                        crate::model::UserContent::Blocks(b) => b
+                            .content
+                            .iter()
+                            .filter_map(|c| match c {
+                                crate::model::ContentBlock::Text(t) => Some(t.text.clone()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
                     };
                     // Use syntax highlighting for user text
                     let highlighted = self.highlighter.highlight_markdown_text(&text);
@@ -3068,7 +3145,11 @@ impl AppState {
                                 }
                             }
                             ContentBlock::ToolResult(result) if self.show_tools => {
-                                let status = if result.is_explicit_error() { "❌" } else { "✓" };
+                                let status = if result.is_explicit_error() {
+                                    "❌"
+                                } else {
+                                    "✓"
+                                };
                                 entry_lines.push(Line::from(format!(
                                     "   {status} Result for {}",
                                     &result.tool_use_id[..8.min(result.tool_use_id.len())]
@@ -3111,7 +3192,10 @@ impl AppState {
     fn format_edit_diff(&self, input: &serde_json::Value) -> Option<Vec<Line<'static>>> {
         let old_string = input.get("old_string")?.as_str()?;
         let new_string = input.get("new_string")?.as_str()?;
-        let file_path = input.get("file_path").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let file_path = input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
 
         let mut lines = Vec::new();
 
@@ -3170,7 +3254,13 @@ impl AppState {
     ///
     /// `panel` is 0=tree, 1=conversation, 2=details.
     /// `bounds` is (x, y, width, height) of the panel area.
-    pub fn start_selection(&mut self, col: u16, row: u16, panel: usize, bounds: (u16, u16, u16, u16)) {
+    pub fn start_selection(
+        &mut self,
+        col: u16,
+        row: u16,
+        panel: usize,
+        bounds: (u16, u16, u16, u16),
+    ) {
         self.is_selecting = true;
         self.selection_panel = Some(panel);
         self.selection_start = Some((col, row));
@@ -3316,7 +3406,9 @@ impl AppState {
             }
 
             let line = &self.conversation_lines[line_idx];
-            let line_text: String = line.spans.iter()
+            let line_text: String = line
+                .spans
+                .iter()
                 .map(|span| span.content.as_ref())
                 .collect();
 
@@ -3370,7 +3462,9 @@ impl AppState {
             }
 
             let line = &self.details_lines[line_idx];
-            let line_text: String = line.spans.iter()
+            let line_text: String = line
+                .spans
+                .iter()
                 .map(|span| span.content.as_ref())
                 .collect();
 
@@ -3435,16 +3529,22 @@ impl AppState {
         match arboard::Clipboard::new() {
             Ok(mut clipboard) => {
                 if let Err(e) = clipboard.set_text(&text) {
-                    self.status_message = Some(StatusMessage::error(format!("Clipboard error: {e}")));
+                    self.status_message =
+                        Some(StatusMessage::error(format!("Clipboard error: {e}")));
                 } else {
                     let chars = text.chars().count();
                     let lines = text.lines().count();
-                    self.status_message = Some(StatusMessage::success(format!("Copied {} chars ({} lines)", chars, lines)));
+                    self.status_message = Some(StatusMessage::success(format!(
+                        "Copied {} chars ({} lines)",
+                        chars, lines
+                    )));
                     self.clear_selection();
                 }
             }
             Err(e) => {
-                self.status_message = Some(StatusMessage::error(format!("Clipboard not available: {e}")));
+                self.status_message = Some(StatusMessage::error(format!(
+                    "Clipboard not available: {e}"
+                )));
             }
         }
         Ok(())
@@ -4022,7 +4122,11 @@ mod tests {
             let mut dialog = ExportDialogState {
                 active: true,
                 format_index: 2,
-                formats: vec![ExportFormat::Markdown, ExportFormat::Json, ExportFormat::Text],
+                formats: vec![
+                    ExportFormat::Markdown,
+                    ExportFormat::Json,
+                    ExportFormat::Text,
+                ],
                 include_thinking: false,
                 include_tools: false,
                 status_message: Some("Success".to_string()),

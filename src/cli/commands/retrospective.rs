@@ -4,21 +4,24 @@
 //! a single project review.
 
 use crate::analysis::retrospective::{analyze_retrospective, RetrospectiveParams};
-use crate::cli::{Cli, RetrospectiveArgs, OutputFormat};
+use crate::cli::{Cli, OutputFormat, RetrospectiveArgs};
 use crate::error::Result;
 
 use super::helpers::{self, short_id, SessionCollectParams};
 
 /// Run the retrospective command.
 pub fn run(cli: &Cli, args: &RetrospectiveArgs) -> Result<()> {
-    let sessions = helpers::collect_sessions(cli, &SessionCollectParams {
-        session: None,
-        project: Some(&args.project),
-        since: args.since.as_deref(),
-        until: args.until.as_deref(),
-        recent: None,
-        no_subagents: args.no_subagents,
-    })?;
+    let sessions = helpers::collect_sessions(
+        cli,
+        &SessionCollectParams {
+            session: None,
+            project: Some(&args.project),
+            since: args.since.as_deref(),
+            until: args.until.as_deref(),
+            recent: None,
+            no_subagents: args.no_subagents,
+        },
+    )?;
 
     let project = helpers::resolve_single_project(cli, &args.project).ok();
     let decision_store = project
@@ -91,7 +94,10 @@ pub fn run(cli: &Cli, args: &RetrospectiveArgs) -> Result<()> {
             // Top failure modes
             if !result.summary.top_failure_modes.is_empty() {
                 print!("Top failure modes: ");
-                let modes: Vec<String> = result.summary.top_failure_modes.iter()
+                let modes: Vec<String> = result
+                    .summary
+                    .top_failure_modes
+                    .iter()
                     .take(5)
                     .map(|(t, c)| format!("{} ({}x)", t, c))
                     .collect();
@@ -108,7 +114,14 @@ pub fn run(cli: &Cli, args: &RetrospectiveArgs) -> Result<()> {
                     } else {
                         format!(" [{}]", d.tags.join(", "))
                     };
-                    println!("  #{} {} ({}, {:.0}%){}", d.id, d.title, d.status, d.confidence * 100.0, tags);
+                    println!(
+                        "  #{} {} ({}, {:.0}%){}",
+                        d.id,
+                        d.title,
+                        d.status,
+                        d.confidence * 100.0,
+                        tags
+                    );
                 }
                 println!();
             }
@@ -118,7 +131,14 @@ pub fn run(cli: &Cli, args: &RetrospectiveArgs) -> Result<()> {
                 println!("Recurring Errors:");
                 println!("{}", "-".repeat(60));
                 for (i, e) in result.recurring_errors.iter().enumerate() {
-                    let preview: String = e.error_pattern.lines().next().unwrap_or("").chars().take(80).collect();
+                    let preview: String = e
+                        .error_pattern
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(80)
+                        .collect();
                     println!("  {}. [{}] {} ({}x)", i + 1, e.tool_name, preview, e.count);
                     if let Some(ref fix) = e.example_resolution {
                         let fix_preview: String = fix.chars().take(80).collect();
@@ -133,7 +153,10 @@ pub fn run(cli: &Cli, args: &RetrospectiveArgs) -> Result<()> {
                 println!("Hotspot Files:");
                 println!("{}", "-".repeat(60));
                 for f in &result.hotspot_files {
-                    println!("  {} — {} edits, {} sessions", f.path, f.edit_count, f.session_count);
+                    println!(
+                        "  {} — {} edits, {} sessions",
+                        f.path, f.edit_count, f.session_count
+                    );
                 }
                 println!();
             }
@@ -143,7 +166,10 @@ pub fn run(cli: &Cli, args: &RetrospectiveArgs) -> Result<()> {
                 println!("Rework Files:");
                 println!("{}", "-".repeat(60));
                 for f in &result.rework_files {
-                    println!("  {} — {} versions, {} sessions", f.path, f.version_count, f.session_count);
+                    println!(
+                        "  {} — {} versions, {} sessions",
+                        f.path, f.version_count, f.session_count
+                    );
                 }
                 println!();
             }
@@ -157,7 +183,10 @@ pub fn run(cli: &Cli, args: &RetrospectiveArgs) -> Result<()> {
                         let ts = s.timestamp.as_deref().unwrap_or("?");
                         println!(
                             "  [{}] {} — {} errors, {} tools",
-                            short_id(&s.session_id), ts, s.error_count, s.tool_count,
+                            short_id(&s.session_id),
+                            ts,
+                            s.error_count,
+                            s.tool_count,
                         );
                     }
                 }

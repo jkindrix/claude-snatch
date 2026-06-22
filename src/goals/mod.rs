@@ -207,10 +207,11 @@ pub fn save_goals(project_dir: &Path, store: &GoalStore) -> Result<()> {
             source,
         })?;
     }
-    let json = serde_json::to_string_pretty(store).map_err(|source| SnatchError::SerializationError {
-        context: "Failed to serialize goals".to_string(),
-        source,
-    })?;
+    let json =
+        serde_json::to_string_pretty(store).map_err(|source| SnatchError::SerializationError {
+            context: "Failed to serialize goals".to_string(),
+            source,
+        })?;
     atomic_write(&path, json.as_bytes())
 }
 
@@ -221,8 +222,14 @@ mod tests {
     #[test]
     fn test_goal_status_parse() {
         assert_eq!(GoalStatus::parse("open"), Some(GoalStatus::Open));
-        assert_eq!(GoalStatus::parse("in_progress"), Some(GoalStatus::InProgress));
-        assert_eq!(GoalStatus::parse("in-progress"), Some(GoalStatus::InProgress));
+        assert_eq!(
+            GoalStatus::parse("in_progress"),
+            Some(GoalStatus::InProgress)
+        );
+        assert_eq!(
+            GoalStatus::parse("in-progress"),
+            Some(GoalStatus::InProgress)
+        );
         assert_eq!(GoalStatus::parse("done"), Some(GoalStatus::Done));
         assert_eq!(GoalStatus::parse("complete"), Some(GoalStatus::Done));
         assert_eq!(GoalStatus::parse("abandoned"), Some(GoalStatus::Abandoned));
@@ -260,7 +267,11 @@ mod tests {
         let mut store = GoalStore::default();
         store.add_goal("Goal".into(), None);
 
-        assert!(store.update_goal(1, Some(GoalStatus::InProgress), Some("working on it".into())));
+        assert!(store.update_goal(
+            1,
+            Some(GoalStatus::InProgress),
+            Some("working on it".into())
+        ));
         assert_eq!(store.goals[0].status, GoalStatus::InProgress);
         assert_eq!(store.goals[0].progress.as_deref(), Some("working on it"));
 
@@ -318,7 +329,9 @@ mod tests {
 
         let formatted = store.format_goals_for_injection().unwrap();
         assert!(formatted.contains("### Active Goals"));
-        assert!(formatted.contains("[in_progress] #1: Build MCP server (progress: 9 tools shipped)"));
+        assert!(
+            formatted.contains("[in_progress] #1: Build MCP server (progress: 9 tools shipped)")
+        );
         assert!(formatted.contains("[open] #2: Write tests"));
     }
 
@@ -358,7 +371,9 @@ mod tests {
 
     #[test]
     fn test_goals_path() {
-        let path = goals_path(Path::new("/home/user/.claude/projects/-home-user-myproject"));
+        let path = goals_path(Path::new(
+            "/home/user/.claude/projects/-home-user-myproject",
+        ));
         assert_eq!(
             path,
             PathBuf::from("/home/user/.claude/projects/-home-user-myproject/memory/goals.json")

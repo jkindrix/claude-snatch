@@ -90,18 +90,51 @@ pub struct ConflictResult {
 
 /// Signal word pairs that indicate opposing positions.
 pub const OPPOSING_PAIRS: &[(&[&str], &[&str])] = &[
-    (&["will use", "should use", "let's use", "we'll use", "using"],
-     &["won't use", "shouldn't use", "don't use", "not use", "without", "no "]),
-    (&["add", "adding", "include", "including", "enable", "enabling"],
-     &["remove", "removing", "exclude", "excluding", "disable", "disabling"]),
-    (&["yes", "agree", "confirmed", "correct", "right"],
-     &["no", "disagree", "rejected", "incorrect", "wrong"]),
-    (&["keep", "keeping", "maintain", "retain"],
-     &["drop", "dropping", "eliminate", "remove"]),
-    (&["implement", "support", "allow"],
-     &["skip", "forbid", "prevent", "disallow"]),
-    (&["explicit", "manual", "opt-in"],
-     &["implicit", "automatic", "opt-out"]),
+    (
+        &["will use", "should use", "let's use", "we'll use", "using"],
+        &[
+            "won't use",
+            "shouldn't use",
+            "don't use",
+            "not use",
+            "without",
+            "no ",
+        ],
+    ),
+    (
+        &[
+            "add",
+            "adding",
+            "include",
+            "including",
+            "enable",
+            "enabling",
+        ],
+        &[
+            "remove",
+            "removing",
+            "exclude",
+            "excluding",
+            "disable",
+            "disabling",
+        ],
+    ),
+    (
+        &["yes", "agree", "confirmed", "correct", "right"],
+        &["no", "disagree", "rejected", "incorrect", "wrong"],
+    ),
+    (
+        &["keep", "keeping", "maintain", "retain"],
+        &["drop", "dropping", "eliminate", "remove"],
+    ),
+    (
+        &["implement", "support", "allow"],
+        &["skip", "forbid", "prevent", "disallow"],
+    ),
+    (
+        &["explicit", "manual", "opt-in"],
+        &["implicit", "automatic", "opt-out"],
+    ),
 ];
 
 /// Extract sentences from text that match a topic regex.
@@ -110,11 +143,10 @@ pub fn topic_sentences(text: &str, topic: Option<&Regex>) -> String {
     let Some(re) = topic else {
         return text.to_string();
     };
-    let sentences: Vec<&str> = text.split(|c| c == '.' || c == '!' || c == '?')
+    let matching: Vec<&str> = text
+        .split(['.', '!', '?'])
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .collect();
-    let matching: Vec<&str> = sentences.into_iter()
         .filter(|s| re.is_match(s))
         .collect();
     if matching.is_empty() {
@@ -125,7 +157,11 @@ pub fn topic_sentences(text: &str, topic: Option<&Regex>) -> String {
 }
 
 /// Check if two texts contain opposing signal patterns.
-pub fn find_opposing_signals(text_a: &str, text_b: &str, topic: Option<&Regex>) -> Option<(Vec<String>, f64)> {
+pub fn find_opposing_signals(
+    text_a: &str,
+    text_b: &str,
+    topic: Option<&Regex>,
+) -> Option<(Vec<String>, f64)> {
     let scoped_a = topic_sentences(text_a, topic);
     let scoped_b = topic_sentences(text_b, topic);
     let lower_a = scoped_a.to_lowercase();
@@ -160,8 +196,10 @@ pub fn find_opposing_signals(text_a: &str, text_b: &str, topic: Option<&Regex>) 
         }
     }
 
-    let total_signals = found_a_positive.len() + found_b_negative.len()
-        + found_a_negative.len() + found_b_positive.len();
+    let total_signals = found_a_positive.len()
+        + found_b_negative.len()
+        + found_a_negative.len()
+        + found_b_positive.len();
 
     if total_signals == 0 {
         return None;
@@ -190,10 +228,7 @@ pub fn extract_conclusion_around_match(text: &str, regex: &Regex) -> String {
         let start = m.start();
         let end = m.end();
 
-        let para_start = text[..start]
-            .rfind("\n\n")
-            .map(|i| i + 2)
-            .unwrap_or(0);
+        let para_start = text[..start].rfind("\n\n").map(|i| i + 2).unwrap_or(0);
         let para_end = text[end..]
             .find("\n\n")
             .map(|i| end + i)
@@ -222,9 +257,14 @@ pub fn detect_registry_conflicts(
                     if let Some(ref topic) = topic_filter {
                         let topic_lower = topic.to_lowercase();
                         let matches = d.title.to_lowercase().contains(&topic_lower)
-                            || d.tags.iter().any(|t| t.to_lowercase().contains(&topic_lower))
+                            || d.tags
+                                .iter()
+                                .any(|t| t.to_lowercase().contains(&topic_lower))
                             || new_d.title.to_lowercase().contains(&topic_lower)
-                            || new_d.tags.iter().any(|t| t.to_lowercase().contains(&topic_lower));
+                            || new_d
+                                .tags
+                                .iter()
+                                .any(|t| t.to_lowercase().contains(&topic_lower));
                         if !matches {
                             continue;
                         }
@@ -259,9 +299,8 @@ pub fn detect_registry_conflicts(
                 continue;
             }
 
-            let shared_tags: Vec<&String> = d1.tags.iter()
-                .filter(|t| d2.tags.contains(t))
-                .collect();
+            let shared_tags: Vec<&String> =
+                d1.tags.iter().filter(|t| d2.tags.contains(t)).collect();
 
             if shared_tags.is_empty() {
                 continue;
@@ -269,15 +308,16 @@ pub fn detect_registry_conflicts(
 
             if let Some(ref topic) = topic_filter {
                 let topic_lower = topic.to_lowercase();
-                if !shared_tags.iter().any(|t| t.to_lowercase().contains(&topic_lower)) {
+                if !shared_tags
+                    .iter()
+                    .any(|t| t.to_lowercase().contains(&topic_lower))
+                {
                     continue;
                 }
             }
 
-            let d1_text = format!("{} {}", d1.title,
-                d1.description.as_deref().unwrap_or(""));
-            let d2_text = format!("{} {}", d2.title,
-                d2.description.as_deref().unwrap_or(""));
+            let d1_text = format!("{} {}", d1.title, d1.description.as_deref().unwrap_or(""));
+            let d2_text = format!("{} {}", d2.title, d2.description.as_deref().unwrap_or(""));
 
             if let Some((_, confidence)) = find_opposing_signals(&d1_text, &d2_text, None) {
                 let (earlier, later) = if d1.created_at <= d2.created_at {
@@ -289,13 +329,19 @@ pub fn detect_registry_conflicts(
                 conflicts.push(ConflictPair {
                     earlier_time: earlier.created_at,
                     earlier_session: earlier.session_id.clone().unwrap_or_default(),
-                    earlier_text: format!("[{}] #{}: {}", earlier.status, earlier.id, earlier.title),
+                    earlier_text: format!(
+                        "[{}] #{}: {}",
+                        earlier.status, earlier.id, earlier.title
+                    ),
                     later_time: later.created_at,
                     later_session: later.session_id.clone().unwrap_or_default(),
                     later_text: format!("[{}] #{}: {}", later.status, later.id, later.title),
                     detection: ConflictDetection::Registry,
                     confidence,
-                    topic: shared_tags.first().map(|s| s.to_string()).unwrap_or_default(),
+                    topic: shared_tags
+                        .first()
+                        .map(|s| (*s).clone())
+                        .unwrap_or_default(),
                 });
             }
         }
@@ -391,6 +437,7 @@ pub fn detect_search_conflicts(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::trivial_regex)]
     use super::*;
 
     #[test]
@@ -399,18 +446,18 @@ mod tests {
             "We will use traits for polymorphism",
             "We won't use traits, using enums instead",
             None,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(!signals.is_empty());
         assert!(confidence > 0.0);
     }
 
     #[test]
     fn test_find_opposing_signals_no_conflict() {
-        assert!(find_opposing_signals(
-            "The weather is nice today",
-            "I had lunch at noon",
-            None,
-        ).is_none());
+        assert!(
+            find_opposing_signals("The weather is nice today", "I had lunch at noon", None,)
+                .is_none()
+        );
     }
 
     #[test]

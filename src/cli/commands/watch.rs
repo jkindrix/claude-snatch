@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 use crate::analytics::SessionAnalytics;
 use crate::cli::{Cli, WatchArgs};
 use crate::discovery::Session;
-use crate::parser::SessionState;
-use crate::reconstruction::Conversation;
 use crate::error::{Result, SnatchError};
 use crate::model::LogEntry;
+use crate::parser::SessionState;
+use crate::reconstruction::Conversation;
 
 use super::get_claude_dir;
 
@@ -31,11 +31,12 @@ pub fn run(cli: &Cli, args: &WatchArgs) -> Result<()> {
             .filter(|s| s.is_active().unwrap_or(false))
             .collect()
     } else if let Some(session_id) = &args.session {
-        let session = claude_dir
-            .find_session(session_id)?
-            .ok_or_else(|| SnatchError::SessionNotFound {
-                session_id: session_id.clone(),
-            })?;
+        let session =
+            claude_dir
+                .find_session(session_id)?
+                .ok_or_else(|| SnatchError::SessionNotFound {
+                    session_id: session_id.clone(),
+                })?;
         vec![session]
     } else {
         // Watch most recently modified session
@@ -62,7 +63,9 @@ pub fn run(cli: &Cli, args: &WatchArgs) -> Result<()> {
 
     // Initialize line counts
     for session in &sessions {
-        let entries = session.parse_with_options(cli.max_file_size).unwrap_or_default();
+        let entries = session
+            .parse_with_options(cli.max_file_size)
+            .unwrap_or_default();
         line_counts.insert(session.session_id().to_string(), entries.len());
     }
 
@@ -134,21 +137,38 @@ fn display_entry(_cli: &Cli, session_id: &str, entry: &LogEntry) {
             let content = match &user.message {
                 crate::model::UserContent::Simple(s) => truncate(&s.content, 80),
                 crate::model::UserContent::Blocks(b) => {
-                    let texts: Vec<_> = b.content.iter().filter_map(|c| {
-                        if let crate::model::ContentBlock::Text(t) = c {
-                            Some(t.text.as_str())
-                        } else {
-                            None
-                        }
-                    }).collect();
+                    let texts: Vec<_> = b
+                        .content
+                        .iter()
+                        .filter_map(|c| {
+                            if let crate::model::ContentBlock::Text(t) = c {
+                                Some(t.text.as_str())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
                     truncate(&texts.join(" "), 80)
                 }
             };
-            println!("[{} {}] 👤 USER: {}", timestamp, short_id(session_id), content);
+            println!(
+                "[{} {}] 👤 USER: {}",
+                timestamp,
+                short_id(session_id),
+                content
+            );
         }
         LogEntry::Assistant(assistant) => {
-            let has_thinking = assistant.message.content.iter().any(|c| matches!(c, crate::model::ContentBlock::Thinking(_)));
-            let has_tools = assistant.message.content.iter().any(|c| matches!(c, crate::model::ContentBlock::ToolUse(_)));
+            let has_thinking = assistant
+                .message
+                .content
+                .iter()
+                .any(|c| matches!(c, crate::model::ContentBlock::Thinking(_)));
+            let has_tools = assistant
+                .message
+                .content
+                .iter()
+                .any(|c| matches!(c, crate::model::ContentBlock::ToolUse(_)));
 
             let mut text_content = String::new();
             for block in &assistant.message.content {
@@ -159,8 +179,12 @@ fn display_entry(_cli: &Cli, session_id: &str, entry: &LogEntry) {
             }
 
             let mut markers = Vec::new();
-            if has_thinking { markers.push("💭"); }
-            if has_tools { markers.push("🔧"); }
+            if has_thinking {
+                markers.push("💭");
+            }
+            if has_tools {
+                markers.push("🔧");
+            }
 
             let markers_str = if markers.is_empty() {
                 String::new()
@@ -168,7 +192,8 @@ fn display_entry(_cli: &Cli, session_id: &str, entry: &LogEntry) {
                 format!("{} ", markers.join(""))
             };
 
-            println!("[{} {}] 🤖 ASST: {}{}",
+            println!(
+                "[{} {}] 🤖 ASST: {}{}",
                 timestamp,
                 short_id(session_id),
                 markers_str,
@@ -176,16 +201,29 @@ fn display_entry(_cli: &Cli, session_id: &str, entry: &LogEntry) {
             );
         }
         LogEntry::System(system) => {
-            let subtype = system.subtype.as_ref()
+            let subtype = system
+                .subtype
+                .as_ref()
                 .map(|s| format!("{s:?}"))
                 .unwrap_or_else(|| "system".to_string());
-            println!("[{} {}] ⚙️  SYS: {}", timestamp, short_id(session_id), subtype);
+            println!(
+                "[{} {}] ⚙️  SYS: {}",
+                timestamp,
+                short_id(session_id),
+                subtype
+            );
         }
         LogEntry::Summary(_) => {
             println!("[{} {}] 📋 SUMMARY", timestamp, short_id(session_id));
         }
         _ => {
-            println!("[{} {}] {} {}", timestamp, short_id(session_id), type_str, short_id(uuid));
+            println!(
+                "[{} {}] {} {}",
+                timestamp,
+                short_id(session_id),
+                type_str,
+                short_id(uuid)
+            );
         }
     }
 }
@@ -228,9 +266,15 @@ fn run_live_dashboard(cli: &Cli, sessions: &[Session], poll_interval: Duration) 
 
         // Header
         let elapsed = start_time.elapsed();
-        output.push_str("╔══════════════════════════════════════════════════════════════════════════════╗\n");
-        output.push_str("║           🔍  CLAUDE-SNATCH LIVE MONITOR                                     ║\n");
-        output.push_str("╠══════════════════════════════════════════════════════════════════════════════╣\n");
+        output.push_str(
+            "╔══════════════════════════════════════════════════════════════════════════════╗\n",
+        );
+        output.push_str(
+            "║           🔍  CLAUDE-SNATCH LIVE MONITOR                                     ║\n",
+        );
+        output.push_str(
+            "╠══════════════════════════════════════════════════════════════════════════════╣\n",
+        );
         output.push_str(&format!(
             "║  ⏱️  Uptime: {:02}:{:02}:{:02}  │  Sessions: {:>3}  │  Interval: {:>4}ms                  ║\n",
             elapsed.as_secs() / 3600,
@@ -239,7 +283,9 @@ fn run_live_dashboard(cli: &Cli, sessions: &[Session], poll_interval: Duration) 
             sessions.len(),
             poll_interval.as_millis()
         ));
-        output.push_str("╠══════════════════════════════════════════════════════════════════════════════╣\n");
+        output.push_str(
+            "╠══════════════════════════════════════════════════════════════════════════════╣\n",
+        );
 
         // Aggregate stats across sessions
         let mut total_input_tokens: u64 = 0;
@@ -251,14 +297,20 @@ fn run_live_dashboard(cli: &Cli, sessions: &[Session], poll_interval: Duration) 
         let mut active_count = 0;
 
         for session in sessions {
-            let entries = session.parse_with_options(cli.max_file_size).unwrap_or_default();
+            let entries = session
+                .parse_with_options(cli.max_file_size)
+                .unwrap_or_default();
             if let Ok(conversation) = Conversation::from_entries(entries) {
                 let analytics = SessionAnalytics::from_conversation(&conversation);
 
                 total_input_tokens += analytics.usage.usage.input_tokens;
                 total_output_tokens += analytics.usage.usage.output_tokens;
                 total_cache_read += analytics.usage.usage.cache_read_input_tokens.unwrap_or(0);
-                total_cache_creation += analytics.usage.usage.cache_creation_input_tokens.unwrap_or(0);
+                total_cache_creation += analytics
+                    .usage
+                    .usage
+                    .cache_creation_input_tokens
+                    .unwrap_or(0);
                 total_messages += analytics.usage.message_count;
                 total_cost += analytics.usage.estimated_cost.unwrap_or(0.0);
             }
@@ -269,8 +321,12 @@ fn run_live_dashboard(cli: &Cli, sessions: &[Session], poll_interval: Duration) 
         }
 
         // Token usage section
-        output.push_str("║  📊 TOKEN USAGE                                                              ║\n");
-        output.push_str("║  ────────────────────────────────────────────────────────────────────────    ║\n");
+        output.push_str(
+            "║  📊 TOKEN USAGE                                                              ║\n",
+        );
+        output.push_str(
+            "║  ────────────────────────────────────────────────────────────────────────    ║\n",
+        );
         output.push_str(&format!(
             "║    Input Tokens:     {:>12} │ Cache Read:     {:>12}              ║\n",
             format_number(total_input_tokens),
@@ -283,14 +339,19 @@ fn run_live_dashboard(cli: &Cli, sessions: &[Session], poll_interval: Duration) 
         ));
         output.push_str(&format!(
             "║    Total Messages:   {:>12} │ Active Sessions:{:>12}              ║\n",
-            total_messages,
-            active_count
+            total_messages, active_count
         ));
-        output.push_str("╠══════════════════════════════════════════════════════════════════════════════╣\n");
+        output.push_str(
+            "╠══════════════════════════════════════════════════════════════════════════════╣\n",
+        );
 
         // Cost section
-        output.push_str("║  💰 COST ESTIMATE                                                            ║\n");
-        output.push_str("║  ────────────────────────────────────────────────────────────────────────    ║\n");
+        output.push_str(
+            "║  💰 COST ESTIMATE                                                            ║\n",
+        );
+        output.push_str(
+            "║  ────────────────────────────────────────────────────────────────────────    ║\n",
+        );
         output.push_str(&format!(
             "║    Estimated Cost:   ${:<12.4}                                            ║\n",
             total_cost
@@ -306,16 +367,24 @@ fn run_live_dashboard(cli: &Cli, sessions: &[Session], poll_interval: Duration) 
         } else {
             output.push_str("║    Projected Rate:   (calculating...)                                        ║\n");
         }
-        output.push_str("╠══════════════════════════════════════════════════════════════════════════════╣\n");
+        output.push_str(
+            "╠══════════════════════════════════════════════════════════════════════════════╣\n",
+        );
 
         // Recent activity section
-        output.push_str("║  📝 RECENT ACTIVITY                                                          ║\n");
-        output.push_str("║  ────────────────────────────────────────────────────────────────────────    ║\n");
+        output.push_str(
+            "║  📝 RECENT ACTIVITY                                                          ║\n",
+        );
+        output.push_str(
+            "║  ────────────────────────────────────────────────────────────────────────    ║\n",
+        );
 
         // Get last 5 messages across all sessions
         let mut recent_entries: Vec<(String, LogEntry)> = Vec::new();
         for session in sessions {
-            let entries = session.parse_with_options(cli.max_file_size).unwrap_or_default();
+            let entries = session
+                .parse_with_options(cli.max_file_size)
+                .unwrap_or_default();
             for entry in entries.into_iter().rev().take(5) {
                 recent_entries.push((session.session_id().to_string(), entry));
             }
@@ -337,21 +406,26 @@ fn run_live_dashboard(cli: &Cli, sessions: &[Session], poll_interval: Duration) 
                 LogEntry::User(user) => {
                     let content = match &user.message {
                         crate::model::UserContent::Simple(s) => s.content.clone(),
-                        crate::model::UserContent::Blocks(b) => {
-                            b.content.iter().filter_map(|c| {
+                        crate::model::UserContent::Blocks(b) => b
+                            .content
+                            .iter()
+                            .filter_map(|c| {
                                 if let crate::model::ContentBlock::Text(t) = c {
                                     Some(t.text.as_str())
                                 } else {
                                     None
                                 }
-                            }).collect::<Vec<_>>().join(" ")
-                        }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" "),
                     };
                     ("👤", truncate(&content, 50))
                 }
                 LogEntry::Assistant(_) => ("🤖", "Assistant response...".to_string()),
                 LogEntry::System(sys) => {
-                    let subtype = sys.subtype.as_ref()
+                    let subtype = sys
+                        .subtype
+                        .as_ref()
                         .map(|s| format!("{s:?}"))
                         .unwrap_or_else(|| "system".to_string());
                     ("⚙️ ", subtype)
@@ -373,7 +447,9 @@ fn run_live_dashboard(cli: &Cli, sessions: &[Session], poll_interval: Duration) 
             output.push_str("║                                                                              ║\n");
         }
 
-        output.push_str("╚══════════════════════════════════════════════════════════════════════════════╝\n");
+        output.push_str(
+            "╚══════════════════════════════════════════════════════════════════════════════╝\n",
+        );
         output.push_str("  Press Ctrl+C to exit\n");
 
         print!("{output}");

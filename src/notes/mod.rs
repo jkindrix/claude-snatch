@@ -218,7 +218,9 @@ mod tests {
 
     #[test]
     fn test_notes_path() {
-        let path = notes_path(Path::new("/home/user/.claude/projects/-home-user-myproject"));
+        let path = notes_path(Path::new(
+            "/home/user/.claude/projects/-home-user-myproject",
+        ));
         assert_eq!(
             path,
             PathBuf::from("/home/user/.claude/projects/-home-user-myproject/memory/notes.json")

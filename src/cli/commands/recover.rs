@@ -96,9 +96,7 @@ pub fn run(cli: &Cli, args: &RecoverArgs) -> Result<()> {
     let sessions = claude_dir.all_sessions()?;
     let session = sessions
         .iter()
-        .find(|s| {
-            s.session_id().starts_with(&args.session) || s.session_id() == args.session
-        })
+        .find(|s| s.session_id().starts_with(&args.session) || s.session_id() == args.session)
         .ok_or_else(|| SnatchError::SessionNotFound {
             session_id: args.session.clone(),
         })?;
@@ -129,9 +127,10 @@ pub fn run(cli: &Cli, args: &RecoverArgs) -> Result<()> {
     }
 
     // Filter by file pattern if specified
-    let file_pattern: Option<GlobMatcher> = args.file.as_ref().and_then(|p| {
-        Glob::new(p).ok().map(|g| g.compile_matcher())
-    });
+    let file_pattern: Option<GlobMatcher> = args
+        .file
+        .as_ref()
+        .and_then(|p| Glob::new(p).ok().map(|g| g.compile_matcher()));
 
     // Recover files
     let mut recovered_files: Vec<RecoveredFile> = Vec::new();
@@ -173,15 +172,24 @@ pub fn run(cli: &Cli, args: &RecoverArgs) -> Result<()> {
             println!("{json}");
         }
         OutputFormat::Tsv => {
-            println!("path\tsize\tlines\twrites\tedits_applied\tedits_skipped\tcomplete\tintegrity");
+            println!(
+                "path\tsize\tlines\twrites\tedits_applied\tedits_skipped\tcomplete\tintegrity"
+            );
             for f in &recovered_files {
-                let integrity = f.integrity_score
+                let integrity = f
+                    .integrity_score
                     .map(|s| format!("{:.2}", s))
                     .unwrap_or_else(|| "N/A".to_string());
                 println!(
                     "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                    f.output_path, f.size_bytes, f.line_count, f.write_count,
-                    f.edit_count, f.edits_skipped, f.complete, integrity
+                    f.output_path,
+                    f.size_bytes,
+                    f.line_count,
+                    f.write_count,
+                    f.edit_count,
+                    f.edits_skipped,
+                    f.complete,
+                    integrity
                 );
             }
         }
@@ -192,15 +200,25 @@ pub fn run(cli: &Cli, args: &RecoverArgs) -> Result<()> {
                 println!();
                 for f in &recovered_files {
                     let status = status_indicator(f.complete);
-                    let integrity = f.integrity_score
+                    let integrity = f
+                        .integrity_score
                         .map(|s| format!(" [{:.0}%]", s * 100.0))
                         .unwrap_or_default();
                     println!(
                         "  {} {}{} ({} bytes, {} lines, {} writes, {} edits)",
-                        status, f.output_path, integrity, f.size_bytes, f.line_count, f.write_count, f.edit_count
+                        status,
+                        f.output_path,
+                        integrity,
+                        f.size_bytes,
+                        f.line_count,
+                        f.write_count,
+                        f.edit_count
                     );
                     if f.edits_skipped > 0 {
-                        println!("      ({} edits skipped - occurred before last Write)", f.edits_skipped);
+                        println!(
+                            "      ({} edits skipped - occurred before last Write)",
+                            f.edits_skipped
+                        );
                     }
                     if args.verbose && !f.warnings.is_empty() {
                         for warn in &f.warnings {
@@ -231,7 +249,10 @@ pub fn run(cli: &Cli, args: &RecoverArgs) -> Result<()> {
 }
 
 /// Extract file operations from the conversation.
-fn extract_file_operations(conversation: &Conversation, main_thread_only: bool) -> Vec<FileOperation> {
+fn extract_file_operations(
+    conversation: &Conversation,
+    main_thread_only: bool,
+) -> Vec<FileOperation> {
     let mut operations = Vec::new();
     let mut index = 0;
 
@@ -352,7 +373,8 @@ fn recover_file(
             let last_write_index = last_write.index;
 
             // Count and warn about skipped edits (came before last Write)
-            let edits_before_write: Vec<_> = edits.iter()
+            let edits_before_write: Vec<_> = edits
+                .iter()
                 .filter(|e| e.index < last_write_index)
                 .collect();
 
@@ -365,7 +387,8 @@ fn recover_file(
             }
 
             // Get edits after the last write, sorted by index
-            let mut edits_to_apply: Vec<_> = edits.iter()
+            let mut edits_to_apply: Vec<_> = edits
+                .iter()
                 .filter(|e| e.index > last_write_index)
                 .collect();
             edits_to_apply.sort_by_key(|e| e.index);
@@ -376,7 +399,9 @@ fn recover_file(
 
                 // Validate edit before applying
                 if old_str.is_empty() {
-                    warnings.push("Skipping edit with empty old_string (invalid operation)".to_string());
+                    warnings.push(
+                        "Skipping edit with empty old_string (invalid operation)".to_string(),
+                    );
                     complete = false;
                     continue;
                 }
@@ -418,7 +443,11 @@ fn recover_file(
     let total_applicable_edits = edits.len().saturating_sub(edits_skipped);
     let integrity_score = if total_applicable_edits == 0 {
         // No edits to apply - perfect integrity if we have content
-        if !content.is_empty() || write_count > 0 { Some(1.0) } else { None }
+        if !content.is_empty() || write_count > 0 {
+            Some(1.0)
+        } else {
+            None
+        }
     } else if args.apply_edits {
         // Score = successfully applied edits / total applicable edits
         Some(edit_count as f64 / total_applicable_edits as f64)
@@ -570,7 +599,11 @@ fn truncate_for_display(s: &str, max_len: usize) -> String {
 /// Get an ASCII-safe status indicator.
 /// Uses [OK] and [!!] instead of emojis for terminal compatibility.
 fn status_indicator(complete: bool) -> &'static str {
-    if complete { "[OK]" } else { "[!!]" }
+    if complete {
+        "[OK]"
+    } else {
+        "[!!]"
+    }
 }
 
 #[cfg(test)]
@@ -609,7 +642,13 @@ mod tests {
     }
 
     /// Create an Edit operation for testing.
-    fn make_edit_op(path: &str, old: &str, new: &str, index: usize, replace_all: bool) -> FileOperation {
+    fn make_edit_op(
+        path: &str,
+        old: &str,
+        new: &str,
+        index: usize,
+        replace_all: bool,
+    ) -> FileOperation {
         FileOperation {
             file_path: path.to_string(),
             op_type: FileOpType::Edit,
@@ -686,9 +725,7 @@ mod tests {
 
     #[test]
     fn test_recover_file_single_write() {
-        let ops = vec![
-            make_write_op("/test/file.rs", "fn main() {}", 0),
-        ];
+        let ops = vec![make_write_op("/test/file.rs", "fn main() {}", 0)];
         let args = default_args();
 
         let result = recover_file("/test/file.rs", &ops, &args).unwrap();
@@ -715,14 +752,15 @@ mod tests {
 
         assert_eq!(result.content, "version 3");
         assert_eq!(result.write_count, 3);
-        assert!(result.warnings.iter().any(|w| w.contains("written 3 times")));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.contains("written 3 times")));
     }
 
     #[test]
     fn test_recover_file_edit_only_fails() {
-        let ops = vec![
-            make_edit_op("/test/file.rs", "old", "new", 0, false),
-        ];
+        let ops = vec![make_edit_op("/test/file.rs", "old", "new", 0, false)];
         let args = default_args();
 
         let result = recover_file("/test/file.rs", &ops, &args).unwrap();
@@ -730,7 +768,10 @@ mod tests {
         assert!(result.content.is_empty());
         assert!(!result.complete);
         assert_eq!(result.edits_skipped, 1);
-        assert!(result.warnings.iter().any(|w| w.contains("edited but not written")));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.contains("edited but not written")));
     }
 
     #[test]
@@ -781,7 +822,10 @@ mod tests {
         assert_eq!(result.content, "fresh content");
         assert_eq!(result.edit_count, 0);
         assert_eq!(result.edits_skipped, 1);
-        assert!(result.warnings.iter().any(|w| w.contains("occurred before the last Write")));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.contains("occurred before the last Write")));
     }
 
     #[test]
@@ -798,7 +842,10 @@ mod tests {
         assert_eq!(result.content, "hello world");
         assert_eq!(result.edit_count, 0);
         assert!(!result.complete);
-        assert!(result.warnings.iter().any(|w| w.contains("Edit pattern not found")));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.contains("Edit pattern not found")));
         assert_eq!(result.integrity_score, Some(0.0));
     }
 
@@ -887,7 +934,10 @@ mod tests {
         assert_eq!(result.content, "hello world");
         assert_eq!(result.edit_count, 0);
         assert!(!result.complete);
-        assert!(result.warnings.iter().any(|w| w.contains("empty old_string")));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.contains("empty old_string")));
     }
 
     #[test]

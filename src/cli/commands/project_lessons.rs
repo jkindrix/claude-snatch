@@ -11,14 +11,17 @@ use super::helpers::{self, short_id, SessionCollectParams};
 
 /// Run the project-lessons command.
 pub fn run(cli: &Cli, args: &ProjectLessonsArgs) -> Result<()> {
-    let sessions = helpers::collect_sessions(cli, &SessionCollectParams {
-        session: None,
-        project: Some(&args.project),
-        since: args.since.as_deref(),
-        until: args.until.as_deref(),
-        recent: None,
-        no_subagents: args.no_subagents,
-    })?;
+    let sessions = helpers::collect_sessions(
+        cli,
+        &SessionCollectParams {
+            session: None,
+            project: Some(&args.project),
+            since: args.since.as_deref(),
+            until: args.until.as_deref(),
+            recent: None,
+            no_subagents: args.no_subagents,
+        },
+    )?;
 
     let params = ProjectLessonsParams {
         category: args.category.clone().unwrap_or_else(|| "all".to_string()),
@@ -77,10 +80,8 @@ pub fn run(cli: &Cli, args: &ProjectLessonsArgs) -> Result<()> {
                 println!("Recurring Errors:");
                 println!("{}", "-".repeat(60));
                 for (i, err) in result.recurring_errors.iter().enumerate() {
-                    let session_list: Vec<&str> = err.sessions.iter()
-                        .take(3)
-                        .map(|s| short_id(s))
-                        .collect();
+                    let session_list: Vec<&str> =
+                        err.sessions.iter().take(3).map(|s| short_id(s)).collect();
                     println!(
                         "  {}. [{}] {} ({}x, sessions: {})",
                         i + 1,

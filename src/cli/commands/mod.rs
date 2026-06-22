@@ -8,9 +8,9 @@ pub mod chain;
 pub mod cleanup;
 pub mod code;
 pub mod completions;
+pub mod config;
 pub mod conflicts;
 pub mod context;
-pub mod config;
 pub mod decisions;
 pub mod detect;
 pub mod diff;
@@ -26,8 +26,8 @@ pub mod index;
 pub mod info;
 pub mod lessons;
 pub mod list;
-pub mod notes;
 pub mod messages;
+pub mod notes;
 pub mod pick;
 pub mod priorities;
 pub mod project_lessons;
@@ -97,12 +97,12 @@ pub fn parse_date_filter(s: &str) -> Result<SystemTime> {
         });
     }
 
-    let amount: i64 = s_lower[..numeric_end].parse().map_err(|_| {
-        SnatchError::InvalidArgument {
+    let amount: i64 = s_lower[..numeric_end]
+        .parse()
+        .map_err(|_| SnatchError::InvalidArgument {
             name: "date".to_string(),
             reason: format!("Invalid number in date filter: {}", &s_lower[..numeric_end]),
-        }
-    })?;
+        })?;
 
     let unit = &s_lower[numeric_end..];
     let duration = match unit {
@@ -145,12 +145,12 @@ pub fn parse_size(s: &str) -> Result<u64> {
         });
     }
 
-    let amount: f64 = s_upper[..numeric_end].parse().map_err(|_| {
-        SnatchError::InvalidArgument {
+    let amount: f64 = s_upper[..numeric_end]
+        .parse()
+        .map_err(|_| SnatchError::InvalidArgument {
             name: "size".to_string(),
             reason: format!("Invalid number in size filter: {}", &s_upper[..numeric_end]),
-        }
-    })?;
+        })?;
 
     let unit = s_upper[numeric_end..].trim();
     let multiplier: u64 = match unit {

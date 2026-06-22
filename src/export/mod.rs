@@ -46,8 +46,8 @@ pub use json::*;
 pub use markdown::*;
 pub use otel::*;
 pub use schema::{
-    entry_schema, entry_schema_string, export_schema, export_schema_string,
-    validate_entries, validate_export, SchemaValidator, ValidationResult,
+    entry_schema, entry_schema_string, export_schema, export_schema_string, validate_entries,
+    validate_export, SchemaValidator, ValidationResult,
 };
 pub use sqlite::*;
 pub use text::*;
@@ -139,7 +139,7 @@ pub struct ExportOptions {
     pub redaction: Option<crate::util::RedactionConfig>,
     /// Preview mode for redaction - highlights what would be redacted without actually redacting.
     /// When true, sensitive data is wrapped in markers like [WOULD-REDACT:type]...[/WOULD-REDACT]
-    /// instead of being replaced with [REDACTED].
+    /// instead of being replaced with `[REDACTED]`.
     pub redaction_preview: bool,
     /// Data minimization settings for privacy-conscious exports.
     pub minimization: Option<DataMinimizationConfig>,
@@ -243,14 +243,20 @@ impl DataMinimizationConfig {
     }
 
     /// Generalize a timestamp (round to nearest hour).
-    pub fn generalize_timestamp(&self, ts: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    pub fn generalize_timestamp(
+        &self,
+        ts: chrono::DateTime<chrono::Utc>,
+    ) -> chrono::DateTime<chrono::Utc> {
         if !self.generalize_timestamps {
             return ts;
         }
         use chrono::Timelike;
-        ts.with_minute(0).unwrap_or(ts)
-            .with_second(0).unwrap_or(ts)
-            .with_nanosecond(0).unwrap_or(ts)
+        ts.with_minute(0)
+            .unwrap_or(ts)
+            .with_second(0)
+            .unwrap_or(ts)
+            .with_nanosecond(0)
+            .unwrap_or(ts)
     }
 }
 
@@ -472,18 +478,49 @@ impl SpdxLicenseInfo {
     pub fn from_identifier(identifier: impl Into<String>) -> Self {
         let id = identifier.into();
         let (name, url) = match id.as_str() {
-            "MIT" => ("MIT License".to_string(), Some("https://opensource.org/licenses/MIT".to_string())),
-            "Apache-2.0" => ("Apache License 2.0".to_string(), Some("https://www.apache.org/licenses/LICENSE-2.0".to_string())),
-            "BSD-3-Clause" => ("BSD 3-Clause License".to_string(), Some("https://opensource.org/licenses/BSD-3-Clause".to_string())),
-            "GPL-3.0" => ("GNU General Public License v3.0".to_string(), Some("https://www.gnu.org/licenses/gpl-3.0.html".to_string())),
-            "GPL-2.0" => ("GNU General Public License v2.0".to_string(), Some("https://www.gnu.org/licenses/old-licenses/gpl-2.0.html".to_string())),
-            "LGPL-3.0" => ("GNU Lesser General Public License v3.0".to_string(), Some("https://www.gnu.org/licenses/lgpl-3.0.html".to_string())),
-            "MPL-2.0" => ("Mozilla Public License 2.0".to_string(), Some("https://www.mozilla.org/en-US/MPL/2.0/".to_string())),
-            "ISC" => ("ISC License".to_string(), Some("https://opensource.org/licenses/ISC".to_string())),
-            "Unlicense" => ("The Unlicense".to_string(), Some("https://unlicense.org/".to_string())),
+            "MIT" => (
+                "MIT License".to_string(),
+                Some("https://opensource.org/licenses/MIT".to_string()),
+            ),
+            "Apache-2.0" => (
+                "Apache License 2.0".to_string(),
+                Some("https://www.apache.org/licenses/LICENSE-2.0".to_string()),
+            ),
+            "BSD-3-Clause" => (
+                "BSD 3-Clause License".to_string(),
+                Some("https://opensource.org/licenses/BSD-3-Clause".to_string()),
+            ),
+            "GPL-3.0" => (
+                "GNU General Public License v3.0".to_string(),
+                Some("https://www.gnu.org/licenses/gpl-3.0.html".to_string()),
+            ),
+            "GPL-2.0" => (
+                "GNU General Public License v2.0".to_string(),
+                Some("https://www.gnu.org/licenses/old-licenses/gpl-2.0.html".to_string()),
+            ),
+            "LGPL-3.0" => (
+                "GNU Lesser General Public License v3.0".to_string(),
+                Some("https://www.gnu.org/licenses/lgpl-3.0.html".to_string()),
+            ),
+            "MPL-2.0" => (
+                "Mozilla Public License 2.0".to_string(),
+                Some("https://www.mozilla.org/en-US/MPL/2.0/".to_string()),
+            ),
+            "ISC" => (
+                "ISC License".to_string(),
+                Some("https://opensource.org/licenses/ISC".to_string()),
+            ),
+            "Unlicense" => (
+                "The Unlicense".to_string(),
+                Some("https://unlicense.org/".to_string()),
+            ),
             _ => (id.clone(), None),
         };
-        Self { identifier: id, name, url }
+        Self {
+            identifier: id,
+            name,
+            url,
+        }
     }
 }
 
@@ -532,7 +569,13 @@ impl ExportLicenseInfo {
     }
 
     /// Add dependency license info.
-    pub fn add_dependency(&mut self, name: &str, version: Option<&str>, license: &str, repo: Option<&str>) {
+    pub fn add_dependency(
+        &mut self,
+        name: &str,
+        version: Option<&str>,
+        license: &str,
+        repo: Option<&str>,
+    ) {
         self.dependencies.push(DependencyLicense {
             name: name.to_string(),
             version: version.map(String::from),
@@ -544,12 +587,42 @@ impl ExportLicenseInfo {
     /// Get key dependencies for attribution.
     pub fn with_key_dependencies(mut self) -> Self {
         // Add key dependencies used by claude-snatch
-        self.add_dependency("serde", None, "MIT OR Apache-2.0", Some("https://github.com/serde-rs/serde"));
-        self.add_dependency("tokio", None, "MIT", Some("https://github.com/tokio-rs/tokio"));
-        self.add_dependency("clap", None, "MIT OR Apache-2.0", Some("https://github.com/clap-rs/clap"));
-        self.add_dependency("ratatui", None, "MIT", Some("https://github.com/ratatui/ratatui"));
-        self.add_dependency("chrono", None, "MIT OR Apache-2.0", Some("https://github.com/chronotope/chrono"));
-        self.add_dependency("tantivy", None, "MIT", Some("https://github.com/quickwit-oss/tantivy"));
+        self.add_dependency(
+            "serde",
+            None,
+            "MIT OR Apache-2.0",
+            Some("https://github.com/serde-rs/serde"),
+        );
+        self.add_dependency(
+            "tokio",
+            None,
+            "MIT",
+            Some("https://github.com/tokio-rs/tokio"),
+        );
+        self.add_dependency(
+            "clap",
+            None,
+            "MIT OR Apache-2.0",
+            Some("https://github.com/clap-rs/clap"),
+        );
+        self.add_dependency(
+            "ratatui",
+            None,
+            "MIT",
+            Some("https://github.com/ratatui/ratatui"),
+        );
+        self.add_dependency(
+            "chrono",
+            None,
+            "MIT OR Apache-2.0",
+            Some("https://github.com/chronotope/chrono"),
+        );
+        self.add_dependency(
+            "tantivy",
+            None,
+            "MIT",
+            Some("https://github.com/quickwit-oss/tantivy"),
+        );
         self
     }
 }
@@ -842,7 +915,9 @@ impl ExportOptions {
     #[must_use]
     pub fn minimize_session_id(&self, session_id: &str, counter: usize) -> String {
         match &self.minimization {
-            Some(config) if config.anonymize_session_ids => config.anonymize_session_id(session_id, counter),
+            Some(config) if config.anonymize_session_ids => {
+                config.anonymize_session_id(session_id, counter)
+            }
             _ => session_id.to_string(),
         }
     }
@@ -856,7 +931,9 @@ impl ExportOptions {
     /// Check if project info should be stripped.
     #[must_use]
     pub fn should_strip_project_info(&self) -> bool {
-        self.minimization.as_ref().is_some_and(|m| m.strip_project_info)
+        self.minimization
+            .as_ref()
+            .is_some_and(|m| m.strip_project_info)
     }
 
     /// Check if CWD should be stripped.
@@ -868,7 +945,9 @@ impl ExportOptions {
     /// Check if model names should be stripped.
     #[must_use]
     pub fn should_strip_model(&self) -> bool {
-        self.minimization.as_ref().is_some_and(|m| m.strip_model_names)
+        self.minimization
+            .as_ref()
+            .is_some_and(|m| m.strip_model_names)
     }
 
     /// Check if exclusive filtering is active.
@@ -894,15 +973,15 @@ impl ExportOptions {
             self.only.contains(&content_type)
         } else {
             match content_type {
-                ContentType::User => true, // Always include user messages by default
-                ContentType::Prompts => true, // Prompts are part of user messages
+                ContentType::User => true,      // Always include user messages by default
+                ContentType::Prompts => true,   // Prompts are part of user messages
                 ContentType::Assistant => true, // Always include assistant messages by default
                 ContentType::Thinking => self.include_thinking,
                 ContentType::ToolUse => self.include_tool_use,
                 ContentType::ToolResults => self.include_tool_results,
                 ContentType::System => self.include_system,
                 ContentType::Summary => true, // Include summaries by default
-                ContentType::Code => false, // Code extraction only when explicitly requested
+                ContentType::Code => false,   // Code extraction only when explicitly requested
             }
         }
     }
@@ -954,7 +1033,9 @@ impl ExportOptions {
     pub fn should_include_tool_results(&self) -> bool {
         if self.has_exclusive_filter() {
             // If Prompts is in the filter without ToolResults, exclude tool results
-            if self.only.contains(&ContentType::Prompts) && !self.only.contains(&ContentType::ToolResults) {
+            if self.only.contains(&ContentType::Prompts)
+                && !self.only.contains(&ContentType::ToolResults)
+            {
                 return false;
             }
             self.only.contains(&ContentType::ToolResults)
@@ -1137,7 +1218,10 @@ pub fn export_to_file(
 
     // Flush the BufWriter before finishing atomic write
     writer.flush().map_err(|e| {
-        SnatchError::io(format!("Failed to flush output file: {}", path.display()), e)
+        SnatchError::io(
+            format!("Failed to flush output file: {}", path.display()),
+            e,
+        )
     })?;
 
     // Drop the BufWriter to release the borrow on atomic.writer()
@@ -1156,7 +1240,10 @@ pub fn export_to_string(
     format: ExportFormat,
     options: &ExportOptions,
 ) -> Result<String> {
-    debug!(nodes = conversation.len(), "Exporting conversation to string");
+    debug!(
+        nodes = conversation.len(),
+        "Exporting conversation to string"
+    );
     let mut buffer = Vec::new();
 
     match format {
@@ -1278,7 +1365,10 @@ mod tests {
 
     #[test]
     fn test_export_format_from_str() {
-        assert_eq!(ExportFormat::from_str("markdown"), Some(ExportFormat::Markdown));
+        assert_eq!(
+            ExportFormat::from_str("markdown"),
+            Some(ExportFormat::Markdown)
+        );
         assert_eq!(ExportFormat::from_str("MD"), Some(ExportFormat::Markdown));
         assert_eq!(ExportFormat::from_str("json"), Some(ExportFormat::Json));
         assert_eq!(ExportFormat::from_str("invalid"), None);
@@ -1461,7 +1551,10 @@ mod tests {
     fn test_gdpr_config_portability() {
         let config = GdprConfig::for_portability();
         assert!(config.include_envelope);
-        assert_eq!(config.export_reason, Some(GdprExportReason::PortabilityRequest));
+        assert_eq!(
+            config.export_reason,
+            Some(GdprExportReason::PortabilityRequest)
+        );
         assert!(!config.include_processing_history);
     }
 
@@ -1469,7 +1562,10 @@ mod tests {
     fn test_gdpr_config_erasure() {
         let config = GdprConfig::for_erasure();
         assert!(config.include_envelope);
-        assert_eq!(config.export_reason, Some(GdprExportReason::ErasurePreExport));
+        assert_eq!(
+            config.export_reason,
+            Some(GdprExportReason::ErasurePreExport)
+        );
         assert!(config.include_processing_history);
     }
 
@@ -1483,7 +1579,10 @@ mod tests {
             .with_subject("user@example.com");
 
         assert_eq!(config.data_controller, Some("ACME Corp".to_string()));
-        assert_eq!(config.processing_purpose, Some("AI conversation assistance".to_string()));
+        assert_eq!(
+            config.processing_purpose,
+            Some("AI conversation assistance".to_string())
+        );
         assert_eq!(config.legal_basis, Some("consent".to_string()));
         assert_eq!(config.retention_period, Some("30 days".to_string()));
         assert_eq!(config.data_subject_id, Some("user@example.com".to_string()));
@@ -1500,9 +1599,16 @@ mod tests {
         assert_eq!(envelope.gdpr_version, "GDPR_2016/679");
         assert_eq!(envelope.data_controller, Some("Test Corp".to_string()));
         assert_eq!(envelope.processing_purpose, Some("Testing".to_string()));
-        assert_eq!(envelope.export_reason, Some("access_request_article_15".to_string()));
-        assert!(envelope.data_categories.contains(&"conversation_content".to_string()));
-        assert!(envelope.data_categories.contains(&"processing_history".to_string()));
+        assert_eq!(
+            envelope.export_reason,
+            Some("access_request_article_15".to_string())
+        );
+        assert!(envelope
+            .data_categories
+            .contains(&"conversation_content".to_string()));
+        assert!(envelope
+            .data_categories
+            .contains(&"processing_history".to_string()));
     }
 
     #[test]
@@ -1520,11 +1626,17 @@ mod tests {
     fn test_gdpr_export_reasons() {
         let config = GdprConfig::for_portability();
         let envelope = GdprEnvelope::from_config(&config, "json");
-        assert_eq!(envelope.export_reason, Some("portability_request_article_20".to_string()));
+        assert_eq!(
+            envelope.export_reason,
+            Some("portability_request_article_20".to_string())
+        );
 
         let config = GdprConfig::for_erasure();
         let envelope = GdprEnvelope::from_config(&config, "json");
-        assert_eq!(envelope.export_reason, Some("pre_erasure_article_17".to_string()));
+        assert_eq!(
+            envelope.export_reason,
+            Some("pre_erasure_article_17".to_string())
+        );
     }
 
     #[test]
@@ -1587,7 +1699,12 @@ mod tests {
     #[test]
     fn test_export_license_info_add_dependency() {
         let mut info = ExportLicenseInfo::default_for_tool();
-        info.add_dependency("test-crate", Some("1.0.0"), "MIT", Some("https://example.com"));
+        info.add_dependency(
+            "test-crate",
+            Some("1.0.0"),
+            "MIT",
+            Some("https://example.com"),
+        );
 
         assert_eq!(info.dependencies.len(), 1);
         assert_eq!(info.dependencies[0].name, "test-crate");

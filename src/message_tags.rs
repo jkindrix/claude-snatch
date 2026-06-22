@@ -67,7 +67,8 @@ impl MessageTagStore {
         tag: &str,
         source: TagSource,
     ) -> bool {
-        let entry = self.messages
+        let entry = self
+            .messages
             .entry(message_uuid.to_string())
             .or_insert_with(|| TaggedMessage {
                 session_id: session_id.to_string(),
@@ -119,9 +120,10 @@ impl MessageTagStore {
         self.messages
             .values()
             .filter(|entry| {
-                entry.tags.iter().any(|t| {
-                    t.tag == tag || t.tag.starts_with(&format!("{}:", tag))
-                })
+                entry
+                    .tags
+                    .iter()
+                    .any(|t| t.tag == tag || t.tag.starts_with(&format!("{}:", tag)))
             })
             .collect()
     }
@@ -136,7 +138,8 @@ impl MessageTagStore {
 
     /// Get all unique tags across all messages.
     pub fn all_tags(&self) -> Vec<String> {
-        let mut tags: Vec<String> = self.messages
+        let mut tags: Vec<String> = self
+            .messages
             .values()
             .flat_map(|entry| entry.tags.iter().map(|t| t.tag.clone()))
             .collect();
@@ -152,7 +155,8 @@ impl MessageTagStore {
 
     /// Clear all tags for a session.
     pub fn clear_session(&mut self, session_id: &str) {
-        self.messages.retain(|_, entry| entry.session_id != session_id);
+        self.messages
+            .retain(|_, entry| entry.session_id != session_id);
     }
 }
 
@@ -186,10 +190,11 @@ pub fn save_message_tags(project_dir: &Path, store: &MessageTagStore) -> Result<
             source,
         })?;
     }
-    let json = serde_json::to_string_pretty(store).map_err(|source| SnatchError::SerializationError {
-        context: "Failed to serialize message tags".to_string(),
-        source,
-    })?;
+    let json =
+        serde_json::to_string_pretty(store).map_err(|source| SnatchError::SerializationError {
+            context: "Failed to serialize message tags".to_string(),
+            source,
+        })?;
     atomic_write(&path, json.as_bytes())
 }
 

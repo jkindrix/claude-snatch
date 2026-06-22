@@ -3,7 +3,9 @@
 use std::io;
 
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyModifiers, MouseButton, MouseEventKind},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, KeyCode, KeyModifiers, MouseButton, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -18,9 +20,7 @@ use ratatui::{
 
 /// Style for selected text (inverted colors).
 fn selection_style() -> Style {
-    Style::default()
-        .bg(Color::White)
-        .fg(Color::Black)
+    Style::default().bg(Color::White).fg(Color::Black)
 }
 
 use crate::error::{Result, SnatchError};
@@ -40,7 +40,11 @@ pub fn run(project: Option<&str>, session: Option<&str>) -> Result<()> {
 }
 
 /// Run the TUI application with a specific theme.
-pub fn run_with_theme(project: Option<&str>, session: Option<&str>, theme: Option<&str>) -> Result<()> {
+pub fn run_with_theme(
+    project: Option<&str>,
+    session: Option<&str>,
+    theme: Option<&str>,
+) -> Result<()> {
     run_with_options(project, session, theme, false)
 }
 
@@ -65,8 +69,8 @@ pub fn run_with_options(
         .map_err(|e| SnatchError::io("Failed to enter alternate screen", e))?;
 
     let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)
-        .map_err(|e| SnatchError::io("Failed to create terminal", e))?;
+    let mut terminal =
+        Terminal::new(backend).map_err(|e| SnatchError::io("Failed to create terminal", e))?;
 
     // Create app state with optional theme
     let mut app = AppState::with_theme(theme)?;
@@ -95,7 +99,9 @@ pub fn run_with_options(
         DisableMouseCapture
     )
     .map_err(|e| SnatchError::io("Failed to leave alternate screen", e))?;
-    terminal.show_cursor().map_err(|e| SnatchError::io("Failed to show cursor", e))?;
+    terminal
+        .show_cursor()
+        .map_err(|e| SnatchError::io("Failed to show cursor", e))?;
 
     result
 }
@@ -111,7 +117,8 @@ fn run_loop(
 
     loop {
         // Draw UI
-        terminal.draw(|f| draw_ui(f, app))
+        terminal
+            .draw(|f| draw_ui(f, app))
             .map_err(|e| SnatchError::io("Failed to draw TUI", e))?;
 
         // Handle events from the event handler
@@ -134,11 +141,13 @@ fn run_loop(
                             continue;
                         }
                         // Navigate results
-                        (KeyModifiers::NONE, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
+                        (KeyModifiers::NONE, KeyCode::Down)
+                        | (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
                             app.search_next();
                             continue;
                         }
-                        (KeyModifiers::NONE, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
+                        (KeyModifiers::NONE, KeyCode::Up)
+                        | (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
                             app.search_prev();
                             continue;
                         }
@@ -148,7 +157,8 @@ fn run_loop(
                             continue;
                         }
                         // Character input
-                        (KeyModifiers::NONE, KeyCode::Char(c)) | (KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+                        (KeyModifiers::NONE, KeyCode::Char(c))
+                        | (KeyModifiers::SHIFT, KeyCode::Char(c)) => {
                             app.search_input(c);
                             continue;
                         }
@@ -167,17 +177,20 @@ fn run_loop(
                         // Execute selected command
                         (KeyModifiers::NONE, KeyCode::Enter) => {
                             if let Err(e) = app.execute_selected_command() {
-                                app.status_message = Some(StatusMessage::error(format!("Error: {e}")));
+                                app.status_message =
+                                    Some(StatusMessage::error(format!("Error: {e}")));
                             }
                             continue;
                         }
                         // Navigate up
-                        (KeyModifiers::NONE, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
+                        (KeyModifiers::NONE, KeyCode::Up)
+                        | (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
                             app.command_palette.select_prev();
                             continue;
                         }
                         // Navigate down
-                        (KeyModifiers::NONE, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
+                        (KeyModifiers::NONE, KeyCode::Down)
+                        | (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
                             app.command_palette.select_next();
                             continue;
                         }
@@ -187,7 +200,8 @@ fn run_loop(
                             continue;
                         }
                         // Character input
-                        (KeyModifiers::NONE, KeyCode::Char(c)) | (KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+                        (KeyModifiers::NONE, KeyCode::Char(c))
+                        | (KeyModifiers::SHIFT, KeyCode::Char(c)) => {
                             app.command_palette.push_char(c);
                             continue;
                         }
@@ -211,17 +225,20 @@ fn run_loop(
                             continue;
                         }
                         // Navigate format (left/right or h/l)
-                        (KeyModifiers::NONE, KeyCode::Left) | (KeyModifiers::NONE, KeyCode::Char('h')) => {
+                        (KeyModifiers::NONE, KeyCode::Left)
+                        | (KeyModifiers::NONE, KeyCode::Char('h')) => {
                             app.export_dialog.prev_format();
                             continue;
                         }
-                        (KeyModifiers::NONE, KeyCode::Right) | (KeyModifiers::NONE, KeyCode::Char('l')) => {
+                        (KeyModifiers::NONE, KeyCode::Right)
+                        | (KeyModifiers::NONE, KeyCode::Char('l')) => {
                             app.export_dialog.next_format();
                             continue;
                         }
                         // Toggle thinking (t)
                         (KeyModifiers::NONE, KeyCode::Char('t')) => {
-                            app.export_dialog.include_thinking = !app.export_dialog.include_thinking;
+                            app.export_dialog.include_thinking =
+                                !app.export_dialog.include_thinking;
                             continue;
                         }
                         // Toggle tools (o)
@@ -280,7 +297,8 @@ fn run_loop(
                         (KeyModifiers::NONE, KeyCode::Down)
                         | (KeyModifiers::NONE, KeyCode::Char('j')) => {
                             // Calculate visible height: 70% of terminal height minus 2 for borders
-                            let visible_height = terminal.size()
+                            let visible_height = terminal
+                                .size()
                                 .map(|s| ((s.height as f32 * 0.70) as usize).saturating_sub(2))
                                 .unwrap_or(30);
                             app.help_scroll_down(HELP_LINE_COUNT, visible_height);
@@ -295,7 +313,8 @@ fn run_loop(
                         }
                         // Page down
                         (KeyModifiers::NONE, KeyCode::PageDown) => {
-                            let visible_height = terminal.size()
+                            let visible_height = terminal
+                                .size()
                                 .map(|s| ((s.height as f32 * 0.70) as usize).saturating_sub(2))
                                 .unwrap_or(30);
                             for _ in 0..10 {
@@ -310,7 +329,8 @@ fn run_loop(
                         }
                         // Scroll to bottom
                         (KeyModifiers::NONE, KeyCode::End) => {
-                            let visible_height = terminal.size()
+                            let visible_height = terminal
+                                .size()
                                 .map(|s| ((s.height as f32 * 0.70) as usize).saturating_sub(2))
                                 .unwrap_or(30);
                             app.help_scroll = HELP_LINE_COUNT.saturating_sub(visible_height);
@@ -333,7 +353,8 @@ fn run_loop(
                 if bindings.is_down(&key) {
                     // Calculate visible height for tree panel scrolling
                     // Tree panel height = terminal height - status bar (3 lines) - borders (2)
-                    let tree_height = terminal.size()
+                    let tree_height = terminal
+                        .size()
                         .map(|s| s.height.saturating_sub(5) as usize)
                         .unwrap_or(20);
                     // Update stored height for consistent scroll calculations
@@ -364,7 +385,6 @@ fn run_loop(
 
                 // Handle other keys by code and modifiers
                 match (key.modifiers, key.code) {
-
                     // Panel toggles
                     (KeyModifiers::NONE, KeyCode::Char('1')) => {
                         app.set_focus(0);
@@ -473,12 +493,14 @@ fn run_loop(
                     }
 
                     // Toggle bookmark on current/highlighted session
-                    (KeyModifiers::SHIFT, KeyCode::Char('*')) | (KeyModifiers::NONE, KeyCode::Char('*')) => {
+                    (KeyModifiers::SHIFT, KeyCode::Char('*'))
+                    | (KeyModifiers::NONE, KeyCode::Char('*')) => {
                         app.toggle_session_bookmark();
                     }
 
                     // Set session name (Shift+" since " is for naming/quoting)
-                    (KeyModifiers::SHIFT, KeyCode::Char('"')) | (KeyModifiers::NONE, KeyCode::Char('"')) => {
+                    (KeyModifiers::SHIFT, KeyCode::Char('"'))
+                    | (KeyModifiers::NONE, KeyCode::Char('"')) => {
                         app.start_session_name_input();
                     }
 
@@ -511,7 +533,8 @@ fn run_loop(
                     }
 
                     // Go to line number (Ctrl+G or G)
-                    (KeyModifiers::CONTROL, KeyCode::Char('g')) | (KeyModifiers::SHIFT, KeyCode::Char('G')) => {
+                    (KeyModifiers::CONTROL, KeyCode::Char('g'))
+                    | (KeyModifiers::SHIFT, KeyCode::Char('G')) => {
                         app.start_goto_line();
                     }
 
@@ -537,7 +560,11 @@ fn run_loop(
                             if app.toggle_session_selection() {
                                 let count = app.selected_session_count();
                                 if count > 0 {
-                                    app.status_message = Some(StatusMessage::info(format!("{} session{} selected", count, if count == 1 { "" } else { "s" })));
+                                    app.status_message = Some(StatusMessage::info(format!(
+                                        "{} session{} selected",
+                                        count,
+                                        if count == 1 { "" } else { "s" }
+                                    )));
                                 } else {
                                     app.status_message = None;
                                 }
@@ -557,7 +584,11 @@ fn run_loop(
                         if app.focus == 0 && app.current_project.is_some() {
                             app.select_all_sessions();
                             let count = app.selected_session_count();
-                            app.status_message = Some(StatusMessage::info(format!("{} session{} selected", count, if count == 1 { "" } else { "s" })));
+                            app.status_message = Some(StatusMessage::info(format!(
+                                "{} session{} selected",
+                                count,
+                                if count == 1 { "" } else { "s" }
+                            )));
                         }
                     }
 
@@ -568,7 +599,8 @@ fn run_loop(
                             app.status_message = Some(StatusMessage::info("Selection cleared"));
                         } else if app.selected_session_count() > 0 {
                             app.clear_session_selection();
-                            app.status_message = Some(StatusMessage::info("Session selection cleared"));
+                            app.status_message =
+                                Some(StatusMessage::info("Session selection cleared"));
                         }
                     }
 
@@ -603,8 +635,11 @@ fn run_loop(
                     MouseEventKind::Down(MouseButton::Left) => {
                         // Check for double-click (within configured timeout at same position)
                         let now = std::time::Instant::now();
-                        let is_double_click = app.last_click_time
-                            .map(|t| now.duration_since(t).as_millis() < app.double_click_timeout_ms)
+                        let is_double_click = app
+                            .last_click_time
+                            .map(|t| {
+                                now.duration_since(t).as_millis() < app.double_click_timeout_ms
+                            })
                             .unwrap_or(false)
                             && app.last_click_pos == (mouse.column, mouse.row);
 
@@ -617,9 +652,9 @@ fn run_loop(
                         let size = terminal.size().unwrap_or_default();
                         let terminal_width = size.width;
                         let terminal_height = size.height;
-                        let tree_width = terminal_width / 4;  // 25%
-                        let conversation_width = terminal_width / 2;  // 50%
-                        let conversation_end = tree_width + conversation_width;  // 75%
+                        let tree_width = terminal_width / 4; // 25%
+                        let conversation_width = terminal_width / 2; // 50%
+                        let conversation_end = tree_width + conversation_width; // 75%
 
                         // Calculate main content height (accounts for search bar and status bar)
                         // Layout: main content + search bar (3 if active, 0 otherwise) + status bar (1)
@@ -637,7 +672,7 @@ fn run_loop(
 
                         if mouse.column < tree_width {
                             app.set_focus(0); // Tree panel (left 25%)
-                            // Start text selection
+                                              // Start text selection
                             let bounds = (0, 0, tree_width, main_height);
                             app.start_selection(mouse.column, mouse.row, 0, bounds);
 
@@ -655,12 +690,12 @@ fn run_loop(
                             }
                         } else if mouse.column < conversation_end {
                             app.set_focus(1); // Conversation panel (middle 50%)
-                            // Start text selection
+                                              // Start text selection
                             let bounds = (tree_width, 0, conversation_width, main_height);
                             app.start_selection(mouse.column, mouse.row, 1, bounds);
                         } else {
                             app.set_focus(2); // Details panel (right 25%)
-                            // Start text selection
+                                              // Start text selection
                             let details_width = terminal_width.saturating_sub(conversation_end);
                             let bounds = (conversation_end, 0, details_width, main_height);
                             app.start_selection(mouse.column, mouse.row, 2, bounds);
@@ -763,14 +798,12 @@ fn draw_search_bar(f: &mut Frame, app: &AppState, area: Rect) {
         .fg(app.theme.primary)
         .add_modifier(Modifier::BOLD);
 
-    let paragraph = Paragraph::new(search_text)
-        .style(style)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(app.theme.warning))
-                .title(" Search (Enter to confirm, Esc to cancel) "),
-        );
+    let paragraph = Paragraph::new(search_text).style(style).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(app.theme.warning))
+            .title(" Search (Enter to confirm, Esc to cancel) "),
+    );
 
     f.render_widget(paragraph, area);
 }
@@ -829,13 +862,12 @@ fn draw_tree_panel(f: &mut Frame, app: &AppState, area: Rect) {
         " Projects ".to_string()
     };
 
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(border_style),
-        );
+    let list = List::new(items).block(
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(border_style),
+    );
 
     f.render_widget(list, area);
 }
@@ -871,7 +903,9 @@ fn draw_conversation_panel(f: &mut Frame, app: &AppState, area: Rect) {
                 let line_num = format!("{:>width$}│ ", i + 1, width = app.line_number_width);
                 let mut spans = vec![Span::styled(
                     line_num,
-                    Style::default().fg(app.theme.secondary).add_modifier(Modifier::DIM),
+                    Style::default()
+                        .fg(app.theme.secondary)
+                        .add_modifier(Modifier::DIM),
                 )];
                 // Append original line content
                 spans.extend(line.spans.iter().cloned());
@@ -887,13 +921,12 @@ fn draw_conversation_panel(f: &mut Frame, app: &AppState, area: Rect) {
             .collect()
     };
 
-    let mut paragraph = Paragraph::new(content)
-        .block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(border_style),
-        );
+    let mut paragraph = Paragraph::new(content).block(
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(border_style),
+    );
 
     // Apply word wrap if enabled
     if app.word_wrap {
@@ -956,10 +989,23 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
             InputMode::None => ("Input", ""),
         };
         vec![
-            Span::styled(" snatch ", Style::default().fg(app.theme.primary).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " snatch ",
+                Style::default()
+                    .fg(app.theme.primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("│ "),
-            Span::styled(format!("{}: ", label), Style::default().fg(app.theme.warning)),
-            Span::styled(app.input_buffer().to_string(), Style::default().fg(app.theme.primary).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{}: ", label),
+                Style::default().fg(app.theme.warning),
+            ),
+            Span::styled(
+                app.input_buffer().to_string(),
+                Style::default()
+                    .fg(app.theme.primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("█", Style::default().fg(app.theme.primary)),
             Span::raw(format!(" ({}, Enter to confirm, Esc to cancel)", hint)),
         ]
@@ -972,13 +1018,23 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
             StatusLevel::Info => app.theme.secondary,
         };
         vec![
-            Span::styled(" snatch ", Style::default().fg(app.theme.primary).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " snatch ",
+                Style::default()
+                    .fg(app.theme.primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("│ "),
             Span::styled(msg.text.as_str(), Style::default().fg(msg_color)),
         ]
     } else {
         vec![
-            Span::styled(" snatch ", Style::default().fg(app.theme.primary).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " snatch ",
+                Style::default()
+                    .fg(app.theme.primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("│ "),
             Span::styled(mode, Style::default().fg(app.theme.warning)),
             Span::raw(" │ "),
@@ -997,7 +1053,9 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
         if app.focus_mode {
             content.push(Span::styled(
                 "[ZEN] ",
-                Style::default().fg(app.theme.success).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(app.theme.success)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
 
@@ -1027,9 +1085,7 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
         content
     } else if app.current_project.is_some() {
         // Viewing session list for a project
-        let mut content = vec![
-            Span::raw(format!("{} sessions ", app.tree_items.len())),
-        ];
+        let mut content = vec![Span::raw(format!("{} sessions ", app.tree_items.len()))];
 
         // Show sort mode
         content.push(Span::raw("│ "));
@@ -1075,7 +1131,10 @@ fn draw_help_overlay(f: &mut Frame, app: &AppState) {
 
     // Build help text with dynamic navigation section
     let mut help_text = vec![
-        Line::from(Span::styled("Keyboard Shortcuts", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "Keyboard Shortcuts",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         Line::from("Navigation:"),
     ];
@@ -1122,7 +1181,10 @@ fn draw_help_overlay(f: &mut Frame, app: &AppState) {
         Line::from("  o         Toggle tool outputs"),
         Line::from("  w         Toggle word wrap"),
         Line::from("  #         Toggle line numbers"),
-        Line::from(format!("  T         Cycle theme ({})", available_themes().join("/"))),
+        Line::from(format!(
+            "  T         Cycle theme ({})",
+            available_themes().join("/")
+        )),
         Line::from(""),
         Line::from("Clipboard:"),
         Line::from("  c         Copy message to clipboard"),
@@ -1151,7 +1213,9 @@ fn draw_help_overlay(f: &mut Frame, app: &AppState) {
     ]);
 
     let total_lines = help_text.len();
-    let scroll = app.help_scroll.min(total_lines.saturating_sub(visible_height));
+    let scroll = app
+        .help_scroll
+        .min(total_lines.saturating_sub(visible_height));
 
     // Build title with scroll indicator
     let title = if total_lines > visible_height {
@@ -1196,7 +1260,9 @@ fn draw_export_dialog(f: &mut Frame, app: &AppState) {
         Span::raw("◀ "),
         Span::styled(
             app.export_dialog.format_name(),
-            Style::default().fg(app.theme.primary).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(app.theme.primary)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" ▶"),
     ]);
@@ -1204,8 +1270,16 @@ fn draw_export_dialog(f: &mut Frame, app: &AppState) {
     lines.push(Line::from(""));
 
     // Toggles
-    let thinking_checkbox = if app.export_dialog.include_thinking { "[x]" } else { "[ ]" };
-    let tools_checkbox = if app.export_dialog.include_tools { "[x]" } else { "[ ]" };
+    let thinking_checkbox = if app.export_dialog.include_thinking {
+        "[x]"
+    } else {
+        "[ ]"
+    };
+    let tools_checkbox = if app.export_dialog.include_tools {
+        "[x]"
+    } else {
+        "[ ]"
+    };
 
     lines.push(Line::from(format!(
         "{} Include thinking blocks (t)",
@@ -1380,7 +1454,10 @@ fn draw_command_palette(f: &mut Frame, app: &AppState) {
 
         let (name_style, desc_style, shortcut_style) = if is_selected {
             (
-                Style::default().fg(Color::Black).bg(app.theme.primary).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(app.theme.primary)
+                    .add_modifier(Modifier::BOLD),
                 Style::default().fg(Color::Black).bg(app.theme.primary),
                 Style::default().fg(Color::DarkGray).bg(app.theme.primary),
             )
@@ -1410,7 +1487,11 @@ fn draw_command_palette(f: &mut Frame, app: &AppState) {
     if filtered_count > max_visible {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            format!("  ... {} of {} commands", max_visible.min(filtered_count), filtered_count),
+            format!(
+                "  ... {} of {} commands",
+                max_visible.min(filtered_count),
+                filtered_count
+            ),
             Style::default().fg(Color::DarkGray),
         )));
     }

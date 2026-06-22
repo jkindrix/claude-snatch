@@ -14,16 +14,17 @@ use super::get_claude_dir;
 pub fn run(cli: &Cli, args: &DigestArgs) -> Result<()> {
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
 
-    let session = claude_dir
-        .find_session(&args.session_id)?
-        .ok_or_else(|| SnatchError::SessionNotFound {
-            session_id: args.session_id.clone(),
-        })?;
+    let session =
+        claude_dir
+            .find_session(&args.session_id)?
+            .ok_or_else(|| SnatchError::SessionNotFound {
+                session_id: args.session_id.clone(),
+            })?;
 
     let entries = session.parse_with_options(cli.max_file_size)?;
     let conversation = Conversation::from_entries(entries)?;
     let all_entries = conversation.chronological_entries();
-    let entry_refs: Vec<&_> = all_entries.iter().map(|e| *e).collect();
+    let entry_refs: Vec<&_> = all_entries.clone();
 
     let opts = DigestOptions {
         max_prompts: args.max_prompts,

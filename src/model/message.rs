@@ -514,9 +514,10 @@ impl UserContent {
     pub fn has_visible_text(&self) -> bool {
         match self {
             Self::Simple(s) => !s.content.trim().is_empty(),
-            Self::Blocks(b) => b.content.iter().any(|c| {
-                matches!(c, ContentBlock::Text(t) if !t.text.trim().is_empty())
-            }),
+            Self::Blocks(b) => b
+                .content
+                .iter()
+                .any(|c| matches!(c, ContentBlock::Text(t) if !t.text.trim().is_empty())),
         }
     }
 
@@ -525,7 +526,10 @@ impl UserContent {
     pub fn has_tool_results(&self) -> bool {
         match self {
             Self::Simple(_) => false,
-            Self::Blocks(b) => b.content.iter().any(|c| matches!(c, ContentBlock::ToolResult(_))),
+            Self::Blocks(b) => b
+                .content
+                .iter()
+                .any(|c| matches!(c, ContentBlock::ToolResult(_))),
         }
     }
 
@@ -1125,7 +1129,10 @@ mod tests {
         if let LogEntry::Progress(p) = &entry {
             assert_eq!(p.data.progress_type, "hook_progress");
             assert_eq!(p.agent_id.as_deref(), Some("aef951e7b587a5f44"));
-            assert_eq!(p.parent_tool_use_id.as_deref(), Some("toolu_01Gv1AwMjEQfjPJbCEN8AMJm"));
+            assert_eq!(
+                p.parent_tool_use_id.as_deref(),
+                Some("toolu_01Gv1AwMjEQfjPJbCEN8AMJm")
+            );
             assert!(!p.is_agent_progress());
         } else {
             panic!("Expected Progress variant");
@@ -1141,7 +1148,10 @@ mod tests {
             assert!(p.is_agent_progress());
             assert_eq!(p.effective_agent_id(), Some("a6f6f2bba8a080f95"));
             assert_eq!(p.data.prompt.as_deref(), Some("analyze this file"));
-            assert_eq!(p.parent_tool_use_id.as_deref(), Some("toolu_01RWqMEXFBWfKHHpDArnDTvv"));
+            assert_eq!(
+                p.parent_tool_use_id.as_deref(),
+                Some("toolu_01RWqMEXFBWfKHHpDArnDTvv")
+            );
         } else {
             panic!("Expected Progress variant");
         }

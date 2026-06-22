@@ -233,14 +233,12 @@ static ENTRY_SCHEMA: Lazy<Value> = Lazy::new(|| {
 });
 
 /// Compiled schema validator for export format.
-static EXPORT_VALIDATOR: Lazy<Validator> = Lazy::new(|| {
-    jsonschema::draft7::new(&EXPORT_SCHEMA).expect("Invalid export schema")
-});
+static EXPORT_VALIDATOR: Lazy<Validator> =
+    Lazy::new(|| jsonschema::draft7::new(&EXPORT_SCHEMA).expect("Invalid export schema"));
 
 /// Compiled schema validator for log entries.
-static ENTRY_VALIDATOR: Lazy<Validator> = Lazy::new(|| {
-    jsonschema::draft7::new(&ENTRY_SCHEMA).expect("Invalid entry schema")
-});
+static ENTRY_VALIDATOR: Lazy<Validator> =
+    Lazy::new(|| jsonschema::draft7::new(&ENTRY_SCHEMA).expect("Invalid entry schema"));
 
 /// Result of schema validation.
 #[derive(Debug, Clone)]

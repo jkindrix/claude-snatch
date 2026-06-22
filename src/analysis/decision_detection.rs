@@ -144,8 +144,14 @@ pub fn find_reversal_markers(text: &str) -> Vec<String> {
 /// Extract the first prose sentence containing a decision keyword.
 pub fn extract_decision_sentence(text: &str) -> Option<String> {
     let keywords = [
-        "decided to", "design decision", "we decided", "the decision is",
-        "agreed to", "agreed that", "agreed on", "final decision",
+        "decided to",
+        "design decision",
+        "we decided",
+        "the decision is",
+        "agreed to",
+        "agreed that",
+        "agreed on",
+        "final decision",
     ];
     for line in text.lines() {
         let trimmed = line.trim();
@@ -158,10 +164,8 @@ pub fn extract_decision_sentence(text: &str) -> Option<String> {
             continue;
         }
         let lower = trimmed.to_lowercase();
-        if keywords.iter().any(|k| lower.contains(k)) {
-            if trimmed.len() > 10 {
-                return Some(truncate(trimmed, 120));
-            }
+        if keywords.iter().any(|k| lower.contains(k)) && trimmed.len() > 10 {
+            return Some(truncate(trimmed, 120));
         }
     }
     None
@@ -362,9 +366,7 @@ pub fn detect_decisions(
 
     // Filter by topic
     if let Some(ref topic_re) = params.topic_filter {
-        candidates.retain(|c| {
-            topic_re.is_match(&c.question) || topic_re.is_match(&c.response)
-        });
+        candidates.retain(|c| topic_re.is_match(&c.question) || topic_re.is_match(&c.response));
     }
 
     // Sort by confidence desc, then timestamp

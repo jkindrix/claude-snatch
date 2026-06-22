@@ -90,10 +90,7 @@ impl SessionIndex {
     /// Load from a specific file path.
     fn load_from_file(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path).map_err(|e| {
-            crate::error::SnatchError::io(
-                format!("Failed to read {}", path.display()),
-                e,
-            )
+            crate::error::SnatchError::io(format!("Failed to read {}", path.display()), e)
         })?;
 
         let raw: RawSessionIndex = serde_json::from_str(&content).map_err(|e| {

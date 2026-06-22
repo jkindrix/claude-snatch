@@ -111,9 +111,9 @@ fn compute_frequency(prompts: &[Prompt], args: &PromptsArgs) -> Vec<FrequencyEnt
 
     // Sort by count (descending) or length (descending)
     if args.sort_by_length {
-        entries.sort_by(|a, b| b.prompt.len().cmp(&a.prompt.len()));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.prompt.len()));
     } else {
-        entries.sort_by(|a, b| b.count.cmp(&a.count));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.count));
     }
 
     entries
@@ -138,8 +138,16 @@ fn compute_stats(prompts: &[Prompt]) -> PromptsStats {
     lengths.sort_unstable();
 
     let total_chars: usize = lengths.iter().sum();
-    let avg_len = if total > 0 { total_chars as f64 / total as f64 } else { 0.0 };
-    let median_len = if lengths.is_empty() { 0 } else { lengths[lengths.len() / 2] };
+    let avg_len = if total > 0 {
+        total_chars as f64 / total as f64
+    } else {
+        0.0
+    };
+    let median_len = if lengths.is_empty() {
+        0
+    } else {
+        lengths[lengths.len() / 2]
+    };
     let min_len = lengths.first().copied().unwrap_or(0);
     let max_len = lengths.last().copied().unwrap_or(0);
 
@@ -164,11 +172,26 @@ fn compute_stats(prompts: &[Prompt]) -> PromptsStats {
         let pct = |count: usize| (count as f64 / total as f64) * 100.0;
 
         Some(LengthDistribution {
-            under_100: BucketStats { count: under_100, percentage: pct(under_100) },
-            from_100_to_500: BucketStats { count: from_100_to_500, percentage: pct(from_100_to_500) },
-            from_500_to_1000: BucketStats { count: from_500_to_1000, percentage: pct(from_500_to_1000) },
-            from_1000_to_5000: BucketStats { count: from_1000_to_5000, percentage: pct(from_1000_to_5000) },
-            over_5000: BucketStats { count: over_5000, percentage: pct(over_5000) },
+            under_100: BucketStats {
+                count: under_100,
+                percentage: pct(under_100),
+            },
+            from_100_to_500: BucketStats {
+                count: from_100_to_500,
+                percentage: pct(from_100_to_500),
+            },
+            from_500_to_1000: BucketStats {
+                count: from_500_to_1000,
+                percentage: pct(from_500_to_1000),
+            },
+            from_1000_to_5000: BucketStats {
+                count: from_1000_to_5000,
+                percentage: pct(from_1000_to_5000),
+            },
+            over_5000: BucketStats {
+                count: over_5000,
+                percentage: pct(over_5000),
+            },
         })
     } else {
         None
@@ -187,14 +210,18 @@ fn compute_stats(prompts: &[Prompt]) -> PromptsStats {
             },
         })
         .collect();
-    freq_entries.sort_by(|a, b| b.count.cmp(&a.count));
+    freq_entries.sort_by_key(|b| std::cmp::Reverse(b.count));
     freq_entries.truncate(10);
 
     PromptsStats {
         total_prompts: total,
         unique_prompts: unique,
         single_use_prompts: single_use,
-        single_use_percentage: if unique > 0 { (single_use as f64 / unique as f64) * 100.0 } else { 0.0 },
+        single_use_percentage: if unique > 0 {
+            (single_use as f64 / unique as f64) * 100.0
+        } else {
+            0.0
+        },
         reused_prompts: reused,
         total_characters: total_chars,
         average_length: avg_len,
@@ -259,7 +286,10 @@ fn write_frequency_text<W: Write>(
     writeln!(writer)?;
 
     for entry in entries {
-        let pct = entry.percentage.map(|p| format!(" ({:.1}%)", p)).unwrap_or_default();
+        let pct = entry
+            .percentage
+            .map(|p| format!(" ({:.1}%)", p))
+            .unwrap_or_default();
         // Truncate long prompts for display (unless --no-truncate)
         let display_text = if !no_truncate && entry.prompt.len() > 80 {
             format!("{}...", &entry.prompt[..77])
@@ -311,24 +341,52 @@ fn write_stats_text<W: Write>(
     writeln!(writer, "Counts:")?;
     writeln!(writer, "  Total prompts:      {}", stats.total_prompts)?;
     writeln!(writer, "  Unique prompts:     {}", stats.unique_prompts)?;
-    writeln!(writer, "  Single-use:         {} ({:.1}%)", stats.single_use_prompts, stats.single_use_percentage)?;
+    writeln!(
+        writer,
+        "  Single-use:         {} ({:.1}%)",
+        stats.single_use_prompts, stats.single_use_percentage
+    )?;
     writeln!(writer, "  Reused:             {}", stats.reused_prompts)?;
     writeln!(writer)?;
     writeln!(writer, "Length (characters):")?;
     writeln!(writer, "  Total:              {}", stats.total_characters)?;
     writeln!(writer, "  Average:            {:.1}", stats.average_length)?;
     writeln!(writer, "  Median:             {}", stats.median_length)?;
-    writeln!(writer, "  Range:              {} - {}", stats.min_length, stats.max_length)?;
+    writeln!(
+        writer,
+        "  Range:              {} - {}",
+        stats.min_length, stats.max_length
+    )?;
 
     // Length distribution
     if let Some(ref dist) = stats.length_distribution {
         writeln!(writer)?;
         writeln!(writer, "Length Distribution:")?;
-        writeln!(writer, "  <100 chars:         {:>5} ({:>5.1}%)", dist.under_100.count, dist.under_100.percentage)?;
-        writeln!(writer, "  100-500:            {:>5} ({:>5.1}%)", dist.from_100_to_500.count, dist.from_100_to_500.percentage)?;
-        writeln!(writer, "  500-1000:           {:>5} ({:>5.1}%)", dist.from_500_to_1000.count, dist.from_500_to_1000.percentage)?;
-        writeln!(writer, "  1000-5000:          {:>5} ({:>5.1}%)", dist.from_1000_to_5000.count, dist.from_1000_to_5000.percentage)?;
-        writeln!(writer, "  >5000:              {:>5} ({:>5.1}%)", dist.over_5000.count, dist.over_5000.percentage)?;
+        writeln!(
+            writer,
+            "  <100 chars:         {:>5} ({:>5.1}%)",
+            dist.under_100.count, dist.under_100.percentage
+        )?;
+        writeln!(
+            writer,
+            "  100-500:            {:>5} ({:>5.1}%)",
+            dist.from_100_to_500.count, dist.from_100_to_500.percentage
+        )?;
+        writeln!(
+            writer,
+            "  500-1000:           {:>5} ({:>5.1}%)",
+            dist.from_500_to_1000.count, dist.from_500_to_1000.percentage
+        )?;
+        writeln!(
+            writer,
+            "  1000-5000:          {:>5} ({:>5.1}%)",
+            dist.from_1000_to_5000.count, dist.from_1000_to_5000.percentage
+        )?;
+        writeln!(
+            writer,
+            "  >5000:              {:>5} ({:>5.1}%)",
+            dist.over_5000.count, dist.over_5000.percentage
+        )?;
     }
 
     writeln!(writer)?;
@@ -351,27 +409,24 @@ fn write_stats_text<W: Write>(
 fn count_contains(prompts: &[Prompt], phrase: &str, ignore_case: bool) -> usize {
     if ignore_case {
         let phrase_lower = phrase.to_lowercase();
-        prompts.iter().filter(|p| p.text.to_lowercase().contains(&phrase_lower)).count()
+        prompts
+            .iter()
+            .filter(|p| p.text.to_lowercase().contains(&phrase_lower))
+            .count()
     } else {
         prompts.iter().filter(|p| p.text.contains(phrase)).count()
     }
 }
 
 /// Write contains output as JSON.
-fn write_contains_json<W: Write>(
-    writer: &mut W,
-    output: &ContainsOutput,
-) -> Result<()> {
+fn write_contains_json<W: Write>(writer: &mut W, output: &ContainsOutput) -> Result<()> {
     serde_json::to_writer_pretty(&mut *writer, output)?;
     writeln!(writer)?;
     Ok(())
 }
 
 /// Write contains output as text.
-fn write_contains_text<W: Write>(
-    writer: &mut W,
-    output: &ContainsOutput,
-) -> Result<()> {
+fn write_contains_text<W: Write>(writer: &mut W, output: &ContainsOutput) -> Result<()> {
     writeln!(writer, "Phrase Search Results")?;
     writeln!(writer, "=====================")?;
     if let Some(count) = output.session_count {
@@ -379,10 +434,10 @@ fn write_contains_text<W: Write>(
     }
     writeln!(writer)?;
     writeln!(writer, "Phrase: \"{}\"", output.phrase)?;
-    writeln!(writer, "Matching prompts: {} ({:.1}% of {} total)",
-        output.matching_prompts,
-        output.percentage,
-        output.total_prompts
+    writeln!(
+        writer,
+        "Matching prompts: {} ({:.1}% of {} total)",
+        output.matching_prompts, output.percentage, output.total_prompts
     )?;
     Ok(())
 }
@@ -405,13 +460,21 @@ fn build_grep_regex(args: &PromptsArgs) -> Result<Option<Regex>> {
 }
 
 /// Filter prompts by grep pattern if specified.
-fn filter_prompts_by_grep(prompts: Vec<Prompt>, grep_regex: Option<&Regex>, invert: bool) -> Vec<Prompt> {
+fn filter_prompts_by_grep(
+    prompts: Vec<Prompt>,
+    grep_regex: Option<&Regex>,
+    invert: bool,
+) -> Vec<Prompt> {
     match grep_regex {
         Some(regex) => prompts
             .into_iter()
             .filter(|p| {
                 let matches = regex.is_match(&p.text);
-                if invert { !matches } else { matches }
+                if invert {
+                    !matches
+                } else {
+                    matches
+                }
             })
             .collect(),
         None => prompts,
@@ -467,11 +530,12 @@ pub fn run(cli: &Cli, args: &PromptsArgs) -> Result<()> {
 fn extract_single_session(cli: &Cli, args: &PromptsArgs, session_id: &str) -> Result<()> {
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
 
-    let session = claude_dir
-        .find_session(session_id)?
-        .ok_or_else(|| SnatchError::SessionNotFound {
-            session_id: session_id.to_string(),
-        })?;
+    let session =
+        claude_dir
+            .find_session(session_id)?
+            .ok_or_else(|| SnatchError::SessionNotFound {
+                session_id: session_id.to_string(),
+            })?;
 
     let mut prompts = extract_prompts_from_session(&session, args, cli.max_file_size)?;
 
@@ -494,7 +558,10 @@ fn extract_single_session(cli: &Cli, args: &PromptsArgs, session_id: &str) -> Re
     // Create writer
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.output_file {
         let file = File::create(path).map_err(|e| {
-            SnatchError::io(format!("Failed to create output file: {}", path.display()), e)
+            SnatchError::io(
+                format!("Failed to create output file: {}", path.display()),
+                e,
+            )
         })?;
         Box::new(BufWriter::new(file))
     } else {
@@ -635,7 +702,11 @@ fn extract_multiple_sessions(cli: &Cli, args: &PromptsArgs) -> Result<()> {
             Ok(p) => p,
             Err(e) => {
                 if !cli.quiet {
-                    eprintln!("Warning: Failed to extract from {}: {}", session.session_id(), e);
+                    eprintln!(
+                        "Warning: Failed to extract from {}: {}",
+                        session.session_id(),
+                        e
+                    );
                 }
                 continue;
             }
@@ -685,7 +756,10 @@ fn extract_multiple_sessions(cli: &Cli, args: &PromptsArgs) -> Result<()> {
     // Write output
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.output_file {
         let file = File::create(path).map_err(|e| {
-            SnatchError::io(format!("Failed to create output file: {}", path.display()), e)
+            SnatchError::io(
+                format!("Failed to create output file: {}", path.display()),
+                e,
+            )
         })?;
         Box::new(BufWriter::new(file))
     } else {
@@ -738,7 +812,12 @@ fn extract_multiple_sessions(cli: &Cli, args: &PromptsArgs) -> Result<()> {
         }
 
         if use_json {
-            write_prompts_json(&mut writer, &all_prompts, total_before_limit, Some(session_count))?;
+            write_prompts_json(
+                &mut writer,
+                &all_prompts,
+                total_before_limit,
+                Some(session_count),
+            )?;
         } else {
             // Group prompts by session for text output if separators are enabled
             if args.separators {
@@ -769,10 +848,7 @@ fn extract_multiple_sessions(cli: &Cli, args: &PromptsArgs) -> Result<()> {
                 if !session_prompts.is_empty() {
                     let info = current_session.as_ref().map(|sid| SessionInfo {
                         session_id: sid.clone(),
-                        project_path: session_prompts[0]
-                            .project_path
-                            .clone()
-                            .unwrap_or_default(),
+                        project_path: session_prompts[0].project_path.clone().unwrap_or_default(),
                     });
                     write_prompts(&mut writer, &session_prompts, args, info.as_ref())?;
                 }
@@ -836,7 +912,11 @@ struct PromptsOutput {
 }
 
 /// Extract prompts from a session.
-fn extract_prompts_from_session(session: &Session, args: &PromptsArgs, max_file_size: Option<u64>) -> Result<Vec<Prompt>> {
+fn extract_prompts_from_session(
+    session: &Session,
+    args: &PromptsArgs,
+    max_file_size: Option<u64>,
+) -> Result<Vec<Prompt>> {
     let entries = session.parse_with_options(max_file_size)?;
     let mut prompts = Vec::new();
 
@@ -847,9 +927,7 @@ fn extract_prompts_from_session(session: &Session, args: &PromptsArgs, max_file_
         if let LogEntry::User(user) = entry {
             // Get text content from user message
             let text = match &user.message {
-                crate::model::message::UserContent::Simple(simple) => {
-                    simple.content.clone()
-                }
+                crate::model::message::UserContent::Simple(simple) => simple.content.clone(),
                 crate::model::message::UserContent::Blocks(blocks) => {
                     // Extract text blocks only (skip tool results)
                     blocks
@@ -879,8 +957,8 @@ fn extract_prompts_from_session(session: &Session, args: &PromptsArgs, max_file_
                 prompts.push(Prompt {
                     text: trimmed.to_string(),
                     timestamp,
-                    session_id: None,    // Will be filled in by caller if needed
-                    project_path: None,  // Will be filled in by caller if needed
+                    session_id: None,   // Will be filled in by caller if needed
+                    project_path: None, // Will be filled in by caller if needed
                 });
             }
         }
@@ -916,7 +994,12 @@ fn write_prompts<W: Write>(
     // Write session separator if requested
     if let Some(info) = session_info {
         writeln!(writer)?;
-        writeln!(writer, "# Session: {} ({})", &info.session_id[..8.min(info.session_id.len())], info.project_path)?;
+        writeln!(
+            writer,
+            "# Session: {} ({})",
+            &info.session_id[..8.min(info.session_id.len())],
+            info.project_path
+        )?;
         writeln!(writer)?;
     }
 
@@ -942,6 +1025,7 @@ fn write_prompts<W: Write>(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::trivial_regex)]
     use super::*;
 
     fn make_prompt(text: &str) -> Prompt {
@@ -976,10 +1060,7 @@ mod tests {
 
     #[test]
     fn test_filter_prompts_by_grep_no_filter() {
-        let prompts = vec![
-            make_prompt("Hello world"),
-            make_prompt("Goodbye world"),
-        ];
+        let prompts = vec![make_prompt("Hello world"), make_prompt("Goodbye world")];
         let filtered = filter_prompts_by_grep(prompts.clone(), None, false);
         assert_eq!(filtered.len(), 2);
     }
@@ -1027,10 +1108,7 @@ mod tests {
 
     #[test]
     fn test_filter_prompts_by_grep_no_matches() {
-        let prompts = vec![
-            make_prompt("Hello world"),
-            make_prompt("Goodbye world"),
-        ];
+        let prompts = vec![make_prompt("Hello world"), make_prompt("Goodbye world")];
         let regex = Regex::new("nonexistent").unwrap();
         let filtered = filter_prompts_by_grep(prompts, Some(&regex), false);
         assert!(filtered.is_empty());

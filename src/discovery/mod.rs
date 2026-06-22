@@ -137,13 +137,14 @@ impl ClaudeDirectory {
 
         for entry in std::fs::read_dir(&self.projects_dir).map_err(|e| {
             SnatchError::io(
-                format!("Failed to read projects directory: {}", self.projects_dir.display()),
+                format!(
+                    "Failed to read projects directory: {}",
+                    self.projects_dir.display()
+                ),
                 e,
             )
         })? {
-            let entry = entry.map_err(|e| {
-                SnatchError::io("Failed to read directory entry", e)
-            })?;
+            let entry = entry.map_err(|e| SnatchError::io("Failed to read directory entry", e))?;
 
             let path = entry.path();
             if path.is_dir() {

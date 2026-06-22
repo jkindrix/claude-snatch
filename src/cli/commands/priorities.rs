@@ -4,21 +4,24 @@
 //! open goals, and unresolved decisions.
 
 use crate::analysis::priorities::{suggest_priorities, PriorityParams};
-use crate::cli::{Cli, PrioritiesArgs, OutputFormat};
+use crate::cli::{Cli, OutputFormat, PrioritiesArgs};
 use crate::error::Result;
 
 use super::helpers::{self, SessionCollectParams};
 
 /// Run the priorities command.
 pub fn run(cli: &Cli, args: &PrioritiesArgs) -> Result<()> {
-    let sessions = helpers::collect_sessions(cli, &SessionCollectParams {
-        session: None,
-        project: Some(&args.project),
-        since: args.since.as_deref(),
-        until: args.until.as_deref(),
-        recent: None,
-        no_subagents: args.no_subagents,
-    })?;
+    let sessions = helpers::collect_sessions(
+        cli,
+        &SessionCollectParams {
+            session: None,
+            project: Some(&args.project),
+            since: args.since.as_deref(),
+            until: args.until.as_deref(),
+            recent: None,
+            no_subagents: args.no_subagents,
+        },
+    )?;
 
     let project = helpers::resolve_single_project(cli, &args.project).ok();
     let decision_store = project

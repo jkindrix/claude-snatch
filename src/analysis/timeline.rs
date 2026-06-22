@@ -95,11 +95,8 @@ pub fn build_timeline(turns: &[ConversationTurn<'_>], opts: &TimelineOptions) ->
                 .assistant_message
                 .and_then(|e| extract_assistant_summary(e, opts.summary_max_len));
 
-            let mut tools_used: Vec<String> = turn
-                .tool_uses
-                .iter()
-                .map(|t| t.name.clone())
-                .collect();
+            let mut tools_used: Vec<String> =
+                turn.tool_uses.iter().map(|t| t.name.clone()).collect();
             // Deduplicate tool names while preserving order
             let mut seen: HashSet<String> = HashSet::new();
             tools_used.retain(|t| seen.insert(t.clone()));
@@ -172,10 +169,7 @@ pub fn build_timeline(turns: &[ConversationTurn<'_>], opts: &TimelineOptions) ->
                     index: start,
                     timestamp: first_timestamp,
                     user_prompt: None,
-                    assistant_summary: Some(format!(
-                        "[{} tool-only turns collapsed]",
-                        count
-                    )),
+                    assistant_summary: Some(format!("[{} tool-only turns collapsed]", count)),
                     tools_used: all_tools,
                     files_touched: all_files,
                     had_errors: any_errors,

@@ -152,18 +152,14 @@ impl Default for LessonOptions {
 /// This is the format used by Read tool output.
 fn starts_with_line_number(s: &str) -> bool {
     let trimmed = s.trim_start();
-    let digit_end = trimmed
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(0);
+    let digit_end = trimmed.find(|c: char| !c.is_ascii_digit()).unwrap_or(0);
     digit_end > 0 && trimmed[digit_end..].starts_with('→')
 }
 
 /// Check if text starts with grep-style line output (e.g., "21:", "21-").
 fn starts_with_grep_line(s: &str) -> bool {
     let trimmed = s.trim_start();
-    let digit_end = trimmed
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(0);
+    let digit_end = trimmed.find(|c: char| !c.is_ascii_digit()).unwrap_or(0);
     digit_end > 0 && {
         let rest = &trimmed[digit_end..];
         rest.starts_with(':') || rest.starts_with('-')
@@ -239,10 +235,7 @@ fn is_summary_text(text: &str) -> bool {
 /// Detects both hard errors (`is_error=true`) and soft errors (error patterns
 /// in tool result content like SIGSEGV, panics, compiler errors).
 /// For each error, captures the next assistant response as the resolution.
-pub fn extract_error_fix_pairs(
-    entries: &[&LogEntry],
-    opts: &LessonOptions,
-) -> Vec<ErrorFixPair> {
+pub fn extract_error_fix_pairs(entries: &[&LogEntry], opts: &LessonOptions) -> Vec<ErrorFixPair> {
     let soft_error_re = build_soft_error_regex();
 
     // Build map: tool_use_id → (tool_name, input, timestamp)
@@ -319,6 +312,7 @@ pub fn extract_error_fix_pairs(
                 // Look ahead for the next assistant message as resolution
                 let mut resolution_summary = None;
                 let mut resolution_tools = Vec::new();
+                #[allow(clippy::needless_range_loop)]
                 for j in (i + 1)..entries.len() {
                     if let LogEntry::Assistant(a) = entries[j] {
                         let text = a.message.combined_text();
@@ -379,8 +373,7 @@ pub fn extract_user_corrections(
             }
             LogEntry::User(_) => {
                 if let Some(text) = extract_user_prompt_text(entry) {
-                    if correction_re.is_match(&text) && text.len() > 10 && !is_summary_text(&text)
-                    {
+                    if correction_re.is_match(&text) && text.len() > 10 && !is_summary_text(&text) {
                         corrections.push(UserCorrectionEntry {
                             timestamp: entry.timestamp().map(|t| t.to_rfc3339()),
                             user_text: truncate_text(&text, opts.correction_text_len),
@@ -405,7 +398,7 @@ pub fn rank_error_prone_tools(pairs: &[ErrorFixPair]) -> Vec<(String, usize)> {
         *counts.entry(pair.tool_name.clone()).or_default() += 1;
     }
     let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked.sort_by_key(|b| std::cmp::Reverse(b.1));
     ranked
 }
 
@@ -559,7 +552,7 @@ mod tests {
 
     #[test]
     fn test_extract_hard_error_fix_pair() {
-        let entries = vec![
+        let entries = [
             assistant_with_tool("t1", "Bash", "Running tests"),
             user_tool_result("t1", true, "error: test failed"),
             assistant_text("I see the test failed. Let me fix the issue."),
@@ -581,7 +574,7 @@ mod tests {
 
     #[test]
     fn test_extract_soft_error() {
-        let entries = vec![
+        let entries = [
             assistant_with_tool("t1", "Bash", "Building"),
             user_tool_result("t1", false, "error[E0308]: mismatched types"),
             assistant_text("The compiler error indicates a type mismatch."),
@@ -596,7 +589,7 @@ mod tests {
 
     #[test]
     fn test_no_error_no_pair() {
-        let entries = vec![
+        let entries = [
             assistant_with_tool("t1", "Bash", "Running"),
             user_tool_result("t1", false, "All 5 tests passed"),
             assistant_text("Tests passed!"),
@@ -632,7 +625,7 @@ mod tests {
 
     #[test]
     fn test_extract_user_correction() {
-        let entries = vec![
+        let entries = [
             assistant_text("I'll delete the file now."),
             user_text("No, don't delete that file!"),
         ];
@@ -647,7 +640,7 @@ mod tests {
 
     #[test]
     fn test_correction_skips_short_text() {
-        let entries = vec![
+        let entries = [
             assistant_text("working on it"),
             user_text("no"), // too short (<=10 chars)
         ];
@@ -661,10 +654,7 @@ mod tests {
     #[test]
     fn test_correction_skips_summaries() {
         let long_summary = "This session is being continued from a previous conversation that ran out of context. ".repeat(50);
-        let entries = vec![
-            assistant_text("working"),
-            user_text(&long_summary),
-        ];
+        let entries = [assistant_text("working"), user_text(&long_summary)];
         let refs: Vec<&LogEntry> = entries.iter().collect();
         let opts = LessonOptions::default();
 
@@ -674,7 +664,7 @@ mod tests {
 
     #[test]
     fn test_category_filter_errors_only() {
-        let entries = vec![
+        let entries = [
             assistant_with_tool("t1", "Bash", ""),
             user_tool_result("t1", true, "error"),
             assistant_text("fixed"),
@@ -693,7 +683,7 @@ mod tests {
 
     #[test]
     fn test_category_filter_corrections_only() {
-        let entries = vec![
+        let entries = [
             assistant_with_tool("t1", "Bash", ""),
             user_tool_result("t1", true, "error"),
             assistant_text("I tried something wrong."),
@@ -746,7 +736,7 @@ mod tests {
 
     #[test]
     fn test_extract_lessons_full() {
-        let entries = vec![
+        let entries = [
             assistant_with_tool("t1", "Bash", "Running cargo test"),
             user_tool_result("t1", true, "error: compilation failed"),
             assistant_text("I see the compilation error. Let me fix it."),
@@ -766,7 +756,7 @@ mod tests {
     #[test]
     fn test_false_positive_read_file_content() {
         // Read tool result with is_error=true but content is valid file output
-        let entries = vec![
+        let entries = [
             assistant_with_tool("t1", "Read", "Reading file"),
             user_tool_result("t1", true, "     1\\u2192fn main() {}"),
             assistant_text("Got the file."),
@@ -775,13 +765,16 @@ mod tests {
         let opts = LessonOptions::default();
 
         let pairs = extract_error_fix_pairs(&refs, &opts);
-        assert!(pairs.is_empty(), "Read with line-numbered content should be filtered as false positive");
+        assert!(
+            pairs.is_empty(),
+            "Read with line-numbered content should be filtered as false positive"
+        );
     }
 
     #[test]
     fn test_false_positive_mcp_json_result() {
         // MCP tool result with is_error=true but content is valid JSON
-        let entries = vec![
+        let entries = [
             assistant_with_tool("t1", "mcp__snatch__get_session_lessons", "Fetching lessons"),
             user_tool_result("t1", true, "{session_id: abc}"),
             assistant_text("Got the lessons."),
@@ -790,13 +783,16 @@ mod tests {
         let opts = LessonOptions::default();
 
         let pairs = extract_error_fix_pairs(&refs, &opts);
-        assert!(pairs.is_empty(), "MCP tool returning JSON should be filtered as false positive");
+        assert!(
+            pairs.is_empty(),
+            "MCP tool returning JSON should be filtered as false positive"
+        );
     }
 
     #[test]
     fn test_false_positive_read_offset_content() {
         // Read tool result with is_error=true but content is file output at offset
-        let entries = vec![
+        let entries = [
             assistant_with_tool("t1", "Read", "Reading file"),
             user_tool_result("t1", true, "787\\u2192#[cfg(test)]"),
             assistant_text("Got the file."),
@@ -805,13 +801,16 @@ mod tests {
         let opts = LessonOptions::default();
 
         let pairs = extract_error_fix_pairs(&refs, &opts);
-        assert!(pairs.is_empty(), "Read with offset line-numbered content should be filtered");
+        assert!(
+            pairs.is_empty(),
+            "Read with offset line-numbered content should be filtered"
+        );
     }
 
     #[test]
     fn test_false_positive_grep_output() {
         // Grep tool result with is_error=true but content is grep output
-        let entries = vec![
+        let entries = [
             assistant_with_tool("t1", "Grep", "Searching"),
             user_tool_result("t1", true, "21:[Omitted long matching line]"),
             assistant_text("Found matches."),
@@ -820,13 +819,16 @@ mod tests {
         let opts = LessonOptions::default();
 
         let pairs = extract_error_fix_pairs(&refs, &opts);
-        assert!(pairs.is_empty(), "Grep with line-numbered output should be filtered");
+        assert!(
+            pairs.is_empty(),
+            "Grep with line-numbered output should be filtered"
+        );
     }
 
     #[test]
     fn test_real_read_error_not_filtered() {
         // Read tool result with is_error=true and actual error content
-        let entries = vec![
+        let entries = [
             assistant_with_tool("t1", "Read", "Reading file"),
             user_tool_result("t1", true, "File does not exist."),
             assistant_text("The file is missing."),
@@ -846,22 +848,43 @@ mod tests {
         assert!(is_likely_false_positive("Read", "787→#[cfg(test)]"));
         assert!(is_likely_false_positive("Read", "   42→some line"));
         assert!(!is_likely_false_positive("Read", "File does not exist."));
-        assert!(!is_likely_false_positive("Read", "Sibling tool call errored"));
+        assert!(!is_likely_false_positive(
+            "Read",
+            "Sibling tool call errored"
+        ));
 
         // Grep: grep-style line output
-        assert!(is_likely_false_positive("Grep", "21:[Omitted long matching line]"));
+        assert!(is_likely_false_positive(
+            "Grep",
+            "21:[Omitted long matching line]"
+        ));
         assert!(is_likely_false_positive("Grep", "5-context line"));
-        assert!(!is_likely_false_positive("Grep", "InputValidationError: Grep failed"));
+        assert!(!is_likely_false_positive(
+            "Grep",
+            "InputValidationError: Grep failed"
+        ));
 
         // MCP: JSON responses
-        assert!(is_likely_false_positive("mcp__snatch__list_sessions", r#"{"sessions": []}"#));
-        assert!(!is_likely_false_positive("mcp__snatch__list_sessions", "MCP error -32000: Connection closed"));
+        assert!(is_likely_false_positive(
+            "mcp__snatch__list_sessions",
+            r#"{"sessions": []}"#
+        ));
+        assert!(!is_likely_false_positive(
+            "mcp__snatch__list_sessions",
+            "MCP error -32000: Connection closed"
+        ));
 
         // Agent: substantial non-error text
         assert!(is_likely_false_positive("Agent", &"x".repeat(300)));
-        assert!(!is_likely_false_positive("Agent", "Error: something went wrong"));
+        assert!(!is_likely_false_positive(
+            "Agent",
+            "Error: something went wrong"
+        ));
 
         // Other tools: no filtering
-        assert!(!is_likely_false_positive("Bash", "error: compilation failed"));
+        assert!(!is_likely_false_positive(
+            "Bash",
+            "error: compilation failed"
+        ));
     }
 }

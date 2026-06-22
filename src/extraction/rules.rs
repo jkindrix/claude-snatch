@@ -81,7 +81,9 @@ impl Rule {
 
         // Sort by priority (descending), then by name
         rules.sort_by(|a, b| {
-            b.priority.cmp(&a.priority).then_with(|| a.name.cmp(&b.name))
+            b.priority
+                .cmp(&a.priority)
+                .then_with(|| a.name.cmp(&b.name))
         });
 
         Ok(rules)
@@ -206,7 +208,10 @@ mod tests {
         let rules = Rule::load_from_dir(dir.path()).unwrap();
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].name, "test-rule");
-        assert_eq!(rules[0].description, Some("Test rule description".to_string()));
+        assert_eq!(
+            rules[0].description,
+            Some("Test rule description".to_string())
+        );
         assert_eq!(rules[0].rule_type, Some(RuleType::Always));
         assert_eq!(rules[0].priority, 10);
         assert!(rules[0].active);

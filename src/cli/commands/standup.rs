@@ -101,12 +101,12 @@ fn parse_period(period: &str) -> Result<Duration> {
         });
     }
 
-    let amount: i64 = s_lower[..numeric_end].parse().map_err(|_| {
-        SnatchError::InvalidArgument {
+    let amount: i64 = s_lower[..numeric_end]
+        .parse()
+        .map_err(|_| SnatchError::InvalidArgument {
             name: "period".to_string(),
             reason: format!("Invalid number in period: {}", &s_lower[..numeric_end]),
-        }
-    })?;
+        })?;
 
     let unit = if numeric_end < s_lower.len() {
         &s_lower[numeric_end..]
@@ -122,10 +122,7 @@ fn parse_period(period: &str) -> Result<Duration> {
         _ => {
             return Err(SnatchError::InvalidArgument {
                 name: "period".to_string(),
-                reason: format!(
-                    "Unknown time unit '{}'. Use h/d/w (hours/days/weeks)",
-                    unit
-                ),
+                reason: format!("Unknown time unit '{}'. Use h/d/w (hours/days/weeks)", unit),
             })
         }
     };
@@ -164,7 +161,11 @@ fn extract_accomplishments(tool_uses: &[ToolUse]) -> Vec<String> {
             }
             "Bash" => {
                 if let Some(cmd) = tool.input.get("command").and_then(|v| v.as_str()) {
-                    if cmd.contains("test") || cmd.contains("cargo test") || cmd.contains("pytest") || cmd.contains("npm test") {
+                    if cmd.contains("test")
+                        || cmd.contains("cargo test")
+                        || cmd.contains("pytest")
+                        || cmd.contains("npm test")
+                    {
                         tests_run += 1;
                     }
                     if cmd.contains("git commit") {
@@ -251,7 +252,6 @@ pub fn run(cli: &Cli, args: &StandupArgs) -> Result<()> {
     }
 
     for project in projects {
-
         let sessions = project.sessions()?;
         let mut project_sessions = 0;
         let mut project_tool_uses: Vec<ToolUse> = Vec::new();
@@ -297,7 +297,9 @@ pub fn run(cli: &Cli, args: &StandupArgs) -> Result<()> {
 
                                 // Track file operations
                                 if args.files || args.all {
-                                    if let Some(path) = tool_use.input.get("file_path").and_then(|v| v.as_str()) {
+                                    if let Some(path) =
+                                        tool_use.input.get("file_path").and_then(|v| v.as_str())
+                                    {
                                         let action = match tool_use.name.as_str() {
                                             "Write" => FileAction::Created,
                                             "Edit" => FileAction::Modified,
@@ -305,8 +307,10 @@ pub fn run(cli: &Cli, args: &StandupArgs) -> Result<()> {
                                             _ => continue,
                                         };
                                         // Upgrade action if already tracked
-                                        let entry = all_files.entry(path.to_string()).or_insert(action);
-                                        if *entry == FileAction::Read && action != FileAction::Read {
+                                        let entry =
+                                            all_files.entry(path.to_string()).or_insert(action);
+                                        if *entry == FileAction::Read && action != FileAction::Read
+                                        {
                                             *entry = action;
                                         }
                                     }
@@ -329,7 +333,7 @@ pub fn run(cli: &Cli, args: &StandupArgs) -> Result<()> {
     }
 
     // Sort projects by session count (most active first)
-    project_summaries.sort_by(|a, b| b.sessions.cmp(&a.sessions));
+    project_summaries.sort_by_key(|b| std::cmp::Reverse(b.sessions));
 
     // Build usage summary
     let usage = if (args.usage || args.all) && total_tokens > 0 {
@@ -337,7 +341,11 @@ pub fn run(cli: &Cli, args: &StandupArgs) -> Result<()> {
             total_tokens,
             input_tokens: total_input,
             output_tokens: total_output,
-            estimated_cost: if total_cost > 0.0 { Some(total_cost) } else { None },
+            estimated_cost: if total_cost > 0.0 {
+                Some(total_cost)
+            } else {
+                None
+            },
         })
     } else {
         None
@@ -345,9 +353,18 @@ pub fn run(cli: &Cli, args: &StandupArgs) -> Result<()> {
 
     // Build files summary
     let files = if (args.files || args.all) && !all_files.is_empty() {
-        let files_created = all_files.values().filter(|&&a| a == FileAction::Created).count();
-        let files_modified = all_files.values().filter(|&&a| a == FileAction::Modified).count();
-        let files_read = all_files.values().filter(|&&a| a == FileAction::Read).count();
+        let files_created = all_files
+            .values()
+            .filter(|&&a| a == FileAction::Created)
+            .count();
+        let files_modified = all_files
+            .values()
+            .filter(|&&a| a == FileAction::Modified)
+            .count();
+        let files_read = all_files
+            .values()
+            .filter(|&&a| a == FileAction::Read)
+            .count();
 
         // Get unique file names (not full paths)
         let mut unique_files: Vec<String> = all_files
@@ -376,7 +393,7 @@ pub fn run(cli: &Cli, args: &StandupArgs) -> Result<()> {
     let tools = if (args.tools || args.all) && !tool_counts.is_empty() {
         let total_invocations = tool_counts.values().sum();
         let mut by_tool: Vec<(String, usize)> = tool_counts.into_iter().collect();
-        by_tool.sort_by(|a, b| b.1.cmp(&a.1));
+        by_tool.sort_by_key(|b| std::cmp::Reverse(b.1));
         by_tool.truncate(10); // Top 10 tools
 
         Some(ToolsSummary {
@@ -431,9 +448,7 @@ pub fn run(cli: &Cli, args: &StandupArgs) -> Result<()> {
 /// Format the report based on the requested format.
 fn format_report(report: &StandupReport, format: StandupFormat) -> Result<String> {
     match format {
-        StandupFormat::Json => {
-            Ok(serde_json::to_string_pretty(report)?)
-        }
+        StandupFormat::Json => Ok(serde_json::to_string_pretty(report)?),
         StandupFormat::Text => format_text(report),
         StandupFormat::Markdown => format_markdown(report),
     }
@@ -460,7 +475,7 @@ fn format_text(report: &StandupReport) -> Result<String> {
     writeln!(output, "Projects Worked On:").ok();
     writeln!(output, "-------------------").ok();
     for project in &report.projects {
-        let name = project.path.split('/').last().unwrap_or(&project.path);
+        let name = project.path.split('/').next_back().unwrap_or(&project.path);
         writeln!(output, "  {} ({} sessions)", name, project.sessions).ok();
         for accomplishment in &project.accomplishments {
             writeln!(output, "    - {accomplishment}").ok();
@@ -472,9 +487,24 @@ fn format_text(report: &StandupReport) -> Result<String> {
     if let Some(ref usage) = report.usage {
         writeln!(output, "Token Usage:").ok();
         writeln!(output, "------------").ok();
-        writeln!(output, "  Total:  {} tokens", format_number(usage.total_tokens)).ok();
-        writeln!(output, "  Input:  {} tokens", format_number(usage.input_tokens)).ok();
-        writeln!(output, "  Output: {} tokens", format_number(usage.output_tokens)).ok();
+        writeln!(
+            output,
+            "  Total:  {} tokens",
+            format_number(usage.total_tokens)
+        )
+        .ok();
+        writeln!(
+            output,
+            "  Input:  {} tokens",
+            format_number(usage.input_tokens)
+        )
+        .ok();
+        writeln!(
+            output,
+            "  Output: {} tokens",
+            format_number(usage.output_tokens)
+        )
+        .ok();
         if let Some(cost) = usage.estimated_cost {
             writeln!(output, "  Cost:   ${cost:.2}").ok();
         }
@@ -496,7 +526,12 @@ fn format_text(report: &StandupReport) -> Result<String> {
 
     // Tools
     if let Some(ref tools) = report.tools {
-        writeln!(output, "Tool Usage ({} total):", format_count(tools.total_invocations)).ok();
+        writeln!(
+            output,
+            "Tool Usage ({} total):",
+            format_count(tools.total_invocations)
+        )
+        .ok();
         writeln!(output, "------------------------").ok();
         for (tool, count) in &tools.by_tool {
             writeln!(output, "  {tool}: {}", format_count(*count)).ok();
@@ -518,15 +553,18 @@ fn format_markdown(report: &StandupReport) -> Result<String> {
         return Ok(output);
     }
 
-    writeln!(output, "**Sessions:** {} | **Projects:** {}\n",
+    writeln!(
+        output,
+        "**Sessions:** {} | **Projects:** {}\n",
         format_count(report.total_sessions),
         format_count(report.projects.len())
-    ).ok();
+    )
+    .ok();
 
     // Projects
     writeln!(output, "### What I worked on\n").ok();
     for project in &report.projects {
-        let name = project.path.split('/').last().unwrap_or(&project.path);
+        let name = project.path.split('/').next_back().unwrap_or(&project.path);
         writeln!(output, "- **{}** ({} sessions)", name, project.sessions).ok();
         for accomplishment in &project.accomplishments {
             writeln!(output, "  - {accomplishment}").ok();
@@ -536,7 +574,12 @@ fn format_markdown(report: &StandupReport) -> Result<String> {
 
     // Usage
     if let Some(ref usage) = report.usage {
-        write!(output, "**Tokens:** {} total", format_number(usage.total_tokens)).ok();
+        write!(
+            output,
+            "**Tokens:** {} total",
+            format_number(usage.total_tokens)
+        )
+        .ok();
         if let Some(cost) = usage.estimated_cost {
             write!(output, " (${cost:.2})").ok();
         }
@@ -558,7 +601,12 @@ fn format_markdown(report: &StandupReport) -> Result<String> {
 
     // Tools (compact)
     if let Some(ref tools) = report.tools {
-        let top_tools: Vec<_> = tools.by_tool.iter().take(5).map(|(t, c)| format!("{t}:{c}")).collect();
+        let top_tools: Vec<_> = tools
+            .by_tool
+            .iter()
+            .take(5)
+            .map(|(t, c)| format!("{t}:{c}"))
+            .collect();
         writeln!(output, "**Top tools:** {}\n", top_tools.join(" | ")).ok();
     }
 

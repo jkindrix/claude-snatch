@@ -108,8 +108,8 @@ impl BeyondJsonlData {
         data.mcp_config = McpConfig::load(&claude_dir.mcp_config_path()).ok();
 
         // BJ-007: Global custom commands
-        data.global_commands = CustomCommand::load_from_dir(&claude_dir.commands_dir())
-            .unwrap_or_default();
+        data.global_commands =
+            CustomCommand::load_from_dir(&claude_dir.commands_dir()).unwrap_or_default();
 
         // BJ-009: Credentials presence
         data.credentials_present = CredentialsPresence::detect(claude_dir.root());
@@ -122,15 +122,15 @@ impl BeyondJsonlData {
         }
 
         // BJ-017: Global rules
-        data.global_rules = Rule::load_from_dir(&claude_dir.rules_dir())
-            .unwrap_or_default();
+        data.global_rules = Rule::load_from_dir(&claude_dir.rules_dir()).unwrap_or_default();
 
         // BJ-021: Output styles
-        data.output_styles = OutputStyle::load_from_dir(&claude_dir.output_styles_dir())
-            .unwrap_or_default();
+        data.output_styles =
+            OutputStyle::load_from_dir(&claude_dir.output_styles_dir()).unwrap_or_default();
 
         // BJ-001: File history summary
-        data.file_history_summary = FileHistorySummary::from_dir(&claude_dir.file_history_dir()).ok();
+        data.file_history_summary =
+            FileHistorySummary::from_dir(&claude_dir.file_history_dir()).ok();
 
         Ok(data)
     }
@@ -155,13 +155,12 @@ impl BeyondJsonlData {
 
         // BJ-008: Project commands
         let project_commands_dir = project_path.join(".claude").join("commands");
-        data.project_commands = CustomCommand::load_from_dir(&project_commands_dir)
-            .unwrap_or_default();
+        data.project_commands =
+            CustomCommand::load_from_dir(&project_commands_dir).unwrap_or_default();
 
         // BJ-018: Project rules
         let project_rules_dir = project_path.join(".claude").join("rules");
-        data.project_rules = Rule::load_from_dir(&project_rules_dir)
-            .unwrap_or_default();
+        data.project_rules = Rule::load_from_dir(&project_rules_dir).unwrap_or_default();
 
         Ok(data)
     }
@@ -190,21 +189,51 @@ impl BeyondJsonlData {
     #[must_use]
     pub fn data_source_count(&self) -> usize {
         let mut count = 0;
-        if self.global_settings.is_some() { count += 1; }
-        if self.project_settings.is_some() { count += 1; }
-        if self.global_claude_md.is_some() { count += 1; }
-        if self.project_claude_md.is_some() { count += 1; }
-        if self.mcp_config.is_some() { count += 1; }
-        if !self.global_commands.is_empty() { count += 1; }
-        if !self.project_commands.is_empty() { count += 1; }
-        if self.credentials_present.is_some() { count += 1; }
-        if !self.hooks.is_empty() { count += 1; }
-        if self.session_retention.is_some() { count += 1; }
-        if self.sandbox_config.is_some() { count += 1; }
-        if !self.global_rules.is_empty() { count += 1; }
-        if !self.project_rules.is_empty() { count += 1; }
-        if !self.output_styles.is_empty() { count += 1; }
-        if self.file_history_summary.is_some() { count += 1; }
+        if self.global_settings.is_some() {
+            count += 1;
+        }
+        if self.project_settings.is_some() {
+            count += 1;
+        }
+        if self.global_claude_md.is_some() {
+            count += 1;
+        }
+        if self.project_claude_md.is_some() {
+            count += 1;
+        }
+        if self.mcp_config.is_some() {
+            count += 1;
+        }
+        if !self.global_commands.is_empty() {
+            count += 1;
+        }
+        if !self.project_commands.is_empty() {
+            count += 1;
+        }
+        if self.credentials_present.is_some() {
+            count += 1;
+        }
+        if !self.hooks.is_empty() {
+            count += 1;
+        }
+        if self.session_retention.is_some() {
+            count += 1;
+        }
+        if self.sandbox_config.is_some() {
+            count += 1;
+        }
+        if !self.global_rules.is_empty() {
+            count += 1;
+        }
+        if !self.project_rules.is_empty() {
+            count += 1;
+        }
+        if !self.output_styles.is_empty() {
+            count += 1;
+        }
+        if self.file_history_summary.is_some() {
+            count += 1;
+        }
         count
     }
 }
@@ -238,7 +267,8 @@ impl CredentialsPresence {
         let content = std::fs::read_to_string(&credentials_path).ok()?;
         let json: serde_json::Value = serde_json::from_str(&content).ok()?;
 
-        let anthropic_key_present = json.get("anthropicApiKey")
+        let anthropic_key_present = json
+            .get("anthropicApiKey")
             .and_then(|v| v.as_str())
             .map(|s| !s.is_empty())
             .unwrap_or(false);
@@ -305,7 +335,8 @@ impl OutputStyle {
 
             if path.is_file() && path.extension().map(|e| e == "md").unwrap_or(false) {
                 if let Ok(content) = std::fs::read_to_string(&path) {
-                    let name = path.file_stem()
+                    let name = path
+                        .file_stem()
                         .and_then(|s| s.to_str())
                         .unwrap_or("unknown")
                         .to_string();

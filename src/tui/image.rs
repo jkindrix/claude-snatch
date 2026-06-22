@@ -101,21 +101,15 @@ impl ImageRenderer {
     /// Decode image data from an ImageSource.
     fn decode_source(&self, source: &ImageSource) -> Result<Vec<u8>, ImageError> {
         match source {
-            ImageSource::Base64 { data, .. } => {
-                base64::engine::general_purpose::STANDARD
-                    .decode(data)
-                    .map_err(|e| ImageError::DecodeError(format!("Base64 decode failed: {e}")))
-            }
-            ImageSource::Url { url } => {
-                Err(ImageError::UnsupportedSource(format!(
-                    "URL images not supported in TUI: {url}"
-                )))
-            }
-            ImageSource::File { file_id } => {
-                Err(ImageError::UnsupportedSource(format!(
-                    "File API images not supported: {file_id}"
-                )))
-            }
+            ImageSource::Base64 { data, .. } => base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .map_err(|e| ImageError::DecodeError(format!("Base64 decode failed: {e}"))),
+            ImageSource::Url { url } => Err(ImageError::UnsupportedSource(format!(
+                "URL images not supported in TUI: {url}"
+            ))),
+            ImageSource::File { file_id } => Err(ImageError::UnsupportedSource(format!(
+                "File API images not supported: {file_id}"
+            ))),
         }
     }
 
@@ -140,11 +134,7 @@ impl ImageRenderer {
     }
 
     /// Render a prepared image state to the terminal.
-    pub fn render_image_state(
-        frame: &mut Frame,
-        area: Rect,
-        image_state: &mut StatefulProtocol,
-    ) {
+    pub fn render_image_state(frame: &mut Frame, area: Rect, image_state: &mut StatefulProtocol) {
         let widget = StatefulImage::default();
         frame.render_stateful_widget(widget, area, image_state);
     }

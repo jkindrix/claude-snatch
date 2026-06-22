@@ -66,13 +66,19 @@ fn list_projects<W: Write>(
         }
         SortOrder::Name => {
             // Use best_path() for sorting to get consistent ordering with display
-            projects.sort_by(|a, b| a.best_path().cmp(&b.best_path()));
+            projects.sort_by_key(|a| a.best_path());
         }
         SortOrder::Size => {
             // Sort by total session size
             projects.sort_by(|a, b| {
-                let size_a: u64 = a.sessions().map(|s| s.iter().map(|ss| ss.file_size()).sum()).unwrap_or(0);
-                let size_b: u64 = b.sessions().map(|s| s.iter().map(|ss| ss.file_size()).sum()).unwrap_or(0);
+                let size_a: u64 = a
+                    .sessions()
+                    .map(|s| s.iter().map(|ss| ss.file_size()).sum())
+                    .unwrap_or(0);
+                let size_b: u64 = b
+                    .sessions()
+                    .map(|s| s.iter().map(|ss| ss.file_size()).sum())
+                    .unwrap_or(0);
                 size_b.cmp(&size_a)
             });
         }
@@ -96,7 +102,13 @@ fn list_projects<W: Write>(
             for project in &projects {
                 let session_count = project.sessions().map(|s| s.len()).unwrap_or(0);
                 // Use best_path() which prefers the authoritative cwd from JSONL
-                writeln!(writer, "{}\t{}\t{}", project.best_path(), project.encoded_name(), session_count)?;
+                writeln!(
+                    writer,
+                    "{}\t{}\t{}",
+                    project.best_path(),
+                    project.encoded_name(),
+                    session_count
+                )?;
             }
         }
         OutputFormat::Compact => {
@@ -112,7 +124,12 @@ fn list_projects<W: Write>(
             }
 
             if truncated {
-                writeln!(writer, "Projects (showing {} of {}, use -n 0 for all):", projects.len(), total_count)?;
+                writeln!(
+                    writer,
+                    "Projects (showing {} of {}, use -n 0 for all):",
+                    projects.len(),
+                    total_count
+                )?;
             } else {
                 writeln!(writer, "Projects ({} found):", projects.len())?;
             }
@@ -121,14 +138,23 @@ fn list_projects<W: Write>(
             for project in &projects {
                 let session_count = project.sessions().map(|s| s.len()).unwrap_or(0);
                 // Use best_path() which prefers the authoritative cwd from JSONL
-                writeln!(writer, "  {} ({} sessions)", project.best_path(), session_count)?;
+                writeln!(
+                    writer,
+                    "  {} ({} sessions)",
+                    project.best_path(),
+                    session_count
+                )?;
 
                 if args.sizes {
                     let total_size: u64 = project
                         .sessions()
                         .map(|s| s.iter().map(|ss| ss.file_size()).sum())
                         .unwrap_or(0);
-                    writeln!(writer, "    Size: {}", crate::discovery::format_size(total_size))?;
+                    writeln!(
+                        writer,
+                        "    Size: {}",
+                        crate::discovery::format_size(total_size)
+                    )?;
                 }
             }
         }
@@ -240,7 +266,9 @@ fn list_sessions<W: Write>(
     if !tag_filters.is_empty() {
         sessions.retain(|s| {
             if let Some(meta) = tag_store.get(s.session_id()) {
-                tag_filters.iter().any(|t| meta.tags.iter().any(|mt| mt.contains(t)))
+                tag_filters
+                    .iter()
+                    .any(|t| meta.tags.iter().any(|mt| mt.contains(t)))
             } else {
                 false
             }
@@ -316,14 +344,10 @@ fn list_sessions<W: Write>(
     // Build chain lookup for display
     let chain_lookup: std::collections::HashMap<String, (String, usize, usize)> = {
         use crate::discovery::chain::detect_chains;
-        let main_sessions: Vec<_> = sessions.iter()
-            .filter(|s| !s.is_subagent())
-            .collect();
-        let chains = detect_chains(
-            main_sessions.iter().map(|s| (s.session_id(), s.path()))
-        );
+        let main_sessions: Vec<_> = sessions.iter().filter(|s| !s.is_subagent()).collect();
+        let chains = detect_chains(main_sessions.iter().map(|s| (s.session_id(), s.path())));
         let mut lookup = std::collections::HashMap::new();
-        for (_root_id, chain) in &chains {
+        for chain in chains.values() {
             for (pos, member) in chain.members.iter().enumerate() {
                 lookup.insert(
                     member.file_id.clone(),
@@ -339,15 +363,23 @@ fn list_sessions<W: Write>(
         OutputFormat::Json => {
             let output: Vec<_> = sessions
                 .iter()
-                .map(|s| SessionInfo::from_session(s, &tag_store, args.context, args.context_length))
+                .map(|s| {
+                    SessionInfo::from_session(s, &tag_store, args.context, args.context_length)
+                })
                 .collect();
             writeln!(writer, "{}", serde_json::to_string_pretty(&output)?)?;
         }
         OutputFormat::Tsv => {
             if args.context {
-                writeln!(writer, "session_id\tproject\tsize\tmodified\tsubagent\tname\tcontext")?;
+                writeln!(
+                    writer,
+                    "session_id\tproject\tsize\tmodified\tsubagent\tname\tcontext"
+                )?;
             } else {
-                writeln!(writer, "session_id\tproject\tsize\tmodified\tsubagent\tname")?;
+                writeln!(
+                    writer,
+                    "session_id\tproject\tsize\tmodified\tsubagent\tname"
+                )?;
             }
             for session in &sessions {
                 let id = if args.full_ids {
@@ -358,9 +390,10 @@ fn list_sessions<W: Write>(
                 let meta = tag_store.get(session.session_id());
                 let name = meta.and_then(|m| m.name.as_deref()).unwrap_or("");
                 if args.context {
-                    let context = get_session_context(session, args.context_length).unwrap_or_default();
+                    let context =
+                        get_session_context(session, args.context_length).unwrap_or_default();
                     // Escape tabs and newlines in context for TSV
-                    let context_escaped = context.replace('\t', " ").replace('\n', " ");
+                    let context_escaped = context.replace(['\t', '\n'], " ");
                     writeln!(
                         writer,
                         "{}\t{}\t{}\t{}\t{}\t{}\t{}",
@@ -411,7 +444,12 @@ fn list_sessions<W: Write>(
             }
 
             if truncated {
-                writeln!(writer, "Sessions (showing {} of {}, use -n 0 for all):", sessions.len(), total_count)?;
+                writeln!(
+                    writer,
+                    "Sessions (showing {} of {}, use -n 0 for all):",
+                    sessions.len(),
+                    total_count
+                )?;
             } else {
                 writeln!(writer, "Sessions ({} found):", sessions.len())?;
             }
@@ -432,7 +470,11 @@ fn list_sessions<W: Write>(
                     ""
                 };
 
-                let subagent_marker = if session.is_subagent() { " [subagent]" } else { "" };
+                let subagent_marker = if session.is_subagent() {
+                    " [subagent]"
+                } else {
+                    ""
+                };
 
                 // Build outcome badge
                 let outcome_badge = meta
@@ -443,11 +485,23 @@ fn list_sessions<W: Write>(
                 // Show custom name if available, fall back to slug
                 let slug = session.quick_metadata_cached().ok().and_then(|m| m.slug);
                 if let Some(name) = meta.and_then(|m| m.name.as_ref()) {
-                    write!(writer, "  {}\"{}\" ({}){}{}", bookmark_marker, name, id, subagent_marker, outcome_badge)?;
+                    write!(
+                        writer,
+                        "  {}\"{}\" ({}){}{}",
+                        bookmark_marker, name, id, subagent_marker, outcome_badge
+                    )?;
                 } else if let Some(slug) = &slug {
-                    write!(writer, "  {}{} [{}]{}{}", bookmark_marker, id, slug, subagent_marker, outcome_badge)?;
+                    write!(
+                        writer,
+                        "  {}{} [{}]{}{}",
+                        bookmark_marker, id, slug, subagent_marker, outcome_badge
+                    )?;
                 } else {
-                    write!(writer, "  {}{}{}{}", bookmark_marker, id, subagent_marker, outcome_badge)?;
+                    write!(
+                        writer,
+                        "  {}{}{}{}",
+                        bookmark_marker, id, subagent_marker, outcome_badge
+                    )?;
                 }
 
                 // Show chain indicator
@@ -463,7 +517,11 @@ fn list_sessions<W: Write>(
                     let size_str = session.file_size_human();
                     if session.file_size() == 0 {
                         // Add context for empty sessions
-                        write!(writer, " ({} - empty, possibly new or interrupted)", size_str)?;
+                        write!(
+                            writer,
+                            " ({} - empty, possibly new or interrupted)",
+                            size_str
+                        )?;
                     } else {
                         write!(writer, " ({})", size_str)?;
                     }
@@ -471,7 +529,11 @@ fn list_sessions<W: Write>(
 
                 writeln!(writer)?;
                 writeln!(writer, "    Project: {}", session.project_path())?;
-                writeln!(writer, "    Modified: {}", session.modified_datetime().format("%Y-%m-%d %H:%M:%S UTC"))?;
+                writeln!(
+                    writer,
+                    "    Modified: {}",
+                    session.modified_datetime().format("%Y-%m-%d %H:%M:%S UTC")
+                )?;
 
                 // Show duration if available
                 if let Ok(meta) = session.quick_metadata_cached() {
@@ -611,7 +673,12 @@ struct SessionInfo {
 }
 
 impl SessionInfo {
-    fn from_session(session: &Session, tag_store: &TagStore, include_context: bool, context_length: usize) -> Self {
+    fn from_session(
+        session: &Session,
+        tag_store: &TagStore,
+        include_context: bool,
+        context_length: usize,
+    ) -> Self {
         let meta = tag_store.get(session.session_id());
         let context = if include_context {
             get_session_context(session, context_length)
@@ -619,7 +686,8 @@ impl SessionInfo {
             None
         };
 
-        let (duration, compaction_count) = session.quick_metadata_cached()
+        let (duration, compaction_count) = session
+            .quick_metadata_cached()
             .map(|m| (m.duration_human(), m.compaction_count))
             .unwrap_or((None, 0));
 

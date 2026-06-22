@@ -40,10 +40,7 @@ pub fn run(cli: &Cli, args: &CodeArgs) -> Result<()> {
     let sessions = claude_dir.all_sessions()?;
     let session = sessions
         .iter()
-        .find(|s| {
-            s.session_id().starts_with(&args.session)
-                || s.session_id() == args.session
-        })
+        .find(|s| s.session_id().starts_with(&args.session) || s.session_id() == args.session)
         .ok_or_else(|| crate::error::SnatchError::SessionNotFound {
             session_id: args.session.clone(),
         })?;
@@ -89,7 +86,14 @@ pub fn run(cli: &Cli, args: &CodeArgs) -> Result<()> {
                     .timestamp
                     .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
                     .unwrap_or_else(|| "-".to_string());
-                let preview = e.code.lines().next().unwrap_or("").chars().take(50).collect::<String>();
+                let preview = e
+                    .code
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(50)
+                    .collect::<String>();
                 println!("{}\t{}\t{}\t{}\t{}", e.index, lang, e.source, ts, preview);
             }
         }
@@ -146,7 +150,10 @@ pub fn run(cli: &Cli, args: &CodeArgs) -> Result<()> {
 }
 
 /// Extract code blocks from a conversation.
-fn extract_code_from_conversation(conversation: &Conversation, args: &CodeArgs) -> Vec<ExtractedCode> {
+fn extract_code_from_conversation(
+    conversation: &Conversation,
+    args: &CodeArgs,
+) -> Vec<ExtractedCode> {
     let mut extracted = Vec::new();
     let mut index = 0;
 
@@ -211,7 +218,11 @@ fn extract_code_from_conversation(conversation: &Conversation, args: &CodeArgs) 
 }
 
 /// Write extracted code blocks to individual files.
-fn write_code_to_files(extracted: &[ExtractedCode], args: &CodeArgs, session: &Session) -> Result<()> {
+fn write_code_to_files(
+    extracted: &[ExtractedCode],
+    args: &CodeArgs,
+    session: &Session,
+) -> Result<()> {
     use std::fs;
 
     let output_dir = args

@@ -48,8 +48,8 @@ use crate::analytics::{SessionAnalytics, SessionDiff};
 use crate::discovery::{ClaudeDirectory, Session, SessionFilter};
 use crate::error::{Result, SnatchError};
 use crate::export::{
-    CsvExporter, Exporter, ExportOptions, HtmlExporter, JsonExporter,
-    MarkdownExporter, TextExporter, XmlExporter,
+    CsvExporter, ExportOptions, Exporter, HtmlExporter, JsonExporter, MarkdownExporter,
+    TextExporter, XmlExporter,
 };
 use crate::model::LogEntry;
 use crate::parser::JsonlParser;
@@ -201,12 +201,11 @@ impl SnatchClient {
 
     /// Parse a session and return the log entries.
     pub fn parse_session(&self, session_id: &str) -> Result<Vec<LogEntry>> {
-        let session = self
-            .claude_dir
-            .find_session(session_id)?
-            .ok_or_else(|| SnatchError::SessionNotFound {
+        let session = self.claude_dir.find_session(session_id)?.ok_or_else(|| {
+            SnatchError::SessionNotFound {
                 session_id: session_id.to_string(),
-            })?;
+            }
+        })?;
         session.parse()
     }
 
@@ -290,9 +289,8 @@ impl SnatchClient {
             }
         }
 
-        String::from_utf8(buffer.into_inner()).map_err(|e| {
-            SnatchError::export(format!("Failed to convert export to string: {}", e))
-        })
+        String::from_utf8(buffer.into_inner())
+            .map_err(|e| SnatchError::export(format!("Failed to convert export to string: {}", e)))
     }
 
     /// Export a session directly to a file.
@@ -303,8 +301,7 @@ impl SnatchClient {
         path: impl AsRef<Path>,
     ) -> Result<()> {
         let content = self.export_session(session_id, format)?;
-        std::fs::write(path, content)
-            .map_err(|e| SnatchError::io("Failed to write export file", e))
+        std::fs::write(path, content).map_err(|e| SnatchError::io("Failed to write export file", e))
     }
 
     /// Parse a JSONL file directly.

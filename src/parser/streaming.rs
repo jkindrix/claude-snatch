@@ -145,7 +145,10 @@ pub fn open_stream(path: impl AsRef<Path>) -> Result<StreamingParser<BufReader<F
         }
     })?;
 
-    Ok(StreamingParser::new(BufReader::with_capacity(64 * 1024, file)))
+    Ok(StreamingParser::new(BufReader::with_capacity(
+        64 * 1024,
+        file,
+    )))
 }
 
 /// Session file state detection.
@@ -184,9 +187,9 @@ pub fn detect_session_state(path: impl AsRef<Path>) -> Result<SessionState> {
         SnatchError::io(format!("Failed to read metadata for {}", path.display()), e)
     })?;
 
-    let modified = metadata.modified().map_err(|e| {
-        SnatchError::io(format!("Failed to get mtime for {}", path.display()), e)
-    })?;
+    let modified = metadata
+        .modified()
+        .map_err(|e| SnatchError::io(format!("Failed to get mtime for {}", path.display()), e))?;
 
     let now = SystemTime::now();
     let age = now.duration_since(modified).unwrap_or(Duration::MAX);
@@ -203,9 +206,8 @@ pub fn detect_session_state(path: impl AsRef<Path>) -> Result<SessionState> {
 /// Check if the last line in a file is incomplete (no newline terminator).
 pub fn has_incomplete_line(path: impl AsRef<Path>) -> Result<bool> {
     let path = path.as_ref();
-    let mut file = File::open(path).map_err(|e| {
-        SnatchError::io(format!("Failed to open {}", path.display()), e)
-    })?;
+    let mut file = File::open(path)
+        .map_err(|e| SnatchError::io(format!("Failed to open {}", path.display()), e))?;
 
     let metadata = file.metadata().map_err(|e| {
         SnatchError::io(format!("Failed to read metadata for {}", path.display()), e)
@@ -216,13 +218,15 @@ pub fn has_incomplete_line(path: impl AsRef<Path>) -> Result<bool> {
     }
 
     // Seek to last byte
-    file.seek(SeekFrom::End(-1)).map_err(|e| {
-        SnatchError::io(format!("Failed to seek in {}", path.display()), e)
-    })?;
+    file.seek(SeekFrom::End(-1))
+        .map_err(|e| SnatchError::io(format!("Failed to seek in {}", path.display()), e))?;
 
     let mut buf = [0u8; 1];
     file.read_exact(&mut buf).map_err(|e| {
-        SnatchError::io(format!("Failed to read last byte from {}", path.display()), e)
+        SnatchError::io(
+            format!("Failed to read last byte from {}", path.display()),
+            e,
+        )
     })?;
 
     Ok(buf[0] != b'\n')
@@ -326,7 +330,10 @@ impl<R: BufRead> ProgressStreamingParser<R> {
     }
 
     /// Set progress callback.
-    pub fn on_progress(mut self, callback: impl Fn(&StreamingProgress) + Send + Sync + 'static) -> Self {
+    pub fn on_progress(
+        mut self,
+        callback: impl Fn(&StreamingProgress) + Send + Sync + 'static,
+    ) -> Self {
         self.callback = Some(Box::new(callback));
         self
     }
@@ -598,11 +605,11 @@ impl<'a> ZeroCopyLine<'a> {
 
     /// Parse into a LogEntry.
     pub fn parse(&self) -> crate::error::Result<crate::model::LogEntry> {
-        let s = self.as_str().map_err(|e| {
-            crate::error::SnatchError::DataIntegrityError {
+        let s = self
+            .as_str()
+            .map_err(|e| crate::error::SnatchError::DataIntegrityError {
                 message: format!("Invalid UTF-8 at line {}: {e}", self.line_num),
-            }
-        })?;
+            })?;
 
         serde_json::from_str(s.trim()).map_err(|e| {
             crate::error::SnatchError::parse_with_source(self.line_num, e.to_string(), e)
@@ -711,7 +718,10 @@ invalid
     fn test_session_state() {
         // Can't easily test this without actual files, but verify the enum works
         assert_eq!(SessionState::Inactive.description(), "inactive");
-        assert_eq!(SessionState::PossiblyActive.description(), "possibly active");
+        assert_eq!(
+            SessionState::PossiblyActive.description(),
+            "possibly active"
+        );
     }
 
     #[test]
@@ -745,8 +755,7 @@ invalid
     #[test]
     fn test_zero_copy_lines_empty() {
         let content = b"";
-        let lines: Vec<_> = ZeroCopyLines::new(content).collect();
-        assert!(lines.is_empty());
+        assert!(ZeroCopyLines::new(content).next().is_none());
     }
 
     #[test]
