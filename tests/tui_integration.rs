@@ -231,33 +231,56 @@ mod watch_tests {
     #[tokio::test]
     async fn test_watch_starts() -> Result<()> {
         let _serial = PTY_SERIAL.lock().await;
-        let mut session =
-            match Session::spawn(snatch_bin(), &["watch", "--all", "--interval", "100"]).await {
-                Ok(session) => session,
-                Err(_) => {
-                    eprintln!("Watch test skipped: terminal not interactive in this environment");
-                    return Ok(());
-                }
-            };
+        // `--follow` keeps watch running so there is genuinely a live process to
+        // observe and interrupt; without it watch does a single poll and exits
+        // on its own, which made the old test a no-op that passed by timing luck.
+        let mut session = match Session::spawn(
+            snatch_bin(),
+            &["watch", "--all", "--follow", "--interval", "100"],
+        )
+        .await
+        {
+            Ok(session) => session,
+            Err(_) => {
+                eprintln!("Watch test skipped: terminal not interactive in this environment");
+                return Ok(());
+            }
+        };
 
-        // Watch should show some output about watching or sessions. It's okay if
-        // watch doesn't output immediately (polling mode), so the result is
-        // advisory only.
-        let _ = session
+        // A live watch must print its startup banner. If it instead reports that
+        // there are no active sessions to watch (common on a fresh CI checkout),
+        // there is nothing to drive - skip gracefully. A timeout likewise means
+        // the process could not run here.
+        match session
             .expect_timeout(
-                Pattern::regex(r"[Ww]atch|session|active|monitor|waiting").unwrap(),
-                Duration::from_secs(3),
+                Pattern::regex(r"Watching \d+ session|No sessions to watch").unwrap(),
+                Duration::from_secs(5),
             )
-            .await;
+            .await
+        {
+            Ok(m) if m.matched.contains("No sessions") => {
+                eprintln!("Watch test skipped: no active sessions to watch in this environment");
+                return Ok(());
+            }
+            Ok(_) => {}
+            Err(_) => {
+                eprintln!("Watch test skipped: terminal not interactive in this environment");
+                return Ok(());
+            }
+        }
 
-        // Send Ctrl+C to stop. A write error means the process already exited
-        // (watch's single-check mode finishes quickly, or there is no usable
-        // terminal to drive) - skip gracefully.
+        // It started and is watching. Stop it; a write error means the PTY is
+        // dead in this environment - skip.
         if session.send_control(ControlChar::CtrlC).await.is_err() {
             eprintln!("Watch test skipped: terminal not interactive in this environment");
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Ensure the follow loop is not left running: dropping the session closes
+        // the PTY but does not reap the child, and on some platforms Ctrl+C does
+        // not terminate it.
+        session.kill().ok();
 
         Ok(())
     }
@@ -266,37 +289,73 @@ mod watch_tests {
     #[tokio::test]
     async fn test_watch_ctrl_c_exits() -> Result<()> {
         let _serial = PTY_SERIAL.lock().await;
-        let mut session =
-            match Session::spawn(snatch_bin(), &["watch", "--all", "--interval", "200"]).await {
-                Ok(session) => session,
-                Err(_) => {
-                    eprintln!("Watch test skipped: terminal not interactive in this environment");
-                    return Ok(());
-                }
-            };
+        // `--follow` is essential here: it keeps watch in its polling loop so the
+        // Ctrl+C below actually exercises interrupt handling. Without it watch
+        // exits on its own after one poll, so the test never tested anything.
+        let mut session = match Session::spawn(
+            snatch_bin(),
+            &["watch", "--all", "--follow", "--interval", "200"],
+        )
+        .await
+        {
+            Ok(session) => session,
+            Err(_) => {
+                eprintln!("Watch test skipped: terminal not interactive in this environment");
+                return Ok(());
+            }
+        };
 
-        // Give it time to start and install its signal handling. `watch --all`
-        // scans every project, which can be slow when the suite runs in parallel,
-        // so allow a generous startup window to avoid a flaky race with Ctrl+C.
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // Confirm watch is actually up and looping before we interrupt it. If
+        // there is nothing active to watch, or it cannot run here, skip - there
+        // is no interrupt behavior to assert.
+        match session
+            .expect_timeout(
+                Pattern::regex(r"Watching \d+ session|No sessions to watch").unwrap(),
+                Duration::from_secs(5),
+            )
+            .await
+        {
+            Ok(m) if m.matched.contains("No sessions") => {
+                eprintln!("Watch test skipped: no active sessions to watch in this environment");
+                return Ok(());
+            }
+            Ok(_) => {}
+            Err(_) => {
+                eprintln!("Watch test skipped: terminal not interactive in this environment");
+                return Ok(());
+            }
+        }
 
-        // Send Ctrl+C. A write error (e.g. EIO on a dead PTY) means the process
-        // already exited because it has no usable terminal to drive - skip.
+        // Send Ctrl+C. The PTY is in cooked mode, so this byte is delivered to
+        // the process group as SIGINT. A write error means the PTY is dead in
+        // this environment - skip.
         if session.send_control(ControlChar::CtrlC).await.is_err() {
             eprintln!("Watch test skipped: terminal not interactive in this environment");
             return Ok(());
         }
 
-        // Should exit. On Linux, Ctrl+C is delivered over the PTY (or watch's
-        // single-check mode has already finished) and the child is reaped, so
-        // wait() returns promptly. On macOS and Windows the test PTY often can't
-        // deliver Ctrl+C or reap an already-exited child, so wait() never
-        // observes the exit even though watch itself terminated correctly. Treat
-        // that timeout as a graceful skip rather than a failure.
+        // The interrupt must terminate the running process. rust-expect reports
+        // EOF as ProcessExitStatus::Unknown, so we can confirm watch exits after
+        // the interrupt but not its precise exit code.
         let wait_result = tokio::time::timeout(Duration::from_secs(5), session.wait()).await;
 
-        if wait_result.is_err() {
-            eprintln!("Watch test skipped: terminal not interactive in this environment");
+        if cfg!(target_os = "linux") {
+            // Linux PTYs reliably deliver Ctrl+C as SIGINT (cooked mode) and reap
+            // the child, so the interrupt MUST terminate watch. This is the strict
+            // gate that catches a regression where watch stops honoring Ctrl+C.
+            assert!(
+                wait_result.is_ok(),
+                "Watch should exit after Ctrl+C (SIGINT)"
+            );
+        } else if wait_result.is_err() {
+            // macOS/Windows test PTYs can't always deliver the interrupt or
+            // observe the child's exit (Windows ConPTY has no cooked-mode line
+            // discipline). Don't false-fail there - the Linux gate covers the
+            // interrupt behavior - but kill the still-running child explicitly,
+            // because dropping the session only closes the PTY, it does not reap
+            // the process.
+            eprintln!("Watch test skipped: PTY could not deliver interrupt in this environment");
+            session.kill().ok();
             return Ok(());
         }
 
