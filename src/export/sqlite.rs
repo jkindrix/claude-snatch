@@ -694,8 +694,18 @@ impl SqliteExporter {
         let summary = analytics.summary_report();
 
         // Get cache token info from aggregated usage
-        let cache_read = analytics.usage.usage.cache_read_input_tokens;
-        let cache_creation = analytics.usage.usage.cache_creation_input_tokens;
+        // rusqlite 0.38 no longer implements ToSql for u64/usize; SQLite stores
+        // i64, so cast the token/count values explicitly.
+        let cache_read = analytics
+            .usage
+            .usage
+            .cache_read_input_tokens
+            .map(|v| v as i64);
+        let cache_creation = analytics
+            .usage
+            .usage
+            .cache_creation_input_tokens
+            .map(|v| v as i64);
 
         conn.execute(
             "INSERT INTO usage_stats (
@@ -706,17 +716,17 @@ impl SqliteExporter {
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 session_fk,
-                summary.total_messages,
-                summary.user_messages,
-                summary.assistant_messages,
-                summary.total_tokens,
-                summary.input_tokens,
-                summary.output_tokens,
+                summary.total_messages as i64,
+                summary.user_messages as i64,
+                summary.assistant_messages as i64,
+                summary.total_tokens as i64,
+                summary.input_tokens as i64,
+                summary.output_tokens as i64,
                 cache_read,
                 cache_creation,
                 summary.cache_hit_rate,
-                summary.tool_invocations,
-                summary.thinking_blocks,
+                summary.tool_invocations as i64,
+                summary.thinking_blocks as i64,
                 summary.primary_model,
                 summary.estimated_cost,
             ],
@@ -728,7 +738,7 @@ impl SqliteExporter {
             conn.execute(
                 "INSERT INTO tool_usage (session_fk, tool_name, invocation_count)
                  VALUES (?1, ?2, ?3)",
-                params![session_fk, tool_name, count],
+                params![session_fk, tool_name, *count as i64],
             )
             .map_err(|e| SnatchError::export(format!("Failed to insert tool usage: {}", e)))?;
         }

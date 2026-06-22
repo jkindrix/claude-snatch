@@ -371,7 +371,7 @@ impl SchemaValidator {
 
 /// Format a validation error for display.
 fn format_validation_error(error: &jsonschema::ValidationError) -> String {
-    let path = error.instance_path.to_string();
+    let path = error.instance_path().to_string();
     if path.is_empty() {
         format!("{}", error)
     } else {
