@@ -741,20 +741,27 @@ mod tests {
         }
     }
 
+    // The filesystem-probing decode reconstructs Unix-style absolute paths
+    // (it builds up from `/`), so this round-trip is only meaningful on Unix.
+    #[cfg(unix)]
     #[test]
     fn test_decode_with_filesystem_check_existing_path() {
         use std::env;
 
-        // Test with a path we know exists - the temp directory
+        // Use a path we know exists - the temp directory.
         let temp_dir = env::temp_dir();
-        let temp_str = temp_dir.to_string_lossy();
-
-        // Encode the temp path
-        let encoded = encode_project_path(&temp_str);
+        let encoded = encode_project_path(&temp_dir.to_string_lossy());
         let decoded = decode_project_path(&encoded);
 
-        // Should decode back to the original
-        assert_eq!(decoded, temp_str.as_ref());
+        // The decode probes the filesystem to rebuild an existing path, so the
+        // result can be normalized relative to the input (e.g. a trailing slash,
+        // or macOS resolving /var -> /private/var). Compare the directories the
+        // two paths resolve to rather than their raw strings.
+        assert_eq!(
+            std::fs::canonicalize(&decoded).ok(),
+            std::fs::canonicalize(&temp_dir).ok(),
+            "decoded {decoded:?} should resolve to the same directory as {temp_dir:?}"
+        );
     }
 
     #[test]
