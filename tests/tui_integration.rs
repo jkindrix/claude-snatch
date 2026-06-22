@@ -16,6 +16,11 @@ fn snatch_bin() -> &'static str {
     env!("CARGO_BIN_EXE_snatch")
 }
 
+/// Serializes the PTY-spawning integration tests. Each drives a real
+/// pseudo-terminal; running several at once starves them under parallel
+/// load and makes them flaky, so each holds this lock for its duration.
+static PTY_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 mod tui_tests {
     use super::*;
 
@@ -25,6 +30,7 @@ mod tui_tests {
     /// properly detect the PTY as an interactive terminal.
     #[tokio::test]
     async fn test_tui_launches_and_renders() -> Result<()> {
+        let _serial = PTY_SERIAL.lock().await;
         let mut session = Session::spawn(snatch_bin(), &["tui"]).await?;
 
         // TUI should render with box drawing characters, show Session/Project,
@@ -38,7 +44,9 @@ mod tui_tests {
 
         match result {
             Ok(m) => {
-                if m.matched.contains("Cannot launch TUI") || m.matched.contains("no interactive terminal") {
+                if m.matched.contains("Cannot launch TUI")
+                    || m.matched.contains("no interactive terminal")
+                {
                     // TUI can't run in this environment - skip gracefully
                     eprintln!("TUI test skipped: terminal not interactive in this environment");
                     return Ok(());
@@ -59,6 +67,7 @@ mod tui_tests {
     /// Test TUI navigation with j/k keys
     #[tokio::test]
     async fn test_tui_navigation() -> Result<()> {
+        let _serial = PTY_SERIAL.lock().await;
         let mut session = Session::spawn(snatch_bin(), &["tui"]).await?;
 
         // Wait for TUI to render or error
@@ -99,6 +108,7 @@ mod tui_tests {
     /// Test TUI exits cleanly with 'q'
     #[tokio::test]
     async fn test_tui_quit() -> Result<()> {
+        let _serial = PTY_SERIAL.lock().await;
         let mut session = Session::spawn(snatch_bin(), &["tui"]).await?;
 
         // Wait for TUI to render or error
@@ -120,7 +130,8 @@ mod tui_tests {
                 session.send_str("q").await?;
 
                 // Should exit - wait for process to end
-                let wait_result = tokio::time::timeout(Duration::from_secs(2), session.wait()).await;
+                let wait_result =
+                    tokio::time::timeout(Duration::from_secs(2), session.wait()).await;
 
                 assert!(
                     wait_result.is_ok(),
@@ -142,6 +153,7 @@ mod pick_tests {
     /// Test that `snatch pick` launches the fuzzy picker
     #[tokio::test]
     async fn test_pick_launches() -> Result<()> {
+        let _serial = PTY_SERIAL.lock().await;
         let mut session = Session::spawn(snatch_bin(), &["pick", "--limit", "10"]).await?;
 
         // Pick should show some UI elements or session list
@@ -181,6 +193,7 @@ mod pick_tests {
     /// Test that pick exits with ESC key
     #[tokio::test]
     async fn test_pick_escape_exits() -> Result<()> {
+        let _serial = PTY_SERIAL.lock().await;
         let mut session = Session::spawn(snatch_bin(), &["pick", "--limit", "5"]).await?;
 
         // Wait a moment for UI to start
@@ -204,6 +217,7 @@ mod watch_tests {
     /// Test that `snatch watch --all` starts watching
     #[tokio::test]
     async fn test_watch_starts() -> Result<()> {
+        let _serial = PTY_SERIAL.lock().await;
         let mut session =
             Session::spawn(snatch_bin(), &["watch", "--all", "--interval", "100"]).await?;
 
@@ -230,17 +244,20 @@ mod watch_tests {
     /// Test watch exits cleanly with Ctrl+C
     #[tokio::test]
     async fn test_watch_ctrl_c_exits() -> Result<()> {
+        let _serial = PTY_SERIAL.lock().await;
         let mut session =
             Session::spawn(snatch_bin(), &["watch", "--all", "--interval", "200"]).await?;
 
-        // Give it a moment to start
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Give it time to start and install its signal handling. `watch --all`
+        // scans every project, which can be slow when the suite runs in parallel,
+        // so allow a generous startup window to avoid a flaky race with Ctrl+C.
+        tokio::time::sleep(Duration::from_secs(1)).await;
 
         // Send Ctrl+C
         session.send_control(ControlChar::CtrlC).await?;
 
         // Should exit
-        let wait_result = tokio::time::timeout(Duration::from_secs(2), session.wait()).await;
+        let wait_result = tokio::time::timeout(Duration::from_secs(5), session.wait()).await;
 
         assert!(
             wait_result.is_ok(),
