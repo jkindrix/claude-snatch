@@ -52,8 +52,8 @@ use helpers::{
     extract_image_placeholders, extract_result_preview, extract_thinking_text,
     extract_tool_input_summary, extract_tool_names, extract_user_prompt_text,
     find_compaction_events, get_claude_dir, get_model, has_thinking, is_human_prompt,
-    parse_timestamp_param, period_cutoff, render_attachment_content, resolve_project,
-    resolve_session, resolve_session_with_chain, search_entry_text, truncate_text,
+    main_thread_message_total, parse_timestamp_param, period_cutoff, render_attachment_content,
+    resolve_project, resolve_session, resolve_session_with_chain, search_entry_text, truncate_text,
 };
 use types::{
     ActiveDecisionEntry, ChangeEventEntry, CompactionEvent, ConflictPairEntry, ContextTurnEntry,
@@ -281,7 +281,7 @@ impl SnatchServer {
             cache_read_tokens: summary.cache_read_tokens,
             cache_creation_tokens: summary.cache_creation_tokens,
             total_processed_tokens: summary.total_processed_tokens,
-            messages: summary.total_messages,
+            messages: main_thread_message_total(&conversation),
             user_messages: summary.user_messages,
             assistant_messages: summary.assistant_messages,
             tool_invocations: summary.tool_invocations,
@@ -505,7 +505,10 @@ impl SnatchServer {
             _ => {} // standard/full: keep everything
         }
 
-        let total_messages = entries.len();
+        // Detail-independent canonical total (see main_thread_message_total),
+        // so it matches get_session_info.messages regardless of detail level.
+        // `returned` below conveys how many this page actually emitted.
+        let total_messages = main_thread_message_total(&resolved.conversation);
 
         // Build (original_index, entry) pairs so indices survive reordering
         let mut indexed: Vec<(usize, &LogEntry)> = entries.into_iter().enumerate().collect();

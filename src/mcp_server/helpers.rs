@@ -23,6 +23,32 @@ pub use crate::analysis::extraction::{
 };
 pub use crate::analysis::filters::{parse_period, period_cutoff};
 
+/// Canonical session message total: human user prompts plus distinct assistant
+/// turns (deduped by `message.id`), counted over the main thread.
+///
+/// This is detail-independent and is the single definition shared by
+/// `get_session_messages` (its `total_messages`) and `get_session_info` (its
+/// `messages`), so the two always report the same number.
+#[must_use]
+pub fn main_thread_message_total(conversation: &Conversation) -> usize {
+    use std::collections::HashSet;
+
+    let mut assistant_turns: HashSet<&str> = HashSet::new();
+    let mut user_prompts = 0usize;
+    for entry in conversation.main_thread_entries() {
+        match entry {
+            LogEntry::Assistant(assistant) => {
+                assistant_turns.insert(assistant.message.id.as_str());
+            }
+            LogEntry::User(_) if is_human_prompt(entry) => {
+                user_prompts += 1;
+            }
+            _ => {}
+        }
+    }
+    user_prompts + assistant_turns.len()
+}
+
 /// Resolved session with parsed conversation and analytics.
 pub struct ResolvedSession {
     /// The full session UUID.
@@ -242,4 +268,92 @@ pub fn search_entry_text(
     max_context: usize,
 ) -> Vec<(String, String)> {
     crate::analysis::search::search_entry_text(entry, regex, scope, max_context)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{
+        AssistantContent, AssistantMessage, ContentBlock, TextBlock, UserContent, UserMessage,
+        UserSimpleContent,
+    };
+    use chrono::Utc;
+    use indexmap::IndexMap;
+
+    fn user(uuid: &str, parent: Option<&str>) -> LogEntry {
+        LogEntry::User(UserMessage {
+            uuid: uuid.to_string(),
+            parent_uuid: parent.map(String::from),
+            timestamp: Utc::now(),
+            session_id: "t".to_string(),
+            version: "2.0".to_string(),
+            cwd: None,
+            git_branch: None,
+            user_type: None,
+            is_sidechain: false,
+            is_teammate: None,
+            agent_id: None,
+            slug: None,
+            is_meta: None,
+            is_visible_in_transcript_only: None,
+            thinking_metadata: None,
+            todos: vec![],
+            tool_use_result: None,
+            message: UserContent::Simple(UserSimpleContent {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+            }),
+            extra: IndexMap::new(),
+        })
+    }
+
+    fn assistant(uuid: &str, parent: &str, msg_id: &str) -> LogEntry {
+        LogEntry::Assistant(AssistantMessage {
+            uuid: uuid.to_string(),
+            parent_uuid: Some(parent.to_string()),
+            timestamp: Utc::now(),
+            session_id: "t".to_string(),
+            version: "2.0".to_string(),
+            cwd: None,
+            git_branch: None,
+            user_type: None,
+            is_sidechain: false,
+            is_teammate: None,
+            agent_id: None,
+            slug: None,
+            request_id: None,
+            is_api_error_message: None,
+            message: AssistantContent {
+                id: msg_id.to_string(),
+                msg_type: "message".to_string(),
+                role: "assistant".to_string(),
+                content: vec![ContentBlock::Text(TextBlock {
+                    text: "hi".to_string(),
+                    extra: IndexMap::new(),
+                })],
+                model: "m".to_string(),
+                stop_reason: None,
+                stop_sequence: None,
+                usage: None,
+                container: None,
+                context_management: None,
+                extra: IndexMap::new(),
+            },
+            extra: IndexMap::new(),
+        })
+    }
+
+    #[test]
+    fn main_thread_total_dedups_assistant_chunks() {
+        // Two human prompts and one assistant turn split into two streaming
+        // chunks (same message.id) → 2 + 1 = 3, not 4.
+        let entries = vec![
+            user("u1", None),
+            assistant("a1", "u1", "m1"),
+            assistant("a2", "a1", "m1"),
+            user("u2", Some("a2")),
+        ];
+        let conv = Conversation::from_entries(entries).unwrap();
+        assert_eq!(main_thread_message_total(&conv), 3);
+    }
 }
