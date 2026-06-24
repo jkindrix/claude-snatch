@@ -636,11 +636,7 @@ impl Exporter for XmlExporter {
         // Messages
         self.write_open_tag(writer, 1, "messages", &[])?;
 
-        let entries = if options.main_thread_only {
-            conversation.main_thread_entries()
-        } else {
-            conversation.chronological_entries()
-        };
+        let entries = conversation.entries_for_export(options.main_thread_only);
 
         for entry in entries {
             match entry {

@@ -175,12 +175,8 @@ impl SqliteExporter {
         // Insert session metadata
         let session_id = self.insert_session(conn, conversation, meta)?;
 
-        // Insert messages
-        let entries = if options.main_thread_only {
-            conversation.main_thread_entries()
-        } else {
-            conversation.chronological_entries()
-        };
+        // Insert messages (compaction summaries first, then the rendered thread)
+        let entries = conversation.entries_for_export(options.main_thread_only);
 
         for entry in entries {
             self.insert_entry(conn, session_id, entry, options)?;

@@ -102,6 +102,9 @@ pub struct Conversation {
     tool_links: HashMap<String, String>,
     /// Message ID groupings (streaming chunks).
     message_groups: HashMap<String, Vec<String>>,
+    /// Compaction-summary entries, which carry no UUID and are therefore
+    /// absent from the node tree. Retained so exporters can surface them.
+    summaries: Vec<LogEntry>,
 }
 
 impl Conversation {
@@ -114,6 +117,7 @@ impl Conversation {
         let mut tool_uses: HashMap<String, String> = HashMap::new(); // tool_use_id -> node_uuid
         let mut tool_links = HashMap::new();
         let mut message_groups: HashMap<String, Vec<String>> = HashMap::new();
+        let mut summaries: Vec<LogEntry> = Vec::new();
 
         // First pass: create nodes and track tool uses
         for entry in entries {
@@ -168,6 +172,9 @@ impl Conversation {
                 };
 
                 nodes.insert(uuid, node);
+            } else if matches!(entry, LogEntry::Summary(_)) {
+                // No UUID, so it never becomes a node; keep it for export.
+                summaries.push(entry);
             }
         }
 
@@ -458,6 +465,7 @@ impl Conversation {
             branch_points,
             tool_links,
             message_groups,
+            summaries,
         })
     }
 
@@ -532,6 +540,29 @@ impl Conversation {
             .iter()
             .filter_map(|uuid| self.nodes.get(uuid).map(|n| &n.entry))
             .collect()
+    }
+
+    /// Compaction-summary entries dropped from the node tree (no UUID).
+    #[must_use]
+    pub fn summaries(&self) -> &[LogEntry] {
+        &self.summaries
+    }
+
+    /// Entries for rendering an export: the compaction summaries (which are
+    /// absent from the node tree) followed by the rendered thread.
+    ///
+    /// `main_thread_only` selects the main thread vs. the full chronological
+    /// flatten for the thread portion; the summaries are surfaced first either
+    /// way, since they carry no timestamp to order them by.
+    #[must_use]
+    pub fn entries_for_export(&self, main_thread_only: bool) -> Vec<&LogEntry> {
+        let mut entries: Vec<&LogEntry> = self.summaries.iter().collect();
+        if main_thread_only {
+            entries.extend(self.main_thread_entries());
+        } else {
+            entries.extend(self.chronological_entries());
+        }
+        entries
     }
 
     /// Get all entries in chronological order (flattened tree).
@@ -721,6 +752,36 @@ mod tests {
         assert_eq!(conv.roots().len(), 1);
         assert_eq!(conv.main_thread().len(), 3);
         assert!(!conv.has_branches());
+    }
+
+    #[test]
+    fn test_summary_entry_retained_for_export() {
+        let summary = LogEntry::Summary(crate::model::SummaryMessage {
+            summary: "session title".to_string(),
+            leaf_uuid: Some("2".to_string()),
+            is_compact_summary: None,
+            extra: IndexMap::new(),
+        });
+        let entries = vec![
+            make_user_entry("1", None),
+            make_user_entry("2", Some("1")),
+            summary,
+        ];
+
+        let conv = Conversation::from_entries(entries).unwrap();
+
+        // The Summary has no UUID, so it is not a node and stays off the thread.
+        assert_eq!(conv.len(), 2);
+        assert!(!conv
+            .main_thread_entries()
+            .iter()
+            .any(|e| matches!(e, LogEntry::Summary(_))));
+
+        // But it is retained and surfaced for export, ahead of the thread.
+        assert_eq!(conv.summaries().len(), 1);
+        let exported = conv.entries_for_export(true);
+        assert!(matches!(exported.first(), Some(LogEntry::Summary(_))));
+        assert_eq!(exported.len(), 3);
     }
 
     #[test]

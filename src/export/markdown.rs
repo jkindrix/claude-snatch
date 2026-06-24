@@ -665,12 +665,8 @@ impl Exporter for MarkdownExporter {
         // Write header
         self.write_header(writer, conversation, options)?;
 
-        // Get entries
-        let entries = if options.main_thread_only {
-            conversation.main_thread_entries()
-        } else {
-            conversation.chronological_entries()
-        };
+        // Get entries (compaction summaries first, then the rendered thread)
+        let entries = conversation.entries_for_export(options.main_thread_only);
 
         // Write table of contents if enabled
         if self.include_toc && !self.plain_text {

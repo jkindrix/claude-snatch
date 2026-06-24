@@ -105,11 +105,7 @@ impl Exporter for JsonExporter {
             self.write_json(writer, &value)?;
         } else {
             // Export entries directly as array
-            let entries = if options.main_thread_only {
-                conversation.main_thread_entries()
-            } else {
-                conversation.chronological_entries()
-            };
+            let entries = conversation.entries_for_export(options.main_thread_only);
 
             let filtered = filter_entries(&entries, options);
             let value = serde_json::to_value(&filtered)?;
@@ -274,7 +270,10 @@ impl ConversationExport {
             conversation.chronological_entries()
         };
 
-        let filtered_entries = filter_entries(&entries, options);
+        // Include compaction summaries (absent from the node tree) in the
+        // serialized entries, but keep metadata extraction below on the thread.
+        let export_entries = conversation.entries_for_export(options.main_thread_only);
+        let filtered_entries = filter_entries(&export_entries, options);
 
         // Extract metadata from first entry
         let metadata = entries.first().map(|first| {
