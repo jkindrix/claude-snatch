@@ -300,6 +300,10 @@ impl Session {
         let mut system_count = 0;
         let mut other_count = 0;
         let mut compaction_count = 0;
+        // A single assistant turn is written as several JSONL lines (streaming
+        // chunks) sharing one message.id. Dedup by message.id to count turns,
+        // not chunks.
+        let mut seen_assistant_ids = std::collections::HashSet::new();
 
         for entry in &entries {
             match entry {
@@ -309,9 +313,13 @@ impl Session {
                         compaction_count += 1;
                     }
                 }
+                LogEntry::Assistant(a) => {
+                    if seen_assistant_ids.insert(a.message.id.clone()) {
+                        assistant_count += 1;
+                    }
+                }
                 _ => match entry.message_type() {
                     "user" => user_count += 1,
-                    "assistant" => assistant_count += 1,
                     _ => other_count += 1,
                 },
             }

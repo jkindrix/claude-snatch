@@ -92,6 +92,11 @@ impl SessionAnalytics {
             self.process_entry(&node.entry);
         }
 
+        // process_entry counts one assistant per node, but a single turn can be
+        // written as several streaming-chunk nodes sharing one message.id.
+        // Collapse the tally to distinct turns.
+        self.message_counts.assistant = conversation.message_group_count();
+
         // Calculate cost
         self.usage.calculate_cost();
     }
@@ -1976,6 +1981,28 @@ mod tests {
 
         assert_eq!(counts.total(), 27);
         assert_eq!(counts.conversation(), 25);
+    }
+
+    #[test]
+    fn test_assistant_count_dedups_streaming_chunks() {
+        // get_session_info reports summary.assistant_messages from this path.
+        // A turn split into streaming chunks sharing one message.id must count
+        // once, not once per chunk.
+        let entry = |uuid: &str, parent: &str, msg_id: &str| {
+            let json = format!(
+                r#"{{"type":"assistant","uuid":"{uuid}","parentUuid":"{parent}","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","version":"2.1.0","isSidechain":false,"message":{{"id":"{msg_id}","type":"message","role":"assistant","model":"m","content":[{{"type":"text","text":"x"}}]}}}}"#
+            );
+            serde_json::from_str::<crate::model::LogEntry>(&json).unwrap()
+        };
+        let entries = vec![
+            entry("c1", "root", "msg_A"),
+            entry("c2", "c1", "msg_A"),
+            entry("c3", "c2", "msg_B"),
+        ];
+        let conv = crate::reconstruction::Conversation::from_entries(entries).unwrap();
+        let summary = SessionAnalytics::from_conversation(&conv).summary_report();
+
+        assert_eq!(summary.assistant_messages, 2);
     }
 
     #[test]

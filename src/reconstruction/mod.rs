@@ -515,6 +515,16 @@ impl Conversation {
         self.message_groups.get(message_id).map(Vec::as_slice)
     }
 
+    /// Number of distinct assistant turns (message IDs).
+    ///
+    /// One assistant turn can be written as several JSONL lines (streaming
+    /// chunks) sharing a single `message.id`; those arrive as separate nodes.
+    /// This counts turns, not chunks.
+    #[must_use]
+    pub fn message_group_count(&self) -> usize {
+        self.message_groups.len()
+    }
+
     /// Get the main thread as entries.
     #[must_use]
     pub fn main_thread_entries(&self) -> Vec<&LogEntry> {
@@ -582,7 +592,6 @@ impl Conversation {
     #[must_use]
     pub fn statistics(&self) -> ConversationStats {
         let mut user_count = 0;
-        let mut assistant_count = 0;
         let mut system_count = 0;
         let mut tool_use_count = 0;
         let mut tool_result_count = 0;
@@ -595,7 +604,6 @@ impl Conversation {
                     tool_result_count += user.message.tool_results().len();
                 }
                 LogEntry::Assistant(assistant) => {
-                    assistant_count += 1;
                     for content in &assistant.message.content {
                         match content {
                             ContentBlock::ToolUse(_) => tool_use_count += 1,
@@ -612,7 +620,9 @@ impl Conversation {
         ConversationStats {
             total_nodes: self.nodes.len(),
             user_messages: user_count,
-            assistant_messages: assistant_count,
+            // Distinct assistant turns: streaming chunks share one message.id
+            // across several nodes, so count groups rather than nodes.
+            assistant_messages: self.message_groups.len(),
             system_messages: system_count,
             tool_uses: tool_use_count,
             tool_results: tool_result_count,
@@ -916,6 +926,38 @@ mod tests {
             thread.contains(&"u1"),
             "preamble lost from main thread: {thread:?}"
         );
+    }
+
+    fn assistant_chunk(uuid: &str, parent: Option<&str>, msg_id: &str) -> LogEntry {
+        let parent_json = parent.map_or("null".to_string(), |p| format!("\"{p}\""));
+        let json = format!(
+            r#"{{"type":"assistant","uuid":"{uuid}","parentUuid":{parent_json},"timestamp":"2026-01-01T00:00:00Z","sessionId":"s","version":"2.1.0","isSidechain":false,"message":{{"id":"{msg_id}","type":"message","role":"assistant","model":"m","content":[{{"type":"text","text":"x"}}]}}}}"#
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn test_streaming_chunks_count_as_one_assistant_turn() {
+        // One assistant turn is written as several JSONL lines (streaming chunks)
+        // sharing a single message.id, each a distinct node. Turn counts must
+        // dedup by message.id rather than counting nodes.
+        let entries = vec![
+            make_user_entry("u1", None),
+            // Turn A: 3 chunks sharing msg_A.
+            assistant_chunk("c1", Some("u1"), "msg_A"),
+            assistant_chunk("c2", Some("c1"), "msg_A"),
+            assistant_chunk("c3", Some("c2"), "msg_A"),
+            // Turn B: single chunk.
+            assistant_chunk("c4", Some("c3"), "msg_B"),
+        ];
+
+        let conv = Conversation::from_entries(entries).unwrap();
+
+        // All 5 lines remain distinct nodes.
+        assert_eq!(conv.len(), 5);
+        // But only 2 distinct assistant turns.
+        assert_eq!(conv.message_group_count(), 2);
+        assert_eq!(conv.statistics().assistant_messages, 2);
     }
 
     #[test]
