@@ -115,6 +115,98 @@ pub fn extract_user_prompt_text(entry: &LogEntry) -> Option<String> {
     }
 }
 
+/// Render a human-readable marker for an attachment log entry.
+///
+/// Every attachment yields a `[attachment: <type>]` marker so a reader knows
+/// injected context existed. Content-bearing kinds — injected files (`file`)
+/// and edited-file snippets (`edited_text_file`) — additionally surface their
+/// payload, truncated to `max_len`. Operational kinds (hook output, skill/tool
+/// listings, metadata) are marker-only to avoid flooding the transcript.
+/// Returns `None` if the entry is not an attachment.
+pub fn render_attachment_content(entry: &LogEntry, max_len: usize) -> Option<String> {
+    let LogEntry::Attachment(att) = entry else {
+        return None;
+    };
+    let payload = att.attachment.as_ref();
+    let kind = payload
+        .and_then(|p| p.get("type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let marker = format!("[attachment: {kind}]");
+
+    let detail = match kind {
+        "file" => payload.and_then(|p| {
+            let path = p
+                .get("displayPath")
+                .or_else(|| p.get("filename"))
+                .and_then(|v| v.as_str());
+            let content = file_attachment_text(p.get("content"));
+            render_path_and_body(path, content.as_deref(), max_len)
+        }),
+        "edited_text_file" => payload.and_then(|p| {
+            let path = p.get("filename").and_then(|v| v.as_str());
+            let snippet = p.get("snippet").and_then(|v| v.as_str());
+            render_path_and_body(path, snippet, max_len)
+        }),
+        _ => None,
+    };
+
+    Some(match detail {
+        Some(d) => format!("{marker} {d}"),
+        None => marker,
+    })
+}
+
+/// Extract the injected file text from a `file` attachment's `content`, which
+/// may be stored as a plain string or as a `{file: {content: ...}}` object.
+fn file_attachment_text(content: Option<&serde_json::Value>) -> Option<String> {
+    let content = content?;
+    if let Some(s) = content.as_str() {
+        return Some(s.to_string());
+    }
+    content
+        .get("file")
+        .and_then(|f| f.get("content"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+/// Join an optional path with an optional body (truncated), for attachment rendering.
+fn render_path_and_body(path: Option<&str>, body: Option<&str>, max_len: usize) -> Option<String> {
+    match (path, body) {
+        (Some(path), Some(body)) => Some(format!("{path}\n{}", truncate_text(body, max_len))),
+        (Some(path), None) => Some(path.to_string()),
+        (None, Some(body)) => Some(truncate_text(body, max_len)),
+        (None, None) => None,
+    }
+}
+
+/// Collect `[image: <media_type>]` placeholders for any top-level image blocks
+/// in a user message, so a pasted image is visible rather than silently dropped.
+///
+/// Returns an empty vector if the entry is not a user message or has no image
+/// blocks. Image bytes are never rendered, consistent with the codebase's
+/// image-dropping convention.
+pub fn extract_image_placeholders(entry: &LogEntry) -> Vec<String> {
+    let LogEntry::User(user) = entry else {
+        return Vec::new();
+    };
+    let UserContent::Blocks(blocks) = &user.message else {
+        return Vec::new();
+    };
+    blocks
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Image(img) => Some(format!(
+                "[image: {}]",
+                img.source.media_type().unwrap_or("image")
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Extract text summary from an Assistant message.
 ///
 /// Returns the assistant's combined text content, truncated to `max_len`.
@@ -644,6 +736,58 @@ mod tests {
         let line2 = r#"{"uuid":"2","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:01Z","sessionId":"s","version":"2.0","isSidechain":false,"message":{"role":"user","content":"fix the parser"}}"#;
         let entry2: LogEntry = serde_json::from_str(line2).unwrap();
         assert!(is_human_prompt(&entry2));
+    }
+
+    #[test]
+    fn test_render_attachment_content_file_surfaces_payload() {
+        let line = r#"{"uuid":"1","type":"attachment","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","attachment":{"type":"file","displayPath":"../CLAUDE.md","content":"hello world"}}"#;
+        let entry: LogEntry = serde_json::from_str(line).unwrap();
+        let rendered = render_attachment_content(&entry, 100).unwrap();
+        assert!(rendered.starts_with("[attachment: file]"));
+        assert!(rendered.contains("../CLAUDE.md"));
+        assert!(rendered.contains("hello world"));
+    }
+
+    #[test]
+    fn test_render_attachment_content_file_nested_object_payload() {
+        // `file` content is sometimes a {file: {content: ...}} object, not a string.
+        let line = r#"{"uuid":"1","type":"attachment","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","attachment":{"type":"file","displayPath":"../foo.md","content":{"type":"text","file":{"filePath":"/tmp/foo.md","content":"nested body"}}}}"#;
+        let entry: LogEntry = serde_json::from_str(line).unwrap();
+        let rendered = render_attachment_content(&entry, 100).unwrap();
+        assert!(rendered.starts_with("[attachment: file]"));
+        assert!(rendered.contains("../foo.md"));
+        assert!(rendered.contains("nested body"));
+    }
+
+    #[test]
+    fn test_render_attachment_content_hook_is_marker_only() {
+        // Operational noise (hook output) gets a marker but no payload dump.
+        let line = r#"{"uuid":"1","type":"attachment","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","attachment":{"type":"hook_success","stdout":"lots of noise","content":"lots of noise"}}"#;
+        let entry: LogEntry = serde_json::from_str(line).unwrap();
+        let rendered = render_attachment_content(&entry, 100).unwrap();
+        assert_eq!(rendered, "[attachment: hook_success]");
+    }
+
+    #[test]
+    fn test_render_attachment_content_non_attachment_is_none() {
+        let line = r#"{"uuid":"2","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:01Z","sessionId":"s","version":"2.0","isSidechain":false,"message":{"role":"user","content":"hi"}}"#;
+        let entry: LogEntry = serde_json::from_str(line).unwrap();
+        assert!(render_attachment_content(&entry, 100).is_none());
+    }
+
+    #[test]
+    fn test_extract_image_placeholders() {
+        let line = r#"{"uuid":"1","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","version":"2.0","isSidechain":false,"message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"abc"}},{"type":"text","text":"look"}]}}"#;
+        let entry: LogEntry = serde_json::from_str(line).unwrap();
+        assert_eq!(
+            extract_image_placeholders(&entry),
+            vec!["[image: image/png]"]
+        );
+
+        // A text-only message has no image placeholders.
+        let line2 = r#"{"uuid":"2","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:01Z","sessionId":"s","version":"2.0","isSidechain":false,"message":{"role":"user","content":"plain text"}}"#;
+        let entry2: LogEntry = serde_json::from_str(line2).unwrap();
+        assert!(extract_image_placeholders(&entry2).is_empty());
     }
 
     #[test]

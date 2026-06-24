@@ -49,10 +49,11 @@ use crate::reconstruction::Conversation;
 
 use helpers::{
     extract_assistant_summary, extract_error_preview, extract_files_from_tools,
-    extract_result_preview, extract_thinking_text, extract_tool_input_summary, extract_tool_names,
-    extract_user_prompt_text, find_compaction_events, get_claude_dir, get_model, has_thinking,
-    is_human_prompt, parse_timestamp_param, period_cutoff, resolve_project, resolve_session,
-    resolve_session_with_chain, search_entry_text, truncate_text,
+    extract_image_placeholders, extract_result_preview, extract_thinking_text,
+    extract_tool_input_summary, extract_tool_names, extract_user_prompt_text,
+    find_compaction_events, get_claude_dir, get_model, has_thinking, is_human_prompt,
+    parse_timestamp_param, period_cutoff, render_attachment_content, resolve_project,
+    resolve_session, resolve_session_with_chain, search_entry_text, truncate_text,
 };
 use types::{
     ActiveDecisionEntry, ChangeEventEntry, CompactionEvent, ConflictPairEntry, ContextTurnEntry,
@@ -621,12 +622,24 @@ impl SnatchServer {
                     }
                     "standard" => {
                         let content = match entry {
-                            LogEntry::User(_) => extract_user_prompt_text(entry)
-                                .map(|t| truncate_text(&t, truncate_len)),
+                            LogEntry::User(_) => {
+                                let text = extract_user_prompt_text(entry)
+                                    .map(|t| truncate_text(&t, truncate_len));
+                                let images = extract_image_placeholders(entry);
+                                match (text, images.is_empty()) {
+                                    (Some(t), true) => Some(t),
+                                    (Some(t), false) => Some(format!("{t}\n{}", images.join(" "))),
+                                    (None, false) => Some(images.join(" ")),
+                                    (None, true) => None,
+                                }
+                            }
                             LogEntry::Assistant(_) => {
                                 extract_assistant_summary(entry, truncate_len)
                             }
                             LogEntry::System(sys) => sys.content.clone(),
+                            LogEntry::Attachment(_) => {
+                                render_attachment_content(entry, truncate_len)
+                            }
                             _ => None,
                         };
                         let tool_names = extract_tool_names(entry);
@@ -659,12 +672,24 @@ impl SnatchServer {
                     // "full" or any unrecognised detail level
                     _ => {
                         let content = match entry {
-                            LogEntry::User(_) => extract_user_prompt_text(entry)
-                                .map(|t| truncate_text(&t, truncate_len)),
+                            LogEntry::User(_) => {
+                                let text = extract_user_prompt_text(entry)
+                                    .map(|t| truncate_text(&t, truncate_len));
+                                let images = extract_image_placeholders(entry);
+                                match (text, images.is_empty()) {
+                                    (Some(t), true) => Some(t),
+                                    (Some(t), false) => Some(format!("{t}\n{}", images.join(" "))),
+                                    (None, false) => Some(images.join(" ")),
+                                    (None, true) => None,
+                                }
+                            }
                             LogEntry::Assistant(_) => {
                                 extract_assistant_summary(entry, truncate_len)
                             }
                             LogEntry::System(sys) => sys.content.clone(),
+                            LogEntry::Attachment(_) => {
+                                render_attachment_content(entry, truncate_len)
+                            }
                             _ => None,
                         };
                         let tool_names = extract_tool_names(entry);
