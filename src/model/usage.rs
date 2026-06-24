@@ -249,6 +249,19 @@ pub struct ModelPricing {
     pub cache_read_per_million: f64,
 }
 
+/// Strip an optional trailing `-YYYYMMDD` snapshot suffix from a model ID so a
+/// dated snapshot (e.g. `claude-opus-4-5-20251101`) maps to the same rate as
+/// its base ID (`claude-opus-4-5`).
+fn normalize_model_id(model: &str) -> &str {
+    if let Some(idx) = model.rfind('-') {
+        let suffix = &model[idx + 1..];
+        if suffix.len() == 8 && suffix.bytes().all(|b| b.is_ascii_digit()) {
+            return &model[..idx];
+        }
+    }
+    model
+}
+
 impl ModelPricing {
     /// Create pricing for Claude Opus 4.5.
     #[must_use]
@@ -286,6 +299,34 @@ impl ModelPricing {
         }
     }
 
+    /// Create pricing for the current Claude Opus tier (Opus 4.6–4.8).
+    ///
+    /// Rates as published 2026-06: $5/M input, $25/M output.
+    #[must_use]
+    pub fn claude_opus_4_8() -> Self {
+        Self {
+            model: "claude-opus-4-8".to_string(),
+            input_per_million: 5.0,        // $5/M input
+            output_per_million: 25.0,      // $25/M output
+            cache_write_per_million: 6.25, // 1.25x input
+            cache_read_per_million: 0.5,   // 0.1x input
+        }
+    }
+
+    /// Create pricing for Claude Haiku 4.5.
+    ///
+    /// Rates as published 2026-06: $1/M input, $5/M output.
+    #[must_use]
+    pub fn claude_haiku_4_5() -> Self {
+        Self {
+            model: "claude-haiku-4-5".to_string(),
+            input_per_million: 1.0,        // $1/M input
+            output_per_million: 5.0,       // $5/M output
+            cache_write_per_million: 1.25, // 1.25x input
+            cache_read_per_million: 0.1,   // 0.1x input
+        }
+    }
+
     /// Calculate cost for given usage.
     #[must_use]
     pub fn calculate_cost(&self, usage: &Usage) -> CostEstimate {
@@ -309,17 +350,24 @@ impl ModelPricing {
         }
     }
 
-    /// Get pricing for a model by name.
+    /// Get pricing for a model by its exact identifier.
+    ///
+    /// Matches the exact model ID (snapshot date suffixes are normalized away)
+    /// against a rate table, so each version is priced at its own tier rather
+    /// than a single per-family guess. Returns `None` for any unrecognized
+    /// model — callers must treat that as "rate unavailable", never as $0.
     #[must_use]
     pub fn for_model(model: &str) -> Option<Self> {
-        if model.contains("opus") {
-            Some(Self::claude_opus_4_5())
-        } else if model.contains("sonnet") {
-            Some(Self::claude_sonnet_4())
-        } else if model.contains("haiku") {
-            Some(Self::claude_haiku_3_5())
-        } else {
-            None
+        match normalize_model_id(model) {
+            "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6" => {
+                Some(Self::claude_opus_4_8())
+            }
+            "claude-opus-4-5" => Some(Self::claude_opus_4_5()),
+            "claude-sonnet-4-6" | "claude-sonnet-4-5" | "claude-sonnet-4" => {
+                Some(Self::claude_sonnet_4())
+            }
+            "claude-haiku-4-5" => Some(Self::claude_haiku_4_5()),
+            _ => None,
         }
     }
 }
@@ -362,15 +410,19 @@ impl AggregatedUsage {
     /// Calculate estimated cost based on model usage.
     pub fn calculate_cost(&mut self) {
         let mut total = 0.0;
+        let mut priced = false;
 
         for (model, usage) in &self.by_model {
             if let Some(pricing) = ModelPricing::for_model(model) {
                 let cost = pricing.calculate_cost(usage);
                 total += cost.total_cost;
+                priced = true;
             }
         }
 
-        self.estimated_cost = Some(total);
+        // If no model in the breakdown has a known rate, the cost is
+        // unavailable rather than a misleading $0.
+        self.estimated_cost = if priced { Some(total) } else { None };
     }
 
     /// Get the most used tool.
@@ -627,6 +679,54 @@ mod tests {
         assert!(pricing.model.contains("opus"));
         assert!(pricing.input_per_million > 0.0);
         assert!(pricing.output_per_million > 0.0);
+    }
+
+    #[test]
+    fn test_for_model_prices_by_exact_id() {
+        // Current Opus tier prices at its own rate, not the older 4.5 tier.
+        let opus48 = ModelPricing::for_model("claude-opus-4-8").unwrap();
+        assert_eq!(opus48.input_per_million, 5.0);
+        assert_eq!(opus48.output_per_million, 25.0);
+
+        // Opus 4.5 keeps its own (higher) tier; dated snapshots normalize to it.
+        let opus45 = ModelPricing::for_model("claude-opus-4-5-20251101").unwrap();
+        assert_eq!(opus45.input_per_million, 15.0);
+        assert_eq!(opus45.output_per_million, 75.0);
+
+        // Sonnet and Haiku resolve to their own tiers (dated form included).
+        assert_eq!(
+            ModelPricing::for_model("claude-sonnet-4-6")
+                .unwrap()
+                .input_per_million,
+            3.0
+        );
+        assert_eq!(
+            ModelPricing::for_model("claude-haiku-4-5-20251001")
+                .unwrap()
+                .input_per_million,
+            1.0
+        );
+
+        // Unknown / fabricated IDs are unavailable, never a wrong-tier guess.
+        assert!(ModelPricing::for_model("claude-made-up-9").is_none());
+        assert!(ModelPricing::for_model("<synthetic>").is_none());
+    }
+
+    #[test]
+    fn test_unpriced_usage_reports_unavailable_not_zero() {
+        let mut agg = AggregatedUsage::default();
+        agg.add_usage(
+            "<synthetic>",
+            &Usage {
+                input_tokens: 1000,
+                output_tokens: 500,
+                ..Default::default()
+            },
+        );
+        agg.calculate_cost();
+        // A session whose only model has no known rate yields no estimate,
+        // rather than a misleading $0.00.
+        assert_eq!(agg.estimated_cost, None);
     }
 
     #[test]
