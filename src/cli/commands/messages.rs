@@ -3,11 +3,14 @@
 //! Reads conversation messages from a session at different detail levels,
 //! mirroring the MCP `get_session_messages` tool for CLI use.
 
+use std::collections::HashMap;
+
 use crate::analysis::extraction::{
     extract_assistant_summary, extract_thinking_text, extract_tool_input_summary,
     extract_tool_names, extract_user_prompt_text, get_model, has_thinking, is_human_prompt,
     truncate_text,
 };
+use crate::analysis::subagents::{match_subagents, SubagentMatch};
 use crate::cli::{Cli, MessagesArgs, OutputFormat};
 use crate::error::{Result, SnatchError};
 use crate::model::message::LogEntry;
@@ -57,6 +60,21 @@ struct ToolDetailOutput {
     command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pattern: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subagent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt: Option<String>,
+    /// For Agent/Task calls: the spawned subagent's session id, when matched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subagent_session_id: Option<String>,
+    /// Preview of the subagent's final assistant message (its result), truncated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subagent_result_preview: Option<String>,
+    /// Full subagent transcript, present only with --subagent-transcripts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subagent_transcript: Option<Vec<MessageOutput>>,
 }
 
 /// Run the messages command.
@@ -90,6 +108,18 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
         "overview" => 200,
         "conversation" | "standard" => 500,
         _ => 1000,
+    };
+
+    // Match Agent/Task calls to spawned subagents (only "full" detail renders tool
+    // details). Uses the unfiltered thread for spawn-order joining.
+    let subagent_matches: HashMap<String, SubagentMatch> = if detail == "full" {
+        match_subagents(
+            &session,
+            &conversation.main_thread_entries(),
+            cli.max_file_size,
+        )
+    } else {
+        HashMap::new()
     };
 
     let mut main_entries: Vec<&LogEntry> = conversation.main_thread_entries();
@@ -175,6 +205,9 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                         truncate_len,
                         include_thinking,
                         thinking_max_len,
+                        &subagent_matches,
+                        args.subagent_transcripts,
+                        cli.max_file_size,
                     )
                 })
                 .collect();
@@ -320,6 +353,33 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                             let detail_str: Vec<String> =
                                 summary.iter().map(|(k, v)| format!("{k}={v}")).collect();
                             println!("    > {} {}", t.name, detail_str.join(" "));
+
+                            // Attach the spawned subagent's work to its Agent/Task call.
+                            if let Some(m) = subagent_matches.get(&t.id) {
+                                let msgs = m
+                                    .message_count
+                                    .map(|n| format!(" ({n} msgs)"))
+                                    .unwrap_or_default();
+                                println!("      -> subagent {}{}", m.session_id, msgs);
+                                if let Some(preview) = &m.result_preview {
+                                    println!("         result: {}", truncate_text(preview, 200));
+                                }
+                                if args.subagent_transcripts {
+                                    for sub in render_subagent_transcript_cli(
+                                        &m.path,
+                                        include_thinking,
+                                        cli.max_file_size,
+                                    ) {
+                                        let c = sub.content.unwrap_or_default();
+                                        println!(
+                                            "         [{}] {}: {}",
+                                            sub.index,
+                                            sub.msg_type,
+                                            truncate_text(&c, 200)
+                                        );
+                                    }
+                                }
+                            }
                         }
                         if let Some(thinking) = thinking {
                             println!("    thinking: {}", truncate_text(&thinking, 300));
@@ -334,7 +394,65 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
     Ok(())
 }
 
+/// Render a subagent's main thread as message outputs (standard detail: user and
+/// assistant text plus tool names; tool details are not expanded recursively).
+fn render_subagent_transcript_cli(
+    path: &std::path::Path,
+    include_thinking: bool,
+    max_file_size: Option<u64>,
+) -> Vec<MessageOutput> {
+    let entries = crate::discovery::Session::from_path(path, "")
+        .ok()
+        .and_then(|s| s.parse_with_options(max_file_size).ok())
+        .unwrap_or_default();
+    let Ok(conversation) = Conversation::from_entries(entries) else {
+        return vec![];
+    };
+    conversation
+        .main_thread_entries()
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let content = match entry {
+                LogEntry::User(_) => {
+                    extract_user_prompt_text(entry).map(|t| truncate_text(&t, 500))
+                }
+                LogEntry::Assistant(_) => extract_assistant_summary(entry, 500),
+                LogEntry::System(sys) => sys.content.clone(),
+                _ => None,
+            };
+            let tool_names = extract_tool_names(entry);
+            let thinking = if include_thinking {
+                extract_thinking_text(entry, 1000)
+            } else {
+                None
+            };
+            MessageOutput {
+                index: i,
+                msg_type: entry.message_type().to_string(),
+                timestamp: entry.timestamp().map(|t| t.to_rfc3339()),
+                content,
+                git_branch: entry.git_branch().map(|s| s.to_string()),
+                model: get_model(entry),
+                tool_calls: if tool_names.is_empty() {
+                    None
+                } else {
+                    Some(tool_names)
+                },
+                tool_details: None,
+                has_thinking: if has_thinking(entry) {
+                    Some(true)
+                } else {
+                    None
+                },
+                thinking_preview: thinking,
+            }
+        })
+        .collect()
+}
+
 /// Build a JSON message output for a single entry.
+#[allow(clippy::too_many_arguments)]
 fn build_message_output(
     index: usize,
     entry: &LogEntry,
@@ -342,6 +460,9 @@ fn build_message_output(
     truncate_len: usize,
     include_thinking: bool,
     thinking_max_len: usize,
+    subagent_matches: &HashMap<String, SubagentMatch>,
+    include_subagent_transcripts: bool,
+    max_file_size: Option<u64>,
 ) -> Option<MessageOutput> {
     let msg_type = entry.message_type().to_string();
     let timestamp = entry.timestamp().map(|t| t.to_rfc3339());
@@ -446,11 +567,26 @@ fn build_message_output(
                     .iter()
                     .map(|t| {
                         let summary = extract_tool_input_summary(&t.name, &t.input);
+                        let matched = subagent_matches.get(&t.id);
                         ToolDetailOutput {
                             tool_name: t.name.clone(),
                             file_path: summary.get("file_path").cloned(),
                             command: summary.get("command").cloned(),
                             pattern: summary.get("pattern").cloned(),
+                            subagent_type: summary.get("subagent_type").cloned(),
+                            description: summary.get("description").cloned(),
+                            prompt: summary.get("prompt").cloned(),
+                            subagent_session_id: matched.map(|m| m.session_id.clone()),
+                            subagent_result_preview: matched.and_then(|m| m.result_preview.clone()),
+                            subagent_transcript: matched
+                                .filter(|_| include_subagent_transcripts)
+                                .map(|m| {
+                                    render_subagent_transcript_cli(
+                                        &m.path,
+                                        include_thinking,
+                                        max_file_size,
+                                    )
+                                }),
                         }
                     })
                     .collect()

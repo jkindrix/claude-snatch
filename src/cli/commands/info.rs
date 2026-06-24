@@ -52,6 +52,27 @@ fn show_session_info(
 ) -> Result<()> {
     let summary = session.summary()?;
 
+    // Enumerate subagents spawned by this session (empty for subagent sessions).
+    let mut subagents: Vec<SubagentInfoOutput> = session
+        .subagent_links()
+        .into_iter()
+        .map(|link| {
+            let message_count =
+                crate::discovery::Session::from_path(&link.path, &summary.project_path)
+                    .ok()
+                    .and_then(|s| s.quick_metadata_cached().ok())
+                    .map(|m| m.user_count + m.assistant_count);
+            SubagentInfoOutput {
+                agent_session_id: link.agent_session_id,
+                agent_type: link.agent_type,
+                description: link.description,
+                tool_use_id: link.tool_use_id,
+                message_count,
+            }
+        })
+        .collect();
+    subagents.sort_by(|a, b| a.agent_session_id.cmp(&b.agent_session_id));
+
     // Load tags/bookmarks for this session
     let tag_store = TagStore::load().unwrap_or_default();
     let session_meta = tag_store.get(&summary.session_id);
@@ -177,6 +198,7 @@ fn show_session_info(
                     files_created,
                     lines_added,
                     lines_removed,
+                    subagents,
                 })?
             );
         }
@@ -273,6 +295,22 @@ fn show_session_info(
                 );
             }
             println!();
+
+            // Show subagents spawned by this session (their transcripts live in
+            // separate agent-*.jsonl files, not counted in Messages above).
+            if !subagents.is_empty() {
+                println!("Subagents ({}):", subagents.len());
+                for sa in &subagents {
+                    let kind = sa.agent_type.as_deref().unwrap_or("agent");
+                    let desc = sa.description.as_deref().unwrap_or("");
+                    let msgs = sa
+                        .message_count
+                        .map(|n| format!(" ({n} msgs)"))
+                        .unwrap_or_default();
+                    println!("  {} [{}]{} {}", sa.agent_session_id, kind, msgs, desc);
+                }
+                println!();
+            }
 
             if let Some(start) = &summary.start_time {
                 println!("Started:      {}", start.format("%Y-%m-%d %H:%M:%S UTC"));
@@ -855,6 +893,23 @@ struct SessionInfoOutput {
     /// Total lines removed.
     #[serde(skip_serializing_if = "Option::is_none")]
     lines_removed: Option<usize>,
+    /// Subagents spawned by this session (transcripts in separate files).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    subagents: Vec<SubagentInfoOutput>,
+}
+
+/// One spawned subagent, for session info JSON output.
+#[derive(Debug, serde::Serialize)]
+struct SubagentInfoOutput {
+    agent_session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_use_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_count: Option<usize>,
 }
 
 /// Project info for JSON output.
@@ -931,6 +986,7 @@ mod tests {
             files_created: None,
             lines_added: Some(100),
             lines_removed: Some(20),
+            subagents: vec![],
         };
 
         let json = serde_json::to_string(&output).unwrap();
@@ -1029,6 +1085,7 @@ mod tests {
             files_created: None,
             lines_added: None,
             lines_removed: None,
+            subagents: vec![],
         };
 
         let json = serde_json::to_string(&output).unwrap();

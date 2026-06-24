@@ -2565,6 +2565,11 @@ pub struct MessagesArgs {
     /// Only include messages before this timestamp (ISO 8601, date, or relative like "2h").
     #[arg(long)]
     pub before: Option<String>,
+
+    /// Inline each spawned subagent's full transcript under its Agent/Task call
+    /// (detail=full only). Default shows a pointer plus a result preview.
+    #[arg(long)]
+    pub subagent_transcripts: bool,
 }
 
 /// Arguments for the pick command.

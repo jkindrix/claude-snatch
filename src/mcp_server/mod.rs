@@ -3159,12 +3159,9 @@ struct RenderedSubagent {
 }
 
 /// Match each `Agent`/`Task` call in `ordered_entries` to the subagent it spawned
-/// and render the result, keyed by the spawning tool_use id.
-///
-/// Two passes, conservative by design: first the exact `tool_use_id` link from the
-/// sidecar (always correct, but only newer Claude Code records it), then a
-/// description fallback that attaches only when exactly one unused subagent carries
-/// that description. Ambiguous descriptions are left unattached rather than guessed.
+/// (via the shared conservative join) and render it for the messages response,
+/// keyed by the spawning tool_use id. The full transcript is built only when
+/// `include_transcripts` is set.
 fn resolve_subagent_renders(
     session: &Session,
     ordered_entries: &[&LogEntry],
@@ -3172,131 +3169,33 @@ fn resolve_subagent_renders(
     include_thinking: bool,
     max_file_size: Option<u64>,
 ) -> HashMap<String, RenderedSubagent> {
-    let mut out = HashMap::new();
-    let links = session.subagent_links();
-    if links.is_empty() {
-        return out;
-    }
-
-    // Agent/Task calls in spawn order: (tool_use id, description).
-    let mut agent_calls: Vec<(String, Option<String>)> = Vec::new();
-    for entry in ordered_entries {
-        if let LogEntry::Assistant(a) = entry {
-            for tu in a.message.tool_uses() {
-                if tu.name == "Agent" || tu.name == "Task" {
-                    let desc = tu
-                        .input
-                        .get("description")
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
-                    agent_calls.push((tu.id.clone(), desc));
-                }
-            }
-        }
-    }
-    if agent_calls.is_empty() {
-        return out;
-    }
-
-    let by_id: HashMap<&str, &crate::discovery::SubagentLink> = links
-        .iter()
-        .filter_map(|l| l.tool_use_id.as_deref().map(|id| (id, l)))
-        .collect();
-    let mut by_desc: HashMap<&str, Vec<&crate::discovery::SubagentLink>> = HashMap::new();
-    for l in &links {
-        if let Some(d) = l.description.as_deref() {
-            by_desc.entry(d).or_default().push(l);
-        }
-    }
-
-    let mut used: HashSet<String> = HashSet::new();
-    let project = session.project_path();
-
-    // Pass 1: exact tool_use_id matches.
-    for (id, _) in &agent_calls {
-        if let Some(link) = by_id.get(id.as_str()) {
-            if used.insert(link.agent_session_id.clone()) {
-                out.insert(
-                    id.clone(),
-                    render_one_subagent(
-                        link,
-                        project,
-                        include_transcripts,
-                        include_thinking,
-                        max_file_size,
-                    ),
-                );
-            }
-        }
-    }
-    // Pass 2: unique-description fallback for still-unmatched calls.
-    for (id, desc) in &agent_calls {
-        if out.contains_key(id) {
-            continue;
-        }
-        let Some(d) = desc.as_deref() else { continue };
-        let Some(cands) = by_desc.get(d) else {
-            continue;
-        };
-        let avail: Vec<_> = cands
-            .iter()
-            .filter(|l| !used.contains(&l.agent_session_id))
-            .collect();
-        if avail.len() == 1 {
-            let link = avail[0];
-            if used.insert(link.agent_session_id.clone()) {
-                out.insert(
-                    id.clone(),
-                    render_one_subagent(
-                        link,
-                        project,
-                        include_transcripts,
-                        include_thinking,
-                        max_file_size,
-                    ),
-                );
-            }
-        }
-    }
-    out
-}
-
-/// Parse one subagent transcript and render its result preview (final assistant
-/// message) and, when requested, its full transcript.
-fn render_one_subagent(
-    link: &crate::discovery::SubagentLink,
-    project_path: &str,
-    include_transcripts: bool,
-    include_thinking: bool,
-    max_file_size: Option<u64>,
-) -> RenderedSubagent {
-    let entries = Session::from_path(&link.path, project_path)
-        .ok()
-        .and_then(|s| s.parse_with_options(max_file_size).ok())
-        .unwrap_or_default();
-    let conversation = Conversation::from_entries(entries).ok();
-    let main: Vec<&LogEntry> = conversation
-        .as_ref()
-        .map(Conversation::main_thread_entries)
-        .unwrap_or_default();
-
-    let result_preview = main
-        .iter()
-        .rev()
-        .find(|e| matches!(e, LogEntry::Assistant(_)))
-        .and_then(|e| extract_assistant_summary(e, 500));
-
-    let transcript = if include_transcripts {
-        Some(render_subagent_transcript(&main, include_thinking))
-    } else {
-        None
-    };
-
-    RenderedSubagent {
-        session_id: link.agent_session_id.clone(),
-        result_preview,
-        transcript,
-    }
+    crate::analysis::subagents::match_subagents(session, ordered_entries, max_file_size)
+        .into_iter()
+        .map(|(id, m)| {
+            let transcript = if include_transcripts {
+                let entries = Session::from_path(&m.path, session.project_path())
+                    .ok()
+                    .and_then(|s| s.parse_with_options(max_file_size).ok())
+                    .unwrap_or_default();
+                let conversation = Conversation::from_entries(entries).ok();
+                let main: Vec<&LogEntry> = conversation
+                    .as_ref()
+                    .map(Conversation::main_thread_entries)
+                    .unwrap_or_default();
+                Some(render_subagent_transcript(&main, include_thinking))
+            } else {
+                None
+            };
+            (
+                id,
+                RenderedSubagent {
+                    session_id: m.session_id,
+                    result_preview: m.result_preview,
+                    transcript,
+                },
+            )
+        })
+        .collect()
 }
 
 /// Render a subagent's main thread as message entries (standard detail: user and
