@@ -89,6 +89,30 @@ pub struct SessionInfoResponse {
     pub tool_invocations: usize,
     pub cache_hit_rate: f64,
     pub estimated_cost: Option<f64>,
+    /// Subagents spawned by this session, attached to their spawning Agent/Task
+    /// call via `tool_use_id` when available. Empty for subagent sessions or when
+    /// none were spawned. The transcripts live in separate `agent-*.jsonl` files
+    /// and are not counted in this session's own `messages`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub subagents: Vec<SubagentSummary>,
+}
+
+/// Summary of one subagent spawned by a session, for `get_session_info`.
+#[derive(Debug, Serialize)]
+pub struct SubagentSummary {
+    /// Subagent session id (`agent-<hash>`); query it directly for the transcript.
+    pub agent_session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Spawning Agent/Task tool_use id, when the sidecar records it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
+    /// User + assistant message count in the subagent transcript; absent if the
+    /// transcript could not be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<usize>,
 }
 
 /// Request to get stats.

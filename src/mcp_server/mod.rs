@@ -43,7 +43,7 @@ use mcpkit::prelude::*;
 use mcpkit::transport::stdio::StdioTransport;
 
 use crate::analytics::{AnalyticsSummary, SessionAnalytics};
-use crate::discovery::{chain::detect_chains, ClaudeDirectory};
+use crate::discovery::{chain::detect_chains, ClaudeDirectory, Session};
 use crate::model::message::LogEntry;
 use crate::reconstruction::Conversation;
 
@@ -72,7 +72,8 @@ use types::{
     RecurringCorrectionEntry, RecurringErrorEntry, RetrospectiveSummaryEntry, ReworkFileEntry,
     SearchMatch, SearchSessionsRequest, SearchSessionsResponse, SessionDigestResponse,
     SessionHealthEntry, SessionInfoResponse, SessionLessonsResponse, SessionMessagesResponse,
-    SessionSummary, SessionTimelineResponse, StatsResponse, SuggestPrioritiesRequest,
+    SessionSummary, SessionTimelineResponse, StatsResponse, SubagentSummary,
+    SuggestPrioritiesRequest,
     SuggestPrioritiesResponse, TagMessageRequest, TagMessageResponse, TaggedMessageEntry,
     ThreadExchangeEntry, ThreadTopicRequest, ThreadTopicResponse, TimelineTurn, ToolCallEntry,
     ToolCallsResponse, ToolCallsSummary, ToolDetail, UserCorrection,
@@ -240,6 +241,27 @@ impl SnatchServer {
             (None, None)
         };
 
+        // Enumerate subagents spawned by this session (empty for subagent
+        // sessions). message_count parses each transcript; cached across calls.
+        let mut subagents: Vec<SubagentSummary> = session
+            .subagent_links()
+            .into_iter()
+            .map(|link| {
+                let message_count = Session::from_path(&link.path, session.project_path())
+                    .ok()
+                    .and_then(|s| s.quick_metadata_cached().ok())
+                    .map(|m| m.user_count + m.assistant_count);
+                SubagentSummary {
+                    agent_session_id: link.agent_session_id,
+                    agent_type: link.agent_type,
+                    description: link.description,
+                    tool_use_id: link.tool_use_id,
+                    message_count,
+                }
+            })
+            .collect();
+        subagents.sort_by(|a, b| a.agent_session_id.cmp(&b.agent_session_id));
+
         let info = SessionInfoResponse {
             session_id: session.session_id().to_string(),
             slug,
@@ -265,6 +287,7 @@ impl SnatchServer {
             tool_invocations: summary.tool_invocations,
             cache_hit_rate: summary.cache_hit_rate,
             estimated_cost: summary.estimated_cost,
+            subagents,
         };
 
         match ToolOutput::json(&info) {
