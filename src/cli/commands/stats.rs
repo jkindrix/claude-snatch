@@ -278,6 +278,9 @@ pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
         let today = Utc::now().date_naive();
         let mut history = CostHistory::load()?;
 
+        // Cost history is a billing time series, so it deliberately records the
+        // all-in `total_tokens()` (incl. cache reads) paired with cost — unlike the
+        // live stats views, which report real-work `work_tokens()`.
         let point = CostDataPoint::with_values(
             today,
             global_analytics.total_usage.usage.total_tokens(),
@@ -491,6 +494,10 @@ fn output_session_stats(cli: &Cli, args: &StatsArgs, analytics: &SessionAnalytic
                 format_number(summary.output_tokens)
             );
             println!(
+                "  Cache (created): {} tokens",
+                format_number(summary.cache_creation_tokens)
+            );
+            println!(
                 "  Total:  {:>14} tokens",
                 format_number(summary.total_tokens)
             );
@@ -585,7 +592,7 @@ fn output_project_stats(
             println!("sessions\t{}", analytics.session_count);
             println!(
                 "total_tokens\t{}",
-                analytics.total_usage.usage.total_tokens()
+                analytics.total_usage.usage.work_tokens()
             );
             println!("tool_invocations\t{}", analytics.message_counts.tool_uses);
         }
@@ -593,7 +600,7 @@ fn output_project_stats(
             println!(
                 "sessions:{} tokens:{} tools:{}",
                 analytics.session_count,
-                analytics.total_usage.usage.total_tokens(),
+                analytics.total_usage.usage.work_tokens(),
                 analytics.message_counts.tool_uses
             );
         }
@@ -619,7 +626,7 @@ fn output_project_stats(
             println!("Token Usage:");
             println!(
                 "  Total: {} tokens",
-                format_number(analytics.total_usage.usage.total_tokens())
+                format_number(analytics.total_usage.usage.work_tokens())
             );
             println!();
 
@@ -712,7 +719,7 @@ fn output_multi_project_stats(
             println!("sessions\t{}", analytics.session_count);
             println!(
                 "total_tokens\t{}",
-                analytics.total_usage.usage.total_tokens()
+                analytics.total_usage.usage.work_tokens()
             );
             println!("tool_invocations\t{}", analytics.message_counts.tool_uses);
             if let Some(cost) = analytics.total_usage.estimated_cost {
@@ -729,7 +736,7 @@ fn output_multi_project_stats(
                 "projects:{} sessions:{} tokens:{} cost:{}",
                 project_names.len(),
                 analytics.session_count,
-                analytics.total_usage.usage.total_tokens(),
+                analytics.total_usage.usage.work_tokens(),
                 cost
             );
         }
@@ -769,7 +776,7 @@ fn output_multi_project_stats(
             println!("Token Usage:");
             println!(
                 "  Total: {} tokens",
-                format_number(analytics.total_usage.usage.total_tokens())
+                format_number(analytics.total_usage.usage.work_tokens())
             );
             println!();
 
@@ -851,7 +858,7 @@ fn output_global_stats(cli: &Cli, args: &StatsArgs, analytics: &ProjectAnalytics
             println!("sessions\t{}", analytics.session_count);
             println!(
                 "total_tokens\t{}",
-                analytics.total_usage.usage.total_tokens()
+                analytics.total_usage.usage.work_tokens()
             );
             if let Some(cost) = analytics.total_usage.estimated_cost {
                 println!("estimated_cost\t{cost:.4}");
@@ -866,7 +873,7 @@ fn output_global_stats(cli: &Cli, args: &StatsArgs, analytics: &ProjectAnalytics
             println!(
                 "sessions:{} tokens:{} cost:{}",
                 analytics.session_count,
-                analytics.total_usage.usage.total_tokens(),
+                analytics.total_usage.usage.work_tokens(),
                 cost
             );
         }
@@ -891,12 +898,13 @@ fn output_global_stats(cli: &Cli, args: &StatsArgs, analytics: &ProjectAnalytics
             // Token usage
             let usage = &analytics.total_usage.usage;
             println!("Token Usage:");
-            println!(
-                "  Input:  {} tokens",
-                format_number(usage.total_input_tokens())
-            );
+            println!("  Input:  {} tokens", format_number(usage.input_tokens));
             println!("  Output: {} tokens", format_number(usage.output_tokens));
-            println!("  Total:  {} tokens", format_number(usage.total_tokens()));
+            println!(
+                "  Cache (created): {} tokens",
+                format_number(usage.cache_creation_input_tokens.unwrap_or(0))
+            );
+            println!("  Total:  {} tokens", format_number(usage.work_tokens()));
             println!();
 
             // Messages

@@ -580,7 +580,8 @@ pub struct AnalyticsSummary {
     pub user_messages: usize,
     /// Assistant messages.
     pub assistant_messages: usize,
-    /// Real-work tokens (fresh input + output, excluding cache traffic).
+    /// Real-work tokens: fresh input + cache-creation + output (excludes only
+    /// re-served cache reads). See `Usage::work_tokens`.
     pub total_tokens: u64,
     /// Fresh (non-cached) input tokens.
     pub input_tokens: u64,
@@ -2037,6 +2038,30 @@ mod tests {
         assert!(!prediction.rate_string().is_empty());
         assert!(!prediction.time_to_limit_string().is_empty());
         assert!(!prediction.usage_percentage_string().is_empty());
+    }
+
+    #[test]
+    fn test_summary_report_token_mapping() {
+        let mut analytics = SessionAnalytics::default();
+        analytics.usage.usage.input_tokens = 14_852;
+        analytics.usage.usage.output_tokens = 115_560;
+        analytics.usage.usage.cache_creation_input_tokens = Some(2_331_483);
+        analytics.usage.usage.cache_read_input_tokens = Some(35_214_896);
+
+        let summary = analytics.summary_report();
+
+        // input_tokens is fresh only, not the cache-inclusive total.
+        assert_eq!(summary.input_tokens, 14_852);
+        // total_tokens is real work: fresh + cache_creation + output.
+        assert_eq!(summary.total_tokens, 14_852 + 2_331_483 + 115_560);
+        // Cache is broken out explicitly.
+        assert_eq!(summary.cache_read_tokens, 35_214_896);
+        assert_eq!(summary.cache_creation_tokens, 2_331_483);
+        // total_processed_tokens preserves the all-in figure.
+        assert_eq!(
+            summary.total_processed_tokens,
+            14_852 + 2_331_483 + 35_214_896 + 115_560
+        );
     }
 
     #[test]

@@ -56,16 +56,23 @@ impl Usage {
             + self.cache_read_input_tokens.unwrap_or(0)
     }
 
-    /// Calculate total tokens (input + output).
+    /// Calculate total tokens processed, including cache reads and writes
+    /// (`total_input_tokens` + output). This is the all-in figure.
+    ///
+    /// Note: this method is the all-in total; the `total_tokens` *field* on
+    /// reporting structs (e.g. `AnalyticsSummary`) holds the real-work figure
+    /// from [`Self::work_tokens`]. Keep the two straight when wiring outputs.
     #[must_use]
     pub fn total_tokens(&self) -> u64 {
         self.total_input_tokens() + self.output_tokens
     }
 
-    /// Calculate real-work tokens: fresh input + output, excluding cache traffic.
+    /// Calculate real-work tokens: everything the model processed as new
+    /// content — fresh input + cache-creation (first-time-processed) input +
+    /// output. Excludes only `cache_read`, the re-served component.
     #[must_use]
     pub fn work_tokens(&self) -> u64 {
-        self.input_tokens + self.output_tokens
+        self.input_tokens + self.cache_creation_input_tokens.unwrap_or(0) + self.output_tokens
     }
 
     /// Calculate cache hit rate as a percentage.
@@ -404,6 +411,30 @@ mod tests {
 
         assert_eq!(usage.total_input_tokens(), 450);
         assert_eq!(usage.total_tokens(), 500);
+        // work_tokens = fresh input + cache_creation + output (excludes cache_read).
+        assert_eq!(usage.work_tokens(), 100 + 200 + 50);
+    }
+
+    #[test]
+    fn test_work_tokens_excludes_only_cache_read() {
+        let usage = Usage {
+            input_tokens: 14_852,
+            output_tokens: 115_560,
+            cache_creation_input_tokens: Some(2_331_483),
+            cache_read_input_tokens: Some(35_214_896),
+            ..Default::default()
+        };
+
+        // Real work = fresh + cache_creation + output; cache_read is re-served.
+        assert_eq!(usage.work_tokens(), 14_852 + 2_331_483 + 115_560);
+        // All-in total still available and includes cache_read.
+        assert_eq!(
+            usage.total_tokens(),
+            14_852 + 2_331_483 + 35_214_896 + 115_560
+        );
+        // Headline (work) is far below the all-in figure, but well above fresh+output.
+        assert!(usage.work_tokens() < usage.total_tokens());
+        assert!(usage.work_tokens() > usage.input_tokens + usage.output_tokens);
     }
 
     #[test]

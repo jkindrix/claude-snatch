@@ -85,6 +85,7 @@ fn show_session_info(
                 primary_model,
                 tools_summary,
                 estimated_cost,
+                total_tokens,
                 input_tokens,
                 output_tokens,
                 cache_read_tokens,
@@ -110,6 +111,7 @@ fn show_session_info(
                     a.primary_model().map(|s| s.to_string()),
                     if tools.is_empty() { None } else { Some(tools) },
                     a.usage.estimated_cost,
+                    Some(a.usage.usage.work_tokens()),
                     Some(a.usage.usage.input_tokens),
                     Some(a.usage.usage.output_tokens),
                     Some(a.usage.usage.cache_read_input_tokens.unwrap_or(0)),
@@ -127,7 +129,7 @@ fn show_session_info(
             } else {
                 (
                     None, None, None, None, None, None, None, None, None, None, None, None, None,
-                    None,
+                    None, None,
                 )
             };
 
@@ -165,6 +167,7 @@ fn show_session_info(
                     primary_model,
                     tools_summary,
                     estimated_cost,
+                    total_tokens,
                     input_tokens,
                     output_tokens,
                     cache_read_tokens,
@@ -822,6 +825,9 @@ struct SessionInfoOutput {
     /// Estimated cost in USD.
     #[serde(skip_serializing_if = "Option::is_none")]
     estimated_cost: Option<f64>,
+    /// Real-work tokens: fresh input + cache-creation + output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_tokens: Option<u64>,
     /// Fresh (non-cached) input tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     input_tokens: Option<u64>,
@@ -915,6 +921,7 @@ mod tests {
                 ("Edit".to_string(), 3),
             ])),
             estimated_cost: Some(0.42),
+            total_tokens: Some(65000),
             input_tokens: Some(50000),
             output_tokens: Some(10000),
             cache_read_tokens: Some(40000),
@@ -1012,6 +1019,7 @@ mod tests {
             primary_model: None,
             tools_summary: None,
             estimated_cost: None,
+            total_tokens: None,
             input_tokens: None,
             output_tokens: None,
             cache_read_tokens: None,
