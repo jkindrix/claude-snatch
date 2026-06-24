@@ -419,6 +419,71 @@ impl Session {
         (count, size)
     }
 
+    /// Get the subagents directory for this (main) session, if it exists.
+    ///
+    /// For a main session at `<project>/<uuid>.jsonl`, the subagents live under
+    /// `<project>/<uuid>/subagents/`. Returns `None` for subagent sessions (they
+    /// do not nest further) or when the directory is absent.
+    #[must_use]
+    pub fn subagents_dir(&self) -> Option<PathBuf> {
+        if self.is_subagent {
+            return None;
+        }
+        let parent = self.path.parent()?;
+        let stem = self.path.file_stem()?.to_str()?;
+        let dir = parent.join(stem).join("subagents");
+        if dir.is_dir() {
+            Some(dir)
+        } else {
+            None
+        }
+    }
+
+    /// Enumerate the subagents spawned by this (main) session.
+    ///
+    /// Reads `<project>/<uuid>/subagents/agent-*.jsonl` and attaches the sidecar
+    /// `agent-*.meta.json` metadata when present. The sidecar carries `agentType`
+    /// and `description`; only newer Claude Code versions also write `toolUseId`,
+    /// which is the exact id of the spawning `Agent`/`Task` tool_use in the parent.
+    /// Each subagent is still enumerated when its sidecar is missing or partial.
+    ///
+    /// Returns an empty vector for subagent sessions or when there are none.
+    #[must_use]
+    pub fn subagent_links(&self) -> Vec<SubagentLink> {
+        let Some(dir) = self.subagents_dir() else {
+            return Vec::new();
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+
+        let mut links = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // Only the transcript files; skip the .meta.json sidecars themselves.
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !stem.starts_with("agent-") {
+                continue;
+            }
+
+            let meta = read_subagent_meta(&dir.join(format!("{stem}.meta.json")));
+
+            links.push(SubagentLink {
+                agent_session_id: stem.to_string(),
+                path: path.clone(),
+                agent_type: meta.agent_type,
+                description: meta.description,
+                tool_use_id: meta.tool_use_id,
+            });
+        }
+        links
+    }
+
     /// Get the authoritative project path.
     ///
     /// This method extracts the `cwd` from the JSONL file if available,
@@ -430,6 +495,51 @@ impl Session {
             .extracted_cwd
             .unwrap_or_else(|| self.project_path.clone()))
     }
+}
+
+/// A subagent spawned by a main session, linked from its sidecar metadata.
+///
+/// Built by [`Session::subagent_links`]. `agent_type` and `description` come from
+/// the `agent-*.meta.json` sidecar; `tool_use_id` is the spawning `Agent`/`Task`
+/// tool_use id and is only written by newer Claude Code versions (often absent).
+#[derive(Debug, Clone)]
+pub struct SubagentLink {
+    /// Subagent session id (`agent-<hash>`, the transcript file stem).
+    pub agent_session_id: String,
+    /// Path to the subagent transcript (`agent-*.jsonl`).
+    pub path: PathBuf,
+    /// Agent type from the sidecar (`agentType`), e.g. "Explore". May be absent.
+    pub agent_type: Option<String>,
+    /// Spawn description from the sidecar. Matches the parent Agent call's
+    /// `description` input when present. May be absent.
+    pub description: Option<String>,
+    /// Spawning `Agent`/`Task` tool_use id (`toolUseId`). Exact per-call link to
+    /// the parent, when present.
+    pub tool_use_id: Option<String>,
+}
+
+/// Sidecar metadata parsed from `agent-*.meta.json`.
+///
+/// All fields are optional: older sidecars carry only `agentType`, most add
+/// `description`, and only the newest add `toolUseId`. Unknown fields are ignored.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct SubagentMeta {
+    #[serde(rename = "agentType")]
+    agent_type: Option<String>,
+    description: Option<String>,
+    #[serde(rename = "toolUseId")]
+    tool_use_id: Option<String>,
+}
+
+/// Read and parse an `agent-*.meta.json` sidecar, returning defaults on any error
+/// (missing file, unreadable, or malformed) so a partial sidecar never hides the
+/// subagent it describes.
+fn read_subagent_meta(path: &Path) -> SubagentMeta {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 /// Quick metadata extracted from a session without full parsing.
@@ -744,6 +854,78 @@ mod tests {
         };
 
         assert_eq!(summary.short_id(), "40afc8a7");
+    }
+
+    #[test]
+    fn test_subagent_links_parses_sidecars_and_degrades() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        let uuid = "85a67f74-54a8-49dd-89c1-b5e0c47ab3a7";
+
+        // Main session file.
+        let main_path = project.join(format!("{uuid}.jsonl"));
+        std::fs::write(&main_path, "{}\n").unwrap();
+
+        // Subagents directory with three transcripts.
+        let subagents = project.join(uuid).join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+
+        // Full sidecar (newer format with toolUseId).
+        std::fs::write(subagents.join("agent-aaa.jsonl"), "{}\n").unwrap();
+        std::fs::write(
+            subagents.join("agent-aaa.meta.json"),
+            r#"{"agentType":"Explore","description":"Tests and hygiene","toolUseId":"toolu_01CZMwPKSF5kpJMpW7P68Lq4"}"#,
+        )
+        .unwrap();
+
+        // Partial sidecar (common format: no toolUseId).
+        std::fs::write(subagents.join("agent-bbb.jsonl"), "{}\n").unwrap();
+        std::fs::write(
+            subagents.join("agent-bbb.meta.json"),
+            r#"{"agentType":"general-purpose","description":"Review code"}"#,
+        )
+        .unwrap();
+
+        // Missing sidecar: the subagent must still be enumerated.
+        std::fs::write(subagents.join("agent-ccc.jsonl"), "{}\n").unwrap();
+
+        let session = Session::from_path(&main_path, "/tmp/project").unwrap();
+        let mut links = session.subagent_links();
+        links.sort_by(|a, b| a.agent_session_id.cmp(&b.agent_session_id));
+
+        assert_eq!(links.len(), 3);
+
+        assert_eq!(links[0].agent_session_id, "agent-aaa");
+        assert_eq!(links[0].agent_type.as_deref(), Some("Explore"));
+        assert_eq!(links[0].description.as_deref(), Some("Tests and hygiene"));
+        assert_eq!(
+            links[0].tool_use_id.as_deref(),
+            Some("toolu_01CZMwPKSF5kpJMpW7P68Lq4")
+        );
+
+        assert_eq!(links[1].agent_session_id, "agent-bbb");
+        assert_eq!(links[1].agent_type.as_deref(), Some("general-purpose"));
+        assert_eq!(links[1].description.as_deref(), Some("Review code"));
+        assert_eq!(links[1].tool_use_id, None);
+
+        assert_eq!(links[2].agent_session_id, "agent-ccc");
+        assert_eq!(links[2].agent_type, None);
+        assert_eq!(links[2].description, None);
+        assert_eq!(links[2].tool_use_id, None);
+    }
+
+    #[test]
+    fn test_subagent_links_empty_for_subagent_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let subagents = tmp.path().join("parent-uuid").join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        let agent_path = subagents.join("agent-aaa.jsonl");
+        std::fs::write(&agent_path, "{}\n").unwrap();
+
+        let session = Session::from_path(&agent_path, "/tmp/project").unwrap();
+        assert!(session.is_subagent());
+        assert!(session.subagents_dir().is_none());
+        assert!(session.subagent_links().is_empty());
     }
 
     #[test]
