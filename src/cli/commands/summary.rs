@@ -67,6 +67,9 @@ struct SummaryOutput {
     total_tokens: u64,
     input_tokens: u64,
     output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    total_processed_tokens: u64,
     messages: usize,
     tool_invocations: usize,
     estimated_cost: Option<f64>,
@@ -147,9 +150,20 @@ pub fn run(cli: &Cli, args: &SummaryArgs) -> Result<()> {
                 period: args.period.clone(),
                 projects: num_projects,
                 sessions: num_sessions,
-                total_tokens: combined.total_usage.usage.total_tokens(),
-                input_tokens: combined.total_usage.usage.total_input_tokens(),
+                total_tokens: combined.total_usage.usage.work_tokens(),
+                input_tokens: combined.total_usage.usage.input_tokens,
                 output_tokens: combined.total_usage.usage.output_tokens,
+                cache_read_tokens: combined
+                    .total_usage
+                    .usage
+                    .cache_read_input_tokens
+                    .unwrap_or(0),
+                cache_creation_tokens: combined
+                    .total_usage
+                    .usage
+                    .cache_creation_input_tokens
+                    .unwrap_or(0),
+                total_processed_tokens: combined.total_usage.usage.total_tokens(),
                 messages: combined.message_counts.user + combined.message_counts.assistant,
                 tool_invocations: combined.message_counts.tool_uses,
                 estimated_cost: combined.total_usage.estimated_cost,
@@ -162,10 +176,7 @@ pub fn run(cli: &Cli, args: &SummaryArgs) -> Result<()> {
             println!("period\t{}", args.period);
             println!("projects\t{num_projects}");
             println!("sessions\t{num_sessions}");
-            println!(
-                "total_tokens\t{}",
-                combined.total_usage.usage.total_tokens()
-            );
+            println!("total_tokens\t{}", combined.total_usage.usage.work_tokens());
             println!("tool_invocations\t{}", combined.message_counts.tool_uses);
             if let Some(cost) = combined.total_usage.estimated_cost {
                 println!("estimated_cost\t{cost:.4}");
@@ -181,7 +192,7 @@ pub fn run(cli: &Cli, args: &SummaryArgs) -> Result<()> {
                 "{}|sessions:{} tokens:{} tools:{} cost:{}",
                 args.period,
                 num_sessions,
-                format_number(combined.total_usage.usage.total_tokens()),
+                format_number(combined.total_usage.usage.work_tokens()),
                 combined.message_counts.tool_uses,
                 cost
             );
@@ -203,7 +214,7 @@ pub fn run(cli: &Cli, args: &SummaryArgs) -> Result<()> {
             println!("-----");
             println!(
                 "  Tokens:    {}",
-                format_number(combined.total_usage.usage.total_tokens())
+                format_number(combined.total_usage.usage.work_tokens())
             );
             println!(
                 "  Messages:  {}",

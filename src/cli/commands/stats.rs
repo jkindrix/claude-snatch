@@ -445,6 +445,9 @@ fn output_session_stats(cli: &Cli, args: &StatsArgs, analytics: &SessionAnalytic
             println!("total_tokens\t{}", summary.total_tokens);
             println!("input_tokens\t{}", summary.input_tokens);
             println!("output_tokens\t{}", summary.output_tokens);
+            println!("cache_read_tokens\t{}", summary.cache_read_tokens);
+            println!("cache_creation_tokens\t{}", summary.cache_creation_tokens);
+            println!("total_processed_tokens\t{}", summary.total_processed_tokens);
             println!("messages\t{}", summary.total_messages);
             println!("tool_invocations\t{}", summary.tool_invocations);
             println!("cache_hit_rate\t{:.2}", summary.cache_hit_rate);
@@ -1262,6 +1265,9 @@ struct StatsOutput {
     total_tokens: u64,
     input_tokens: u64,
     output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    total_processed_tokens: u64,
     messages: usize,
     tool_invocations: usize,
     cache_hit_rate: Option<f64>,
@@ -1277,6 +1283,9 @@ impl StatsOutput {
             total_tokens: summary.total_tokens,
             input_tokens: summary.input_tokens,
             output_tokens: summary.output_tokens,
+            cache_read_tokens: summary.cache_read_tokens,
+            cache_creation_tokens: summary.cache_creation_tokens,
+            total_processed_tokens: summary.total_processed_tokens,
             messages: summary.total_messages,
             tool_invocations: summary.tool_invocations,
             cache_hit_rate: Some(summary.cache_hit_rate),
@@ -1288,9 +1297,20 @@ impl StatsOutput {
         Self {
             scope: scope.to_string(),
             sessions: Some(analytics.session_count),
-            total_tokens: analytics.total_usage.usage.total_tokens(),
-            input_tokens: analytics.total_usage.usage.total_input_tokens(),
+            total_tokens: analytics.total_usage.usage.work_tokens(),
+            input_tokens: analytics.total_usage.usage.input_tokens,
             output_tokens: analytics.total_usage.usage.output_tokens,
+            cache_read_tokens: analytics
+                .total_usage
+                .usage
+                .cache_read_input_tokens
+                .unwrap_or(0),
+            cache_creation_tokens: analytics
+                .total_usage
+                .usage
+                .cache_creation_input_tokens
+                .unwrap_or(0),
+            total_processed_tokens: analytics.total_usage.usage.total_tokens(),
             messages: analytics.message_counts.user + analytics.message_counts.assistant,
             tool_invocations: analytics.message_counts.tool_uses,
             cache_hit_rate: None,
@@ -2317,6 +2337,9 @@ mod tests {
             total_tokens: 1000,
             input_tokens: 600,
             output_tokens: 400,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            total_processed_tokens: 1000,
             messages: 10,
             tool_invocations: 3,
             cache_hit_rate: Some(0.75),

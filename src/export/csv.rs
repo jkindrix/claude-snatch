@@ -270,6 +270,24 @@ impl CsvExporter {
         )?;
         self.write_row(
             writer,
+            &["cache_read_tokens", &summary.cache_read_tokens.to_string()],
+        )?;
+        self.write_row(
+            writer,
+            &[
+                "cache_creation_tokens",
+                &summary.cache_creation_tokens.to_string(),
+            ],
+        )?;
+        self.write_row(
+            writer,
+            &[
+                "total_processed_tokens",
+                &summary.total_processed_tokens.to_string(),
+            ],
+        )?;
+        self.write_row(
+            writer,
             &["cache_hit_rate", &format!("{:.2}", summary.cache_hit_rate)],
         )?;
         self.write_row(

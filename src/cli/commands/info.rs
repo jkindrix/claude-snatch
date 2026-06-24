@@ -87,6 +87,9 @@ fn show_session_info(
                 estimated_cost,
                 input_tokens,
                 output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                total_processed_tokens,
                 files_modified,
                 files_created,
                 lines_added,
@@ -107,11 +110,11 @@ fn show_session_info(
                     a.primary_model().map(|s| s.to_string()),
                     if tools.is_empty() { None } else { Some(tools) },
                     a.usage.estimated_cost,
-                    Some(
-                        a.usage.usage.input_tokens
-                            + a.usage.usage.cache_read_input_tokens.unwrap_or(0),
-                    ),
+                    Some(a.usage.usage.input_tokens),
                     Some(a.usage.usage.output_tokens),
+                    Some(a.usage.usage.cache_read_input_tokens.unwrap_or(0)),
+                    Some(a.usage.usage.cache_creation_input_tokens.unwrap_or(0)),
+                    Some(a.usage.usage.total_tokens()),
                     if edited.is_empty() {
                         None
                     } else {
@@ -123,7 +126,8 @@ fn show_session_info(
                 )
             } else {
                 (
-                    None, None, None, None, None, None, None, None, None, None, None,
+                    None, None, None, None, None, None, None, None, None, None, None, None, None,
+                    None,
                 )
             };
 
@@ -163,6 +167,9 @@ fn show_session_info(
                     estimated_cost,
                     input_tokens,
                     output_tokens,
+                    cache_read_tokens,
+                    cache_creation_tokens,
+                    total_processed_tokens,
                     files_modified,
                     files_created,
                     lines_added,
@@ -815,12 +822,21 @@ struct SessionInfoOutput {
     /// Estimated cost in USD.
     #[serde(skip_serializing_if = "Option::is_none")]
     estimated_cost: Option<f64>,
-    /// Total input tokens.
+    /// Fresh (non-cached) input tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     input_tokens: Option<u64>,
     /// Total output tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     output_tokens: Option<u64>,
+    /// Cache read tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_read_tokens: Option<u64>,
+    /// Cache creation tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_creation_tokens: Option<u64>,
+    /// All tokens processed, including cache reads and writes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_processed_tokens: Option<u64>,
     /// Files modified during the session.
     #[serde(skip_serializing_if = "Option::is_none")]
     files_modified: Option<Vec<String>>,
@@ -901,6 +917,9 @@ mod tests {
             estimated_cost: Some(0.42),
             input_tokens: Some(50000),
             output_tokens: Some(10000),
+            cache_read_tokens: Some(40000),
+            cache_creation_tokens: Some(5000),
+            total_processed_tokens: Some(105000),
             files_modified: Some(vec!["src/main.rs".to_string()]),
             files_created: None,
             lines_added: Some(100),
@@ -995,6 +1014,9 @@ mod tests {
             estimated_cost: None,
             input_tokens: None,
             output_tokens: None,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
+            total_processed_tokens: None,
             files_modified: None,
             files_created: None,
             lines_added: None,

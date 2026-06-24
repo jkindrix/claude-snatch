@@ -319,9 +319,12 @@ impl SessionAnalytics {
             total_messages: self.message_counts.total(),
             user_messages: self.message_counts.user,
             assistant_messages: self.message_counts.assistant,
-            total_tokens: self.usage.usage.total_tokens(),
-            input_tokens: self.usage.usage.total_input_tokens(),
+            total_tokens: self.usage.usage.work_tokens(),
+            input_tokens: self.usage.usage.input_tokens,
             output_tokens: self.usage.usage.output_tokens,
+            cache_read_tokens: self.usage.usage.cache_read_input_tokens.unwrap_or(0),
+            cache_creation_tokens: self.usage.usage.cache_creation_input_tokens.unwrap_or(0),
+            total_processed_tokens: self.usage.usage.total_tokens(),
             tool_invocations: self.message_counts.tool_uses,
             unique_tools: self.tool_counts.len(),
             thinking_blocks: self.thinking_stats.block_count,
@@ -577,12 +580,18 @@ pub struct AnalyticsSummary {
     pub user_messages: usize,
     /// Assistant messages.
     pub assistant_messages: usize,
-    /// Total tokens.
+    /// Real-work tokens (fresh input + output, excluding cache traffic).
     pub total_tokens: u64,
-    /// Input tokens.
+    /// Fresh (non-cached) input tokens.
     pub input_tokens: u64,
     /// Output tokens.
     pub output_tokens: u64,
+    /// Cache read tokens.
+    pub cache_read_tokens: u64,
+    /// Cache creation tokens.
+    pub cache_creation_tokens: u64,
+    /// All tokens processed, including cache reads and writes.
+    pub total_processed_tokens: u64,
     /// Tool invocations.
     pub tool_invocations: usize,
     /// Unique tools used.
@@ -626,6 +635,9 @@ impl AnalyticsSummary {
             total_tokens: 0,
             input_tokens: 0,
             output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            total_processed_tokens: 0,
             tool_invocations: 0,
             unique_tools: 0,
             thinking_blocks: 0,
@@ -643,6 +655,9 @@ impl AnalyticsSummary {
             agg.total_tokens += s.total_tokens;
             agg.input_tokens += s.input_tokens;
             agg.output_tokens += s.output_tokens;
+            agg.cache_read_tokens += s.cache_read_tokens;
+            agg.cache_creation_tokens += s.cache_creation_tokens;
+            agg.total_processed_tokens += s.total_processed_tokens;
             agg.tool_invocations += s.tool_invocations;
             agg.thinking_blocks += s.thinking_blocks;
             agg.error_count += s.error_count;
@@ -1982,6 +1997,9 @@ mod tests {
             total_tokens: 0,
             input_tokens: 0,
             output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            total_processed_tokens: 0,
             tool_invocations: 0,
             unique_tools: 0,
             thinking_blocks: 0,

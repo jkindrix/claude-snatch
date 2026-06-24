@@ -62,6 +62,12 @@ impl Usage {
         self.total_input_tokens() + self.output_tokens
     }
 
+    /// Calculate real-work tokens: fresh input + output, excluding cache traffic.
+    #[must_use]
+    pub fn work_tokens(&self) -> u64 {
+        self.input_tokens + self.output_tokens
+    }
+
     /// Calculate cache hit rate as a percentage.
     #[must_use]
     pub fn cache_hit_rate(&self) -> f64 {
