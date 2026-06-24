@@ -3691,6 +3691,67 @@ mod tests {
         format!("{assistant}\n{results}\n")
     }
 
+    fn attachment_image_session_jsonl(session_id: &str) -> String {
+        // A user turn with a top-level image block plus text.
+        let user = format!(
+            r#"{{"type":"user","uuid":"u1","parentUuid":null,"timestamp":"2026-06-09T18:00:00Z","sessionId":"{session_id}","version":"2.1.0","isSidechain":false,"message":{{"role":"user","content":[{{"type":"image","source":{{"type":"base64","media_type":"image/png","data":"x"}}}},{{"type":"text","text":"IMAGE_PROMPT_MARKER"}}]}}}}"#
+        );
+        // A content-bearing attachment (injected file): payload should surface.
+        let file = format!(
+            r#"{{"type":"attachment","uuid":"at1","parentUuid":"u1","timestamp":"2026-06-09T18:00:01Z","sessionId":"{session_id}","attachment":{{"type":"file","displayPath":"../CLAUDE.md","content":"FILE_BODY_MARKER"}}}}"#
+        );
+        // An operational attachment (noise): marker only, payload suppressed.
+        let noise = format!(
+            r#"{{"type":"attachment","uuid":"at2","parentUuid":"at1","timestamp":"2026-06-09T18:00:02Z","sessionId":"{session_id}","attachment":{{"type":"task_reminder","content":"NOISE_SHOULD_NOT_APPEAR","itemCount":1}}}}"#
+        );
+        format!("{user}\n{file}\n{noise}\n")
+    }
+
+    #[tokio::test]
+    async fn test_get_session_messages_renders_attachments_and_images() {
+        let sid = "cccccccc-1111-2222-3333-444444444444";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &attachment_image_session_jsonl(sid));
+        let server = make_server(&tmp);
+        let text = unwrap_output(
+            server
+                .get_session_messages(GetSessionMessagesRequest {
+                    session_id: sid.to_string(),
+                    detail: Some("full".to_string()),
+                    message_type: None,
+                    limit: None,
+                    offset: None,
+                    reverse: None,
+                    include_thinking: None,
+                    chain_aware: None,
+                    after_timestamp: None,
+                    before_timestamp: None,
+                    include_subagent_transcripts: None,
+                })
+                .await,
+        );
+        // Image block renders a placeholder alongside the prompt text.
+        assert!(
+            text.contains("[image: image/png]"),
+            "image placeholder missing"
+        );
+        assert!(
+            text.contains("IMAGE_PROMPT_MARKER"),
+            "image prompt text missing"
+        );
+        // Content-bearing attachment surfaces its marker and payload.
+        assert!(text.contains("[attachment: file]"), "file marker missing");
+        assert!(text.contains("FILE_BODY_MARKER"), "file payload missing");
+        // Operational attachment is marker-only — payload suppressed.
+        assert!(
+            text.contains("[attachment: task_reminder]"),
+            "noise marker missing"
+        );
+        assert!(
+            !text.contains("NOISE_SHOULD_NOT_APPEAR"),
+            "noise payload should not be surfaced"
+        );
+    }
+
     #[tokio::test]
     async fn test_get_session_messages_full_surfaces_tool_output() {
         let sid = "aaaaaaaa-1111-2222-3333-444444444444";
