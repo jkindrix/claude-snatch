@@ -188,10 +188,16 @@ pub struct GetSessionMessagesRequest {
 
     /// Only include messages before this timestamp (ISO 8601 or relative like "2h", "30m").
     pub before_timestamp: Option<String>,
+
+    /// If true, inline each spawned subagent's full transcript under its Agent/Task
+    /// call (only at detail="full"). Default: false — a pointer (subagent_session_id)
+    /// plus a result preview is attached instead, and the transcript is fetched on
+    /// demand by querying the subagent id.
+    pub include_subagent_transcripts: Option<bool>,
 }
 
 /// A message in the session messages response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MessageEntry {
     pub index: usize,
     #[serde(rename = "type")]
@@ -215,7 +221,7 @@ pub struct MessageEntry {
 }
 
 /// Tool call detail for "full" detail level.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ToolDetail {
     pub tool_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -230,6 +236,16 @@ pub struct ToolDetail {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    /// For Agent/Task calls: the spawned subagent's session id (`agent-<hash>`),
+    /// when it could be matched to this call. Query it for the full transcript.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_session_id: Option<String>,
+    /// Preview of the subagent's final assistant message (its result), truncated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_result_preview: Option<String>,
+    /// Full subagent transcript, present only when include_subagent_transcripts=true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_transcript: Option<Vec<MessageEntry>>,
 }
 
 /// Response for get_session_messages.

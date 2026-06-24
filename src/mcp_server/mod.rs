@@ -73,10 +73,9 @@ use types::{
     SearchMatch, SearchSessionsRequest, SearchSessionsResponse, SessionDigestResponse,
     SessionHealthEntry, SessionInfoResponse, SessionLessonsResponse, SessionMessagesResponse,
     SessionSummary, SessionTimelineResponse, StatsResponse, SubagentSummary,
-    SuggestPrioritiesRequest,
-    SuggestPrioritiesResponse, TagMessageRequest, TagMessageResponse, TaggedMessageEntry,
-    ThreadExchangeEntry, ThreadTopicRequest, ThreadTopicResponse, TimelineTurn, ToolCallEntry,
-    ToolCallsResponse, ToolCallsSummary, ToolDetail, UserCorrection,
+    SuggestPrioritiesRequest, SuggestPrioritiesResponse, TagMessageRequest, TagMessageResponse,
+    TaggedMessageEntry, ThreadExchangeEntry, ThreadTopicRequest, ThreadTopicResponse, TimelineTurn,
+    ToolCallEntry, ToolCallsResponse, ToolCallsSummary, ToolDetail, UserCorrection,
 };
 
 // ============================================================================
@@ -397,7 +396,7 @@ impl SnatchServer {
     /// Use detail="overview" for user prompts only, "standard" for user+assistant
     /// text with tool names, or "full" for tool call details.
     #[tool(
-        description = "Read conversation messages from a session. Use detail='overview' for prompts only, 'conversation' for user+assistant text (skipping tool-only turns), 'standard' for user+assistant text, 'full' for tool details. Set include_thinking=true to recover reasoning/decision rationale (always lost in compaction). Supports pagination with offset/limit."
+        description = "Read conversation messages from a session. Use detail='overview' for prompts only, 'conversation' for user+assistant text (skipping tool-only turns), 'standard' for user+assistant text, 'full' for tool details. At detail='full', Agent/Task calls are linked to the subagent they spawned (subagent_session_id) with a result preview; set include_subagent_transcripts=true to inline each subagent's full transcript. Set include_thinking=true to recover reasoning/decision rationale (always lost in compaction). Supports pagination with offset/limit."
     )]
     async fn get_session_messages(&self, request: GetSessionMessagesRequest) -> ToolOutput {
         let chain_aware = request.chain_aware.unwrap_or(false);
@@ -416,6 +415,27 @@ impl SnatchServer {
             "overview" => 500,
             "conversation" | "standard" => 1000,
             _ => 2000,
+        };
+        let include_subagent_transcripts = request.include_subagent_transcripts.unwrap_or(false);
+
+        // Match Agent/Task calls to the subagents they spawned (only "full" detail
+        // renders tool details). Uses the unfiltered thread for spawn-order joining.
+        let subagent_renders: HashMap<String, RenderedSubagent> = if detail == "full" {
+            match self.get_claude_dir() {
+                Ok(dir) => match dir.find_session(&resolved.session_id) {
+                    Ok(Some(session)) => resolve_subagent_renders(
+                        &session,
+                        &resolved.conversation.main_thread_entries(),
+                        include_subagent_transcripts,
+                        include_thinking,
+                        self.max_file_size,
+                    ),
+                    _ => HashMap::new(),
+                },
+                Err(_) => HashMap::new(),
+            }
+        } else {
+            HashMap::new()
         };
 
         let mut entries: Vec<&LogEntry> = resolved.conversation.main_thread_entries();
@@ -615,6 +635,7 @@ impl SnatchServer {
                                 .iter()
                                 .map(|t| {
                                     let summary = extract_tool_input_summary(&t.name, &t.input);
+                                    let rendered = subagent_renders.get(&t.id);
                                     ToolDetail {
                                         tool_name: t.name.clone(),
                                         file_path: summary.get("file_path").cloned(),
@@ -623,6 +644,11 @@ impl SnatchServer {
                                         subagent_type: summary.get("subagent_type").cloned(),
                                         description: summary.get("description").cloned(),
                                         prompt: summary.get("prompt").cloned(),
+                                        subagent_session_id: rendered.map(|r| r.session_id.clone()),
+                                        subagent_result_preview: rendered
+                                            .and_then(|r| r.result_preview.clone()),
+                                        subagent_transcript: rendered
+                                            .and_then(|r| r.transcript.clone()),
                                     }
                                 })
                                 .collect()
@@ -3125,6 +3151,199 @@ pub async fn run_server(
     })
 }
 
+/// A subagent's rendered output, attached to its spawning Agent/Task call.
+struct RenderedSubagent {
+    session_id: String,
+    result_preview: Option<String>,
+    transcript: Option<Vec<MessageEntry>>,
+}
+
+/// Match each `Agent`/`Task` call in `ordered_entries` to the subagent it spawned
+/// and render the result, keyed by the spawning tool_use id.
+///
+/// Two passes, conservative by design: first the exact `tool_use_id` link from the
+/// sidecar (always correct, but only newer Claude Code records it), then a
+/// description fallback that attaches only when exactly one unused subagent carries
+/// that description. Ambiguous descriptions are left unattached rather than guessed.
+fn resolve_subagent_renders(
+    session: &Session,
+    ordered_entries: &[&LogEntry],
+    include_transcripts: bool,
+    include_thinking: bool,
+    max_file_size: Option<u64>,
+) -> HashMap<String, RenderedSubagent> {
+    let mut out = HashMap::new();
+    let links = session.subagent_links();
+    if links.is_empty() {
+        return out;
+    }
+
+    // Agent/Task calls in spawn order: (tool_use id, description).
+    let mut agent_calls: Vec<(String, Option<String>)> = Vec::new();
+    for entry in ordered_entries {
+        if let LogEntry::Assistant(a) = entry {
+            for tu in a.message.tool_uses() {
+                if tu.name == "Agent" || tu.name == "Task" {
+                    let desc = tu
+                        .input
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    agent_calls.push((tu.id.clone(), desc));
+                }
+            }
+        }
+    }
+    if agent_calls.is_empty() {
+        return out;
+    }
+
+    let by_id: HashMap<&str, &crate::discovery::SubagentLink> = links
+        .iter()
+        .filter_map(|l| l.tool_use_id.as_deref().map(|id| (id, l)))
+        .collect();
+    let mut by_desc: HashMap<&str, Vec<&crate::discovery::SubagentLink>> = HashMap::new();
+    for l in &links {
+        if let Some(d) = l.description.as_deref() {
+            by_desc.entry(d).or_default().push(l);
+        }
+    }
+
+    let mut used: HashSet<String> = HashSet::new();
+    let project = session.project_path();
+
+    // Pass 1: exact tool_use_id matches.
+    for (id, _) in &agent_calls {
+        if let Some(link) = by_id.get(id.as_str()) {
+            if used.insert(link.agent_session_id.clone()) {
+                out.insert(
+                    id.clone(),
+                    render_one_subagent(
+                        link,
+                        project,
+                        include_transcripts,
+                        include_thinking,
+                        max_file_size,
+                    ),
+                );
+            }
+        }
+    }
+    // Pass 2: unique-description fallback for still-unmatched calls.
+    for (id, desc) in &agent_calls {
+        if out.contains_key(id) {
+            continue;
+        }
+        let Some(d) = desc.as_deref() else { continue };
+        let Some(cands) = by_desc.get(d) else {
+            continue;
+        };
+        let avail: Vec<_> = cands
+            .iter()
+            .filter(|l| !used.contains(&l.agent_session_id))
+            .collect();
+        if avail.len() == 1 {
+            let link = avail[0];
+            if used.insert(link.agent_session_id.clone()) {
+                out.insert(
+                    id.clone(),
+                    render_one_subagent(
+                        link,
+                        project,
+                        include_transcripts,
+                        include_thinking,
+                        max_file_size,
+                    ),
+                );
+            }
+        }
+    }
+    out
+}
+
+/// Parse one subagent transcript and render its result preview (final assistant
+/// message) and, when requested, its full transcript.
+fn render_one_subagent(
+    link: &crate::discovery::SubagentLink,
+    project_path: &str,
+    include_transcripts: bool,
+    include_thinking: bool,
+    max_file_size: Option<u64>,
+) -> RenderedSubagent {
+    let entries = Session::from_path(&link.path, project_path)
+        .ok()
+        .and_then(|s| s.parse_with_options(max_file_size).ok())
+        .unwrap_or_default();
+    let conversation = Conversation::from_entries(entries).ok();
+    let main: Vec<&LogEntry> = conversation
+        .as_ref()
+        .map(Conversation::main_thread_entries)
+        .unwrap_or_default();
+
+    let result_preview = main
+        .iter()
+        .rev()
+        .find(|e| matches!(e, LogEntry::Assistant(_)))
+        .and_then(|e| extract_assistant_summary(e, 500));
+
+    let transcript = if include_transcripts {
+        Some(render_subagent_transcript(&main, include_thinking))
+    } else {
+        None
+    };
+
+    RenderedSubagent {
+        session_id: link.agent_session_id.clone(),
+        result_preview,
+        transcript,
+    }
+}
+
+/// Render a subagent's main thread as message entries (standard detail: user and
+/// assistant text plus tool names; tool details are not expanded recursively).
+fn render_subagent_transcript(entries: &[&LogEntry], include_thinking: bool) -> Vec<MessageEntry> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let content = match entry {
+                LogEntry::User(_) => {
+                    extract_user_prompt_text(entry).map(|t| truncate_text(&t, 500))
+                }
+                LogEntry::Assistant(_) => extract_assistant_summary(entry, 500),
+                LogEntry::System(sys) => sys.content.clone(),
+                _ => None,
+            };
+            let tool_names = extract_tool_names(entry);
+            let thinking = if include_thinking {
+                extract_thinking_text(entry, 1000)
+            } else {
+                None
+            };
+            MessageEntry {
+                index: i,
+                msg_type: entry.message_type().to_string(),
+                timestamp: entry.timestamp().map(|t| t.to_rfc3339()),
+                content,
+                git_branch: entry.git_branch().map(String::from),
+                model: get_model(entry),
+                tool_calls: if tool_names.is_empty() {
+                    None
+                } else {
+                    Some(tool_names)
+                },
+                tool_details: None,
+                has_thinking: if has_thinking(entry) {
+                    Some(true)
+                } else {
+                    None
+                },
+                thinking_preview: thinking,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3132,6 +3351,55 @@ mod tests {
     use tempfile::TempDir;
 
     const PROJECT_PATH: &str = "/home/user/test-project";
+
+    #[test]
+    fn test_resolve_subagent_renders_description_fallback_and_ambiguity() {
+        // Three Agent calls in one assistant turn: a unique description and two
+        // sharing a description. Sidecars carry no toolUseId, forcing the
+        // description fallback. The unique one attaches; the ambiguous pair does not.
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        let uuid = "85a67f74-54a8-49dd-89c1-b5e0c47ab3a7";
+
+        let main_jsonl = format!(
+            r#"{{"type":"assistant","uuid":"a1","parentUuid":null,"timestamp":"2026-06-09T18:00:00Z","sessionId":"{uuid}","version":"2.1.0","isSidechain":false,"message":{{"id":"m1","type":"message","role":"assistant","model":"claude","content":[{{"type":"tool_use","id":"toolu_AAA","name":"Agent","input":{{"description":"Review X","subagent_type":"Explore","prompt":"p"}}}},{{"type":"tool_use","id":"toolu_BBB","name":"Agent","input":{{"description":"Dup desc","subagent_type":"Explore","prompt":"p"}}}},{{"type":"tool_use","id":"toolu_CCC","name":"Agent","input":{{"description":"Dup desc","subagent_type":"Explore","prompt":"p"}}}}]}}}}"#
+        );
+        let main_path = project.join(format!("{uuid}.jsonl"));
+        std::fs::write(&main_path, format!("{main_jsonl}\n")).unwrap();
+
+        let subagents = project.join(uuid).join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        let agent_body = |sid: &str| {
+            format!(
+                "{{\"type\":\"assistant\",\"uuid\":\"{sid}\",\"parentUuid\":null,\"timestamp\":\"2026-06-09T18:01:00Z\",\"sessionId\":\"{uuid}\",\"version\":\"2.1.0\",\"isSidechain\":true,\"message\":{{\"id\":\"{sid}m\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude\",\"content\":[{{\"type\":\"text\",\"text\":\"found\"}}]}}}}\n"
+            )
+        };
+        for (file, desc) in [
+            ("agent-x", "Review X"),
+            ("agent-y", "Dup desc"),
+            ("agent-z", "Dup desc"),
+        ] {
+            std::fs::write(subagents.join(format!("{file}.jsonl")), agent_body(file)).unwrap();
+            std::fs::write(
+                subagents.join(format!("{file}.meta.json")),
+                format!(r#"{{"agentType":"Explore","description":"{desc}"}}"#),
+            )
+            .unwrap();
+        }
+
+        let session = Session::from_path(&main_path, PROJECT_PATH).unwrap();
+        let entries = session.parse().unwrap();
+        let refs: Vec<&LogEntry> = entries.iter().collect();
+        let out = resolve_subagent_renders(&session, &refs, false, false, None);
+
+        // Unique description attaches; ambiguous pair is left unattached.
+        assert_eq!(
+            out.get("toolu_AAA").map(|r| r.session_id.as_str()),
+            Some("agent-x")
+        );
+        assert!(!out.contains_key("toolu_BBB"));
+        assert!(!out.contains_key("toolu_CCC"));
+    }
 
     fn setup_claude_dir(session_id: &str, project_path: &str, jsonl: &str) -> TempDir {
         let tmp = TempDir::new().expect("failed to create temp dir");
@@ -3364,6 +3632,7 @@ mod tests {
                     chain_aware: None,
                     after_timestamp: None,
                     before_timestamp: None,
+                    include_subagent_transcripts: None,
                 })
                 .await,
         );
