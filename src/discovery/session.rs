@@ -441,11 +441,14 @@ impl Session {
 
     /// Enumerate the subagents spawned by this (main) session.
     ///
-    /// Reads `<project>/<uuid>/subagents/agent-*.jsonl` and attaches the sidecar
-    /// `agent-*.meta.json` metadata when present. The sidecar carries `agentType`
-    /// and `description`; only newer Claude Code versions also write `toolUseId`,
-    /// which is the exact id of the spawning `Agent`/`Task` tool_use in the parent.
-    /// Each subagent is still enumerated when its sidecar is missing or partial.
+    /// Reads `agent-*.jsonl` transcripts from `<project>/<uuid>/subagents/` and,
+    /// one level deeper, from `subagents/workflows/<wf>/` (multi-agent Workflow
+    /// fan-outs are stored there). Attaches the sidecar `agent-*.meta.json`
+    /// metadata when present: it carries `agentType` and `description`; only newer
+    /// Claude Code versions also write `toolUseId`, the exact id of the spawning
+    /// `Agent`/`Task` tool_use in the parent. Each subagent is still enumerated
+    /// when its sidecar is missing or partial (workflow subagents carry only
+    /// `agentType`).
     ///
     /// Returns an empty vector for subagent sessions or when there are none.
     #[must_use]
@@ -453,33 +456,19 @@ impl Session {
         let Some(dir) = self.subagents_dir() else {
             return Vec::new();
         };
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return Vec::new();
-        };
 
         let mut links = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            // Only the transcript files; skip the .meta.json sidecars themselves.
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            if !stem.starts_with("agent-") {
-                continue;
-            }
+        // Direct subagents: subagents/agent-*.jsonl
+        collect_agent_links(&dir, &mut links);
 
-            let meta = read_subagent_meta(&dir.join(format!("{stem}.meta.json")));
-
-            links.push(SubagentLink {
-                agent_session_id: stem.to_string(),
-                path: path.clone(),
-                agent_type: meta.agent_type,
-                description: meta.description,
-                tool_use_id: meta.tool_use_id,
-            });
+        // Workflow subagents: subagents/workflows/<wf>/agent-*.jsonl
+        if let Ok(wf_entries) = std::fs::read_dir(dir.join("workflows")) {
+            for wf in wf_entries.flatten() {
+                let wf_dir = wf.path();
+                if wf_dir.is_dir() {
+                    collect_agent_links(&wf_dir, &mut links);
+                }
+            }
         }
         links
     }
@@ -530,6 +519,36 @@ struct SubagentMeta {
     description: Option<String>,
     #[serde(rename = "toolUseId")]
     tool_use_id: Option<String>,
+}
+
+/// Append a [`SubagentLink`] for each `agent-*.jsonl` transcript directly in `dir`,
+/// reading the sibling `agent-*.meta.json` sidecar from the same directory.
+fn collect_agent_links(dir: &Path, links: &mut Vec<SubagentLink>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Only the transcript files; skip the .meta.json sidecars themselves.
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !stem.starts_with("agent-") {
+            continue;
+        }
+
+        let meta = read_subagent_meta(&dir.join(format!("{stem}.meta.json")));
+        links.push(SubagentLink {
+            agent_session_id: stem.to_string(),
+            path: path.clone(),
+            agent_type: meta.agent_type,
+            description: meta.description,
+            tool_use_id: meta.tool_use_id,
+        });
+    }
 }
 
 /// Read and parse an `agent-*.meta.json` sidecar, returning defaults on any error
@@ -889,11 +908,23 @@ mod tests {
         // Missing sidecar: the subagent must still be enumerated.
         std::fs::write(subagents.join("agent-ccc.jsonl"), "{}\n").unwrap();
 
+        // Nested workflow subagent: subagents/workflows/<wf>/agent-*.jsonl
+        let wf = subagents.join("workflows").join("wf_test");
+        std::fs::create_dir_all(&wf).unwrap();
+        std::fs::write(wf.join("agent-ddd.jsonl"), "{}\n").unwrap();
+        std::fs::write(
+            wf.join("agent-ddd.meta.json"),
+            r#"{"agentType":"workflow-subagent"}"#,
+        )
+        .unwrap();
+        // A non-agent file in the workflow dir must be ignored.
+        std::fs::write(wf.join("journal.jsonl"), "{}\n").unwrap();
+
         let session = Session::from_path(&main_path, "/tmp/project").unwrap();
         let mut links = session.subagent_links();
         links.sort_by(|a, b| a.agent_session_id.cmp(&b.agent_session_id));
 
-        assert_eq!(links.len(), 3);
+        assert_eq!(links.len(), 4);
 
         assert_eq!(links[0].agent_session_id, "agent-aaa");
         assert_eq!(links[0].agent_type.as_deref(), Some("Explore"));
@@ -912,6 +943,11 @@ mod tests {
         assert_eq!(links[2].agent_type, None);
         assert_eq!(links[2].description, None);
         assert_eq!(links[2].tool_use_id, None);
+
+        // Nested workflow subagent is enumerated with its (minimal) sidecar.
+        assert_eq!(links[3].agent_session_id, "agent-ddd");
+        assert_eq!(links[3].agent_type.as_deref(), Some("workflow-subagent"));
+        assert_eq!(links[3].description, None);
     }
 
     #[test]
