@@ -19,7 +19,7 @@ struct TimelineOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     end_time: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    duration: Option<String>,
+    span: Option<String>,
     total_turns: usize,
     timeline: Vec<TimelineTurnOutput>,
 }
@@ -56,7 +56,7 @@ pub fn run(cli: &Cli, args: &TimelineArgs) -> Result<()> {
     let analytics = crate::analytics::SessionAnalytics::from_conversation(&conversation);
     let start_time = analytics.start_time.map(|t| t.to_rfc3339());
     let end_time = analytics.end_time.map(|t| t.to_rfc3339());
-    let duration = analytics.duration_string();
+    let span = analytics.duration_string();
 
     let total_turns = turns.len();
 
@@ -73,7 +73,7 @@ pub fn run(cli: &Cli, args: &TimelineArgs) -> Result<()> {
                 session_id: args.session_id.clone(),
                 start_time,
                 end_time,
-                duration,
+                span,
                 total_turns,
                 timeline: timeline
                     .into_iter()

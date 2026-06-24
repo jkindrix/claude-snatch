@@ -83,7 +83,7 @@ static EXPORT_SCHEMA: Lazy<Value> = Lazy::new(|| {
                     "thinking_blocks": { "type": "integer", "minimum": 0 },
                     "cache_hit_rate": { "type": "number", "minimum": 0.0, "maximum": 100.0 },
                     "estimated_cost": { "type": ["number", "null"], "minimum": 0.0 },
-                    "duration_seconds": { "type": ["integer", "null"] },
+                    "span_seconds": { "type": ["integer", "null"] },
                     "primary_model": { "type": ["string", "null"] }
                 }
             },
@@ -569,7 +569,7 @@ mod tests {
                 "thinking_blocks": 2,
                 "cache_hit_rate": 45.5,
                 "estimated_cost": 0.05,
-                "duration_seconds": 120,
+                "span_seconds": 120,
                 "primary_model": "claude-3-5-sonnet-20241022"
             },
             "entries": []

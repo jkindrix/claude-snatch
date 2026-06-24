@@ -39,7 +39,7 @@ pub struct SessionSummary {
     pub modified_time: Option<String>,
     pub is_active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration: Option<String>,
+    pub span: Option<String>,
     pub compaction_count: usize,
     /// Root session ID if this session is part of a chain.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -74,7 +74,7 @@ pub struct SessionInfoResponse {
     pub parent_session_id: Option<String>,
     pub is_active: bool,
     pub modified_time: Option<String>,
-    pub duration: Option<String>,
+    pub span: Option<String>,
     pub compaction_count: usize,
     pub primary_model: Option<String>,
     pub total_tokens: u64,
@@ -329,7 +329,7 @@ pub struct SessionTimelineResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_time: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration: Option<String>,
+    pub span: Option<String>,
     pub total_turns: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
@@ -379,7 +379,7 @@ pub struct ProjectSessionEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_time: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration: Option<String>,
+    pub span: Option<String>,
     pub compaction_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,

@@ -156,7 +156,7 @@ impl SnatchServer {
         let summaries: Vec<SessionSummary> = sessions
             .iter()
             .map(|s| {
-                let (duration, compaction_count, slug) = s
+                let (span, compaction_count, slug) = s
                     .quick_metadata_cached()
                     .map(|m| (m.duration_human(), m.compaction_count, m.slug.clone()))
                     .unwrap_or((None, 0, None));
@@ -169,7 +169,7 @@ impl SnatchServer {
                     parent_session_id: s.parent_session_id().map(String::from),
                     modified_time: Some(s.modified_datetime().to_rfc3339()),
                     is_active: s.is_active().unwrap_or(false),
-                    duration,
+                    span,
                     compaction_count,
                     chain_id: chain_info.map(|(root, _)| root.clone()),
                     chain_length: chain_info.map(|(_, len)| *len),
@@ -272,7 +272,7 @@ impl SnatchServer {
             parent_session_id: session.parent_session_id().map(String::from),
             is_active: session.is_active().unwrap_or(false),
             modified_time: Some(session.modified_datetime().to_rfc3339()),
-            duration: analytics.duration_string(),
+            span: analytics.duration_string(),
             compaction_count,
             primary_model: analytics.primary_model().map(String::from),
             total_tokens: summary.total_tokens,
@@ -847,7 +847,7 @@ impl SnatchServer {
         // Get session time bounds and git branch
         let start_time = resolved.analytics.start_time.map(|t| t.to_rfc3339());
         let end_time = resolved.analytics.end_time.map(|t| t.to_rfc3339());
-        let duration = resolved.analytics.duration_string();
+        let span = resolved.analytics.duration_string();
         let git_branch = main_entries
             .iter()
             .find_map(|e| e.git_branch().map(String::from));
@@ -879,7 +879,7 @@ impl SnatchServer {
             project_path: resolved.project_path,
             start_time,
             end_time,
-            duration,
+            span,
             total_turns,
             git_branch,
             timeline,
@@ -1046,7 +1046,7 @@ impl SnatchServer {
                 let first_prompt = prompts.first().cloned();
                 let start_time = analytics.start_time.map(|t| t.to_rfc3339());
                 let end_time = analytics.end_time.map(|t| t.to_rfc3339());
-                let duration = analytics.duration_string();
+                let span = analytics.duration_string();
                 let tokens = summary_report.total_tokens;
                 let cost = summary_report.estimated_cost;
 
@@ -1075,7 +1075,7 @@ impl SnatchServer {
                     parent_session_id: session.parent_session_id().map(String::from),
                     start_time,
                     end_time,
-                    duration,
+                    span,
                     compaction_count,
                     git_branch: branch,
                     user_prompt_count: prompt_count,

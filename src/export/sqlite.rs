@@ -223,7 +223,7 @@ impl SqliteExporter {
                 git_commit TEXT,
                 start_time TEXT,
                 end_time TEXT,
-                duration_seconds REAL,
+                span_seconds REAL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -421,7 +421,7 @@ impl SqliteExporter {
         let git_commit = meta.and_then(|m| m.git_commit.clone());
 
         conn.execute(
-            "INSERT INTO sessions (session_id, version, project_path, is_subagent, agent_hash, file_size, git_branch, git_commit, start_time, end_time, duration_seconds)
+            "INSERT INTO sessions (session_id, version, project_path, is_subagent, agent_hash, file_size, git_branch, git_commit, start_time, end_time, span_seconds)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 session_id,

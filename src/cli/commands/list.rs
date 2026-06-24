@@ -535,10 +535,10 @@ fn list_sessions<W: Write>(
                     session.modified_datetime().format("%Y-%m-%d %H:%M:%S UTC")
                 )?;
 
-                // Show duration if available
+                // Show span if available
                 if let Ok(meta) = session.quick_metadata_cached() {
-                    if let Some(duration) = meta.duration_human() {
-                        writeln!(writer, "    Duration: {duration}")?;
+                    if let Some(span) = meta.duration_human() {
+                        writeln!(writer, "    Span: {span}")?;
                     }
                     if meta.compaction_count > 0 {
                         writeln!(writer, "    Compactions: {}", meta.compaction_count)?;
@@ -661,7 +661,7 @@ struct SessionInfo {
     file_size: u64,
     modified: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    duration: Option<String>,
+    span: Option<String>,
     compaction_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
@@ -686,7 +686,7 @@ impl SessionInfo {
             None
         };
 
-        let (duration, compaction_count) = session
+        let (span, compaction_count) = session
             .quick_metadata_cached()
             .map(|m| (m.duration_human(), m.compaction_count))
             .unwrap_or((None, 0));
@@ -698,7 +698,7 @@ impl SessionInfo {
             parent_session_id: session.parent_session_id().map(String::from),
             file_size: session.file_size(),
             modified: session.modified_datetime().to_rfc3339(),
-            duration,
+            span,
             compaction_count,
             name: meta.and_then(|m| m.name.clone()),
             context,

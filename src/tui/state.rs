@@ -2904,7 +2904,7 @@ impl AppState {
             Line::from(format!("Tools: {}", summary.tool_invocations)),
             Line::from(format!("Thinking: {}", summary.thinking_blocks)),
             Line::from(""),
-            Line::from(format!("Duration: {}", summary.duration_string())),
+            Line::from(format!("Span: {}", summary.duration_string())),
             Line::from(format!("Cost: {}", summary.cost_string())),
         ];
 

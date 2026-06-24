@@ -24,7 +24,7 @@ expression: json
     "thinking_blocks": 0,
     "cache_hit_rate": 0.0,
     "estimated_cost": 0.0015300000000000001,
-    "duration_seconds": 33,
+    "span_seconds": 33,
     "primary_model": "claude-sonnet-4-20250514"
   },
   "tree": {

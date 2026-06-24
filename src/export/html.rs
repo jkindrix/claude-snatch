@@ -695,7 +695,7 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
                 format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
             };
             writeln!(writer, "    <div class=\"stat-item\">")?;
-            writeln!(writer, "      <div class=\"stat-label\">Duration</div>")?;
+            writeln!(writer, "      <div class=\"stat-label\">Span</div>")?;
             writeln!(
                 writer,
                 "      <div class=\"stat-value\">{}</div>",

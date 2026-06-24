@@ -145,8 +145,8 @@ impl MarkdownExporter {
             if let Some(end) = analytics.end_time {
                 writeln!(writer, "**Ended:** {}", format_timestamp(&end))?;
             }
-            if let Some(duration) = analytics.duration_string() {
-                writeln!(writer, "**Duration:** {duration}")?;
+            if let Some(span) = analytics.duration_string() {
+                writeln!(writer, "**Span:** {span}")?;
             }
         }
 

@@ -222,8 +222,8 @@ impl XmlExporter {
             if let Some(end) = analytics.end_time {
                 self.write_text_element(writer, 2, "end-time", &format_timestamp(&end))?;
             }
-            if let Some(duration) = analytics.duration_string() {
-                self.write_text_element(writer, 2, "duration", &duration)?;
+            if let Some(span) = analytics.duration_string() {
+                self.write_text_element(writer, 2, "span", &span)?;
             }
         }
 

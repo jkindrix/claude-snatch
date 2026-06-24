@@ -123,8 +123,8 @@ pub struct AnalyticsSummary {
     pub tool_invocations: usize,
     /// Estimated cost in USD.
     pub estimated_cost: Option<f64>,
-    /// Session duration in seconds.
-    pub duration_seconds: Option<i64>,
+    /// Session wall-clock span in seconds (first to last entry; includes idle time).
+    pub span_seconds: Option<i64>,
     /// Primary model used.
     pub primary_model: Option<String>,
 }
@@ -230,7 +230,7 @@ impl SnatchClient {
             output_tokens: summary.output_tokens,
             tool_invocations: summary.tool_invocations,
             estimated_cost: summary.estimated_cost,
-            duration_seconds: analytics.duration().map(|d| d.num_seconds()),
+            span_seconds: analytics.duration().map(|d| d.num_seconds()),
             primary_model: summary.primary_model,
         })
     }
@@ -473,7 +473,7 @@ mod tests {
             output_tokens: 3000,
             tool_invocations: 5,
             estimated_cost: Some(0.05),
-            duration_seconds: Some(300),
+            span_seconds: Some(300),
             primary_model: Some("claude-sonnet-4-20250514".to_string()),
         };
 

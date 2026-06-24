@@ -472,9 +472,9 @@ fn output_session_stats(cli: &Cli, args: &StatsArgs, analytics: &SessionAnalytic
             println!("==================");
             println!();
 
-            // Duration
-            if let Some(duration) = analytics.duration_string() {
-                println!("Duration: {duration}");
+            // Span
+            if let Some(span) = analytics.duration_string() {
+                println!("Span: {span}");
             }
 
             // Model

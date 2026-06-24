@@ -300,7 +300,7 @@ impl ConversationExport {
                 thinking_blocks: summary.thinking_blocks,
                 cache_hit_rate: summary.cache_hit_rate,
                 estimated_cost: summary.estimated_cost,
-                duration_seconds: session_analytics.duration().map(|d| d.num_seconds()),
+                span_seconds: session_analytics.duration().map(|d| d.num_seconds()),
                 primary_model: summary.primary_model,
             })
         } else {
@@ -384,9 +384,9 @@ pub struct ExportAnalytics {
     /// Estimated cost in USD.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub estimated_cost: Option<f64>,
-    /// Duration in seconds.
+    /// Wall-clock span in seconds (first to last entry; includes idle time).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_seconds: Option<i64>,
+    pub span_seconds: Option<i64>,
     /// Primary model used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_model: Option<String>,

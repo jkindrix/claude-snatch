@@ -1481,8 +1481,8 @@ impl SessionDiff {
             lines.push(String::new());
         }
 
-        // Duration
-        lines.push("Duration:".to_string());
+        // Span
+        lines.push("Span:".to_string());
         if let Some(dur_a) = self.duration_diff.duration_a {
             lines.push(format!("  A: {} minutes", dur_a.num_minutes()));
         }

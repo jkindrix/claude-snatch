@@ -1,13 +1,12 @@
 ---
 source: tests/integration_tests.rs
-assertion_line: 933
 expression: markdown
 ---
 # Claude Code Conversation
 
 **Started:** 2025-01-15 11:00:00 UTC
 **Ended:** 2025-01-15 11:00:01 UTC
-**Duration:** 1s
+**Span:** 1s
 
 ## Statistics
 - **Messages:** 2 (1 user, 1 assistant)

@@ -175,7 +175,7 @@ fn show_session_info(
                     compaction_count: summary.compaction_count,
                     start_time: summary.start_time.map(|t| t.to_rfc3339()),
                     end_time: summary.end_time.map(|t| t.to_rfc3339()),
-                    duration_human: summary.duration_human(),
+                    span_human: summary.duration_human(),
                     state: format!("{:?}", summary.state),
                     version: summary.version.clone(),
                     path: session.path().to_string_lossy().to_string(),
@@ -328,10 +328,10 @@ fn show_session_info(
                     end.format("%Y-%m-%d %H:%M:%S UTC")
                 );
             }
-            if let Some(duration) = summary.duration_human() {
-                // Only show duration for inactive sessions (completed)
+            if let Some(span) = summary.duration_human() {
+                // Only show span for inactive sessions (completed)
                 if !summary.state.is_active() {
-                    println!("Duration:     {duration}");
+                    println!("Span:         {span}");
                 }
             }
             println!();
@@ -830,7 +830,7 @@ struct SessionInfoOutput {
     compaction_count: usize,
     start_time: Option<String>,
     end_time: Option<String>,
-    duration_human: Option<String>,
+    span_human: Option<String>,
     state: String,
     version: Option<String>,
     path: String,
@@ -960,7 +960,7 @@ mod tests {
             compaction_count: 2,
             start_time: Some("2025-01-01T00:00:00Z".to_string()),
             end_time: Some("2025-01-01T01:00:00Z".to_string()),
-            duration_human: Some("1 hour".to_string()),
+            span_human: Some("1 hour".to_string()),
             state: "Complete".to_string(),
             version: Some("2.0.74".to_string()),
             path: "/home/user/.claude/projects/abc123.jsonl".to_string(),
@@ -1062,7 +1062,7 @@ mod tests {
             compaction_count: 0,
             start_time: None,
             end_time: None,
-            duration_human: None,
+            span_human: None,
             state: "Unknown".to_string(),
             version: None,
             path: "/test".to_string(),
