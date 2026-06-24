@@ -236,6 +236,11 @@ pub struct ToolDetail {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    /// Remaining tool-input fields not surfaced as a named field above (e.g.
+    /// Edit `old_string`/`new_string`, Write `content`, TodoWrite `todos`),
+    /// each truncated. Lets a reader see what the call did, not just that it ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_summary: Option<std::collections::BTreeMap<String, String>>,
     /// For Agent/Task calls: the spawned subagent's session id (`agent-<hash>`),
     /// when it could be matched to this call. Query it for the full transcript.
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -688,6 +688,23 @@ impl SnatchServer {
                                     if subagent_result_preview.is_some() {
                                         result_preview = None;
                                     }
+                                    // Collect input fields not surfaced as a
+                                    // named field above, so bulky inputs (Edit
+                                    // old/new_string, Write content, TodoWrite
+                                    // todos) aren't silently dropped.
+                                    const NAMED_KEYS: [&str; 6] = [
+                                        "file_path",
+                                        "command",
+                                        "pattern",
+                                        "subagent_type",
+                                        "description",
+                                        "prompt",
+                                    ];
+                                    let extra: std::collections::BTreeMap<String, String> = summary
+                                        .iter()
+                                        .filter(|(k, _)| !NAMED_KEYS.contains(&k.as_str()))
+                                        .map(|(k, v)| (k.clone(), v.clone()))
+                                        .collect();
                                     ToolDetail {
                                         tool_name: t.name.clone(),
                                         file_path: summary.get("file_path").cloned(),
@@ -696,6 +713,11 @@ impl SnatchServer {
                                         subagent_type: summary.get("subagent_type").cloned(),
                                         description: summary.get("description").cloned(),
                                         prompt: summary.get("prompt").cloned(),
+                                        input_summary: if extra.is_empty() {
+                                            None
+                                        } else {
+                                            Some(extra)
+                                        },
                                         subagent_session_id: rendered.map(|r| r.session_id.clone()),
                                         subagent_result_preview,
                                         subagent_transcript: rendered

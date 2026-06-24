@@ -162,14 +162,62 @@ pub fn extract_tool_input_summary(
     };
 
     match tool_name {
-        "Write" | "Read" => {
+        "Read" => {
             if let Some(fp) = obj.get("file_path").and_then(|v| v.as_str()) {
                 summary.insert("file_path".into(), fp.to_string());
+            }
+        }
+        "Write" => {
+            if let Some(fp) = obj.get("file_path").and_then(|v| v.as_str()) {
+                summary.insert("file_path".into(), fp.to_string());
+            }
+            if let Some(content) = obj.get("content").and_then(|v| v.as_str()) {
+                summary.insert("content".into(), truncate_text(content, 500));
             }
         }
         "Edit" => {
             if let Some(fp) = obj.get("file_path").and_then(|v| v.as_str()) {
                 summary.insert("file_path".into(), fp.to_string());
+            }
+            if let Some(old) = obj.get("old_string").and_then(|v| v.as_str()) {
+                summary.insert("old_string".into(), truncate_text(old, 200));
+            }
+            if let Some(new) = obj.get("new_string").and_then(|v| v.as_str()) {
+                summary.insert("new_string".into(), truncate_text(new, 200));
+            }
+        }
+        "MultiEdit" => {
+            if let Some(fp) = obj.get("file_path").and_then(|v| v.as_str()) {
+                summary.insert("file_path".into(), fp.to_string());
+            }
+            if let Some(edits) = obj.get("edits").and_then(|v| v.as_array()) {
+                summary.insert("edit_count".into(), edits.len().to_string());
+                if let Some(first) = edits.first() {
+                    if let Some(old) = first.get("old_string").and_then(|v| v.as_str()) {
+                        summary.insert("old_string".into(), truncate_text(old, 200));
+                    }
+                    if let Some(new) = first.get("new_string").and_then(|v| v.as_str()) {
+                        summary.insert("new_string".into(), truncate_text(new, 200));
+                    }
+                }
+            }
+        }
+        "TodoWrite" => {
+            if let Some(todos) = obj.get("todos").and_then(|v| v.as_array()) {
+                let rendered: Vec<String> = todos
+                    .iter()
+                    .filter_map(|t| {
+                        let content = t.get("content").and_then(|v| v.as_str())?;
+                        let status = t
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("pending");
+                        Some(format!("[{status}] {content}"))
+                    })
+                    .collect();
+                if !rendered.is_empty() {
+                    summary.insert("todos".into(), truncate_text(&rendered.join("; "), 500));
+                }
             }
         }
         "Bash" => {
@@ -477,7 +525,50 @@ mod tests {
             serde_json::json!({"file_path": "/home/user/src/main.rs", "content": "fn main() {}"});
         let summary = extract_tool_input_summary("Write", &input);
         assert_eq!(summary.get("file_path").unwrap(), "/home/user/src/main.rs");
-        assert!(!summary.contains_key("content"));
+        assert_eq!(summary.get("content").unwrap(), "fn main() {}");
+    }
+
+    #[test]
+    fn test_extract_tool_input_summary_edit() {
+        let input = serde_json::json!({
+            "file_path": "/home/user/src/main.rs",
+            "old_string": "let x = 1;",
+            "new_string": "let x = 2;"
+        });
+        let summary = extract_tool_input_summary("Edit", &input);
+        assert_eq!(summary.get("file_path").unwrap(), "/home/user/src/main.rs");
+        assert_eq!(summary.get("old_string").unwrap(), "let x = 1;");
+        assert_eq!(summary.get("new_string").unwrap(), "let x = 2;");
+    }
+
+    #[test]
+    fn test_extract_tool_input_summary_multiedit() {
+        let input = serde_json::json!({
+            "file_path": "/home/user/src/main.rs",
+            "edits": [
+                {"old_string": "a", "new_string": "b"},
+                {"old_string": "c", "new_string": "d"}
+            ]
+        });
+        let summary = extract_tool_input_summary("MultiEdit", &input);
+        assert_eq!(summary.get("file_path").unwrap(), "/home/user/src/main.rs");
+        assert_eq!(summary.get("edit_count").unwrap(), "2");
+        assert_eq!(summary.get("old_string").unwrap(), "a");
+        assert_eq!(summary.get("new_string").unwrap(), "b");
+    }
+
+    #[test]
+    fn test_extract_tool_input_summary_todowrite() {
+        let input = serde_json::json!({
+            "todos": [
+                {"content": "first task", "status": "completed"},
+                {"content": "second task", "status": "in_progress"}
+            ]
+        });
+        let summary = extract_tool_input_summary("TodoWrite", &input);
+        let todos = summary.get("todos").unwrap();
+        assert!(todos.contains("[completed] first task"));
+        assert!(todos.contains("[in_progress] second task"));
     }
 
     #[test]
