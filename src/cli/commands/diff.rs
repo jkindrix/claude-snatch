@@ -406,23 +406,22 @@ pub fn compare_conversations(first: &Conversation, second: &Conversation) -> Con
     diff.removed_messages = first_uuids.difference(&second_uuids).count();
     diff.common_messages = first_uuids.intersection(&second_uuids).count();
 
-    // Count message types in first conversation
+    // Count message types. Assistant turns dedup streaming chunks (one turn is
+    // written as several nodes sharing a message.id), matching get_session_info
+    // and CLI info.
     for node in first.nodes().values() {
-        match node.entry.message_type() {
-            "user" => diff.first_user_count += 1,
-            "assistant" => diff.first_assistant_count += 1,
-            _ => {}
+        if node.entry.message_type() == "user" {
+            diff.first_user_count += 1;
         }
     }
+    diff.first_assistant_count = first.message_group_count();
 
-    // Count message types in second conversation
     for node in second.nodes().values() {
-        match node.entry.message_type() {
-            "user" => diff.second_user_count += 1,
-            "assistant" => diff.second_assistant_count += 1,
-            _ => {}
+        if node.entry.message_type() == "user" {
+            diff.second_user_count += 1;
         }
     }
+    diff.second_assistant_count = second.message_group_count();
 
     // Count branches
     diff.first_branch_count = first.branch_count();
@@ -488,6 +487,29 @@ mod tests {
             ..Default::default()
         };
         assert!(!diff.is_identical());
+    }
+
+    #[test]
+    fn test_compare_conversations_dedups_streaming_chunks() {
+        // A turn split into streaming chunks (shared message.id across nodes)
+        // must count as one assistant turn, consistent with get_session_info.
+        let chunk = |uuid: &str, parent: &str, msg_id: &str| {
+            let json = format!(
+                r#"{{"type":"assistant","uuid":"{uuid}","parentUuid":"{parent}","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","version":"2.1.0","isSidechain":false,"message":{{"id":"{msg_id}","type":"message","role":"assistant","model":"m","content":[{{"type":"text","text":"x"}}]}}}}"#
+            );
+            serde_json::from_str::<crate::model::LogEntry>(&json).unwrap()
+        };
+        let entries = vec![
+            chunk("c1", "root", "msg_A"),
+            chunk("c2", "c1", "msg_A"),
+            chunk("c3", "c2", "msg_B"),
+        ];
+        let conv = Conversation::from_entries(entries).unwrap();
+        let diff = compare_conversations(&conv, &conv);
+
+        // 3 chunk nodes, 2 distinct turns.
+        assert_eq!(diff.first_assistant_count, 2);
+        assert_eq!(diff.second_assistant_count, 2);
     }
 
     #[test]
