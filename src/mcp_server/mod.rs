@@ -597,6 +597,9 @@ impl SnatchServer {
                                         file_path: summary.get("file_path").cloned(),
                                         command: summary.get("command").cloned(),
                                         pattern: summary.get("pattern").cloned(),
+                                        subagent_type: summary.get("subagent_type").cloned(),
+                                        description: summary.get("description").cloned(),
+                                        prompt: summary.get("prompt").cloned(),
                                     }
                                 })
                                 .collect()

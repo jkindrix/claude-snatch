@@ -200,6 +200,12 @@ pub struct ToolDetail {
     pub command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
 }
 
 /// Response for get_session_messages.

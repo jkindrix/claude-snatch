@@ -190,9 +190,15 @@ pub fn extract_tool_input_summary(
                 summary.insert("pattern".into(), p.to_string());
             }
         }
-        "Agent" => {
+        "Agent" | "Task" => {
             if let Some(desc) = obj.get("description").and_then(|v| v.as_str()) {
                 summary.insert("description".into(), truncate_text(desc, 100));
+            }
+            if let Some(st) = obj.get("subagent_type").and_then(|v| v.as_str()) {
+                summary.insert("subagent_type".into(), st.to_string());
+            }
+            if let Some(prompt) = obj.get("prompt").and_then(|v| v.as_str()) {
+                summary.insert("prompt".into(), truncate_text(prompt, 500));
             }
         }
         "WebSearch" => {
@@ -454,6 +460,28 @@ mod tests {
         let summary = extract_tool_input_summary("Grep", &input);
         assert_eq!(summary.get("pattern").unwrap(), "fn main");
         assert_eq!(summary.get("path").unwrap(), "/src");
+    }
+
+    #[test]
+    fn test_extract_tool_input_summary_agent() {
+        let input = serde_json::json!({
+            "subagent_type": "Explore",
+            "description": "Tests, versioning, release hygiene",
+            "prompt": "Inspect the repository at /tmp/rust-mssql-driver."
+        });
+        let summary = extract_tool_input_summary("Agent", &input);
+        assert_eq!(summary.get("subagent_type").unwrap(), "Explore");
+        assert_eq!(
+            summary.get("description").unwrap(),
+            "Tests, versioning, release hygiene"
+        );
+        assert_eq!(
+            summary.get("prompt").unwrap(),
+            "Inspect the repository at /tmp/rust-mssql-driver."
+        );
+        // "Task" is the older alias for the same tool.
+        let task_summary = extract_tool_input_summary("Task", &input);
+        assert_eq!(task_summary.get("subagent_type").unwrap(), "Explore");
     }
 
     #[test]
