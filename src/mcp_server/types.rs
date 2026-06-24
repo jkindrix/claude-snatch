@@ -83,12 +83,27 @@ pub struct SessionInfoResponse {
     pub cache_read_tokens: u64,
     pub cache_creation_tokens: u64,
     pub total_processed_tokens: u64,
+    /// Canonical message count: human user prompts plus distinct assistant
+    /// turns (deduped by message.id) on the main thread. Matches
+    /// get_session_messages.total_messages. Note this is main-thread-scoped, so
+    /// it does not equal user_messages + assistant_messages below (those are
+    /// whole-session, including sidechains and tool-result carriers).
     pub messages: usize,
+    /// Whole-session user-message nodes, including tool-result carriers and
+    /// sidechains (broader scope than `messages`).
     pub user_messages: usize,
+    /// Whole-session distinct assistant turns, including sidechains (broader
+    /// scope than `messages`).
     pub assistant_messages: usize,
     pub tool_invocations: usize,
     pub cache_hit_rate: f64,
+    /// Estimated cost in USD. Partial (priced models only) when
+    /// `unpriced_models` is non-empty; null when no model could be priced.
     pub estimated_cost: Option<f64>,
+    /// Models in this session with no known rate, excluded from
+    /// `estimated_cost`. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unpriced_models: Vec<String>,
     /// Subagents spawned by this session, attached to their spawning Agent/Task
     /// call via `tool_use_id` when available. Empty for subagent sessions or when
     /// none were spawned. The transcripts live in separate `agent-*.jsonl` files

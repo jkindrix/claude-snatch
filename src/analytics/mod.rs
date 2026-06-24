@@ -336,6 +336,7 @@ impl SessionAnalytics {
             error_count: self.total_errors(),
             cache_hit_rate: self.cache_efficiency(),
             estimated_cost: self.usage.estimated_cost,
+            unpriced_models: self.usage.unpriced_models.clone(),
             branch_count: self.branch_count,
             primary_model: self.primary_model().map(String::from),
         }
@@ -608,8 +609,11 @@ pub struct AnalyticsSummary {
     pub error_count: usize,
     /// Cache hit rate percentage.
     pub cache_hit_rate: f64,
-    /// Estimated cost in USD.
+    /// Estimated cost in USD. Partial when `unpriced_models` is non-empty.
     pub estimated_cost: Option<f64>,
+    /// Models with no known rate, excluded from `estimated_cost`. Non-empty
+    /// means the cost estimate covers only the priced models.
+    pub unpriced_models: Vec<String>,
     /// Branch count.
     pub branch_count: usize,
     /// Primary model used.
@@ -650,10 +654,12 @@ impl AnalyticsSummary {
             error_count: 0,
             cache_hit_rate: 0.0,
             estimated_cost: None,
+            unpriced_models: Vec::new(),
             branch_count: 0,
             primary_model: None,
         };
         let mut cost = 0.0f64;
+        let mut unpriced: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for s in summaries {
             agg.total_messages += s.total_messages;
             agg.user_messages += s.user_messages;
@@ -668,10 +674,12 @@ impl AnalyticsSummary {
             agg.thinking_blocks += s.thinking_blocks;
             agg.error_count += s.error_count;
             cost += s.estimated_cost.unwrap_or(0.0);
+            unpriced.extend(s.unpriced_models.iter().cloned());
         }
         if cost > 0.0 {
             agg.estimated_cost = Some(cost);
         }
+        agg.unpriced_models = unpriced.into_iter().collect();
         agg
     }
 
@@ -2034,6 +2042,7 @@ mod tests {
             error_count: 0,
             cache_hit_rate: 0.0,
             estimated_cost: Some(0.0042),
+            unpriced_models: Vec::new(),
             branch_count: 0,
             primary_model: None,
         };

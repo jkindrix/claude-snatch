@@ -287,6 +287,7 @@ impl SnatchServer {
             tool_invocations: summary.tool_invocations,
             cache_hit_rate: summary.cache_hit_rate,
             estimated_cost: summary.estimated_cost,
+            unpriced_models: summary.unpriced_models.clone(),
             subagents,
         };
 

@@ -387,8 +387,12 @@ pub struct AggregatedUsage {
     pub tools_by_name: IndexMap<String, usize>,
     /// Total errors encountered.
     pub error_count: usize,
-    /// Estimated total cost.
+    /// Estimated total cost. When `by_model` contains models with no known
+    /// rate (see `unpriced_models`), this sum covers only the priced models.
     pub estimated_cost: Option<f64>,
+    /// Models present in `by_model` that have no known rate, so their cost is
+    /// excluded from `estimated_cost`. Non-empty means the estimate is partial.
+    pub unpriced_models: Vec<String>,
 }
 
 impl AggregatedUsage {
@@ -411,17 +415,22 @@ impl AggregatedUsage {
     pub fn calculate_cost(&mut self) {
         let mut total = 0.0;
         let mut priced = false;
+        let mut unpriced = Vec::new();
 
         for (model, usage) in &self.by_model {
             if let Some(pricing) = ModelPricing::for_model(model) {
                 let cost = pricing.calculate_cost(usage);
                 total += cost.total_cost;
                 priced = true;
+            } else {
+                unpriced.push(model.clone());
             }
         }
 
+        self.unpriced_models = unpriced;
         // If no model in the breakdown has a known rate, the cost is
-        // unavailable rather than a misleading $0.
+        // unavailable rather than a misleading $0. When some are priced, the
+        // sum is partial — `unpriced_models` flags what was excluded.
         self.estimated_cost = if priced { Some(total) } else { None };
     }
 
@@ -727,6 +736,33 @@ mod tests {
         // A session whose only model has no known rate yields no estimate,
         // rather than a misleading $0.00.
         assert_eq!(agg.estimated_cost, None);
+        assert_eq!(agg.unpriced_models, vec!["<synthetic>".to_string()]);
+    }
+
+    #[test]
+    fn test_mixed_pricing_reports_partial_with_signal() {
+        let mut agg = AggregatedUsage::default();
+        agg.add_usage(
+            "claude-opus-4-8",
+            &Usage {
+                input_tokens: 1_000_000,
+                output_tokens: 0,
+                ..Default::default()
+            },
+        );
+        agg.add_usage(
+            "retired-3-x",
+            &Usage {
+                input_tokens: 1000,
+                output_tokens: 500,
+                ..Default::default()
+            },
+        );
+        agg.calculate_cost();
+        // The priced model's cost is preserved ($5/M input * 1M = $5)...
+        assert_eq!(agg.estimated_cost, Some(5.0));
+        // ...and the unpriceable model is flagged rather than silently dropped.
+        assert_eq!(agg.unpriced_models, vec!["retired-3-x".to_string()]);
     }
 
     #[test]
