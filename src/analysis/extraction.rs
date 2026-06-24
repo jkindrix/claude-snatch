@@ -323,6 +323,32 @@ pub fn extract_error_preview(
     }
 }
 
+/// Extract a plain-text preview of a tool result's content, for both success
+/// and error results.
+///
+/// Returns `None` when the result carries no content (or only non-text content).
+/// Extracts plain text from the content (not Debug format).
+pub fn extract_result_preview(
+    result: &crate::model::content::ToolResult,
+    max_len: usize,
+) -> Option<String> {
+    let content = result.content.as_ref()?;
+    let text = match content {
+        crate::model::content::ToolResultContent::String(s) => s.clone(),
+        crate::model::content::ToolResultContent::Array(arr) => arr
+            .iter()
+            .filter_map(|v| v.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(truncate_text(trimmed, max_len))
+    }
+}
+
 /// Check if an Assistant message has thinking blocks.
 pub fn has_thinking(entry: &LogEntry) -> bool {
     match entry {
@@ -541,5 +567,48 @@ mod tests {
         assert!(!is_noise_text("")); // empty is not noise (it's nothing)
         assert!(!is_noise_text("<p>HTML paragraph</p>")); // random XML is not noise
         assert!(!is_noise_text("[some bracketed text]")); // only interrupt markers
+    }
+
+    #[test]
+    fn test_extract_result_preview_string() {
+        let r: crate::model::content::ToolResult =
+            serde_json::from_str(r#"{"tool_use_id":"t1","content":"hello world"}"#).unwrap();
+        assert_eq!(
+            extract_result_preview(&r, 100).as_deref(),
+            Some("hello world")
+        );
+    }
+
+    #[test]
+    fn test_extract_result_preview_array_joins_text() {
+        let r: crate::model::content::ToolResult = serde_json::from_str(
+            r#"{"tool_use_id":"t1","content":[{"type":"text","text":"part one"},{"type":"text","text":"part two"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            extract_result_preview(&r, 100).as_deref(),
+            Some("part one\npart two")
+        );
+    }
+
+    #[test]
+    fn test_extract_result_preview_extracts_success_and_error() {
+        // Unlike extract_error_preview, this returns content for both states.
+        let err: crate::model::content::ToolResult =
+            serde_json::from_str(r#"{"tool_use_id":"t1","content":"boom","is_error":true}"#)
+                .unwrap();
+        assert_eq!(extract_result_preview(&err, 100).as_deref(), Some("boom"));
+        // The error-only helper still bails on success.
+        let ok: crate::model::content::ToolResult =
+            serde_json::from_str(r#"{"tool_use_id":"t1","content":"ok"}"#).unwrap();
+        assert!(extract_error_preview(&ok, 100).is_none());
+        assert_eq!(extract_result_preview(&ok, 100).as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn test_extract_result_preview_absent_content_is_none() {
+        let r: crate::model::content::ToolResult =
+            serde_json::from_str(r#"{"tool_use_id":"t1"}"#).unwrap();
+        assert!(extract_result_preview(&r, 100).is_none());
     }
 }

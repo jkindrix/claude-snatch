@@ -16,7 +16,7 @@ use super::SnatchServer;
 // Re-export analysis functions so `use helpers::*` in mod.rs continues to work.
 pub use crate::analysis::extraction::{
     extract_assistant_summary, extract_error_preview, extract_files_from_tools,
-    extract_thinking_text, extract_tool_input_summary, extract_tool_names,
+    extract_result_preview, extract_thinking_text, extract_tool_input_summary, extract_tool_names,
     extract_user_prompt_text, find_compaction_events, get_model, has_thinking, has_tool_errors,
     is_human_prompt, truncate_text,
 };

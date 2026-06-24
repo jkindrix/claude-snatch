@@ -49,7 +49,7 @@ use crate::reconstruction::Conversation;
 
 use helpers::{
     extract_assistant_summary, extract_error_preview, extract_files_from_tools,
-    extract_thinking_text, extract_tool_input_summary, extract_tool_names,
+    extract_result_preview, extract_thinking_text, extract_tool_input_summary, extract_tool_names,
     extract_user_prompt_text, find_compaction_events, get_claude_dir, get_model, has_thinking,
     is_human_prompt, parse_timestamp_param, period_cutoff, resolve_project, resolve_session,
     resolve_session_with_chain, search_entry_text, truncate_text,
@@ -517,6 +517,45 @@ impl SnatchServer {
         let paginated: Vec<(usize, &LogEntry)> =
             indexed.into_iter().skip(offset).take(limit).collect();
 
+        // Map tool_use_id -> (had_error, result_preview) so the "full" detail
+        // builder can surface each tool's output, joined to the assistant's
+        // tool_use call. Scoped to the tool_use ids actually in the rendered
+        // page so we don't clone every result's content (e.g. large file reads)
+        // across the whole session. Only built at "full" detail.
+        let tool_result_previews: HashMap<String, (bool, Option<String>)> = if detail == "full" {
+            let needed: HashSet<&str> = paginated
+                .iter()
+                .filter_map(|(_, e)| match e {
+                    LogEntry::Assistant(a) => Some(a),
+                    _ => None,
+                })
+                .flat_map(|a| a.message.tool_uses())
+                .map(|t| t.id.as_str())
+                .collect();
+            let mut map = HashMap::new();
+            if !needed.is_empty() {
+                for entry in &resolved.conversation.main_thread_entries() {
+                    if let LogEntry::User(user) = entry {
+                        for result in user.message.tool_results() {
+                            if !needed.contains(result.tool_use_id.as_str()) {
+                                continue;
+                            }
+                            let is_err = result.is_error == Some(true);
+                            let preview = if is_err {
+                                extract_error_preview(result, 300)
+                            } else {
+                                extract_result_preview(result, 500)
+                            };
+                            map.insert(result.tool_use_id.clone(), (is_err, preview));
+                        }
+                    }
+                }
+            }
+            map
+        } else {
+            HashMap::new()
+        };
+
         let truncate_len = match detail {
             "overview" => 200,
             "conversation" => 500,
@@ -636,6 +675,19 @@ impl SnatchServer {
                                 .map(|t| {
                                     let summary = extract_tool_input_summary(&t.name, &t.input);
                                     let rendered = subagent_renders.get(&t.id);
+                                    let subagent_result_preview =
+                                        rendered.and_then(|r| r.result_preview.clone());
+                                    let (had_error, mut result_preview) =
+                                        match tool_result_previews.get(&t.id) {
+                                            Some((err, prev)) => (*err, prev.clone()),
+                                            None => (false, None),
+                                        };
+                                    // Skip the generic result preview when a richer
+                                    // subagent preview is already attached, to avoid
+                                    // duplicating the same text.
+                                    if subagent_result_preview.is_some() {
+                                        result_preview = None;
+                                    }
                                     ToolDetail {
                                         tool_name: t.name.clone(),
                                         file_path: summary.get("file_path").cloned(),
@@ -645,10 +697,11 @@ impl SnatchServer {
                                         description: summary.get("description").cloned(),
                                         prompt: summary.get("prompt").cloned(),
                                         subagent_session_id: rendered.map(|r| r.session_id.clone()),
-                                        subagent_result_preview: rendered
-                                            .and_then(|r| r.result_preview.clone()),
+                                        subagent_result_preview,
                                         subagent_transcript: rendered
                                             .and_then(|r| r.transcript.clone()),
+                                        had_error: if had_error { Some(true) } else { None },
+                                        result_preview,
                                     }
                                 })
                                 .collect()
@@ -1166,22 +1219,25 @@ impl SnatchServer {
             input: serde_json::Value,
             had_error: bool,
             error_text: Option<String>,
+            result_text: Option<String>,
         }
 
         let mut all_calls: Vec<ToolCallWithResult> = Vec::new();
-        let mut tool_result_map: HashMap<String, (bool, Option<String>)> = HashMap::new();
+        let mut tool_result_map: HashMap<String, (bool, Option<String>, Option<String>)> =
+            HashMap::new();
 
         // First pass: collect tool results from user messages
         for entry in &main_entries {
             if let LogEntry::User(user) = entry {
                 for result in user.message.tool_results() {
                     let is_err = result.is_error == Some(true);
-                    let err_text = if is_err {
-                        extract_error_preview(result, 300)
+                    let (err_text, res_text) = if is_err {
+                        (extract_error_preview(result, 300), None)
                     } else {
-                        None
+                        (None, extract_result_preview(result, 500))
                     };
-                    tool_result_map.insert(result.tool_use_id.clone(), (is_err, err_text));
+                    tool_result_map
+                        .insert(result.tool_use_id.clone(), (is_err, err_text, res_text));
                 }
             }
         }
@@ -1191,10 +1247,10 @@ impl SnatchServer {
             if let LogEntry::Assistant(assistant) = entry {
                 let timestamp = entry.timestamp().map(|t| t.to_rfc3339());
                 for tool_use in assistant.message.tool_uses() {
-                    let (had_error, error_text) = tool_result_map
+                    let (had_error, error_text, result_text) = tool_result_map
                         .get(&tool_use.id)
                         .cloned()
-                        .unwrap_or((false, None));
+                        .unwrap_or((false, None, None));
 
                     all_calls.push(ToolCallWithResult {
                         timestamp: timestamp.clone(),
@@ -1202,6 +1258,7 @@ impl SnatchServer {
                         input: tool_use.input.clone(),
                         had_error,
                         error_text,
+                        result_text,
                     });
                 }
             }
@@ -1260,6 +1317,7 @@ impl SnatchServer {
                     input_summary,
                     had_error: call.had_error,
                     error_preview: call.error_text,
+                    result_preview: call.result_text,
                 }
             })
             .collect();
@@ -3571,6 +3629,188 @@ mod tests {
                     offset: None,
                 })
                 .await,
+        );
+    }
+
+    /// Session with a successful Read, an errored Bash, and an Agent call whose
+    /// result arrives as an array (no sidecar, so it stays unmatched).
+    fn tool_result_session_jsonl(session_id: &str) -> String {
+        let assistant = format!(
+            r#"{{"type":"assistant","uuid":"a1","parentUuid":null,"timestamp":"2026-06-09T18:00:00Z","sessionId":"{session_id}","version":"2.1.0","isSidechain":false,"message":{{"id":"m1","type":"message","role":"assistant","model":"claude","content":[{{"type":"tool_use","id":"toolu_R","name":"Read","input":{{"file_path":"/x.rs"}}}},{{"type":"tool_use","id":"toolu_B","name":"Bash","input":{{"command":"false"}}}},{{"type":"tool_use","id":"toolu_A","name":"Agent","input":{{"description":"d","subagent_type":"Explore","prompt":"p"}}}}]}}}}"#
+        );
+        let results = format!(
+            r#"{{"type":"user","uuid":"u2","parentUuid":"a1","timestamp":"2026-06-09T18:00:01Z","sessionId":"{session_id}","version":"2.1.0","isSidechain":false,"message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_R","content":"FILE_CONTENTS_MARKER"}},{{"type":"tool_result","tool_use_id":"toolu_B","is_error":true,"content":"BASH_ERROR_MARKER"}},{{"type":"tool_result","tool_use_id":"toolu_A","content":[{{"type":"text","text":"AGENT_RESULT_MARKER"}}]}}]}}}}"#
+        );
+        format!("{assistant}\n{results}\n")
+    }
+
+    #[tokio::test]
+    async fn test_get_session_messages_full_surfaces_tool_output() {
+        let sid = "aaaaaaaa-1111-2222-3333-444444444444";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &tool_result_session_jsonl(sid));
+        let server = make_server(&tmp);
+        let text = unwrap_output(
+            server
+                .get_session_messages(GetSessionMessagesRequest {
+                    session_id: sid.to_string(),
+                    detail: Some("full".to_string()),
+                    message_type: None,
+                    limit: None,
+                    offset: None,
+                    reverse: None,
+                    include_thinking: None,
+                    chain_aware: None,
+                    after_timestamp: None,
+                    before_timestamp: None,
+                    include_subagent_transcripts: None,
+                })
+                .await,
+        );
+        // Successful Read output is surfaced.
+        assert!(text.contains("FILE_CONTENTS_MARKER"), "Read output missing");
+        // Errored Bash output is surfaced and flagged.
+        assert!(text.contains("BASH_ERROR_MARKER"), "Bash error missing");
+        assert!(text.contains("had_error"), "had_error flag missing");
+        // An unmatched Agent's array result falls back to the tool_result block.
+        assert!(text.contains("AGENT_RESULT_MARKER"), "Agent result missing");
+    }
+
+    #[tokio::test]
+    async fn test_get_tool_calls_surfaces_result_preview() {
+        let sid = "bbbbbbbb-1111-2222-3333-444444444444";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &tool_result_session_jsonl(sid));
+        let server = make_server(&tmp);
+        let text = unwrap_output(
+            server
+                .get_tool_calls(GetToolCallsRequest {
+                    session_id: sid.to_string(),
+                    tool_filter: None,
+                    errors_only: None,
+                    limit: None,
+                    offset: None,
+                })
+                .await,
+        );
+        assert!(
+            text.contains("result_preview"),
+            "result_preview field missing"
+        );
+        assert!(
+            text.contains("FILE_CONTENTS_MARKER"),
+            "success output missing"
+        );
+        assert!(text.contains("BASH_ERROR_MARKER"), "error preview missing");
+    }
+
+    #[tokio::test]
+    async fn test_full_detail_surfaces_result_when_result_turn_outside_window() {
+        // limit=1 pages in only the assistant turn (idx 0); the tool_result turn
+        // (idx 1) is outside the window. The full-thread scan must still find it.
+        let sid = "dddddddd-1111-2222-3333-444444444444";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &tool_result_session_jsonl(sid));
+        let server = make_server(&tmp);
+        let text = unwrap_output(
+            server
+                .get_session_messages(GetSessionMessagesRequest {
+                    session_id: sid.to_string(),
+                    detail: Some("full".to_string()),
+                    message_type: None,
+                    limit: Some(1),
+                    offset: None,
+                    reverse: None,
+                    include_thinking: None,
+                    chain_aware: None,
+                    after_timestamp: None,
+                    before_timestamp: None,
+                    include_subagent_transcripts: None,
+                })
+                .await,
+        );
+        assert_eq!(
+            text.matches("\"index\"").count(),
+            1,
+            "expected a 1-entry page"
+        );
+        assert!(
+            text.contains("FILE_CONTENTS_MARKER"),
+            "result not surfaced when its turn is outside the window"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_full_detail_dedups_matched_subagent_preview() {
+        // One Agent call whose sidecar carries the spawning toolUseId, so it
+        // matches exactly and gets a subagent_result_preview. The generic
+        // result_preview (from the parent tool_result) must then be suppressed.
+        let sid = "cccccccc-1111-2222-3333-444444444444";
+        let assistant = format!(
+            r#"{{"type":"assistant","uuid":"a1","parentUuid":null,"timestamp":"2026-06-09T18:00:00Z","sessionId":"{sid}","version":"2.1.0","isSidechain":false,"message":{{"id":"m1","type":"message","role":"assistant","model":"claude","content":[{{"type":"tool_use","id":"toolu_A","name":"Agent","input":{{"description":"d","subagent_type":"Explore","prompt":"p"}}}}]}}}}"#
+        );
+        let user = format!(
+            r#"{{"type":"user","uuid":"u2","parentUuid":"a1","timestamp":"2026-06-09T18:00:02Z","sessionId":"{sid}","version":"2.1.0","isSidechain":false,"message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_A","content":[{{"type":"text","text":"PARENT_RESULT_MARKER"}}]}}]}}}}"#
+        );
+        let main = format!("{assistant}\n{user}\n");
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &main);
+
+        // Sidecar transcript + meta with the exact toolUseId for a Pass-1 match.
+        let sub_dir = tmp
+            .path()
+            .join("projects")
+            .join(encode_project_path(PROJECT_PATH))
+            .join(sid)
+            .join("subagents");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+        std::fs::write(
+            sub_dir.join("agent-1.jsonl"),
+            format!(
+                "{}\n",
+                r#"{"type":"assistant","uuid":"s1","parentUuid":null,"timestamp":"2026-06-09T18:00:01Z","sessionId":"agent-1","version":"2.1.0","isSidechain":true,"message":{"id":"sm1","type":"message","role":"assistant","model":"claude","content":[{"type":"text","text":"SUBAGENT_REPORT_MARKER"}]}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            sub_dir.join("agent-1.meta.json"),
+            r#"{"agentType":"Explore","description":"d","toolUseId":"toolu_A"}"#,
+        )
+        .unwrap();
+
+        let server = make_server(&tmp);
+        let text = unwrap_output(
+            server
+                .get_session_messages(GetSessionMessagesRequest {
+                    session_id: sid.to_string(),
+                    detail: Some("full".to_string()),
+                    message_type: None,
+                    limit: None,
+                    offset: None,
+                    reverse: None,
+                    include_thinking: None,
+                    chain_aware: None,
+                    after_timestamp: None,
+                    before_timestamp: None,
+                    include_subagent_transcripts: None,
+                })
+                .await,
+        );
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let messages = v["messages"].as_array().unwrap();
+        let td = messages
+            .iter()
+            .flat_map(|m| m["tool_details"].as_array().into_iter().flatten())
+            .find(|td| td["tool_name"] == "Agent")
+            .expect("Agent tool_detail not found");
+        // The richer subagent preview is present...
+        assert!(
+            td["subagent_result_preview"]
+                .as_str()
+                .unwrap_or("")
+                .contains("SUBAGENT_REPORT_MARKER"),
+            "subagent_result_preview missing for matched Agent"
+        );
+        // ...and the generic result_preview is suppressed (no duplication).
+        assert!(
+            td.get("result_preview").is_none() || td["result_preview"].is_null(),
+            "result_preview should be deduped when subagent preview is present"
         );
     }
 }

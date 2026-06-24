@@ -246,6 +246,14 @@ pub struct ToolDetail {
     /// Full subagent transcript, present only when include_subagent_transcripts=true.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent_transcript: Option<Vec<MessageEntry>>,
+    /// Whether the matched tool result was an error (absent when success).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub had_error: Option<bool>,
+    /// Truncated preview of the tool result's output (file contents, stdout,
+    /// matches). For Agent/Task calls a richer subagent_result_preview is used
+    /// instead, so this is absent when that is present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_preview: Option<String>,
 }
 
 /// Response for get_session_messages.
@@ -486,6 +494,9 @@ pub struct ToolCallEntry {
     pub had_error: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_preview: Option<String>,
+    /// Truncated preview of a successful tool result's output (absent on error).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_preview: Option<String>,
 }
 
 /// Tool call summary stats.
