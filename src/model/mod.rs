@@ -47,6 +47,7 @@ pub mod content;
 pub mod message;
 pub mod metadata;
 pub mod schema;
+mod serde_str;
 pub mod tools;
 pub mod usage;
 

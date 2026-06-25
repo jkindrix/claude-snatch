@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 80402f31e0cdbe7504a76fad11ef475f033169d380564197d7b0567274f0721e # shrinks to empty_count = 0, content_lines = ["\t", "\t"]
+cc 76e67250f7bdd4c298b024db7b673f47be7d9d200ac163ab508ee35a497e35bc # shrinks to content = "0"

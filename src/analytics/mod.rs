@@ -148,7 +148,7 @@ impl SessionAnalytics {
         }
 
         match entry {
-            LogEntry::Unknown => {}
+            LogEntry::Unknown(_) => {}
             LogEntry::User(user) => {
                 self.message_counts.user += 1;
 

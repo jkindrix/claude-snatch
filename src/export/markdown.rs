@@ -292,7 +292,25 @@ impl MarkdownExporter {
         options: &ExportOptions,
     ) -> Result<()> {
         match content {
-            ContentBlock::Unknown => {}
+            ContentBlock::Unknown { kind, raw } => {
+                let label = if kind.is_empty() {
+                    "unknown"
+                } else {
+                    kind.as_str()
+                };
+                let json = serde_json::to_string_pretty(raw).unwrap_or_else(|_| raw.to_string());
+                if self.plain_text {
+                    writeln!(writer, "[Unknown content block: {label}]")?;
+                    writeln!(writer, "{json}")?;
+                } else {
+                    writeln!(writer, "**Unknown content block: `{label}`**")?;
+                    writeln!(writer)?;
+                    writeln!(writer, "```json")?;
+                    writeln!(writer, "{json}")?;
+                    writeln!(writer, "```")?;
+                }
+                writeln!(writer)?;
+            }
             ContentBlock::Text(text) => {
                 // Handle code-only mode - extract code blocks instead of full text
                 if options.is_code_only() {
@@ -733,7 +751,7 @@ impl MarkdownExporter {
         options: &ExportOptions,
     ) -> Result<()> {
         match entry {
-            LogEntry::Unknown => {}
+            LogEntry::Unknown(_) => {}
             LogEntry::User(user) => {
                 if options.should_include_user() {
                     // Skip user messages that have no visible text content when using
@@ -790,12 +808,13 @@ fn format_timestamp(ts: &DateTime<Utc>) -> String {
 }
 
 /// Format a stop reason for display.
-fn format_stop_reason(reason: &StopReason) -> &'static str {
+fn format_stop_reason(reason: &StopReason) -> String {
     match reason {
-        StopReason::ToolUse => "tool_use",
-        StopReason::EndTurn => "end_turn",
-        StopReason::MaxTokens => "max_tokens",
-        StopReason::StopSequence => "stop_sequence",
+        StopReason::ToolUse => "tool_use".to_string(),
+        StopReason::EndTurn => "end_turn".to_string(),
+        StopReason::MaxTokens => "max_tokens".to_string(),
+        StopReason::StopSequence => "stop_sequence".to_string(),
+        StopReason::Other(s) => s.clone(),
     }
 }
 

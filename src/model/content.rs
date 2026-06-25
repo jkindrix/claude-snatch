@@ -9,8 +9,9 @@
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{from_value, Value};
 
+use super::serde_str::serde_string_enum;
 use super::usage::Usage;
 
 /// Assistant message content structure.
@@ -124,8 +125,7 @@ impl AssistantContent {
 }
 
 /// Stop reason - why generation stopped.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopReason {
     /// Generation paused for tool invocation (~94% of cases).
     ToolUse,
@@ -135,7 +135,17 @@ pub enum StopReason {
     MaxTokens,
     /// Custom stop sequence triggered.
     StopSequence,
+    /// Any stop reason not modeled above (e.g. a future `pause_turn`),
+    /// captured verbatim so it never drops the assistant message.
+    Other(String),
 }
+
+serde_string_enum!(StopReason {
+    ToolUse => "tool_use",
+    EndTurn => "end_turn",
+    MaxTokens => "max_tokens",
+    StopSequence => "stop_sequence",
+} other Other);
 
 /// Container context for code execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,9 +207,12 @@ pub struct ContextEdit {
     pub extra: IndexMap<String, Value>,
 }
 
-/// Content block - one of 5 types.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+/// Content block - one of 5 modeled types plus a raw-preserving fallback.
+///
+/// Serialization is implemented manually (see `ContentBlockRef`) so that the
+/// [`ContentBlock::Unknown`] variant re-emits its original raw JSON object
+/// verbatim rather than a wrapper shape.
+#[derive(Debug, Clone)]
 pub enum ContentBlock {
     /// Natural language text.
     Text(TextBlock),
@@ -217,10 +230,68 @@ pub enum ContentBlock {
     Image(ImageBlock),
 
     /// Any content-block type not modeled above (e.g. `redacted_thinking`,
-    /// `server_tool_use`). Captured so an unknown block doesn't drop the whole
-    /// message; the block's payload is not retained.
-    #[serde(other)]
-    Unknown,
+    /// `server_tool_use`, `fallback`). The block's `type` and full raw JSON are
+    /// retained so the payload survives and re-serializes verbatim.
+    Unknown {
+        /// The block's `type` discriminator (empty if absent).
+        kind: String,
+        /// The full original block JSON.
+        raw: Value,
+    },
+}
+
+/// Borrowed mirror of [`ContentBlock`]'s known variants, used solely to drive
+/// serialization with the original internally-tagged `type` shape. Has no
+/// `Unknown` arm (that serializes its raw value directly), so it never recurses
+/// back into `ContentBlock::serialize`.
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ContentBlockRef<'a> {
+    Text(&'a TextBlock),
+    ToolUse(&'a ToolUse),
+    ToolResult(&'a ToolResult),
+    Thinking(&'a ThinkingBlock),
+    Image(&'a ImageBlock),
+}
+
+impl Serialize for ContentBlock {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Text(b) => ContentBlockRef::Text(b).serialize(serializer),
+            Self::ToolUse(b) => ContentBlockRef::ToolUse(b).serialize(serializer),
+            Self::ToolResult(b) => ContentBlockRef::ToolResult(b).serialize(serializer),
+            Self::Thinking(b) => ContentBlockRef::Thinking(b).serialize(serializer),
+            Self::Image(b) => ContentBlockRef::Image(b).serialize(serializer),
+            Self::Unknown { raw, .. } => raw.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ContentBlock {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let value = Value::deserialize(deserializer)?;
+        let kind = value.get("type").and_then(Value::as_str).map(str::to_owned);
+        Ok(match kind.as_deref() {
+            Some("text") => Self::Text(from_value(value).map_err(D::Error::custom)?),
+            Some("tool_use") => Self::ToolUse(from_value(value).map_err(D::Error::custom)?),
+            Some("tool_result") => Self::ToolResult(from_value(value).map_err(D::Error::custom)?),
+            Some("thinking") => Self::Thinking(from_value(value).map_err(D::Error::custom)?),
+            Some("image") => Self::Image(from_value(value).map_err(D::Error::custom)?),
+            // Unknown block: retain verbatim, but only if it is a JSON object.
+            other if value.is_object() => Self::Unknown {
+                kind: other.unwrap_or_default().to_string(),
+                raw: value,
+            },
+            _ => return Err(D::Error::custom("content block must be a JSON object")),
+        })
+    }
 }
 
 impl ContentBlock {
@@ -233,7 +304,7 @@ impl ContentBlock {
             Self::ToolResult(_) => "tool_result",
             Self::Thinking(_) => "thinking",
             Self::Image(_) => "image",
-            Self::Unknown => "unknown",
+            Self::Unknown { .. } => "unknown",
         }
     }
 
@@ -720,5 +791,18 @@ mod tests {
             ToolResultContent::String("plain".into()).to_display_string(true),
             "plain"
         );
+    }
+
+    #[test]
+    fn test_stop_reason_known_and_unknown_roundtrip() {
+        // Known values map to their wire string; an unmodeled value is captured
+        // verbatim (exact casing) and never fails the parent message.
+        let known: StopReason = serde_json::from_str(r#""end_turn""#).unwrap();
+        assert_eq!(known, StopReason::EndTurn);
+        assert_eq!(serde_json::to_string(&known).unwrap(), r#""end_turn""#);
+
+        let unknown: StopReason = serde_json::from_str(r#""pause_turn""#).unwrap();
+        assert_eq!(unknown, StopReason::Other("pause_turn".to_string()));
+        assert_eq!(serde_json::to_string(&unknown).unwrap(), r#""pause_turn""#);
     }
 }

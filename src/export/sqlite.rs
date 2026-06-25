@@ -599,7 +599,7 @@ impl SqliteExporter {
         options: &ExportOptions,
     ) -> Result<()> {
         match block {
-            ContentBlock::Unknown => {}
+            ContentBlock::Unknown { .. } => {}
             ContentBlock::Text(text) => {
                 conn.execute(
                     "INSERT INTO content_blocks (message_fk, block_type, content, block_order)

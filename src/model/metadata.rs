@@ -10,6 +10,8 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::serde_str::serde_string_enum;
+
 /// Extended thinking configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThinkingMetadata {
@@ -31,8 +33,7 @@ pub struct ThinkingMetadata {
 }
 
 /// Thinking budget level.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ThinkingLevel {
     /// High thinking budget.
     High,
@@ -41,7 +42,15 @@ pub enum ThinkingLevel {
     Medium,
     /// Low thinking budget.
     Low,
+    /// Any level not modeled above, captured verbatim.
+    Other(String),
 }
+
+serde_string_enum!(ThinkingLevel {
+    High => "high",
+    Medium => "medium",
+    Low => "low",
+} other Other);
 
 /// Workflow task item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,8 +76,7 @@ pub struct Todo {
 }
 
 /// Todo status.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TodoStatus {
     /// Task not yet started.
     Pending,
@@ -76,7 +84,15 @@ pub enum TodoStatus {
     InProgress,
     /// Task finished successfully.
     Completed,
+    /// Any status not modeled above, captured verbatim.
+    Other(String),
 }
+
+serde_string_enum!(TodoStatus {
+    Pending => "pending",
+    InProgress => "in_progress",
+    Completed => "completed",
+} other Other);
 
 impl Todo {
     /// Check if the task is completed.
@@ -156,14 +172,20 @@ pub struct CompactMetadata {
 }
 
 /// Compaction trigger type.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompactTrigger {
     /// User-initiated compaction.
     Manual,
     /// Automatic compaction due to context limits.
     Auto,
+    /// Any trigger not modeled above, captured verbatim.
+    Other(String),
 }
+
+serde_string_enum!(CompactTrigger {
+    Manual => "manual",
+    Auto => "auto",
+} other Other);
 
 /// API error details from system messages.
 #[derive(Debug, Clone, Serialize, Deserialize)]

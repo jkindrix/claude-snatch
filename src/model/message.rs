@@ -12,15 +12,19 @@
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{from_value, Value};
 
 use super::content::{AssistantContent, ContentBlock, ImageBlock};
 use super::metadata::{CompactMetadata, HookInfo, ThinkingMetadata, Todo};
+use super::serde_str::serde_string_enum;
 use super::usage::Usage;
 
 /// A parsed JSONL line representing any message type.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+///
+/// Serialization is implemented manually (see `LogEntryRef`) so that the
+/// [`LogEntry::Unknown`] variant re-emits its original raw JSON object verbatim
+/// rather than a `{"type":"unknown", ...}` wrapper shape.
+#[derive(Debug, Clone)]
 pub enum LogEntry {
     /// Claude's responses, tool invocations, thinking blocks.
     Assistant(AssistantMessage),
@@ -35,11 +39,9 @@ pub enum LogEntry {
     Summary(SummaryMessage),
 
     /// File state tracking for undo/redo.
-    #[serde(rename = "file-history-snapshot")]
     FileHistorySnapshot(FileHistorySnapshot),
 
     /// Input buffering control.
-    #[serde(rename = "queue-operation")]
     QueueOperation(QueueOperation),
 
     /// Turn completion markers.
@@ -55,24 +57,117 @@ pub enum LogEntry {
     Attachment(AttachmentMessage),
 
     /// The most recent user prompt, recorded as session sidecar metadata.
-    #[serde(rename = "last-prompt")]
     LastPrompt(LastPromptMessage),
 
     /// Editor mode sidecar metadata.
     Mode(ModeMessage),
 
     /// Permission mode sidecar metadata.
-    #[serde(rename = "permission-mode")]
     PermissionMode(PermissionModeMessage),
 
     /// AI-generated session title metadata.
-    #[serde(rename = "ai-title")]
     AiTitle(AiTitleMessage),
 
-    /// Any entry type not modeled above. Captured so a future/unknown entry
-    /// type degrades to a counted placeholder instead of dropping the line.
-    #[serde(other)]
-    Unknown,
+    /// Any entry type not modeled above. The full raw JSON object is retained so
+    /// the payload — and any `uuid`/`parentUuid`/`timestamp`/etc. — survives
+    /// instead of being dropped, and re-serializes byte-for-content identically.
+    Unknown(Value),
+}
+
+/// Borrowed mirror of [`LogEntry`]'s known variants, used solely to drive
+/// serialization with the original internally-tagged `type` shape. The
+/// [`LogEntry::Unknown`] variant is handled separately (it serializes its raw
+/// value directly), so this enum intentionally has no `Unknown` arm and never
+/// recurses back into `LogEntry::serialize`.
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum LogEntryRef<'a> {
+    Assistant(&'a AssistantMessage),
+    User(&'a UserMessage),
+    System(&'a SystemMessage),
+    Summary(&'a SummaryMessage),
+    #[serde(rename = "file-history-snapshot")]
+    FileHistorySnapshot(&'a FileHistorySnapshot),
+    #[serde(rename = "queue-operation")]
+    QueueOperation(&'a QueueOperation),
+    TurnEnd(&'a TurnEnd),
+    Progress(&'a ProgressMessage),
+    Attachment(&'a AttachmentMessage),
+    #[serde(rename = "last-prompt")]
+    LastPrompt(&'a LastPromptMessage),
+    Mode(&'a ModeMessage),
+    #[serde(rename = "permission-mode")]
+    PermissionMode(&'a PermissionModeMessage),
+    #[serde(rename = "ai-title")]
+    AiTitle(&'a AiTitleMessage),
+}
+
+impl Serialize for LogEntry {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Assistant(m) => LogEntryRef::Assistant(m).serialize(serializer),
+            Self::User(m) => LogEntryRef::User(m).serialize(serializer),
+            Self::System(m) => LogEntryRef::System(m).serialize(serializer),
+            Self::Summary(m) => LogEntryRef::Summary(m).serialize(serializer),
+            Self::FileHistorySnapshot(m) => {
+                LogEntryRef::FileHistorySnapshot(m).serialize(serializer)
+            }
+            Self::QueueOperation(m) => LogEntryRef::QueueOperation(m).serialize(serializer),
+            Self::TurnEnd(m) => LogEntryRef::TurnEnd(m).serialize(serializer),
+            Self::Progress(m) => LogEntryRef::Progress(m).serialize(serializer),
+            Self::Attachment(m) => LogEntryRef::Attachment(m).serialize(serializer),
+            Self::LastPrompt(m) => LogEntryRef::LastPrompt(m).serialize(serializer),
+            Self::Mode(m) => LogEntryRef::Mode(m).serialize(serializer),
+            Self::PermissionMode(m) => LogEntryRef::PermissionMode(m).serialize(serializer),
+            Self::AiTitle(m) => LogEntryRef::AiTitle(m).serialize(serializer),
+            Self::Unknown(raw) => raw.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for LogEntry {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let value = Value::deserialize(deserializer)?;
+        let tag = value.get("type").and_then(Value::as_str).map(str::to_owned);
+        Ok(match tag.as_deref() {
+            Some("assistant") => Self::Assistant(from_value(value).map_err(D::Error::custom)?),
+            Some("user") => Self::User(from_value(value).map_err(D::Error::custom)?),
+            Some("system") => Self::System(from_value(value).map_err(D::Error::custom)?),
+            Some("summary") => Self::Summary(from_value(value).map_err(D::Error::custom)?),
+            Some("file-history-snapshot") => {
+                Self::FileHistorySnapshot(from_value(value).map_err(D::Error::custom)?)
+            }
+            Some("queue-operation") => {
+                Self::QueueOperation(from_value(value).map_err(D::Error::custom)?)
+            }
+            Some("turn_end") => Self::TurnEnd(from_value(value).map_err(D::Error::custom)?),
+            Some("progress") => Self::Progress(from_value(value).map_err(D::Error::custom)?),
+            Some("attachment") => Self::Attachment(from_value(value).map_err(D::Error::custom)?),
+            Some("last-prompt") => Self::LastPrompt(from_value(value).map_err(D::Error::custom)?),
+            Some("mode") => Self::Mode(from_value(value).map_err(D::Error::custom)?),
+            Some("permission-mode") => {
+                Self::PermissionMode(from_value(value).map_err(D::Error::custom)?)
+            }
+            Some("ai-title") => Self::AiTitle(from_value(value).map_err(D::Error::custom)?),
+            // Unknown or absent `type`: retain the whole object verbatim, but
+            // only if it is a JSON object — a bare scalar/array is not a valid
+            // log entry and must still be rejected (strict) / skipped (lenient).
+            _ if value.is_object() => Self::Unknown(value),
+            _ => return Err(D::Error::custom("log entry must be a JSON object")),
+        })
+    }
+}
+
+/// Read a string field from an unknown entry's raw JSON object.
+fn unknown_field<'a>(raw: &'a Value, key: &str) -> Option<&'a str> {
+    raw.get(key).and_then(Value::as_str)
 }
 
 impl LogEntry {
@@ -90,11 +185,10 @@ impl LogEntry {
             Self::QueueOperation(_) => None,
             Self::TurnEnd(_) => None,
             // Sidecar metadata entries carry no UUID.
-            Self::LastPrompt(_)
-            | Self::Mode(_)
-            | Self::PermissionMode(_)
-            | Self::AiTitle(_)
-            | Self::Unknown => None,
+            Self::LastPrompt(_) | Self::Mode(_) | Self::PermissionMode(_) | Self::AiTitle(_) => {
+                None
+            }
+            Self::Unknown(raw) => unknown_field(raw, "uuid"),
         }
     }
 
@@ -107,6 +201,7 @@ impl LogEntry {
             Self::System(m) => m.parent_uuid.as_deref(),
             Self::Progress(m) => m.parent_uuid.as_deref(),
             Self::Attachment(m) => m.parent_uuid.as_deref(),
+            Self::Unknown(raw) => unknown_field(raw, "parentUuid"),
             _ => None,
         }
     }
@@ -116,6 +211,7 @@ impl LogEntry {
     pub fn logical_parent_uuid(&self) -> Option<&str> {
         match self {
             Self::System(m) => m.logical_parent_uuid.as_deref(),
+            Self::Unknown(raw) => unknown_field(raw, "logicalParentUuid"),
             _ => None,
         }
     }
@@ -137,7 +233,7 @@ impl LogEntry {
             Self::QueueOperation(m) => Some(&m.session_id),
             Self::TurnEnd(_) => None,
             Self::Summary(_) => None,
-            Self::Unknown => None,
+            Self::Unknown(raw) => unknown_field(raw, "sessionId"),
         }
     }
 
@@ -155,11 +251,12 @@ impl LogEntry {
             Self::TurnEnd(m) => Some(m.timestamp),
             Self::Summary(_) => None,
             // Sidecar metadata entries carry no timestamp.
-            Self::LastPrompt(_)
-            | Self::Mode(_)
-            | Self::PermissionMode(_)
-            | Self::AiTitle(_)
-            | Self::Unknown => None,
+            Self::LastPrompt(_) | Self::Mode(_) | Self::PermissionMode(_) | Self::AiTitle(_) => {
+                None
+            }
+            Self::Unknown(raw) => unknown_field(raw, "timestamp")
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&Utc)),
         }
     }
 
@@ -183,6 +280,10 @@ impl LogEntry {
             Self::System(m) => m.is_sidechain.unwrap_or(false),
             Self::Progress(m) => m.is_sidechain,
             Self::Attachment(m) => m.is_sidechain,
+            Self::Unknown(raw) => raw
+                .get("isSidechain")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             _ => false,
         }
     }
@@ -225,7 +326,7 @@ impl LogEntry {
             Self::Mode(_) => "mode",
             Self::PermissionMode(_) => "permission-mode",
             Self::AiTitle(_) => "ai-title",
-            Self::Unknown => "unknown",
+            Self::Unknown(_) => "unknown",
         }
     }
 
@@ -242,6 +343,7 @@ impl LogEntry {
             Self::User(m) => m.cwd.as_deref(),
             Self::System(m) => m.cwd.as_deref(),
             Self::Attachment(m) => m.cwd.as_deref(),
+            Self::Unknown(raw) => unknown_field(raw, "cwd"),
             _ => None,
         }
     }
@@ -254,6 +356,7 @@ impl LogEntry {
             Self::User(m) => m.git_branch.as_deref(),
             Self::System(m) => m.git_branch.as_deref(),
             Self::Attachment(m) => m.git_branch.as_deref(),
+            Self::Unknown(raw) => unknown_field(raw, "gitBranch"),
             _ => None,
         }
     }
@@ -712,8 +815,7 @@ pub struct SystemMessage {
 }
 
 /// System message subtypes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SystemSubtype {
     /// Compaction boundary marker.
     CompactBoundary,
@@ -737,10 +839,24 @@ pub enum SystemSubtype {
     Permission,
     /// Tool execution event.
     Tool,
-    /// Unknown subtype for forward compatibility.
-    #[serde(other)]
-    Unknown,
+    /// Any subtype not modeled above, captured verbatim (the original string is
+    /// retained rather than collapsed to a nameless placeholder).
+    Other(String),
 }
+
+serde_string_enum!(SystemSubtype {
+    CompactBoundary => "compact_boundary",
+    StopHookSummary => "stop_hook_summary",
+    ApiError => "api_error",
+    LocalCommand => "local_command",
+    Checkpoint => "checkpoint",
+    Rewind => "rewind",
+    Rename => "rename",
+    Init => "init",
+    Resume => "resume",
+    Permission => "permission",
+    Tool => "tool",
+} other Other);
 
 /// Summary message - Context management summaries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -841,8 +957,7 @@ pub struct QueueOperation {
 }
 
 /// Queue operation types.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueueOperationType {
     /// Add input to queue while processing.
     Enqueue,
@@ -852,7 +967,16 @@ pub enum QueueOperationType {
     Remove,
     /// Clear and process all queued inputs.
     PopAll,
+    /// Any operation not modeled above, captured verbatim.
+    Other(String),
 }
+
+serde_string_enum!(QueueOperationType {
+    Enqueue => "enqueue",
+    Dequeue => "dequeue",
+    Remove => "remove",
+    PopAll => "popAll",
+} other Other);
 
 /// Turn end marker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1165,22 +1289,121 @@ mod tests {
 
     #[test]
     fn test_unknown_entry_type_degrades() {
-        // An unmodeled entry type parses as Unknown instead of failing the line.
+        // An unmodeled entry type parses as Unknown, retaining its full payload.
         let json = r#"{"type":"future-entry-type","uuid":"x1","sessionId":"s","timestamp":"2026-06-21T00:00:00Z","weird":true}"#;
         let entry: LogEntry = serde_json::from_str(json).unwrap();
         assert_eq!(entry.message_type(), "unknown");
+        assert!(matches!(entry, LogEntry::Unknown(_)));
+        // Payload survives: re-serialization equals the original object verbatim
+        // (no `{"type":"unknown", ...}` wrapper shape).
+        let original: Value = serde_json::from_str(json).unwrap();
+        assert_eq!(serde_json::to_value(&entry).unwrap(), original);
+    }
+
+    #[test]
+    fn test_unknown_entry_real_shapes_roundtrip() {
+        // Real unmodeled top-level types observed in the archive must round-trip
+        // by content with their `type` and payload preserved.
+        for json in [
+            r#"{"type":"pr-link","sessionId":"s1","prNumber":136,"prUrl":"https://example/pr/136","prRepository":"o/r","timestamp":"2026-06-10T06:02:47.027Z"}"#,
+            r#"{"type":"custom-title","customTitle":"streaming-primitives","sessionId":"s2"}"#,
+            r#"{"type":"agent-name","sessionId":"s3","name":"explorer"}"#,
+        ] {
+            let entry: LogEntry = serde_json::from_str(json).unwrap();
+            assert!(
+                matches!(entry, LogEntry::Unknown(_)),
+                "expected Unknown for {json}"
+            );
+            let original: Value = serde_json::from_str(json).unwrap();
+            assert_eq!(
+                serde_json::to_value(&entry).unwrap(),
+                original,
+                "round-trip mismatch for {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unknown_entry_accessors_extract_from_raw() {
+        // Tree-linkage fields are recovered from an unknown entry's raw JSON so
+        // it can still thread and be attributed.
+        let json = r#"{"type":"future-msg","uuid":"u9","parentUuid":"p9","logicalParentUuid":"lp9","sessionId":"sess9","timestamp":"2026-06-21T00:00:05Z","isSidechain":true,"cwd":"/work","gitBranch":"feat"}"#;
+        let entry: LogEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.uuid(), Some("u9"));
+        assert_eq!(entry.parent_uuid(), Some("p9"));
+        assert_eq!(entry.logical_parent_uuid(), Some("lp9"));
+        assert_eq!(entry.session_id(), Some("sess9"));
+        assert_eq!(entry.cwd(), Some("/work"));
+        assert_eq!(entry.git_branch(), Some("feat"));
+        assert!(entry.is_sidechain());
+        assert!(entry.timestamp().is_some());
+    }
+
+    #[test]
+    fn test_non_object_entry_still_rejected() {
+        // A bare JSON scalar is not a valid log entry and must error (so strict
+        // mode rejects and lenient mode skips it).
+        assert!(serde_json::from_str::<LogEntry>("123").is_err());
+        assert!(serde_json::from_str::<LogEntry>("true").is_err());
+        assert!(serde_json::from_str::<LogEntry>("null").is_err());
     }
 
     #[test]
     fn test_unknown_content_block_preserves_message() {
         // An unmodeled content block must not drop the whole message; the
-        // sibling text block still parses.
+        // sibling text block still parses and the unknown block is retained.
         let json = r#"{"type":"assistant","uuid":"a1","timestamp":"2026-06-21T00:00:01Z","sessionId":"s","version":"2.1.0","isSidechain":false,"message":{"id":"m1","type":"message","role":"assistant","model":"claude","content":[{"type":"redacted_thinking","data":"opaque"},{"type":"text","text":"survives"}]}}"#;
         let entry: LogEntry = serde_json::from_str(json).unwrap();
-        if let LogEntry::Assistant(a) = entry {
+        if let LogEntry::Assistant(a) = &entry {
             assert_eq!(a.message.combined_text(), "survives");
+            // The redacted_thinking block is retained verbatim, not dropped.
+            let unknown = a
+                .message
+                .content
+                .iter()
+                .find(|b| matches!(b, ContentBlock::Unknown { .. }))
+                .expect("unknown block retained");
+            if let ContentBlock::Unknown { kind, raw } = unknown {
+                assert_eq!(kind, "redacted_thinking");
+                assert_eq!(raw.get("data").and_then(Value::as_str), Some("opaque"));
+            }
         } else {
             panic!("Expected Assistant variant");
+        }
+    }
+
+    #[test]
+    fn test_unknown_content_block_fallback_roundtrip() {
+        // The real `fallback` model-switch block must round-trip verbatim.
+        let block_json = r#"{"type":"fallback","from":{"model":"claude-fable-5"},"to":{"model":"claude-opus-4-8"}}"#;
+        let block: ContentBlock = serde_json::from_str(block_json).unwrap();
+        match &block {
+            ContentBlock::Unknown { kind, .. } => assert_eq!(kind, "fallback"),
+            other => panic!("expected Unknown fallback, got {other:?}"),
+        }
+        let original: Value = serde_json::from_str(block_json).unwrap();
+        assert_eq!(serde_json::to_value(&block).unwrap(), original);
+    }
+
+    #[test]
+    fn test_system_subtype_unknown_preserved_verbatim() {
+        // An unmodeled system subtype is retained as Other(<string>), not
+        // collapsed to a nameless placeholder, and serializes back to the
+        // original string.
+        let json = r#"{"type":"system","subtype":"turn_duration","uuid":"sy9","timestamp":"2026-06-21T00:00:06Z","sessionId":"s","durationMs":31226}"#;
+        let entry: LogEntry = serde_json::from_str(json).unwrap();
+        if let LogEntry::System(s) = &entry {
+            assert_eq!(
+                s.subtype,
+                Some(SystemSubtype::Other("turn_duration".to_string()))
+            );
+            let reser = serde_json::to_value(&entry).unwrap();
+            assert_eq!(
+                reser.get("subtype").and_then(Value::as_str),
+                Some("turn_duration")
+            );
+        } else {
+            panic!("Expected System variant");
         }
     }
 

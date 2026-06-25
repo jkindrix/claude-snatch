@@ -213,7 +213,7 @@ impl TextExporter {
                     ContentBlock::ToolUse(_) => options.should_include_tool_use(),
                     ContentBlock::Thinking(_) => options.should_include_thinking(),
                     ContentBlock::Image(_) => true,
-                    ContentBlock::Unknown => false,
+                    ContentBlock::Unknown { .. } => true,
                 })
             }
         }
@@ -298,7 +298,20 @@ impl TextExporter {
         options: &ExportOptions,
     ) -> Result<()> {
         match content {
-            ContentBlock::Unknown => {}
+            ContentBlock::Unknown { kind, raw } => {
+                let label = if kind.is_empty() {
+                    "unknown"
+                } else {
+                    kind.as_str()
+                };
+                writeln!(writer, "[Unknown content block: {label}]")?;
+                writeln!(
+                    writer,
+                    "{}",
+                    serde_json::to_string(raw).unwrap_or_else(|_| raw.to_string())
+                )?;
+                writeln!(writer)?;
+            }
             ContentBlock::Text(text) => {
                 // Use should_include() directly for text content to respect exclusive filter
                 if options.should_include(ContentType::Assistant) {
