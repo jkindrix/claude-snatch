@@ -51,9 +51,6 @@ max_recent_sessions = 50
 # Default export format
 format = "markdown"
 
-# Include thinking blocks in exports
-include_thinking = true
-
 # Include tool calls in exports
 include_tools = true
 
@@ -152,7 +149,6 @@ snatch tui
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `format` | string | `markdown` | Default export format |
-| `include_thinking` | bool | `true` | Include thinking blocks |
 | `include_tools` | bool | `true` | Include tool calls |
 | `main_thread_only` | bool | `false` | Export main thread only |
 | `text_width` | int | `80` | Line width for text |

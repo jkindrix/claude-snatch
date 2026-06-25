@@ -37,10 +37,6 @@ fn show_config(cli: &Cli) -> Result<()> {
             println!("[default_format]");
             println!("  format = \"{}\"", config.default_format.format);
             println!(
-                "  include_thinking = {}",
-                config.default_format.include_thinking
-            );
-            println!(
                 "  include_tool_use = {}",
                 config.default_format.include_tool_use
             );
@@ -116,7 +112,6 @@ fn get_config_value(cli: &Cli, key: &str) -> Result<()> {
 
     let value = match key {
         "default_format.format" => config.default_format.format,
-        "default_format.include_thinking" => config.default_format.include_thinking.to_string(),
         "default_format.include_tool_use" => config.default_format.include_tool_use.to_string(),
         "default_format.include_timestamps" => config.default_format.include_timestamps.to_string(),
         "default_format.pretty_json" => config.default_format.pretty_json.to_string(),
@@ -183,9 +178,6 @@ fn set_config_value(_cli: &Cli, key: &str, value: &str) -> Result<()> {
     match key {
         "default_format.format" => {
             config.default_format.format = value.to_string();
-        }
-        "default_format.include_thinking" => {
-            config.default_format.include_thinking = parse_bool(value)?;
         }
         "default_format.include_tool_use" => {
             config.default_format.include_tool_use = parse_bool(value)?;

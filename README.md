@@ -471,7 +471,6 @@ output_format = "text"
 color = true
 
 [export]
-include_thinking = true
 include_tool_use = true
 include_timestamps = true
 

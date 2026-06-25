@@ -89,7 +89,6 @@ impl Config {
         if other.default_format.format != "markdown" {
             self.default_format.format = other.default_format.format.clone();
         }
-        self.default_format.include_thinking = other.default_format.include_thinking;
         self.default_format.include_tool_use = other.default_format.include_tool_use;
         self.default_format.include_timestamps = other.default_format.include_timestamps;
         self.default_format.pretty_json = other.default_format.pretty_json;
@@ -173,9 +172,6 @@ pub struct ExportFormatConfig {
     /// Default format for export command.
     #[serde(default = "default_format")]
     pub format: String,
-    /// Include thinking blocks by default.
-    #[serde(default = "default_true")]
-    pub include_thinking: bool,
     /// Include tool use by default.
     #[serde(default = "default_true")]
     pub include_tool_use: bool,
@@ -191,7 +187,6 @@ impl Default for ExportFormatConfig {
     fn default() -> Self {
         Self {
             format: "markdown".to_string(),
-            include_thinking: true,
             include_tool_use: true,
             include_timestamps: true,
             pretty_json: false,
@@ -768,6 +763,20 @@ mod tests {
     }
 
     #[test]
+    fn test_removed_include_thinking_key_is_ignored() {
+        // Old config files may still contain the removed
+        // `default_format.include_thinking` key. Serde must ignore unknown
+        // fields so those configs keep loading.
+        let toml = r#"
+[default_format]
+format = "text"
+include_thinking = false
+"#;
+        let parsed: Config = toml::from_str(toml).unwrap();
+        assert_eq!(parsed.default_format.format, "text");
+    }
+
+    #[test]
     fn test_config_merge() {
         let mut base = Config::default();
         let mut override_config = Config::default();
@@ -792,7 +801,7 @@ mod tests {
         let project_config = r#"
 [default_format]
 format = "text"
-include_thinking = false
+include_tool_use = false
 
 [display]
 truncate_at = 3000
@@ -807,7 +816,7 @@ truncate_at = 3000
         let config = Config::load_for_project(temp_dir.path()).unwrap();
 
         assert_eq!(config.default_format.format, "text");
-        assert!(!config.default_format.include_thinking);
+        assert!(!config.default_format.include_tool_use);
         assert_eq!(config.display.truncate_at, 3000);
         // Defaults should be preserved where not overridden
         assert!(config.theme.color);
