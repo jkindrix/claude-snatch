@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use crate::analytics::SessionAnalytics;
 use crate::error::Result;
 use crate::model::{
-    content::{ThinkingBlock, ToolResult, ToolResultContent, ToolUse},
+    content::{ThinkingBlock, ToolResult, ToolUse},
     ContentBlock, LogEntry,
 };
 use crate::reconstruction::Conversation;
@@ -521,15 +521,12 @@ impl XmlExporter {
         )?;
 
         if let Some(content) = &result.content {
-            match content {
-                ToolResultContent::String(s) => {
-                    self.write_cdata(writer, depth + 1, "output", s)?;
-                }
-                ToolResultContent::Array(arr) => {
-                    let json = serde_json::to_string_pretty(arr).unwrap_or_default();
-                    self.write_cdata(writer, depth + 1, "output", &json)?;
-                }
-            }
+            self.write_cdata(
+                writer,
+                depth + 1,
+                "output",
+                &content.to_display_string(true),
+            )?;
         }
 
         self.write_close_tag(writer, depth, "tool-result")?;

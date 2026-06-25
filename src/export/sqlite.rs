@@ -12,7 +12,7 @@ use rusqlite::{params, Connection};
 
 use crate::analytics::SessionAnalytics;
 use crate::error::{Result, SnatchError};
-use crate::model::{content::ToolResultContent, ContentBlock, LogEntry};
+use crate::model::{ContentBlock, LogEntry};
 use crate::reconstruction::Conversation;
 
 use super::{ExportOptions, Exporter};
@@ -645,12 +645,7 @@ impl SqliteExporter {
                         "success"
                     };
 
-                    let output = result.content.as_ref().map(|c| match c {
-                        ToolResultContent::String(s) => s.clone(),
-                        ToolResultContent::Array(arr) => {
-                            serde_json::to_string(arr).unwrap_or_default()
-                        }
-                    });
+                    let output = result.content.as_ref().map(|c| c.to_display_string(false));
 
                     conn.execute(
                         "INSERT INTO tool_results (message_fk, tool_use_id, is_error, status, output, block_order)

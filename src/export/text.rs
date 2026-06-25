@@ -359,13 +359,11 @@ impl TextExporter {
         };
         writeln!(writer, "  [RESULT: {} ({})]", result.tool_use_id, status)?;
 
-        let content_str = match &result.content {
-            Some(crate::model::content::ToolResultContent::String(s)) => s.clone(),
-            Some(crate::model::content::ToolResultContent::Array(arr)) => {
-                serde_json::to_string_pretty(arr).unwrap_or_else(|_| "[Array]".to_string())
-            }
-            None => String::new(),
-        };
+        let content_str = result
+            .content
+            .as_ref()
+            .map(|c| c.to_display_string(true))
+            .unwrap_or_default();
 
         if !content_str.is_empty() {
             // Limit output for very long results

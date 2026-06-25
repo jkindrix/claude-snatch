@@ -401,6 +401,86 @@ pub enum ToolResultContent {
     Array(Vec<Value>),
 }
 
+impl ToolResultContent {
+    /// Render the content as a display string for output.
+    ///
+    /// For the array variant, image base64 payloads are replaced with a compact
+    /// `[<size> base64 image omitted]` marker so that a tool returning an image
+    /// (whose `data`/`base64` can be 100 KB+) does not dump the raw blob into
+    /// rendered output. All other structure is preserved. `pretty` selects
+    /// pretty vs compact JSON for the array variant.
+    #[must_use]
+    pub fn to_display_string(&self, pretty: bool) -> String {
+        match self {
+            Self::String(s) => s.clone(),
+            Self::Array(arr) => {
+                let sanitized: Vec<Value> = arr.iter().map(redact_image_payloads).collect();
+                let rendered = if pretty {
+                    serde_json::to_string_pretty(&sanitized)
+                } else {
+                    serde_json::to_string(&sanitized)
+                };
+                rendered.unwrap_or_else(|_| "[Array]".to_string())
+            }
+        }
+    }
+}
+
+/// Recursively copy a JSON value, replacing the base64 payload of any image
+/// block (`{"type": "image", "source"|"file": {... "data"|"base64": "<b64>"}}`)
+/// with a compact size marker. Non-image structure is left untouched.
+fn redact_image_payloads(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let is_image = map.get("type").and_then(Value::as_str) == Some("image");
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (key, val) in map {
+                if is_image && (key == "source" || key == "file") {
+                    out.insert(key.clone(), redact_base64_field(val));
+                } else {
+                    out.insert(key.clone(), redact_image_payloads(val));
+                }
+            }
+            Value::Object(out)
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(redact_image_payloads).collect()),
+        other => other.clone(),
+    }
+}
+
+/// Within an image `source`/`file` object, replace a long base64 string (under
+/// `data` or `base64`) with a `[<size> base64 image omitted]` marker.
+fn redact_base64_field(value: &Value) -> Value {
+    let Value::Object(map) = value else {
+        return value.clone();
+    };
+    let mut out = map.clone();
+    for key in ["data", "base64"] {
+        if let Some(Value::String(b64)) = map.get(key) {
+            let bytes = b64.len() * 3 / 4;
+            out.insert(
+                key.to_string(),
+                Value::String(format!("[{} base64 image omitted]", humanize_bytes(bytes))),
+            );
+        }
+    }
+    Value::Object(out)
+}
+
+/// Minimal human-readable byte size (KB/MB) for image-omission markers. Inlined
+/// to avoid a `model` → `discovery` layering dependency.
+fn humanize_bytes(bytes: usize) -> String {
+    const KB: usize = 1024;
+    const MB: usize = 1024 * KB;
+    if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{} KB", bytes / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 /// Thinking content block - extended reasoning.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThinkingBlock {
@@ -613,5 +693,32 @@ mod tests {
         let url_json = r#"{"type":"url","url":"https://example.com/image.png"}"#;
         let source: ImageSource = serde_json::from_str(url_json).unwrap();
         assert!(!source.is_base64());
+    }
+
+    #[test]
+    fn test_tool_result_array_redacts_image_base64() {
+        // A tool result whose array carries an image (source.data) and a text
+        // block, plus the Claude Code file.base64 shape.
+        let big = "iVBORw0KGgo".to_string() + &"A".repeat(4000);
+        let arr = ToolResultContent::Array(vec![
+            serde_json::json!({"type": "text", "text": "see screenshot"}),
+            serde_json::json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": big}}),
+            serde_json::json!({"type": "image", "file": {"base64": big}}),
+        ]);
+        let out = arr.to_display_string(false);
+        // The blob is gone; the marker and surrounding structure remain.
+        assert!(!out.contains(&"A".repeat(100)), "raw base64 leaked: {out}");
+        assert!(
+            out.contains("base64 image omitted"),
+            "missing marker: {out}"
+        );
+        assert!(out.contains("see screenshot"), "dropped text block: {out}");
+        assert!(out.contains("image/png"), "dropped media_type: {out}");
+
+        // String variant is unchanged.
+        assert_eq!(
+            ToolResultContent::String("plain".into()).to_display_string(true),
+            "plain"
+        );
     }
 }
