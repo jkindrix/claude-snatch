@@ -980,7 +980,7 @@ impl UsageTrends {
                 });
 
             entry.tokens += analytics.usage.usage.total_tokens();
-            entry.messages += analytics.message_counts.total();
+            entry.messages += analytics.message_counts.conversation();
             entry.tool_uses += analytics.message_counts.tool_uses;
             entry.sessions += 1;
             if let Some(cost) = analytics.usage.estimated_cost {
@@ -1197,7 +1197,7 @@ pub struct EfficiencyMetrics {
 impl EfficiencyMetrics {
     /// Calculate efficiency metrics from project analytics.
     pub fn from_project(analytics: &ProjectAnalytics) -> Self {
-        let total_messages = analytics.message_counts.total();
+        let total_messages = analytics.message_counts.conversation();
         let total_tokens = analytics.total_usage.usage.total_tokens();
 
         let tokens_per_message = if total_messages > 0 {
@@ -1375,7 +1375,8 @@ impl SessionDiff {
         diff.message_diff = MessageCountDiff {
             user_diff: b.message_counts.user as i64 - a.message_counts.user as i64,
             assistant_diff: b.message_counts.assistant as i64 - a.message_counts.assistant as i64,
-            total_diff: b.message_counts.total() as i64 - a.message_counts.total() as i64,
+            total_diff: b.message_counts.conversation() as i64
+                - a.message_counts.conversation() as i64,
             tool_use_diff: b.message_counts.tool_uses as i64 - a.message_counts.tool_uses as i64,
             thinking_diff: b.message_counts.thinking_blocks as i64
                 - a.message_counts.thinking_blocks as i64,

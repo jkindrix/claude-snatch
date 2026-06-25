@@ -293,7 +293,7 @@ pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
                 .unwrap_or(0),
             global_analytics.total_usage.estimated_cost.unwrap_or(0.0),
             global_analytics.session_count,
-            global_analytics.message_counts.total(),
+            global_analytics.message_counts.conversation(),
         );
 
         history.record(point);
@@ -1765,7 +1765,7 @@ fn collect_timeline_entries(
 
         entry.session_count += 1;
         entry.total_tokens += analytics.usage.usage.total_tokens();
-        entry.message_count += analytics.message_counts.total();
+        entry.message_count += analytics.message_counts.conversation();
         if let Some(cost) = analytics.usage.estimated_cost {
             entry.estimated_cost = Some(entry.estimated_cost.unwrap_or(0.0) + cost);
         }
