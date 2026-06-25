@@ -427,6 +427,12 @@ pub struct UserMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_meta: Option<bool>,
 
+    /// Compaction continuation summary marker. Harness-injected "This session
+    /// is being continued from a previous conversation..." entries carry this,
+    /// so they can be distinguished from genuine human prompts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_compact_summary: Option<bool>,
+
     /// Visible only in transcript view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_visible_in_transcript_only: Option<bool>,

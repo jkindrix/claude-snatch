@@ -41,8 +41,15 @@ pub fn truncate_text(text: &str, max_len: usize) -> String {
 /// carries a `tool_result` block (e.g. a `ToolSearch` result) may be paired
 /// with a synthetic harness acknowledgement like `"Tool loaded."`; that text
 /// is not human-authored, so such turns are not counted as prompts.
+///
+/// Also returns `false` for compaction continuation summaries
+/// (`isCompactSummary: true`), which are harness-injected "This session is
+/// being continued from a previous conversation..." entries, not human input.
 pub fn is_human_prompt(entry: &LogEntry) -> bool {
     if let LogEntry::User(user) = entry {
+        if user.is_compact_summary == Some(true) {
+            return false;
+        }
         if user.message.has_tool_results() {
             return false;
         }
@@ -736,6 +743,21 @@ mod tests {
         let line2 = r#"{"uuid":"2","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:01Z","sessionId":"s","version":"2.0","isSidechain":false,"message":{"role":"user","content":"fix the parser"}}"#;
         let entry2: LogEntry = serde_json::from_str(line2).unwrap();
         assert!(is_human_prompt(&entry2));
+    }
+
+    #[test]
+    fn test_compact_summary_is_not_human_prompt() {
+        // A user-role entry flagged isCompactSummary is a harness-injected
+        // continuation summary, not a human prompt.
+        let line = r#"{"uuid":"1","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","version":"2.0","isSidechain":false,"isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context."}}"#;
+        let entry: LogEntry = serde_json::from_str(line).unwrap();
+        // The flag deserializes into the typed field.
+        if let LogEntry::User(user) = &entry {
+            assert_eq!(user.is_compact_summary, Some(true));
+        } else {
+            panic!("expected user entry");
+        }
+        assert!(!is_human_prompt(&entry));
     }
 
     #[test]

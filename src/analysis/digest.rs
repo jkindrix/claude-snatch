@@ -258,6 +258,28 @@ mod tests {
     }
 
     #[test]
+    fn test_build_digest_excludes_compact_summaries() {
+        // Two genuine human prompts plus one compaction continuation summary.
+        let human1: LogEntry = serde_json::from_str(
+            r#"{"uuid":"1","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","version":"2.0","isSidechain":false,"message":{"role":"user","content":"fix the parser"}}"#,
+        )
+        .unwrap();
+        let summary: LogEntry = serde_json::from_str(
+            r#"{"uuid":"2","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:01Z","sessionId":"s","version":"2.0","isSidechain":false,"isCompactSummary":true,"message":{"role":"user","content":"This session is being continued from a previous conversation."}}"#,
+        )
+        .unwrap();
+        let human2: LogEntry = serde_json::from_str(
+            r#"{"uuid":"3","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:02Z","sessionId":"s","version":"2.0","isSidechain":false,"message":{"role":"user","content":"add tests"}}"#,
+        )
+        .unwrap();
+        let entries: Vec<&LogEntry> = vec![&human1, &summary, &human2];
+        let digest = build_digest(&entries, &DigestOptions::default());
+        // Only the two genuine prompts count; the compaction summary leaks out.
+        assert_eq!(digest.total_prompts, 2);
+        assert!(digest.key_prompts.iter().all(|p| !p.contains("continued")));
+    }
+
+    #[test]
     fn test_format_digest_empty() {
         let digest = SessionDigest {
             key_prompts: vec![],

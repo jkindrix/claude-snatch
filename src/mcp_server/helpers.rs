@@ -295,6 +295,7 @@ mod tests {
             agent_id: None,
             slug: None,
             is_meta: None,
+            is_compact_summary: None,
             is_visible_in_transcript_only: None,
             thinking_metadata: None,
             todos: vec![],
