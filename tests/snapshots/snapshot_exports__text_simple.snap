@@ -1,7 +1,5 @@
 ---
 source: tests/snapshot_exports.rs
-assertion_line: 72
-description: Text export of simple session
 expression: output
 ---
 [USER] (2025-01-15 10:00:00 UTC)
@@ -13,7 +11,7 @@ Hello, Claude!
 Hello! How can I help you today?
 
 
-  [Tokens: 10 in, 15 out]
+  [Tokens: 10 in (incl. cache reads), 15 out]
 
 [USER] (2025-01-15 10:00:30 UTC)
 
@@ -29,7 +27,7 @@ Can you list the files in the current directory?
   [/TOOL]
 
 
-  [Tokens: 50 in, 30 out]
+  [Tokens: 50 in (incl. cache reads), 30 out]
 
 [USER] (2025-01-15 10:00:32 UTC)
 
@@ -47,4 +45,4 @@ The directory contains one file: `file.txt`. Would you like me to read its
 contents?
 
 
-  [Tokens: 100 in, 25 out]
+  [Tokens: 100 in (incl. cache reads), 25 out]

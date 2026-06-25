@@ -20,7 +20,7 @@ What is this project?
 ```
 
 
-*Tokens: 30 in, 20 out*
+*Tokens: 30 in (incl. cache reads), 20 out*
 
 ## 👤 User *(2025-01-15 13:00:03 UTC)* 
 
@@ -38,7 +38,7 @@ src/lib.rs
 This appears to be a Rust project with 2 source files: `src/main.rs` and `src/lib.rs`.
 
 
-*Tokens: 70 in, 30 out*
+*Tokens: 70 in (incl. cache reads), 30 out*
 
 ## 📋 Summary
 

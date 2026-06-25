@@ -28,4 +28,4 @@ Let me solve this step by step:
 The answer is 345.
 
 
-*Tokens: 20 in, 80 out*
+*Tokens: 20 in (incl. cache reads), 80 out*

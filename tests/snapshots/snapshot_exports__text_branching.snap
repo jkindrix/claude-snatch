@@ -12,7 +12,7 @@ That depends on your goals! Python is great for beginners and data science,
 while Rust is excellent for systems programming.
 
 
-  [Tokens: 15 in, 35 out]
+  [Tokens: 15 in (incl. cache reads), 35 out]
 
 [USER] (2025-01-15 12:01:00 UTC)
 
@@ -31,7 +31,7 @@ Python is a versatile, beginner-friendly language known for:
 - Strong community support
 
 
-  [Tokens: 45 in, 60 out]
+  [Tokens: 45 in (incl. cache reads), 60 out]
 
 [ASSISTANT] (2025-01-15 12:01:15 UTC)
 
@@ -42,4 +42,4 @@ Rust is a systems programming language known for:
 - Growing ecosystem for web (Actix, Axum)
 
 
-  [Tokens: 45 in, 55 out]
+  [Tokens: 45 in (incl. cache reads), 55 out]

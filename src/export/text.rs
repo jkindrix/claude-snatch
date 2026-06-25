@@ -174,7 +174,12 @@ impl TextExporter {
                 "  Messages: {} ({} user, {} assistant)",
                 summary.total_messages, summary.user_messages, summary.assistant_messages
             )?;
-            writeln!(writer, "  Total Tokens: {}", summary.total_tokens)?;
+            writeln!(writer, "  Work Tokens: {}", summary.total_tokens)?;
+            writeln!(
+                writer,
+                "  Total Processed Tokens: {}",
+                summary.total_processed_tokens
+            )?;
             writeln!(writer, "  Input Tokens: {}", summary.input_tokens)?;
             writeln!(writer, "  Output Tokens: {}", summary.output_tokens)?;
             if summary.cache_hit_rate > 0.0 {
@@ -274,7 +279,7 @@ impl TextExporter {
                 writeln!(writer)?;
                 writeln!(
                     writer,
-                    "  [Tokens: {} in, {} out]",
+                    "  [Tokens: {} in (incl. cache reads), {} out]",
                     usage.total_input_tokens(),
                     usage.output_tokens
                 )?;
