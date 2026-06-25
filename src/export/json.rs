@@ -645,11 +645,11 @@ pub fn conversation_to_jsonl<W: Write>(
     writer: &mut W,
     main_thread_only: bool,
 ) -> Result<()> {
-    let entries = if main_thread_only {
-        conversation.main_thread_entries()
-    } else {
-        conversation.chronological_entries()
-    };
+    // Use entries_for_export (like the 6 sibling exporters) so uuid-less
+    // entries (compaction summaries and, after retention, file-history-snapshot
+    // / last-prompt / mode / ai-title / permission-mode / queue-operation /
+    // turn-end) survive the round-trip instead of being silently dropped.
+    let entries = conversation.entries_for_export(main_thread_only);
 
     for entry in entries {
         let json = serde_json::to_string(entry)?;
