@@ -34,19 +34,6 @@ fn show_config(cli: &Cli) -> Result<()> {
             println!("Snatch Configuration");
             println!("====================\n");
 
-            println!("[default_format]");
-            println!("  format = \"{}\"", config.default_format.format);
-            println!(
-                "  include_tool_use = {}",
-                config.default_format.include_tool_use
-            );
-            println!(
-                "  include_timestamps = {}",
-                config.default_format.include_timestamps
-            );
-            println!("  pretty_json = {}", config.default_format.pretty_json);
-            println!();
-
             println!("[theme]");
             println!("  name = \"{}\"", config.theme.name);
             println!("  color = {}", config.theme.color);
@@ -111,11 +98,6 @@ fn get_config_value(cli: &Cli, key: &str) -> Result<()> {
     let config = Config::load().unwrap_or_default();
 
     let value = match key {
-        "default_format.format" => config.default_format.format,
-        "default_format.include_tool_use" => config.default_format.include_tool_use.to_string(),
-        "default_format.include_timestamps" => config.default_format.include_timestamps.to_string(),
-        "default_format.pretty_json" => config.default_format.pretty_json.to_string(),
-
         "theme.name" => config.theme.name,
         "theme.color" => config.theme.color.to_string(),
         "theme.unicode" => config.theme.unicode.to_string(),
@@ -176,19 +158,6 @@ fn set_config_value(_cli: &Cli, key: &str, value: &str) -> Result<()> {
     let mut config = Config::load().unwrap_or_default();
 
     match key {
-        "default_format.format" => {
-            config.default_format.format = value.to_string();
-        }
-        "default_format.include_tool_use" => {
-            config.default_format.include_tool_use = parse_bool(value)?;
-        }
-        "default_format.include_timestamps" => {
-            config.default_format.include_timestamps = parse_bool(value)?;
-        }
-        "default_format.pretty_json" => {
-            config.default_format.pretty_json = parse_bool(value)?;
-        }
-
         "theme.name" => {
             config.theme.name = value.to_string();
         }

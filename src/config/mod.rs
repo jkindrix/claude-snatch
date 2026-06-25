@@ -16,9 +16,6 @@ use crate::util::atomic_write;
 /// Application configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
-    /// Default export format.
-    #[serde(default)]
-    pub default_format: ExportFormatConfig,
     /// TUI theme.
     #[serde(default)]
     pub theme: ThemeConfig,
@@ -85,14 +82,6 @@ impl Config {
     // the same literal, so the bit patterns match.
     #[allow(clippy::float_cmp)]
     pub fn merge_from(&mut self, other: &Config) {
-        // Merge export format config
-        if other.default_format.format != "markdown" {
-            self.default_format.format = other.default_format.format.clone();
-        }
-        self.default_format.include_tool_use = other.default_format.include_tool_use;
-        self.default_format.include_timestamps = other.default_format.include_timestamps;
-        self.default_format.pretty_json = other.default_format.pretty_json;
-
         // Merge theme config
         if other.theme.name != "default" {
             self.theme.name = other.theme.name.clone();
@@ -163,34 +152,6 @@ impl Config {
         atomic_write(path, content.as_bytes())?;
 
         Ok(())
-    }
-}
-
-/// Export format configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExportFormatConfig {
-    /// Default format for export command.
-    #[serde(default = "default_format")]
-    pub format: String,
-    /// Include tool use by default.
-    #[serde(default = "default_true")]
-    pub include_tool_use: bool,
-    /// Include timestamps by default.
-    #[serde(default = "default_true")]
-    pub include_timestamps: bool,
-    /// Pretty-print JSON by default.
-    #[serde(default)]
-    pub pretty_json: bool,
-}
-
-impl Default for ExportFormatConfig {
-    fn default() -> Self {
-        Self {
-            format: "markdown".to_string(),
-            include_tool_use: true,
-            include_timestamps: true,
-            pretty_json: false,
-        }
     }
 }
 
@@ -461,10 +422,6 @@ impl Default for CacheConfig {
 // Default value functions for serde
 fn default_true() -> bool {
     true
-}
-
-fn default_format() -> String {
-    "markdown".to_string()
 }
 
 fn default_theme() -> String {
@@ -749,7 +706,6 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.default_format.format, "markdown");
         assert!(config.theme.color);
         assert!(config.cache.enabled);
     }
@@ -759,21 +715,24 @@ mod tests {
         let config = Config::default();
         let toml = toml::to_string(&config).unwrap();
         let parsed: Config = toml::from_str(&toml).unwrap();
-        assert_eq!(parsed.default_format.format, config.default_format.format);
+        assert_eq!(parsed.theme.name, config.theme.name);
     }
 
     #[test]
-    fn test_removed_include_thinking_key_is_ignored() {
-        // Old config files may still contain the removed
-        // `default_format.include_thinking` key. Serde must ignore unknown
-        // fields so those configs keep loading.
+    fn test_removed_default_format_group_is_ignored() {
+        // The whole `[default_format]` group was removed (it was read by no
+        // command). Old config files still carrying it must keep loading —
+        // serde ignores the unknown section — and known sections still parse.
         let toml = r#"
 [default_format]
 format = "text"
 include_thinking = false
+
+[display]
+truncate_at = 1234
 "#;
         let parsed: Config = toml::from_str(toml).unwrap();
-        assert_eq!(parsed.default_format.format, "text");
+        assert_eq!(parsed.display.truncate_at, 1234);
     }
 
     #[test]
@@ -782,13 +741,11 @@ include_thinking = false
         let mut override_config = Config::default();
 
         // Set some overrides
-        override_config.default_format.format = "json".to_string();
         override_config.theme.name = "dark".to_string();
         override_config.display.truncate_at = 5000;
 
         base.merge_from(&override_config);
 
-        assert_eq!(base.default_format.format, "json");
         assert_eq!(base.theme.name, "dark");
         assert_eq!(base.display.truncate_at, 5000);
     }
@@ -799,10 +756,6 @@ include_thinking = false
 
         // Create project config
         let project_config = r#"
-[default_format]
-format = "text"
-include_tool_use = false
-
 [display]
 truncate_at = 3000
 "#;
@@ -815,8 +768,6 @@ truncate_at = 3000
 
         let config = Config::load_for_project(temp_dir.path()).unwrap();
 
-        assert_eq!(config.default_format.format, "text");
-        assert!(!config.default_format.include_tool_use);
         assert_eq!(config.display.truncate_at, 3000);
         // Defaults should be preserved where not overridden
         assert!(config.theme.color);
@@ -830,7 +781,7 @@ truncate_at = 3000
         let config = Config::load_for_project(temp_dir.path()).unwrap();
 
         // Should return defaults
-        assert_eq!(config.default_format.format, "markdown");
+        assert!(config.theme.color);
         assert!(config.cache.enabled);
     }
 }
