@@ -205,3 +205,66 @@ fn test_info_nonexistent_session_fails() {
         .failure()
         .stderr(predicate::str::contains("not found"));
 }
+
+// =============================================================================
+// subagent markers (issue 0004): meta.json-less subagents must never vanish
+// =============================================================================
+
+const SUBAGENT_SESSION_ID: &str = "5ababae0-1111-2222-3333-444444444444";
+
+/// Build a fixture with one `Task` spawn call and a single subagent transcript
+/// that has NO `agent-*.meta.json` sidecar (the ~51% common case). The matcher
+/// must still surface it (single-spawn fallback / unlinked marker).
+fn setup_subagent_fixture() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let encoded = encode_project_path(PROJECT_PATH);
+    let project_dir = tmp.path().join("projects").join(&encoded);
+    std::fs::create_dir_all(&project_dir).expect("failed to create project dir");
+
+    let lines: &[&str] = &[
+        r#"{"type":"user","uuid":"a1111111-1111-1111-1111-111111111111","parentUuid":null,"timestamp":"2025-01-15T10:00:00.000Z","sessionId":"SUBSESS","version":"2.0.74","message":{"role":"user","content":"Explore the codebase."}}"#,
+        r#"{"type":"assistant","uuid":"a2222222-2222-2222-2222-222222222222","parentUuid":"a1111111-1111-1111-1111-111111111111","timestamp":"2025-01-15T10:00:01.000Z","sessionId":"SUBSESS","version":"2.0.74","message":{"id":"msg_t01","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_spawn","name":"Task","input":{"description":"Explore codebase structure","subagent_type":"Explore","prompt":"go"}}],"model":"claude-sonnet-4-20250514","stop_reason":"tool_use","usage":{"input_tokens":10,"output_tokens":15,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
+        r#"{"type":"user","uuid":"a3333333-3333-3333-3333-333333333333","parentUuid":"a2222222-2222-2222-2222-222222222222","timestamp":"2025-01-15T10:01:00.000Z","sessionId":"SUBSESS","version":"2.0.74","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_spawn","content":"exploration summary returned"}]}}"#,
+        r#"{"type":"assistant","uuid":"a4444444-4444-4444-4444-444444444444","parentUuid":"a3333333-3333-3333-3333-333333333333","timestamp":"2025-01-15T10:01:01.000Z","sessionId":"SUBSESS","version":"2.0.74","message":{"id":"msg_t02","type":"message","role":"assistant","content":[{"type":"text","text":"Now I understand the architecture."}],"model":"claude-sonnet-4-20250514","stop_reason":"end_turn","usage":{"input_tokens":40,"output_tokens":20,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
+    ];
+    let jsonl = lines.join("\n").replace("SUBSESS", SUBAGENT_SESSION_ID) + "\n";
+    let session_file = project_dir.join(format!("{SUBAGENT_SESSION_ID}.jsonl"));
+    std::fs::write(&session_file, jsonl).expect("failed to write fixture");
+
+    // Subagent transcript WITHOUT a meta.json sidecar.
+    let sub_dir = project_dir.join(SUBAGENT_SESSION_ID).join("subagents");
+    std::fs::create_dir_all(&sub_dir).expect("failed to create subagents dir");
+    let sub_line = r#"{"type":"assistant","uuid":"b1111111-1111-1111-1111-111111111111","parentUuid":null,"timestamp":"2025-01-15T10:00:30.000Z","sessionId":"agent-deadbeef","version":"2.0.74","message":{"id":"msg_s01","type":"message","role":"assistant","content":[{"type":"text","text":"comprehensive exploration report of the codebase"}],"model":"claude-sonnet-4-20250514","stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#;
+    std::fs::write(
+        sub_dir.join("agent-deadbeef.jsonl"),
+        format!("{sub_line}\n"),
+    )
+    .expect("failed to write subagent transcript");
+
+    tmp
+}
+
+#[test]
+fn test_messages_full_surfaces_meta_less_subagent() {
+    let tmp = setup_subagent_fixture();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["messages", SUBAGENT_SESSION_ID, "--detail", "full"])
+        .assert()
+        .success()
+        // Single-spawn fallback links the meta-less subagent to its Task call.
+        .stdout(predicate::str::contains("subagent agent-deadbeef"));
+}
+
+#[test]
+fn test_timeline_surfaces_meta_less_subagent() {
+    let tmp = setup_subagent_fixture();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["timeline", SUBAGENT_SESSION_ID])
+        .assert()
+        .success()
+        // Timeline previously had zero subagent handling; now a marker appears.
+        .stdout(predicate::str::contains("Subagents:"))
+        .stdout(predicate::str::contains("agent-deadbeef"));
+}

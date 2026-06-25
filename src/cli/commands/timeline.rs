@@ -3,6 +3,7 @@
 //! Shows a turn-by-turn narrative of a session, with tool-only turns
 //! collapsed for readability. Mirrors the MCP `get_session_timeline` tool.
 
+use crate::analysis::subagents::match_subagents;
 use crate::analysis::timeline::{build_timeline, TimelineOptions};
 use crate::cli::{Cli, OutputFormat, TimelineArgs};
 use crate::error::{Result, SnatchError};
@@ -22,6 +23,21 @@ struct TimelineOutput {
     span: Option<String>,
     total_turns: usize,
     timeline: Vec<TimelineTurnOutput>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    subagents: Vec<SubagentOutput>,
+}
+
+#[derive(serde::Serialize)]
+struct SubagentOutput {
+    session_id: String,
+    /// "linked" when joined to a spawn call, "unlinked" otherwise.
+    link: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_preview: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -67,6 +83,34 @@ pub fn run(cli: &Cli, args: &TimelineArgs) -> Result<()> {
 
     let timeline = build_timeline(&turns, &opts);
 
+    // Subagent markers: surface work spawned by Agent/Task calls (matching the
+    // messages surface). Linked subagents carry the spawn description; present
+    // but unjoinable ones are still marked so the work never vanishes silently.
+    let matches = match_subagents(
+        &session,
+        &conversation.main_thread_entries(),
+        cli.max_file_size,
+    );
+    let mut subagents: Vec<SubagentOutput> = matches
+        .matched
+        .values()
+        .map(|m| SubagentOutput {
+            session_id: m.session_id.clone(),
+            link: "linked",
+            description: m.description.clone(),
+            message_count: m.message_count,
+            result_preview: m.result_preview.clone(),
+        })
+        .chain(matches.unmatched.iter().map(|m| SubagentOutput {
+            session_id: m.session_id.clone(),
+            link: "unlinked",
+            description: m.description.clone(),
+            message_count: m.message_count,
+            result_preview: m.result_preview.clone(),
+        }))
+        .collect();
+    subagents.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+
     match cli.effective_output() {
         OutputFormat::Json => {
             let output = TimelineOutput {
@@ -87,6 +131,7 @@ pub fn run(cli: &Cli, args: &TimelineArgs) -> Result<()> {
                         had_errors: t.had_errors,
                     })
                     .collect(),
+                subagents,
             };
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
@@ -127,6 +172,29 @@ pub fn run(cli: &Cli, args: &TimelineArgs) -> Result<()> {
                     println!("        Files: {}", turn.files_touched.join(", "));
                 }
 
+                println!();
+            }
+
+            if !subagents.is_empty() {
+                println!("Subagents:");
+                for s in &subagents {
+                    let msgs = s
+                        .message_count
+                        .map(|n| format!("{n} msgs"))
+                        .unwrap_or_else(|| "? msgs".to_string());
+                    let desc = s
+                        .description
+                        .as_deref()
+                        .map(|d| format!(" {d}"))
+                        .unwrap_or_default();
+                    println!(
+                        "  [subagent {}: {}, {}]{}",
+                        s.session_id, msgs, s.link, desc
+                    );
+                    if let Some(preview) = &s.result_preview {
+                        println!("      result: {}", crate::util::truncate_text(preview, 200));
+                    }
+                }
                 println!();
             }
         }
