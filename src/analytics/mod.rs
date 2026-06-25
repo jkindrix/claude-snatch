@@ -97,8 +97,42 @@ impl SessionAnalytics {
         // Collapse the tally to distinct turns.
         self.message_counts.assistant = conversation.message_group_count();
 
+        // Streaming-chunk nodes that share one message.id each repeat the same
+        // billed usage block (input/cache constant, output a running total), so
+        // summing them per node over-counts one API turn. Aggregate usage once
+        // per distinct message.id, taking the field-wise max across its chunks.
+        self.accumulate_usage(conversation);
+
         // Calculate cost
         self.usage.calculate_cost();
+    }
+
+    /// Aggregate token usage with one entry per distinct assistant `message.id`.
+    ///
+    /// Folds the streaming-chunk nodes that share a `message.id` into a single
+    /// deduped [`Usage`] (field-wise max) before adding it, so each billed API
+    /// turn is counted once. `message_count` ends at the number of distinct
+    /// turns, consistent with `message_counts.assistant`.
+    fn accumulate_usage(&mut self, conversation: &Conversation) {
+        // (model, message.id) -> deduped usage for that turn.
+        let mut deduped: IndexMap<(String, String), crate::model::usage::Usage> = IndexMap::new();
+
+        for node in conversation.nodes().values() {
+            if let LogEntry::Assistant(assistant) = &node.entry {
+                let Some(usage) = &assistant.message.usage else {
+                    continue;
+                };
+                let key = (
+                    assistant.message.model.clone(),
+                    assistant.message.id.clone(),
+                );
+                deduped.entry(key).or_default().merge_max(usage);
+            }
+        }
+
+        for ((model, _id), usage) in &deduped {
+            self.usage.add_usage(model, usage);
+        }
     }
 
     /// Process a single log entry.
@@ -179,10 +213,9 @@ impl SessionAnalytics {
         let model = &assistant.message.model;
         *self.models_used.entry(model.clone()).or_insert(0) += 1;
 
-        // Add usage stats
-        if let Some(usage) = &assistant.message.usage {
-            self.usage.add_usage(model, usage);
-        }
+        // Token usage is aggregated once per distinct message.id in
+        // `accumulate_usage` (called after the node loop); not here, to avoid
+        // summing the repeated usage block across streaming-chunk nodes.
 
         let timestamp = Some(assistant.timestamp);
 
@@ -2011,6 +2044,47 @@ mod tests {
         let summary = SessionAnalytics::from_conversation(&conv).summary_report();
 
         assert_eq!(summary.assistant_messages, 2);
+    }
+
+    #[test]
+    fn test_usage_dedups_streaming_chunks_by_message_id() {
+        // Each streaming chunk repeats the billed usage block: input/cache are
+        // constant across chunks, output is a running total, and the ephemeral
+        // cache_creation breakdown is constant. Taking the field-wise max per
+        // message.id recovers one billed turn; summing would over-count it.
+        let chunk = |uuid: &str, parent: &str, msg_id: &str, output: u64| {
+            let json = format!(
+                r#"{{"type":"assistant","uuid":"{uuid}","parentUuid":"{parent}","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","version":"2.1.0","isSidechain":false,"message":{{"id":"{msg_id}","type":"message","role":"assistant","model":"claude-opus-4-8","content":[{{"type":"text","text":"x"}}],"usage":{{"input_tokens":100,"output_tokens":{output},"cache_creation_input_tokens":2000,"cache_read_input_tokens":5000,"cache_creation":{{"ephemeral_5m_input_tokens":1500,"ephemeral_1h_input_tokens":500}}}}}}}}"#
+            );
+            serde_json::from_str::<crate::model::LogEntry>(&json).unwrap()
+        };
+        let entries = vec![
+            // Group A: 3 chunks, output grows monotonically (max == last).
+            chunk("a1", "root", "msg_A", 8),
+            chunk("a2", "a1", "msg_A", 40),
+            chunk("a3", "a2", "msg_A", 88),
+            // Group B: 2 chunks, output constant across chunks (max == once).
+            chunk("b1", "a3", "msg_B", 25),
+            chunk("b2", "b1", "msg_B", 25),
+        ];
+        let conv = crate::reconstruction::Conversation::from_entries(entries).unwrap();
+        let analytics = SessionAnalytics::from_conversation(&conv);
+        let usage = &analytics.usage.usage;
+
+        // Input/cache are constant per chunk -> counted once per message.id.
+        // Two distinct turns => 2 * the single-turn value.
+        assert_eq!(usage.input_tokens, 200);
+        assert_eq!(usage.cache_creation_input_tokens, Some(4000));
+        assert_eq!(usage.cache_read_input_tokens, Some(10_000));
+        // Output is the per-id max (group A: 88, group B: 25), not the chunk sum.
+        assert_eq!(usage.output_tokens, 88 + 25);
+        // Ephemeral cache_creation sub-fields dedup the same way (max per id).
+        let ephemeral = usage.cache_creation.as_ref().unwrap();
+        assert_eq!(ephemeral.ephemeral_5m_input_tokens, Some(3000));
+        assert_eq!(ephemeral.ephemeral_1h_input_tokens, Some(1000));
+        // message_count tracks distinct turns, consistent with assistant count.
+        assert_eq!(analytics.usage.message_count, 2);
+        assert_eq!(analytics.message_counts.assistant, 2);
     }
 
     #[test]

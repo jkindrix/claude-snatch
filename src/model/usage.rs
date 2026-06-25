@@ -165,6 +165,56 @@ impl Usage {
             }
         }
     }
+
+    /// Fold another `Usage` into this one by taking the field-wise maximum.
+    ///
+    /// Used to deduplicate the streaming-chunk JSONL nodes that share one
+    /// `message.id`: every chunk repeats the (constant) input/cache totals and
+    /// carries a running output total, so the maximum across chunks recovers
+    /// the single billed value per field. Summing them (see [`Self::merge`])
+    /// would multiplicatively over-count one API turn.
+    pub fn merge_max(&mut self, other: &Self) {
+        self.input_tokens = self.input_tokens.max(other.input_tokens);
+        self.output_tokens = self.output_tokens.max(other.output_tokens);
+
+        if let Some(other_cache_creation) = other.cache_creation_input_tokens {
+            let slot = self.cache_creation_input_tokens.get_or_insert(0);
+            *slot = (*slot).max(other_cache_creation);
+        }
+
+        if let Some(other_cache_read) = other.cache_read_input_tokens {
+            let slot = self.cache_read_input_tokens.get_or_insert(0);
+            *slot = (*slot).max(other_cache_read);
+        }
+
+        if let Some(other_cache) = &other.cache_creation {
+            let cache = self
+                .cache_creation
+                .get_or_insert_with(CacheCreationDetails::default);
+            if let Some(tokens) = other_cache.ephemeral_5m_input_tokens {
+                let slot = cache.ephemeral_5m_input_tokens.get_or_insert(0);
+                *slot = (*slot).max(tokens);
+            }
+            if let Some(tokens) = other_cache.ephemeral_1h_input_tokens {
+                let slot = cache.ephemeral_1h_input_tokens.get_or_insert(0);
+                *slot = (*slot).max(tokens);
+            }
+        }
+
+        if let Some(other_tools) = &other.server_tool_use {
+            let tools = self
+                .server_tool_use
+                .get_or_insert_with(ServerToolUse::default);
+            if let Some(count) = other_tools.web_search_requests {
+                let slot = tools.web_search_requests.get_or_insert(0);
+                *slot = (*slot).max(count);
+            }
+            if let Some(count) = other_tools.web_fetch_requests {
+                let slot = tools.web_fetch_requests.get_or_insert(0);
+                *slot = (*slot).max(count);
+            }
+        }
+    }
 }
 
 /// Ephemeral cache details.
@@ -554,6 +604,50 @@ mod tests {
         assert_eq!(usage1.input_tokens, 300);
         assert_eq!(usage1.output_tokens, 150);
         assert_eq!(usage1.cache_read_input_tokens, Some(50));
+    }
+
+    #[test]
+    fn test_usage_merge_max_dedups_whole_struct() {
+        // Models the streaming chunks of one message.id: input/cache constant,
+        // output a running total, ephemeral + server_tool_use constant. Folding
+        // by field-wise max must recover the single billed value per field.
+        let chunk = |output: u64| Usage {
+            input_tokens: 100,
+            output_tokens: output,
+            cache_creation_input_tokens: Some(2000),
+            cache_read_input_tokens: Some(5000),
+            cache_creation: Some(CacheCreationDetails {
+                ephemeral_5m_input_tokens: Some(1500),
+                ephemeral_1h_input_tokens: Some(500),
+                extra: IndexMap::new(),
+            }),
+            server_tool_use: Some(ServerToolUse {
+                web_search_requests: Some(2),
+                web_fetch_requests: Some(1),
+                extra: IndexMap::new(),
+            }),
+            ..Default::default()
+        };
+
+        let mut folded = Usage::default();
+        for output in [8, 40, 88] {
+            folded.merge_max(&chunk(output));
+        }
+
+        // Constant fields: max == the single repeated value, not the sum.
+        assert_eq!(folded.input_tokens, 100);
+        assert_eq!(folded.cache_creation_input_tokens, Some(2000));
+        assert_eq!(folded.cache_read_input_tokens, Some(5000));
+        // Output: max == last (cumulative running total).
+        assert_eq!(folded.output_tokens, 88);
+        // Ephemeral cache_creation breakdown deduped (max per field).
+        let cache = folded.cache_creation.unwrap();
+        assert_eq!(cache.ephemeral_5m_input_tokens, Some(1500));
+        assert_eq!(cache.ephemeral_1h_input_tokens, Some(500));
+        // server_tool_use deduped (max per field), not summed.
+        let tools = folded.server_tool_use.unwrap();
+        assert_eq!(tools.web_search_requests, Some(2));
+        assert_eq!(tools.web_fetch_requests, Some(1));
     }
 
     #[test]
