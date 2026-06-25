@@ -76,7 +76,8 @@ use types::{
     SessionSummary, SessionTimelineResponse, StatsResponse, SubagentSummary,
     SuggestPrioritiesRequest, SuggestPrioritiesResponse, TagMessageRequest, TagMessageResponse,
     TaggedMessageEntry, ThreadExchangeEntry, ThreadTopicRequest, ThreadTopicResponse, TimelineTurn,
-    ToolCallEntry, ToolCallsResponse, ToolCallsSummary, ToolDetail, UserCorrection,
+    ToolCallEntry, ToolCallsResponse, ToolCallsSummary, ToolDetail, UnmatchedSubagent,
+    UserCorrection,
 };
 
 // ============================================================================
@@ -398,7 +399,7 @@ impl SnatchServer {
     /// Use detail="overview" for user prompts only, "standard" for user+assistant
     /// text with tool names, or "full" for tool call details.
     #[tool(
-        description = "Read conversation messages from a session. Use detail='overview' for prompts only, 'conversation' for user+assistant text (skipping tool-only turns), 'standard' for user+assistant text, 'full' for tool details. At detail='full', Agent/Task calls are linked to the subagent they spawned (subagent_session_id) with a result preview; set include_subagent_transcripts=true to inline each subagent's full transcript. Set include_thinking=true to recover reasoning/decision rationale (always lost in compaction). Supports pagination with offset/limit."
+        description = "Read conversation messages from a session. Use detail='overview' for prompts only, 'conversation' for user+assistant text (skipping tool-only turns), 'standard' for user+assistant text, 'full' for tool details. At detail='full', Agent/Task calls are linked to the subagent they spawned (subagent_session_id) with a result preview; set include_subagent_transcripts=true to inline each subagent's full transcript. Subagents present on disk but not joinable to a specific call are surfaced in unmatched_subagents rather than dropped. Set include_thinking=true to recover reasoning/decision rationale (always lost in compaction). Supports pagination with offset/limit."
     )]
     async fn get_session_messages(&self, request: GetSessionMessagesRequest) -> ToolOutput {
         let chain_aware = request.chain_aware.unwrap_or(false);
@@ -422,7 +423,7 @@ impl SnatchServer {
 
         // Match Agent/Task calls to the subagents they spawned (only "full" detail
         // renders tool details). Uses the unfiltered thread for spawn-order joining.
-        let subagent_renders: HashMap<String, RenderedSubagent> = if detail == "full" {
+        let resolved_subagents: ResolvedSubagents = if detail == "full" {
             match self.get_claude_dir() {
                 Ok(dir) => match dir.find_session(&resolved.session_id) {
                     Ok(Some(session)) => resolve_subagent_renders(
@@ -432,13 +433,15 @@ impl SnatchServer {
                         include_thinking,
                         self.max_file_size,
                     ),
-                    _ => HashMap::new(),
+                    _ => ResolvedSubagents::default(),
                 },
-                Err(_) => HashMap::new(),
+                Err(_) => ResolvedSubagents::default(),
             }
         } else {
-            HashMap::new()
+            ResolvedSubagents::default()
         };
+        let subagent_renders = resolved_subagents.matched;
+        let unmatched_subagents = resolved_subagents.unmatched;
 
         let mut entries: Vec<&LogEntry> = resolved.conversation.main_thread_entries();
 
@@ -801,6 +804,7 @@ impl SnatchServer {
             returned,
             offset,
             messages,
+            unmatched_subagents,
         };
 
         match ToolOutput::json(&response) {
@@ -3267,6 +3271,16 @@ struct RenderedSubagent {
     transcript: Option<Vec<MessageEntry>>,
 }
 
+/// Result of resolving subagents for a messages response: the confident joins
+/// (keyed by spawning tool_use id, attached inline) plus any subagents present
+/// on disk that could not be joined (surfaced separately so they never silently
+/// vanish — the same fix the CLI `messages` renderer carries).
+#[derive(Default)]
+struct ResolvedSubagents {
+    matched: HashMap<String, RenderedSubagent>,
+    unmatched: Vec<UnmatchedSubagent>,
+}
+
 /// Match each `Agent`/`Task` call in `ordered_entries` to the subagent it spawned
 /// (via the shared conservative join) and render it for the messages response,
 /// keyed by the spawning tool_use id. The full transcript is built only when
@@ -3277,8 +3291,10 @@ fn resolve_subagent_renders(
     include_transcripts: bool,
     include_thinking: bool,
     max_file_size: Option<u64>,
-) -> HashMap<String, RenderedSubagent> {
-    crate::analysis::subagents::match_subagents(session, ordered_entries, max_file_size)
+) -> ResolvedSubagents {
+    let matches =
+        crate::analysis::subagents::match_subagents(session, ordered_entries, max_file_size);
+    let matched = matches
         .matched
         .into_iter()
         .map(|(id, m)| {
@@ -3305,7 +3321,17 @@ fn resolve_subagent_renders(
                 },
             )
         })
-        .collect()
+        .collect();
+    let unmatched = matches
+        .unmatched
+        .into_iter()
+        .map(|m| UnmatchedSubagent {
+            session_id: m.session_id,
+            message_count: m.message_count,
+            result_preview: m.result_preview,
+        })
+        .collect();
+    ResolvedSubagents { matched, unmatched }
 }
 
 /// Render a subagent's main thread as message entries (standard detail: user and
@@ -3403,11 +3429,21 @@ mod tests {
 
         // Unique description attaches; ambiguous pair is left unattached.
         assert_eq!(
-            out.get("toolu_AAA").map(|r| r.session_id.as_str()),
+            out.matched.get("toolu_AAA").map(|r| r.session_id.as_str()),
             Some("agent-x")
         );
-        assert!(!out.contains_key("toolu_BBB"));
-        assert!(!out.contains_key("toolu_CCC"));
+        assert!(!out.matched.contains_key("toolu_BBB"));
+        assert!(!out.matched.contains_key("toolu_CCC"));
+
+        // The ambiguous pair is surfaced as unmatched rather than silently
+        // dropped — the bug this fix closes on the MCP surface.
+        let mut unmatched_ids: Vec<&str> = out
+            .unmatched
+            .iter()
+            .map(|u| u.session_id.as_str())
+            .collect();
+        unmatched_ids.sort_unstable();
+        assert_eq!(unmatched_ids, vec!["agent-y", "agent-z"]);
     }
 
     fn setup_claude_dir(session_id: &str, project_path: &str, jsonl: &str) -> TempDir {

@@ -285,6 +285,22 @@ pub struct SessionMessagesResponse {
     pub returned: usize,
     pub offset: usize,
     pub messages: Vec<MessageEntry>,
+    /// Subagents present on disk but not confidently joined to a spawning
+    /// Agent/Task call (e.g. several key-less subagents in one turn). Surfaced
+    /// so they are never silently dropped; the matched ones are attached inline
+    /// to their spawning message instead. Only populated at detail="full".
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unmatched_subagents: Vec<UnmatchedSubagent>,
+}
+
+/// A subagent present on disk but not joinable to a specific spawn call.
+#[derive(Debug, Serialize)]
+pub struct UnmatchedSubagent {
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_preview: Option<String>,
 }
 
 // ============================================================================
