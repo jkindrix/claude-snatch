@@ -3279,6 +3279,7 @@ fn resolve_subagent_renders(
     max_file_size: Option<u64>,
 ) -> HashMap<String, RenderedSubagent> {
     crate::analysis::subagents::match_subagents(session, ordered_entries, max_file_size)
+        .matched
         .into_iter()
         .map(|(id, m)| {
             let transcript = if include_transcripts {

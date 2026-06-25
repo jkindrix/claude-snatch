@@ -10,7 +10,7 @@ use crate::analysis::extraction::{
     extract_tool_names, extract_user_prompt_text, get_model, has_thinking, is_human_prompt,
     truncate_text,
 };
-use crate::analysis::subagents::{match_subagents, SubagentMatch};
+use crate::analysis::subagents::{match_subagents, SubagentMatch, SubagentMatches};
 use crate::cli::{Cli, MessagesArgs, OutputFormat};
 use crate::error::{Result, SnatchError};
 use crate::model::message::LogEntry;
@@ -27,6 +27,18 @@ struct MessagesOutput {
     returned: usize,
     offset: usize,
     messages: Vec<MessageOutput>,
+    /// Subagents present on disk but not joinable to a specific spawn call.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unmatched_subagents: Vec<UnmatchedSubagentOutput>,
+}
+
+#[derive(serde::Serialize)]
+struct UnmatchedSubagentOutput {
+    session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_preview: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -112,14 +124,14 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
 
     // Match Agent/Task calls to spawned subagents (only "full" detail renders tool
     // details). Uses the unfiltered thread for spawn-order joining.
-    let subagent_matches: HashMap<String, SubagentMatch> = if detail == "full" {
+    let subagent_matches: SubagentMatches = if detail == "full" {
         match_subagents(
             &session,
             &conversation.main_thread_entries(),
             cli.max_file_size,
         )
     } else {
-        HashMap::new()
+        SubagentMatches::default()
     };
 
     let mut main_entries: Vec<&LogEntry> = conversation.main_thread_entries();
@@ -205,7 +217,7 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                         truncate_len,
                         include_thinking,
                         thinking_max_len,
-                        &subagent_matches,
+                        &subagent_matches.matched,
                         args.subagent_transcripts,
                         cli.max_file_size,
                     )
@@ -219,6 +231,15 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                 returned: messages.len(),
                 offset,
                 messages,
+                unmatched_subagents: subagent_matches
+                    .unmatched
+                    .iter()
+                    .map(|m| UnmatchedSubagentOutput {
+                        session_id: m.session_id.clone(),
+                        message_count: m.message_count,
+                        result_preview: m.result_preview.clone(),
+                    })
+                    .collect(),
             };
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
@@ -355,7 +376,7 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                             println!("    > {} {}", t.name, detail_str.join(" "));
 
                             // Attach the spawned subagent's work to its Agent/Task call.
-                            if let Some(m) = subagent_matches.get(&t.id) {
+                            if let Some(m) = subagent_matches.matched.get(&t.id) {
                                 let msgs = m
                                     .message_count
                                     .map(|n| format!(" ({n} msgs)"))
@@ -387,6 +408,20 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                         println!();
                     }
                 }
+            }
+
+            // Subagents present on disk but not joinable to a specific spawn call.
+            // Emitting a marker keeps a present subagent from vanishing silently.
+            for m in &subagent_matches.unmatched {
+                let msgs = m
+                    .message_count
+                    .map(|n| format!("{n} msgs"))
+                    .unwrap_or_else(|| "? msgs".to_string());
+                println!("[subagent {}: {}, unlinked]", m.session_id, msgs);
+                if let Some(preview) = &m.result_preview {
+                    println!("    result: {}", truncate_text(preview, 200));
+                }
+                println!();
             }
         }
     }
