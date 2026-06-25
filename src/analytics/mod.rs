@@ -354,9 +354,13 @@ impl SessionAnalytics {
     pub fn summary_report(&self) -> AnalyticsSummary {
         AnalyticsSummary {
             duration: self.duration(),
-            total_messages: self.message_counts.total(),
+            // Conversation basis (user + assistant), matching `snatch info`'s
+            // Messages count. System/summary/snapshot entries are excluded so the
+            // two surfaces report the same total. See `MessageCounts::conversation`.
+            total_messages: self.message_counts.conversation(),
             user_messages: self.message_counts.user,
             assistant_messages: self.message_counts.assistant,
+            tool_result_blocks: self.message_counts.tool_results,
             total_tokens: self.usage.usage.work_tokens(),
             input_tokens: self.usage.usage.input_tokens,
             output_tokens: self.usage.usage.output_tokens,
@@ -619,6 +623,11 @@ pub struct AnalyticsSummary {
     pub user_messages: usize,
     /// Assistant messages.
     pub assistant_messages: usize,
+    /// Tool-result blocks carried inside user messages. Counts blocks (the value
+    /// of `MessageCounts::tool_results`), which can exceed the number of user
+    /// entries when one entry batches several results. Surfaced additively so the
+    /// tool-result share of `user_messages` is visible rather than hidden.
+    pub tool_result_blocks: usize,
     /// Real-work tokens: fresh input + cache-creation + output (excludes only
     /// re-served cache reads). See `Usage::work_tokens`.
     pub total_tokens: u64,
@@ -675,6 +684,7 @@ impl AnalyticsSummary {
             total_messages: 0,
             user_messages: 0,
             assistant_messages: 0,
+            tool_result_blocks: 0,
             total_tokens: 0,
             input_tokens: 0,
             output_tokens: 0,
@@ -697,6 +707,7 @@ impl AnalyticsSummary {
             agg.total_messages += s.total_messages;
             agg.user_messages += s.user_messages;
             agg.assistant_messages += s.assistant_messages;
+            agg.tool_result_blocks += s.tool_result_blocks;
             agg.total_tokens += s.total_tokens;
             agg.input_tokens += s.input_tokens;
             agg.output_tokens += s.output_tokens;
@@ -2104,6 +2115,7 @@ mod tests {
             total_messages: 0,
             user_messages: 0,
             assistant_messages: 0,
+            tool_result_blocks: 0,
             total_tokens: 0,
             input_tokens: 0,
             output_tokens: 0,
@@ -2148,6 +2160,29 @@ mod tests {
         assert!(!prediction.rate_string().is_empty());
         assert!(!prediction.time_to_limit_string().is_empty());
         assert!(!prediction.usage_percentage_string().is_empty());
+    }
+
+    #[test]
+    fn test_summary_report_message_basis() {
+        // Issue 0002: `snatch stats` Total must use the conversation basis
+        // (user + assistant) so it agrees with `snatch info`'s Messages count,
+        // which excludes system/summary entries. tool_result_blocks is surfaced
+        // additively from the raw user count.
+        let mut analytics = SessionAnalytics::default();
+        analytics.message_counts.user = 100;
+        analytics.message_counts.assistant = 80;
+        analytics.message_counts.system = 7;
+        analytics.message_counts.tool_results = 90;
+
+        let summary = analytics.summary_report();
+
+        // Conversation basis: user + assistant, NOT total() (which would add the
+        // 7 system entries and give 187).
+        assert_eq!(summary.total_messages, 180);
+        assert_eq!(summary.user_messages, 100);
+        assert_eq!(summary.assistant_messages, 80);
+        // Tool-result blocks surfaced as-is (block count, may exceed user entries).
+        assert_eq!(summary.tool_result_blocks, 90);
     }
 
     #[test]

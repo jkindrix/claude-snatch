@@ -283,13 +283,31 @@ fn show_session_info(
             } else {
                 println!("Entries:      {}", summary.entry_count);
             }
-            println!("Messages:     {}", summary.message_count);
+            // Messages is the conversation basis (user + assistant), matching
+            // `snatch stats` Total. Break it down so the User count -- most of
+            // which are tool-result carriers, not human prompts -- is visible.
+            println!(
+                "Messages:     {}  (user + assistant)",
+                summary.message_count
+            );
+            if let Ok(entries) = session.parse_with_options(cli.max_file_size) {
+                if let Ok(conversation) = Conversation::from_entries(entries) {
+                    let analytics = SessionAnalytics::from_conversation(&conversation);
+                    println!("  User:         {}", analytics.message_counts.user);
+                    println!(
+                        "    Tool results: {}  (blocks in user msgs)",
+                        analytics.message_counts.tool_results
+                    );
+                    println!("  Assistant:    {}", analytics.message_counts.assistant);
+                }
+            }
 
-            // Show tool result artifacts info
+            // Show tool result artifacts info (separate on-disk files, distinct
+            // from the in-conversation tool-result blocks counted above).
             let (tr_count, tr_size) = session.tool_result_stats();
             if tr_count > 0 {
                 println!(
-                    "Tool Results: {} files ({})",
+                    "Tool Result Files: {} ({})",
                     tr_count,
                     crate::discovery::format_size(tr_size)
                 );

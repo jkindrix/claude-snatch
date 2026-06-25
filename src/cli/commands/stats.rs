@@ -504,14 +504,27 @@ fn output_session_stats(cli: &Cli, args: &StatsArgs, analytics: &SessionAnalytic
             println!("  Cache Hit Rate: {:.1}%", summary.cache_hit_rate);
             println!();
 
-            // Messages
+            // Messages. "User" is the raw user-entry count; most of those entries
+            // carry tool results rather than human prompts, so the tool-result
+            // block share is surfaced additively. "Total" is the conversation
+            // basis (user + assistant), matching `snatch info`'s Messages count.
             println!("Messages:");
-            println!("  User:      {:>10}", format_count(summary.user_messages));
             println!(
-                "  Assistant: {:>10}",
+                "  User:         {:>10}",
+                format_count(summary.user_messages)
+            );
+            println!(
+                "    Tool results: {:>8}",
+                format_count(summary.tool_result_blocks)
+            );
+            println!(
+                "  Assistant:    {:>10}",
                 format_count(summary.assistant_messages)
             );
-            println!("  Total:     {:>10}", format_count(summary.total_messages));
+            println!(
+                "  Total:        {:>10}  (user + assistant)",
+                format_count(summary.total_messages)
+            );
             println!();
 
             // Tools
