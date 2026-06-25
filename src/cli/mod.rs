@@ -758,7 +758,9 @@ pub struct ExportArgs {
     #[arg(long)]
     pub pretty: bool,
 
-    /// Lossless export: preserve all data including unknown fields.
+    /// Content-preserving export: retain all data including unknown entry
+    /// types, content blocks, and fields. Normalized JSON, not byte-for-byte
+    /// (fields may be reordered; orphan entries are emitted first).
     /// Implies --metadata, --system, --thinking, --tool-use, --tool-results.
     #[arg(long)]
     pub lossless: bool,

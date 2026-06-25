@@ -1,8 +1,11 @@
-//! JSON export for lossless conversation data.
+//! JSON export for conversation data.
 //!
-//! Provides lossless JSON export that preserves all data including
-//! unknown fields for forward compatibility. This format is suitable
-//! for archival and programmatic processing.
+//! Provides a normalized, content-preserving JSON export that retains all
+//! data — including unknown entry types, content blocks, and fields — for
+//! forward compatibility. It is not byte-for-byte identical to the source
+//! (fields may be reordered and orphan entries are emitted first), so it is
+//! content-preserving rather than strictly lossless. Suitable for archival
+//! and programmatic processing.
 
 use std::io::Write;
 
@@ -16,7 +19,7 @@ use crate::reconstruction::Conversation;
 
 use super::{ContentType, ExportOptions, Exporter};
 
-/// JSON exporter for lossless data export.
+/// JSON exporter (normalized, content-preserving).
 #[derive(Debug, Clone)]
 pub struct JsonExporter {
     /// Pretty-print the JSON output.

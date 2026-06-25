@@ -11,6 +11,21 @@
 //! string, and `Other` serializes the captured string unchanged (no
 //! snake/camel/lowercase normalization).
 
+/// Remove the top-level `type` discriminator from an object value.
+///
+/// Known [`crate::model::LogEntry`] / [`crate::model::content::ContentBlock`]
+/// variants are dispatched by reading `type` and then deserialized from the
+/// remaining object. Their inner structs flatten unknown fields into an `extra`
+/// map, so if the discriminator is left in place it is re-captured there and
+/// then emitted a second time by the tagged serializer — producing a duplicate
+/// top-level `type` key. Nested objects (e.g. `message.type`) are untouched.
+pub fn without_top_level_type(mut value: serde_json::Value) -> serde_json::Value {
+    if let serde_json::Value::Object(map) = &mut value {
+        map.remove("type");
+    }
+    value
+}
+
 /// Generate `Serialize`/`Deserialize` impls for a string-valued enum with a
 /// verbatim `Other(String)` fallback.
 ///

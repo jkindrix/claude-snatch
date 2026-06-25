@@ -2,7 +2,7 @@
 //!
 //! This module provides various export formats:
 //! - Markdown: Human-readable conversation transcripts
-//! - JSON: Lossless structured data export
+//! - JSON: Structured data export (normalized, content-preserving)
 //! - HTML: Rich formatted output
 //! - Plain text: Simple formatted output with word wrapping
 //! - CSV: Spreadsheet-compatible tabular data
@@ -1076,7 +1076,7 @@ impl ExportOptions {
 pub enum ExportFormat {
     /// Markdown format.
     Markdown,
-    /// JSON format (lossless).
+    /// JSON format (normalized, content-preserving).
     Json,
     /// Pretty-printed JSON.
     JsonPretty,

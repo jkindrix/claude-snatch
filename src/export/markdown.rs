@@ -751,7 +751,29 @@ impl MarkdownExporter {
         options: &ExportOptions,
     ) -> Result<()> {
         match entry {
-            LogEntry::Unknown(_) => {}
+            LogEntry::Unknown(raw) => {
+                // Preserved unknown events render as compact JSON when
+                // system-style output is requested, rather than vanishing.
+                if options.should_include_system() {
+                    let label = raw
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let json =
+                        serde_json::to_string_pretty(raw).unwrap_or_else(|_| raw.to_string());
+                    if self.plain_text {
+                        writeln!(writer, "[{label} event]")?;
+                        writeln!(writer, "{json}")?;
+                    } else {
+                        writeln!(writer, "## ❓ {label}")?;
+                        writeln!(writer)?;
+                        writeln!(writer, "```json")?;
+                        writeln!(writer, "{json}")?;
+                        writeln!(writer, "```")?;
+                    }
+                    writeln!(writer)?;
+                }
+            }
             LogEntry::User(user) => {
                 if options.should_include_user() {
                     // Skip user messages that have no visible text content when using

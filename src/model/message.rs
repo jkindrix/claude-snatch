@@ -16,7 +16,7 @@ use serde_json::{from_value, Value};
 
 use super::content::{AssistantContent, ContentBlock, ImageBlock};
 use super::metadata::{CompactMetadata, HookInfo, ThinkingMetadata, Todo};
-use super::serde_str::serde_string_enum;
+use super::serde_str::{serde_string_enum, without_top_level_type};
 use super::usage::Usage;
 
 /// A parsed JSONL line representing any message type.
@@ -136,26 +136,36 @@ impl<'de> Deserialize<'de> for LogEntry {
         use serde::de::Error as _;
         let value = Value::deserialize(deserializer)?;
         let tag = value.get("type").and_then(Value::as_str).map(str::to_owned);
+        // Strip the discriminator for known variants so it is not re-captured by
+        // their flattened `extra` map and then duplicated on serialize. The
+        // Unknown arm keeps the full object (including `type`) verbatim.
+        let known = |v: Value| without_top_level_type(v);
         Ok(match tag.as_deref() {
-            Some("assistant") => Self::Assistant(from_value(value).map_err(D::Error::custom)?),
-            Some("user") => Self::User(from_value(value).map_err(D::Error::custom)?),
-            Some("system") => Self::System(from_value(value).map_err(D::Error::custom)?),
-            Some("summary") => Self::Summary(from_value(value).map_err(D::Error::custom)?),
+            Some("assistant") => {
+                Self::Assistant(from_value(known(value)).map_err(D::Error::custom)?)
+            }
+            Some("user") => Self::User(from_value(known(value)).map_err(D::Error::custom)?),
+            Some("system") => Self::System(from_value(known(value)).map_err(D::Error::custom)?),
+            Some("summary") => Self::Summary(from_value(known(value)).map_err(D::Error::custom)?),
             Some("file-history-snapshot") => {
-                Self::FileHistorySnapshot(from_value(value).map_err(D::Error::custom)?)
+                Self::FileHistorySnapshot(from_value(known(value)).map_err(D::Error::custom)?)
             }
             Some("queue-operation") => {
-                Self::QueueOperation(from_value(value).map_err(D::Error::custom)?)
+                Self::QueueOperation(from_value(known(value)).map_err(D::Error::custom)?)
             }
-            Some("turn_end") => Self::TurnEnd(from_value(value).map_err(D::Error::custom)?),
-            Some("progress") => Self::Progress(from_value(value).map_err(D::Error::custom)?),
-            Some("attachment") => Self::Attachment(from_value(value).map_err(D::Error::custom)?),
-            Some("last-prompt") => Self::LastPrompt(from_value(value).map_err(D::Error::custom)?),
-            Some("mode") => Self::Mode(from_value(value).map_err(D::Error::custom)?),
+            Some("turn_end") => Self::TurnEnd(from_value(known(value)).map_err(D::Error::custom)?),
+            Some("progress") => Self::Progress(from_value(known(value)).map_err(D::Error::custom)?),
+            Some("attachment") => {
+                Self::Attachment(from_value(known(value)).map_err(D::Error::custom)?)
+            }
+            Some("last-prompt") => {
+                Self::LastPrompt(from_value(known(value)).map_err(D::Error::custom)?)
+            }
+            Some("mode") => Self::Mode(from_value(known(value)).map_err(D::Error::custom)?),
             Some("permission-mode") => {
-                Self::PermissionMode(from_value(value).map_err(D::Error::custom)?)
+                Self::PermissionMode(from_value(known(value)).map_err(D::Error::custom)?)
             }
-            Some("ai-title") => Self::AiTitle(from_value(value).map_err(D::Error::custom)?),
+            Some("ai-title") => Self::AiTitle(from_value(known(value)).map_err(D::Error::custom)?),
             // Unknown or absent `type`: retain the whole object verbatim, but
             // only if it is a JSON object — a bare scalar/array is not a valid
             // log entry and must still be rejected (strict) / skipped (lenient).
@@ -310,8 +320,13 @@ impl LogEntry {
     }
 
     /// Get the message type as a string.
+    ///
+    /// For an unknown entry this returns its actual raw `type` (falling back to
+    /// `"unknown"` only when the discriminator is absent), so preserved types
+    /// like `pr-link` are visible in CSV/TUI/analytics surfaces rather than
+    /// collapsed to a generic placeholder.
     #[must_use]
-    pub const fn message_type(&self) -> &'static str {
+    pub fn message_type(&self) -> &str {
         match self {
             Self::Assistant(_) => "assistant",
             Self::User(_) => "user",
@@ -326,7 +341,7 @@ impl LogEntry {
             Self::Mode(_) => "mode",
             Self::PermissionMode(_) => "permission-mode",
             Self::AiTitle(_) => "ai-title",
-            Self::Unknown(_) => "unknown",
+            Self::Unknown(raw) => unknown_field(raw, "type").unwrap_or("unknown"),
         }
     }
 
@@ -1292,7 +1307,8 @@ mod tests {
         // An unmodeled entry type parses as Unknown, retaining its full payload.
         let json = r#"{"type":"future-entry-type","uuid":"x1","sessionId":"s","timestamp":"2026-06-21T00:00:00Z","weird":true}"#;
         let entry: LogEntry = serde_json::from_str(json).unwrap();
-        assert_eq!(entry.message_type(), "unknown");
+        // message_type() exposes the real wire type, not a generic placeholder.
+        assert_eq!(entry.message_type(), "future-entry-type");
         assert!(matches!(entry, LogEntry::Unknown(_)));
         // Payload survives: re-serialization equals the original object verbatim
         // (no `{"type":"unknown", ...}` wrapper shape).
@@ -1413,5 +1429,22 @@ mod tests {
         let json = r#"{"type":"system","subtype":"stop_hook_summary","uuid":"sy1","timestamp":"2026-06-21T00:00:02Z","sessionId":"s","hookInfos":[{"command":"x","exitCode":0}]}"#;
         let entry: LogEntry = serde_json::from_str(json).unwrap();
         assert_eq!(entry.message_type(), "system");
+    }
+
+    #[test]
+    fn test_known_entry_no_duplicate_top_level_type_key() {
+        // The discriminator must be stripped before deserializing into a struct
+        // with a flattened `extra` map, else it is re-captured and emitted twice
+        // (a duplicate top-level "type" key). serde_json::Value dedups keys, so
+        // this must be asserted at the string level.
+        let json = r#"{"type":"user","uuid":"u1","timestamp":"2026-06-21T00:00:00Z","sessionId":"s","version":"2.1.0","isSidechain":false,"message":{"role":"user","content":"hi"}}"#;
+        let entry: LogEntry = serde_json::from_str(json).unwrap();
+        let out = serde_json::to_string(&entry).unwrap();
+        // Exactly one top-level "type": the nested message has no `type` here.
+        assert_eq!(
+            out.matches(r#""type":"#).count(),
+            1,
+            "duplicate type key in: {out}"
+        );
     }
 }

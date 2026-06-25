@@ -518,6 +518,21 @@ impl Exporter for TextExporter {
                 LogEntry::Summary(summary) if options.should_include_summary() => {
                     self.write_summary_message(writer, summary, options)?;
                 }
+                LogEntry::Unknown(raw) if options.should_include_system() => {
+                    // Preserved unknown events render as compact JSON rather
+                    // than vanishing, when system-style output is requested.
+                    let label = raw
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    writeln!(writer, "[{label} event]")?;
+                    writeln!(
+                        writer,
+                        "{}",
+                        serde_json::to_string(raw).unwrap_or_else(|_| raw.to_string())
+                    )?;
+                    writeln!(writer)?;
+                }
                 _ => {}
             }
         }

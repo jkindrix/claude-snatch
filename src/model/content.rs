@@ -11,7 +11,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{from_value, Value};
 
-use super::serde_str::serde_string_enum;
+use super::serde_str::{serde_string_enum, without_top_level_type};
 use super::usage::Usage;
 
 /// Assistant message content structure.
@@ -278,12 +278,18 @@ impl<'de> Deserialize<'de> for ContentBlock {
         use serde::de::Error as _;
         let value = Value::deserialize(deserializer)?;
         let kind = value.get("type").and_then(Value::as_str).map(str::to_owned);
+        // Strip the discriminator for known variants so it is not re-captured by
+        // their flattened `extra` map and then duplicated on serialize. The
+        // Unknown arm keeps the full object (including `type`) verbatim.
+        let known = |v: Value| without_top_level_type(v);
         Ok(match kind.as_deref() {
-            Some("text") => Self::Text(from_value(value).map_err(D::Error::custom)?),
-            Some("tool_use") => Self::ToolUse(from_value(value).map_err(D::Error::custom)?),
-            Some("tool_result") => Self::ToolResult(from_value(value).map_err(D::Error::custom)?),
-            Some("thinking") => Self::Thinking(from_value(value).map_err(D::Error::custom)?),
-            Some("image") => Self::Image(from_value(value).map_err(D::Error::custom)?),
+            Some("text") => Self::Text(from_value(known(value)).map_err(D::Error::custom)?),
+            Some("tool_use") => Self::ToolUse(from_value(known(value)).map_err(D::Error::custom)?),
+            Some("tool_result") => {
+                Self::ToolResult(from_value(known(value)).map_err(D::Error::custom)?)
+            }
+            Some("thinking") => Self::Thinking(from_value(known(value)).map_err(D::Error::custom)?),
+            Some("image") => Self::Image(from_value(known(value)).map_err(D::Error::custom)?),
             // Unknown block: retain verbatim, but only if it is a JSON object.
             other if value.is_object() => Self::Unknown {
                 kind: other.unwrap_or_default().to_string(),
@@ -296,14 +302,18 @@ impl<'de> Deserialize<'de> for ContentBlock {
 
 impl ContentBlock {
     /// Get the type name of this content block.
+    ///
+    /// For an unknown block this returns its actual `type` (e.g. `fallback`),
+    /// falling back to `"unknown"` only when the discriminator is absent.
     #[must_use]
-    pub const fn type_name(&self) -> &'static str {
+    pub fn type_name(&self) -> &str {
         match self {
             Self::Text(_) => "text",
             Self::ToolUse(_) => "tool_use",
             Self::ToolResult(_) => "tool_result",
             Self::Thinking(_) => "thinking",
             Self::Image(_) => "image",
+            Self::Unknown { kind, .. } if !kind.is_empty() => kind,
             Self::Unknown { .. } => "unknown",
         }
     }
@@ -791,6 +801,24 @@ mod tests {
             ToolResultContent::String("plain".into()).to_display_string(true),
             "plain"
         );
+    }
+
+    #[test]
+    fn test_known_content_blocks_no_duplicate_type_key() {
+        // Known blocks must not re-emit a duplicate "type" key. Asserted at the
+        // string level since serde_json::Value dedups keys.
+        for json in [
+            r#"{"type":"text","text":"hi"}"#,
+            r#"{"type":"tool_use","id":"t1","name":"Read","input":{}}"#,
+        ] {
+            let block: ContentBlock = serde_json::from_str(json).unwrap();
+            let out = serde_json::to_string(&block).unwrap();
+            assert_eq!(
+                out.matches(r#""type":"#).count(),
+                1,
+                "duplicate type key in: {out}"
+            );
+        }
     }
 
     #[test]
