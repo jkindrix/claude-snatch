@@ -1,257 +1,137 @@
 # Configuration Reference
 
-snatch uses a layered configuration system with sensible defaults.
+snatch works out of the box; configuration is optional and uses sensible defaults.
 
 ## Configuration Locations
 
-Configuration is loaded from these locations (in order of priority):
+Configuration is loaded and merged in this order (later overrides earlier):
 
-1. Command-line arguments (highest priority)
-2. Environment variables
-3. Project-specific config: `.snatch/config.toml`
-4. User config: `~/.config/snatch/config.toml`
-5. Default values (lowest priority)
+1. Default values (lowest priority)
+2. User config: `~/.config/claude-snatch/config.toml`
+3. Project config: `.claude-snatch.toml` in the project directory
+4. Command-line arguments (highest priority)
 
-## Configuration File Format
+The user-config directory follows the platform convention (`$XDG_CONFIG_HOME` or
+`~/.config` on Linux, `~/Library/Application Support` on macOS, `%APPDATA%` on
+Windows), under `claude-snatch/config.toml`. Run `snatch config path` to print the
+exact location.
 
-snatch uses TOML format for configuration files.
+## File Format
 
-### Example Configuration
+snatch uses TOML. Every section and key is optional; anything omitted falls back to
+the default shown below.
+
+### Example
 
 ```toml
-# ~/.config/snatch/config.toml
+# ~/.config/claude-snatch/config.toml
 
-[general]
-# Default Claude directory (auto-detected if not set)
-claude_dir = "~/.claude"
-
-# Default output directory for exports
-output_dir = "~/snatch-exports"
-
-# Enable verbose logging
-verbose = false
-
-[tui]
-# Default theme: "dark", "light", or "high_contrast"
-theme = "dark"
-
-# Show thinking blocks by default
-show_thinking = true
-
-# Show tool outputs by default
-show_tools = true
-
-# Enable word wrap by default
-word_wrap = true
-
-# Number of recent sessions to show
-max_recent_sessions = 50
-
-[export]
-# Default export format
-format = "markdown"
-
-# Include tool calls in exports
-include_tools = true
-
-# Export main thread only by default
-main_thread_only = false
-
-# Default line width for text export
-text_width = 80
-
-[cache]
-# Enable session caching
-enabled = true
-
-# Cache directory
-dir = "~/.cache/snatch"
-
-# Maximum cache size in MB
-max_size_mb = 100
-
-# Cache entry TTL in seconds
-ttl_seconds = 3600
+[theme]
+name = "default"
+color = true
+unicode = true
 
 [display]
-# Date format for timestamps
-date_format = "%Y-%m-%d %H:%M:%S"
+full_ids = false
+show_sizes = true
+truncate_at = 10000
+context_lines = 2
 
-# Truncate long content in previews
-max_preview_length = 200
+[cache]
+enabled = true
+# directory = "/custom/cache/path"   # omitted = auto-detect
+max_size = 104857600                 # bytes (100 MB)
+ttl_seconds = 3600
 
-# Show token counts
-show_tokens = true
+[index]
+# directory = "/custom/index/path"   # omitted = auto-detect
 
-# Show cost estimates
-show_costs = true
-
-[analytics]
-# Default cost per 1M input tokens (USD)
-input_token_cost = 3.00
-
-# Default cost per 1M output tokens (USD)
-output_token_cost = 15.00
-
-[keybindings]
-# Custom key bindings (TUI)
-quit = "q"
-up = "k"
-down = "j"
-left = "h"
-right = "l"
-select = "Enter"
-back = "Escape"
-```
-
-## Environment Variables
-
-All configuration options can be set via environment variables with the `SNATCH_` prefix:
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `SNATCH_CLAUDE_DIR` | Claude directory path | `~/.claude` |
-| `SNATCH_OUTPUT_DIR` | Default output directory | `~/exports` |
-| `SNATCH_THEME` | TUI theme | `dark` |
-| `SNATCH_FORMAT` | Default export format | `markdown` |
-| `SNATCH_CACHE_DIR` | Cache directory | `~/.cache/snatch` |
-| `SNATCH_VERBOSE` | Enable verbose output | `true` |
-
-```bash
-# Example usage
-export SNATCH_THEME=light
-export SNATCH_FORMAT=json
-snatch tui
+[budget]
+# daily_limit = 5.00                 # USD; omitted = no limit
+# weekly_limit = 25.00
+# monthly_limit = 100.00
+warning_threshold = 0.8              # warn at 80% of a limit
+show_in_stats = true
 ```
 
 ## Configuration Sections
 
-### `[general]`
+### `[theme]`
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `claude_dir` | string | `~/.claude` | Path to Claude directory |
-| `output_dir` | string | `.` | Default export output directory |
-| `verbose` | bool | `false` | Enable verbose logging |
-
-### `[tui]`
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `theme` | string | `dark` | Color theme |
-| `show_thinking` | bool | `true` | Show thinking blocks |
-| `show_tools` | bool | `true` | Show tool calls |
-| `word_wrap` | bool | `true` | Enable word wrap |
-| `max_recent_sessions` | int | `50` | Max sessions in tree |
-
-### `[export]`
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `format` | string | `markdown` | Default export format |
-| `include_tools` | bool | `true` | Include tool calls |
-| `main_thread_only` | bool | `false` | Export main thread only |
-| `text_width` | int | `80` | Line width for text |
-
-### `[cache]`
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `enabled` | bool | `true` | Enable caching |
-| `dir` | string | `~/.cache/snatch` | Cache directory |
-| `max_size_mb` | int | `100` | Maximum cache size |
-| `ttl_seconds` | int | `3600` | Cache entry lifetime |
+| `name` | string | `default` | Theme name |
+| `color` | bool | `true` | Use color output |
+| `unicode` | bool | `true` | Use Unicode characters |
 
 ### `[display]`
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `date_format` | string | `%Y-%m-%d %H:%M:%S` | Timestamp format |
-| `max_preview_length` | int | `200` | Preview truncation |
-| `show_tokens` | bool | `true` | Display token counts |
-| `show_costs` | bool | `true` | Display cost estimates |
+| `full_ids` | bool | `false` | Show full session UUIDs instead of short prefixes |
+| `show_sizes` | bool | `true` | Show file sizes |
+| `truncate_at` | int | `10000` | Truncate long content at this many characters |
+| `context_lines` | int | `2` | Context lines shown around search matches |
 
-### `[analytics]`
+### `[cache]`
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `input_token_cost` | float | `3.00` | Cost per 1M input tokens |
-| `output_token_cost` | float | `15.00` | Cost per 1M output tokens |
+| `enabled` | bool | `true` | Enable session caching |
+| `directory` | string | auto-detect | Cache directory (platform cache dir if unset) |
+| `max_size` | int (bytes) | `104857600` | Maximum cache size, in bytes (100 MB) |
+| `ttl_seconds` | int | `3600` | Cache entry lifetime, in seconds |
 
-### `[keybindings]`
+### `[index]`
 
-Customize TUI key bindings:
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `directory` | string | auto-detect | Search-index directory. Read from the config file only — not exposed via `config set`. |
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `quit` | `q` | Exit application |
-| `up` | `k` | Move up |
-| `down` | `j` | Move down |
-| `left` | `h` | Focus left |
-| `right` | `l` | Focus right |
-| `select` | `Enter` | Select item |
-| `back` | `Escape` | Go back |
+### `[budget]`
 
-## Project-Specific Configuration
+Cost alerts based on estimated spend (see `snatch stats`).
 
-Create `.snatch/config.toml` in your project root for project-specific settings:
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `daily_limit` | float (USD) | unset | Daily spend limit; omit for no limit |
+| `weekly_limit` | float (USD) | unset | Weekly spend limit |
+| `monthly_limit` | float (USD) | unset | Monthly spend limit |
+| `warning_threshold` | float | `0.8` | Warn when spend reaches this fraction of a limit (accepts `0`–`1`, or a percentage like `80`) |
+| `show_in_stats` | bool | `true` | Show budget status in `stats` output |
+
+## Project Configuration
+
+Place a `.claude-snatch.toml` in a project directory to override the user config for
+sessions in that project. It uses the same format and is merged on top of the user
+config:
 
 ```toml
-# .snatch/config.toml
-
-[export]
-# Always include tools for this project
-include_tools = true
-
-# Export to specific directory
-output_dir = "./docs/conversations"
+# .claude-snatch.toml
 
 [display]
-# Show more context in previews
-max_preview_length = 500
+truncate_at = 3000
+
+[budget]
+monthly_limit = 50.00
 ```
 
-## Configuration Precedence
-
-When the same setting is defined in multiple places:
-
-1. **Command-line arguments** override everything
-2. **Environment variables** override config files
-3. **Project config** overrides user config
-4. **User config** overrides defaults
-
-Example:
+## Managing Configuration
 
 ```bash
-# Config file says format=markdown
-# Environment says format=json
-# Command line says --format html
-
-# Result: HTML format is used
-snatch export session --format html
+snatch config show                          # print effective configuration (alias: list)
+snatch config get display.truncate_at       # read one value
+snatch config set display.truncate_at 5000  # set a value
+snatch config path                          # print the config file location
+snatch config init                          # write a default config file
+snatch config reset                         # reset to defaults
 ```
 
-## Validating Configuration
+Keys accepted by `config get` / `config set`:
 
-Check your configuration:
+- `theme.name`, `theme.color`, `theme.unicode`
+- `display.full_ids`, `display.show_sizes`, `display.truncate_at`, `display.context_lines`
+- `cache.enabled`, `cache.directory`, `cache.max_size`, `cache.ttl_seconds`
+- `budget.daily_limit`, `budget.weekly_limit`, `budget.monthly_limit`, `budget.warning_threshold`, `budget.show_in_stats`
 
-```bash
-# Show effective configuration
-snatch config show
-
-# Validate configuration file
-snatch config validate
-
-# Show config file locations
-snatch config paths
-```
-
-## Resetting Configuration
-
-```bash
-# Reset to defaults
-snatch config reset
-
-# Create default config file
-snatch config init
-```
+`[index]` is read from the config file but is not exposed through `config set`.

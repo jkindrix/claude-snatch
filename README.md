@@ -456,27 +456,34 @@ cargo fmt
 
 ## Configuration
 
-claude-snatch looks for configuration in:
+claude-snatch works out of the box. To customize, create a TOML config file:
 
-1. `$XDG_CONFIG_HOME/claude-snatch/config.toml`
-2. `~/.config/claude-snatch/config.toml`
-3. `~/.claude-snatch.toml`
+- **User config:** `~/.config/claude-snatch/config.toml` (platform config dir; run
+  `snatch config path` to print the exact location)
+- **Project config:** `.claude-snatch.toml` in a project directory, which overrides
+  the user config for sessions in that project
 
 Example configuration:
 
 ```toml
-[defaults]
-claude_dir = "~/.claude"
-output_format = "text"
+[theme]
 color = true
 
-[export]
-include_tool_use = true
-include_timestamps = true
+[display]
+truncate_at = 10000
+context_lines = 2
 
-[tui]
-theme = "dark"
+[cache]
+enabled = true
+ttl_seconds = 3600
+
+[budget]
+monthly_limit = 100.00   # USD; warns at 80% of the limit by default
 ```
+
+Manage values with `snatch config show`, `snatch config get <key>`, and
+`snatch config set <key> <value>`. See
+[docs/configuration.md](docs/configuration.md) for the full reference.
 
 ## Performance
 
