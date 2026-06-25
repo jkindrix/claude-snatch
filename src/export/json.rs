@@ -753,6 +753,54 @@ mod tests {
     }
 
     #[test]
+    fn test_jsonl_export_preserves_all_entry_types() {
+        // Issue 0003: `-f jsonl` must round-trip every entry type by count,
+        // including uuid-less summaries and file-history snapshots that were
+        // previously dropped.
+        use crate::model::LogEntry;
+        use crate::reconstruction::Conversation;
+
+        let lines = [
+            r#"{"type":"user","uuid":"1","sessionId":"s","version":"2.0","message":{"role":"user","content":"hi"},"timestamp":"2026-01-01T00:00:00Z"}"#,
+            r#"{"type":"summary","summary":"a title","leafUuid":"1"}"#,
+            r#"{"type":"file-history-snapshot","messageId":"m1","snapshot":{"messageId":"m1","timestamp":"2026-01-01T00:00:00Z","trackedFileBackups":{}}}"#,
+            r#"{"type":"last-prompt","sessionId":"s","prompt":"hi"}"#,
+        ];
+        let entries: Vec<LogEntry> = lines
+            .iter()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let conv = Conversation::from_entries(entries).unwrap();
+
+        let mut out = Vec::new();
+        conversation_to_jsonl(&conv, &mut out, false).unwrap();
+        let out = String::from_utf8(out).unwrap();
+
+        let mut counts: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::default();
+        for line in out.lines().filter(|l| !l.trim().is_empty()) {
+            let v: Value = serde_json::from_str(line).unwrap();
+            let ty = v.get("type").and_then(Value::as_str).unwrap().to_string();
+            *counts.entry(ty).or_default() += 1;
+        }
+
+        assert_eq!(counts.get("user"), Some(&1));
+        assert_eq!(
+            counts.get("summary"),
+            Some(&1),
+            "summary must survive jsonl"
+        );
+        assert_eq!(
+            counts.get("file-history-snapshot"),
+            Some(&1),
+            "file-history-snapshot must survive jsonl"
+        );
+        assert_eq!(counts.get("last-prompt"), Some(&1));
+        // All four input entry types are present in the output.
+        assert_eq!(counts.values().sum::<usize>(), 4);
+    }
+
+    #[test]
     fn test_streaming_exporter_compact() {
         let mut exporter = StreamingJsonExporter::new();
         let mut output = Vec::new();

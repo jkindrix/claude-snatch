@@ -837,7 +837,7 @@ pub enum ExportFormatArg {
     JsonPretty,
     /// Plain text.
     Text,
-    /// JSONL (original format).
+    /// JSONL: content-complete round-trip of all entry types (order may differ).
     Jsonl,
     /// CSV tabular format.
     Csv,

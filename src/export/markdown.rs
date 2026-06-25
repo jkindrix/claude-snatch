@@ -862,6 +862,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_markdown_unaffected_by_retained_orphan_entries() {
+        // Issue 0003: retaining all uuid-less entries in the conversation must
+        // not leak structural/metadata entries into the markdown render. The
+        // markdown exporter skips them, so its output is unchanged.
+        use crate::model::LogEntry;
+
+        let user_only: LogEntry = serde_json::from_str(
+            r#"{"type":"user","uuid":"1","sessionId":"s","version":"2.0","message":{"role":"user","content":"hello"},"timestamp":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let with_orphans: Vec<LogEntry> = [
+            r#"{"type":"user","uuid":"1","sessionId":"s","version":"2.0","message":{"role":"user","content":"hello"},"timestamp":"2026-01-01T00:00:00Z"}"#,
+            r#"{"type":"file-history-snapshot","messageId":"m1","snapshot":{"messageId":"m1","timestamp":"2026-01-01T00:00:00Z","trackedFileBackups":{}}}"#,
+            r#"{"type":"last-prompt","sessionId":"s","lastPrompt":"hello"}"#,
+            r#"{"type":"mode","sessionId":"s","mode":"normal"}"#,
+        ]
+        .iter()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+
+        let conv_a = Conversation::from_entries(vec![user_only]).unwrap();
+        let conv_b = Conversation::from_entries(with_orphans).unwrap();
+
+        let exporter = MarkdownExporter::new();
+        let options = ExportOptions::default();
+        let mut out_a = Vec::new();
+        let mut out_b = Vec::new();
+        exporter
+            .export_conversation(&conv_a, &mut out_a, &options)
+            .unwrap();
+        exporter
+            .export_conversation(&conv_b, &mut out_b, &options)
+            .unwrap();
+
+        assert_eq!(
+            String::from_utf8(out_a).unwrap(),
+            String::from_utf8(out_b).unwrap(),
+            "retained orphan entries must not change markdown output"
+        );
+    }
+
+    #[test]
     fn test_format_timestamp() {
         use chrono::TimeZone;
         let ts = Utc.with_ymd_and_hms(2025, 12, 23, 10, 30, 0).unwrap();

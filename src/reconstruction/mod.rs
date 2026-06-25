@@ -102,9 +102,13 @@ pub struct Conversation {
     tool_links: HashMap<String, String>,
     /// Message ID groupings (streaming chunks).
     message_groups: HashMap<String, Vec<String>>,
-    /// Compaction-summary entries, which carry no UUID and are therefore
-    /// absent from the node tree. Retained so exporters can surface them.
-    summaries: Vec<LogEntry>,
+    /// Uuid-less entries (compaction summaries, file-history snapshots, sidecar
+    /// metadata such as last-prompt / mode / ai-title / permission-mode, plus
+    /// queue-operation and turn-end markers). These carry no UUID and are
+    /// therefore absent from the node tree. Retained in original input order so
+    /// exporters can surface them and `-f jsonl` is a content-complete
+    /// round-trip.
+    orphan_entries: Vec<LogEntry>,
 }
 
 impl Conversation {
@@ -117,7 +121,7 @@ impl Conversation {
         let mut tool_uses: HashMap<String, String> = HashMap::new(); // tool_use_id -> node_uuid
         let mut tool_links = HashMap::new();
         let mut message_groups: HashMap<String, Vec<String>> = HashMap::new();
-        let mut summaries: Vec<LogEntry> = Vec::new();
+        let mut orphan_entries: Vec<LogEntry> = Vec::new();
 
         // First pass: create nodes and track tool uses
         for entry in entries {
@@ -172,9 +176,15 @@ impl Conversation {
                 };
 
                 nodes.insert(uuid, node);
-            } else if matches!(entry, LogEntry::Summary(_)) {
-                // No UUID, so it never becomes a node; keep it for export.
-                summaries.push(entry);
+            } else {
+                // No UUID, so it never becomes a node. Retain every uuid-less
+                // entry type (summary, file-history-snapshot, last-prompt, mode,
+                // ai-title, permission-mode, queue-operation, turn-end, and any
+                // unmodeled `Unknown` line) in input order so exporters can
+                // surface them and `-f jsonl` round-trips by content. They are
+                // re-emitted ahead of the uuid-bearing thread because most carry
+                // no timestamp to interleave by (see `entries_for_export`).
+                orphan_entries.push(entry);
             }
         }
 
@@ -465,7 +475,7 @@ impl Conversation {
             branch_points,
             tool_links,
             message_groups,
-            summaries,
+            orphan_entries,
         })
     }
 
@@ -542,21 +552,26 @@ impl Conversation {
             .collect()
     }
 
-    /// Compaction-summary entries dropped from the node tree (no UUID).
+    /// Uuid-less entries dropped from the node tree (summaries,
+    /// file-history-snapshots, sidecar metadata, queue-operation and turn-end
+    /// markers), preserved in original input order.
     #[must_use]
-    pub fn summaries(&self) -> &[LogEntry] {
-        &self.summaries
+    pub fn orphan_entries(&self) -> &[LogEntry] {
+        &self.orphan_entries
     }
 
-    /// Entries for rendering an export: the compaction summaries (which are
-    /// absent from the node tree) followed by the rendered thread.
+    /// Entries for rendering an export: the uuid-less entries (which are absent
+    /// from the node tree) followed by the rendered thread.
     ///
     /// `main_thread_only` selects the main thread vs. the full chronological
-    /// flatten for the thread portion; the summaries are surfaced first either
-    /// way, since they carry no timestamp to order them by.
+    /// flatten for the thread portion. Ordering rule: the uuid-less entries are
+    /// surfaced first, in original input-file order, then the uuid-bearing
+    /// thread. Most uuid-less entries carry no timestamp to interleave by, so
+    /// this is deterministic but NOT byte-order-identical to the source file
+    /// (e.g. a summary recorded mid-file is re-emitted ahead of the thread).
     #[must_use]
     pub fn entries_for_export(&self, main_thread_only: bool) -> Vec<&LogEntry> {
-        let mut entries: Vec<&LogEntry> = self.summaries.iter().collect();
+        let mut entries: Vec<&LogEntry> = self.orphan_entries.iter().collect();
         if main_thread_only {
             entries.extend(self.main_thread_entries());
         } else {
@@ -778,10 +793,86 @@ mod tests {
             .any(|e| matches!(e, LogEntry::Summary(_))));
 
         // But it is retained and surfaced for export, ahead of the thread.
-        assert_eq!(conv.summaries().len(), 1);
+        assert_eq!(conv.orphan_entries().len(), 1);
         let exported = conv.entries_for_export(true);
         assert!(matches!(exported.first(), Some(LogEntry::Summary(_))));
         assert_eq!(exported.len(), 3);
+    }
+
+    #[test]
+    fn test_all_uuidless_entry_types_retained_for_export() {
+        // Every uuid-less entry type must be retained so `-f jsonl` round-trips
+        // by content (issue 0003). Parse realistic lines straight from JSON.
+        let fhs: LogEntry = serde_json::from_str(
+            r#"{"type":"file-history-snapshot","messageId":"m1","snapshot":{"messageId":"m1","timestamp":"2026-01-01T00:00:00Z","trackedFileBackups":{}}}"#,
+        )
+        .unwrap();
+        let last_prompt: LogEntry =
+            serde_json::from_str(r#"{"type":"last-prompt","sessionId":"s","lastPrompt":"hi"}"#)
+                .unwrap();
+        let mode: LogEntry =
+            serde_json::from_str(r#"{"type":"mode","sessionId":"s","mode":"normal"}"#).unwrap();
+        let ai_title: LogEntry =
+            serde_json::from_str(r#"{"type":"ai-title","sessionId":"s","aiTitle":"t"}"#).unwrap();
+        let perm: LogEntry = serde_json::from_str(
+            r#"{"type":"permission-mode","sessionId":"s","permissionMode":"default"}"#,
+        )
+        .unwrap();
+        let queue: LogEntry = serde_json::from_str(
+            r#"{"type":"queue-operation","sessionId":"s","timestamp":"2026-01-01T00:00:00Z","operation":"enqueue"}"#,
+        )
+        .unwrap();
+        let turn_end: LogEntry =
+            serde_json::from_str(r#"{"type":"turn_end","timestamp":"2026-01-01T00:00:00Z"}"#)
+                .unwrap();
+
+        // Confirm none of these carry a UUID (so they never become nodes).
+        for e in [
+            &fhs,
+            &last_prompt,
+            &mode,
+            &ai_title,
+            &perm,
+            &queue,
+            &turn_end,
+        ] {
+            assert!(e.uuid().is_none());
+        }
+
+        let entries = vec![
+            make_user_entry("1", None),
+            fhs,
+            last_prompt,
+            mode,
+            ai_title,
+            perm,
+            queue,
+            turn_end,
+            make_user_entry("2", Some("1")),
+        ];
+
+        let conv = Conversation::from_entries(entries).unwrap();
+
+        // 2 uuid-bearing nodes; the other 7 are retained as orphan entries.
+        assert_eq!(conv.len(), 2);
+        assert_eq!(conv.orphan_entries().len(), 7);
+
+        // entries_for_export surfaces all 9 (7 orphan + 2 thread).
+        let exported = conv.entries_for_export(true);
+        assert_eq!(exported.len(), 9);
+        assert!(exported
+            .iter()
+            .any(|e| matches!(e, LogEntry::FileHistorySnapshot(_))));
+        assert!(exported
+            .iter()
+            .any(|e| matches!(e, LogEntry::LastPrompt(_))));
+        assert!(exported.iter().any(|e| matches!(e, LogEntry::TurnEnd(_))));
+
+        // Orphan entries are emitted first, in original input order.
+        assert!(matches!(
+            exported.first(),
+            Some(LogEntry::FileHistorySnapshot(_))
+        ));
     }
 
     #[test]
