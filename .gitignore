@@ -74,3 +74,4 @@ yarn.lock
 # Binary artifacts (built binaries in project root)
 /snatch
 /snatch.exe
+.tmp/

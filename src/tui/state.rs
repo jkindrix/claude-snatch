@@ -2987,27 +2987,11 @@ impl AppState {
 
         // Check date range filter
         if self.filter_state.date_from.is_some() || self.filter_state.date_to.is_some() {
-            // Get timestamp if available - entries without timestamps pass through
-            let timestamp = match entry {
-                LogEntry::User(u) => Some(&u.timestamp),
-                LogEntry::Assistant(a) => Some(&a.timestamp),
-                LogEntry::System(s) => Some(&s.timestamp),
-                LogEntry::QueueOperation(q) => Some(&q.timestamp),
-                LogEntry::TurnEnd(t) => Some(&t.timestamp),
-                LogEntry::Progress(p) => Some(&p.timestamp),
-                LogEntry::Attachment(a) => Some(&a.timestamp),
-                // Summary, FileHistorySnapshot, and sidecar metadata lack timestamps;
-                // include them by default.
-                LogEntry::Summary(_)
-                | LogEntry::FileHistorySnapshot(_)
-                | LogEntry::LastPrompt(_)
-                | LogEntry::Mode(_)
-                | LogEntry::PermissionMode(_)
-                | LogEntry::AiTitle(_)
-                | LogEntry::Unknown(_) => None,
-            };
-            if let Some(ts) = timestamp {
-                if !self.filter_state.is_in_date_range(ts) {
+            // Get timestamp if available - entries without timestamps pass
+            // through. Unknown entries recover their raw timestamp via
+            // `entry.timestamp()`; entries that genuinely lack one return None.
+            if let Some(ts) = entry.timestamp() {
+                if !self.filter_state.is_in_date_range(&ts) {
                     return false;
                 }
             }
