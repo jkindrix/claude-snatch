@@ -2484,7 +2484,7 @@ pub enum MessageDetail {
     /// User + assistant text with tool names listed.
     #[default]
     Standard,
-    /// Includes tool call details (file paths, commands).
+    /// Includes tool call details (file paths, commands) and thinking blocks.
     Full,
 }
 

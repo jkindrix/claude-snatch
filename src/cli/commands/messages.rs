@@ -89,6 +89,14 @@ struct ToolDetailOutput {
     subagent_transcript: Option<Vec<MessageOutput>>,
 }
 
+/// Whether thinking blocks should be rendered for a given detail level.
+///
+/// `--detail full` implies thinking ("full means full"), so it is always on
+/// at that level. Other levels stay gated by the `--include-thinking` flag.
+fn effective_include_thinking(flag: bool, detail: &str) -> bool {
+    flag || detail == "full"
+}
+
 /// Run the messages command.
 pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
@@ -108,7 +116,9 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
     let msg_type_filter = args.message_type.as_str();
     let limit = args.limit;
     let offset = args.offset;
-    let include_thinking = args.include_thinking;
+    // "full" means full: it implies thinking regardless of the --include-thinking
+    // flag. Other detail levels stay gated by the flag.
+    let include_thinking = effective_include_thinking(args.include_thinking, detail);
 
     let thinking_max_len = match detail {
         "overview" => 500,
@@ -658,5 +668,36 @@ fn build_message_output(
                 thinking_preview: thinking,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_include_thinking;
+
+    #[test]
+    fn full_detail_implies_thinking_without_flag() {
+        // "full means full": thinking is on even when the flag is unset.
+        assert!(effective_include_thinking(false, "full"));
+    }
+
+    #[test]
+    fn non_full_detail_still_gated_by_flag() {
+        for detail in ["overview", "conversation", "standard"] {
+            assert!(
+                !effective_include_thinking(false, detail),
+                "{detail} should hide thinking without the flag"
+            );
+            assert!(
+                effective_include_thinking(true, detail),
+                "{detail} should show thinking with the flag"
+            );
+        }
+    }
+
+    #[test]
+    fn full_detail_with_flag_stays_on_once() {
+        // Both full + flag: still a single boolean, so no double-rendering.
+        assert!(effective_include_thinking(true, "full"));
     }
 }
