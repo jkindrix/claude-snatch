@@ -318,6 +318,9 @@ impl ConversationExport {
                 estimated_cost: summary.estimated_cost,
                 span_seconds: session_analytics.duration().map(|d| d.num_seconds()),
                 primary_model: summary.primary_model,
+                subagent_count: summary.subagent_count,
+                subagent_tokens: summary.subagent_tokens,
+                subagent_tool_invocations: summary.subagent_tool_invocations,
             })
         } else {
             None
@@ -419,6 +422,26 @@ pub struct ExportAnalytics {
     /// Primary model used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_model: Option<String>,
+    /// Number of subagent (Task) invocations that reported usage.
+    #[serde(skip_serializing_if = "is_zero_usize")]
+    pub subagent_count: usize,
+    /// Total tokens consumed by subagents (mined from Task results). Separate
+    /// from `total_tokens`, which is the parent session's own usage.
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub subagent_tokens: u64,
+    /// Total tool invocations across all subagents.
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub subagent_tool_invocations: u64,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_usize(v: &usize) -> bool {
+    *v == 0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
 }
 
 /// Tree structure information.

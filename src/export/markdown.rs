@@ -188,6 +188,15 @@ impl MarkdownExporter {
             if summary.thinking_blocks > 0 {
                 writeln!(writer, "- **Thinking Blocks:** {}", summary.thinking_blocks)?;
             }
+            if summary.subagent_count > 0 {
+                writeln!(
+                    writer,
+                    "- **Subagents:** {} ({} tokens, {} tool uses)",
+                    summary.subagent_count,
+                    summary.subagent_tokens,
+                    summary.subagent_tool_invocations
+                )?;
+            }
             if let Some(model) = &summary.primary_model {
                 writeln!(writer, "- **Primary Model:** {model}")?;
             }

@@ -74,6 +74,8 @@ pub struct SessionAnalytics {
     pub thinking_stats: ThinkingStats,
     /// File modification tracking.
     pub file_stats: FileModificationStats,
+    /// Subagent (Task) usage, mined from Task tool results.
+    pub subagent_stats: SubagentStats,
 }
 
 impl SessionAnalytics {
@@ -165,6 +167,13 @@ impl SessionAnalytics {
                             .or_insert(0) += 1;
                     }
                 }
+
+                // Mine subagent (Task) usage from the structured tool result,
+                // which carries the subagent's own token/tool accounting found
+                // nowhere else in the log.
+                if let Some(result) = &user.tool_use_result {
+                    self.process_subagent_result(result);
+                }
             }
             LogEntry::Assistant(assistant) => {
                 self.message_counts.assistant += 1;
@@ -204,6 +213,37 @@ impl SessionAnalytics {
             | LogEntry::AiTitle(_) => {
                 // Attachment and sidecar metadata entries carry no analytics.
             }
+        }
+    }
+
+    /// Mine subagent usage from a Task tool result.
+    ///
+    /// A subagent (Task) result carries its own `totalTokens`,
+    /// `totalToolUseCount` and `totalDurationMs` — the subagent's API cost,
+    /// which is not reflected in the parent session's own token usage. Results
+    /// are identified by the presence of an `agentId` key.
+    fn process_subagent_result(&mut self, result: &serde_json::Value) {
+        let Some(obj) = result.as_object() else {
+            return;
+        };
+        if !obj.contains_key("agentId") {
+            return;
+        }
+        self.subagent_stats.count += 1;
+        if let Some(t) = obj.get("totalTokens").and_then(serde_json::Value::as_u64) {
+            self.subagent_stats.total_tokens += t;
+        }
+        if let Some(c) = obj
+            .get("totalToolUseCount")
+            .and_then(serde_json::Value::as_u64)
+        {
+            self.subagent_stats.total_tool_use_count += c;
+        }
+        if let Some(d) = obj
+            .get("totalDurationMs")
+            .and_then(serde_json::Value::as_u64)
+        {
+            self.subagent_stats.total_duration_ms += d;
         }
     }
 
@@ -376,6 +416,9 @@ impl SessionAnalytics {
             unpriced_models: self.usage.unpriced_models.clone(),
             branch_count: self.branch_count,
             primary_model: self.primary_model().map(String::from),
+            subagent_count: self.subagent_stats.count,
+            subagent_tokens: self.subagent_stats.total_tokens,
+            subagent_tool_invocations: self.subagent_stats.total_tool_use_count,
         }
     }
 
@@ -441,6 +484,25 @@ impl MessageCounts {
     pub fn conversation(&self) -> usize {
         self.user + self.assistant
     }
+}
+
+/// Subagent (Task) usage statistics.
+///
+/// Mined from each Task tool result's own token/tool accounting
+/// (`totalTokens`, `totalToolUseCount`, `totalDurationMs`). This data exists
+/// nowhere else in the log — main-thread usage does not include subagent API
+/// calls — so it is tracked separately rather than folded into the session's
+/// own [`AggregatedUsage`].
+#[derive(Debug, Clone, Default)]
+pub struct SubagentStats {
+    /// Number of subagent invocations that reported usage.
+    pub count: usize,
+    /// Total tokens consumed across all subagents.
+    pub total_tokens: u64,
+    /// Total tool invocations across all subagents.
+    pub total_tool_use_count: u64,
+    /// Total wall-clock duration across all subagents, in milliseconds.
+    pub total_duration_ms: u64,
 }
 
 /// Thinking block statistics.
@@ -660,6 +722,14 @@ pub struct AnalyticsSummary {
     pub branch_count: usize,
     /// Primary model used.
     pub primary_model: Option<String>,
+    /// Number of subagent (Task) invocations that reported usage.
+    pub subagent_count: usize,
+    /// Total tokens consumed by subagents, mined from Task results. Not included
+    /// in `total_tokens`/`estimated_cost` (those are the parent session's own
+    /// usage); surfaced separately so subagent cost is visible.
+    pub subagent_tokens: u64,
+    /// Total tool invocations across all subagents.
+    pub subagent_tool_invocations: u64,
 }
 
 impl AnalyticsSummary {
@@ -700,6 +770,9 @@ impl AnalyticsSummary {
             unpriced_models: Vec::new(),
             branch_count: 0,
             primary_model: None,
+            subagent_count: 0,
+            subagent_tokens: 0,
+            subagent_tool_invocations: 0,
         };
         let mut cost = 0.0f64;
         let mut unpriced: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -717,6 +790,9 @@ impl AnalyticsSummary {
             agg.tool_invocations += s.tool_invocations;
             agg.thinking_blocks += s.thinking_blocks;
             agg.error_count += s.error_count;
+            agg.subagent_count += s.subagent_count;
+            agg.subagent_tokens += s.subagent_tokens;
+            agg.subagent_tool_invocations += s.subagent_tool_invocations;
             cost += s.estimated_cost.unwrap_or(0.0);
             unpriced.extend(s.unpriced_models.iter().cloned());
         }
@@ -2132,9 +2208,35 @@ mod tests {
             unpriced_models: Vec::new(),
             branch_count: 0,
             primary_model: None,
+            subagent_count: 0,
+            subagent_tokens: 0,
+            subagent_tool_invocations: 0,
         };
 
         assert_eq!(summary.cost_string(), "$0.0042");
+    }
+
+    #[test]
+    fn test_subagent_usage_mined_from_task_result() {
+        let mut analytics = SessionAnalytics::default();
+        let result = serde_json::json!({
+            "agentId": "a85e5837484d89f98",
+            "totalTokens": 46637,
+            "totalToolUseCount": 24,
+            "totalDurationMs": 206640,
+            "usage": {"input_tokens": 100, "output_tokens": 200}
+        });
+        analytics.process_subagent_result(&result);
+        analytics.process_subagent_result(&result);
+        assert_eq!(analytics.subagent_stats.count, 2);
+        assert_eq!(analytics.subagent_stats.total_tokens, 93_274);
+        assert_eq!(analytics.subagent_stats.total_tool_use_count, 48);
+        assert_eq!(analytics.subagent_stats.total_duration_ms, 413_280);
+
+        // A non-subagent tool result (no agentId) is ignored.
+        let other = serde_json::json!({"stdout": "ok", "stderr": ""});
+        analytics.process_subagent_result(&other);
+        assert_eq!(analytics.subagent_stats.count, 2);
     }
 
     #[test]
