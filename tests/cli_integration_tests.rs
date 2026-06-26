@@ -292,6 +292,21 @@ fn test_raw_jsonl_warns_about_excluded_subagents() {
         .stderr(predicate::str::contains("subagent").and(predicate::str::contains("not included")));
 }
 
+/// Regression guard for issue 0011: the markdown stats must headline the on-disk
+/// subagent transcript count, not the billed-usage count. The fixture has one
+/// transcript on disk and zero billed invocations — previously the Subagents line
+/// was omitted entirely (billed == 0), silently hiding the subagent.
+#[test]
+fn test_subagent_count_headlines_inventory() {
+    let tmp = setup_session_with_subagents_dir();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["export", SESSION_ID, "-f", "markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("**Subagents:** 1"));
+}
+
 // =============================================================================
 // info
 // =============================================================================

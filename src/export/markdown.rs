@@ -188,14 +188,26 @@ impl MarkdownExporter {
             if summary.thinking_blocks > 0 {
                 writeln!(writer, "- **Thinking Blocks:** {}", summary.thinking_blocks)?;
             }
-            if summary.subagent_count > 0 {
-                writeln!(
-                    writer,
-                    "- **Subagents:** {} ({} tokens, {} tool uses)",
-                    summary.subagent_count,
-                    summary.subagent_tokens,
-                    summary.subagent_tool_invocations
-                )?;
+            // Headline the on-disk transcript inventory when known; the analytics
+            // count only sees subagents that reported billed usage (issue 0011),
+            // so surface it as a "(N billed)" qualifier when the two differ.
+            let billed = summary.subagent_count;
+            let transcripts = options.subagent_transcript_count;
+            if billed > 0 || transcripts.unwrap_or(0) > 0 {
+                let headline = transcripts.unwrap_or(billed);
+                if transcripts.is_some_and(|t| t != billed) {
+                    writeln!(
+                        writer,
+                        "- **Subagents:** {headline} ({billed} billed, {} tokens, {} tool uses)",
+                        summary.subagent_tokens, summary.subagent_tool_invocations
+                    )?;
+                } else {
+                    writeln!(
+                        writer,
+                        "- **Subagents:** {headline} ({} tokens, {} tool uses)",
+                        summary.subagent_tokens, summary.subagent_tool_invocations
+                    )?;
+                }
             }
             if let Some(model) = &summary.primary_model {
                 writeln!(writer, "- **Primary Model:** {model}")?;

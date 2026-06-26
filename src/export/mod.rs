@@ -146,6 +146,12 @@ pub struct ExportOptions {
     /// Exclusive content filter - when non-empty, only these content types are included.
     /// All other content is excluded. When empty, uses the include_* flags.
     pub only: HashSet<ContentType>,
+    /// On-disk subagent transcript count (`subagents/` directory), when known.
+    /// The analytics `subagent_count` only sees subagent invocations that reported
+    /// billed usage in the parent — often far fewer than the transcripts on disk
+    /// (issue 0011). The command sets this so the export can headline the true
+    /// inventory; `None` falls back to the billed count.
+    pub subagent_transcript_count: Option<usize>,
 }
 
 /// Configuration for data minimization in shared exports.
@@ -701,6 +707,7 @@ impl Default for ExportOptions {
             redaction_preview: false,
             minimization: None,
             only: HashSet::new(),
+            subagent_transcript_count: None,
         }
     }
 }
@@ -727,6 +734,7 @@ impl ExportOptions {
             redaction_preview: false,
             minimization: None,
             only: HashSet::new(),
+            subagent_transcript_count: None,
         }
     }
 
@@ -751,6 +759,7 @@ impl ExportOptions {
             redaction_preview: false,
             minimization: None,
             only: HashSet::new(),
+            subagent_transcript_count: None,
         }
     }
 
@@ -778,6 +787,7 @@ impl ExportOptions {
             redaction_preview: false,
             minimization: Some(DataMinimizationConfig::for_sharing()),
             only: HashSet::new(),
+            subagent_transcript_count: None,
         }
     }
 

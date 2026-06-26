@@ -394,6 +394,10 @@ fn export_session_to_gist(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
             redaction_preview: args.redact_preview,
             minimization: None,
             only: only_filter,
+            subagent_transcript_count: {
+                let n = session.subagent_links().len();
+                (n > 0).then_some(n)
+            },
         }
     };
 
@@ -526,6 +530,10 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
             redaction_preview: args.redact_preview,
             minimization: None,
             only: only_filter,
+            subagent_transcript_count: {
+                let n = session.subagent_links().len();
+                (n > 0).then_some(n)
+            },
         }
     };
 
@@ -1457,6 +1465,10 @@ fn export_session(
             redaction_preview: args.redact_preview,
             minimization: None,
             only: only_filter,
+            subagent_transcript_count: {
+                let n = session.subagent_links().len();
+                (n > 0).then_some(n)
+            },
         }
     };
 
