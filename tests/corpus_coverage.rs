@@ -343,6 +343,50 @@ fn assistant_stop_reason_parses() {
     );
 }
 
+/// Regression guard for issue 0014 (resolved as intended behavior): the
+/// human-readable exporters replace image base64 payloads with a compact
+/// `[N base64 image omitted]` marker so a 100 KB+ blob never dumps into rendered
+/// output, while the structured `json`/`json-pretty` exporters deliberately
+/// preserve the full payload for machine consumers (`raw-jsonl` is the
+/// byte-faithful archival path). The fixture plants a base64 image both as a
+/// top-level user block (`iVBORw0KGgo`) and inside an array-variant tool result
+/// (`TOOLRESULTIMGBLOB`); this locks in which formats strip vs. preserve.
+#[test]
+fn image_payloads_stripped_in_text_formats_preserved_in_json() {
+    use claude_snatch::export::ExportFormat;
+    let entries = parse_fixture("content_blocks_session.jsonl");
+    let conversation = Conversation::from_entries(entries).expect("build conversation");
+    let opts = ExportOptions::default();
+
+    // Human-readable formats strip both image payloads to the size marker.
+    for fmt in [
+        ExportFormat::Markdown,
+        ExportFormat::Text,
+        ExportFormat::Xml,
+    ] {
+        let out = export_to_string(&conversation, fmt, &opts)
+            .unwrap_or_else(|e| panic!("{fmt:?} export should succeed: {e}"));
+        assert!(
+            !out.contains("TOOLRESULTIMGBLOB") && !out.contains("iVBORw0KGgo"),
+            "{fmt:?} should strip image base64 payloads"
+        );
+        assert!(
+            out.contains("base64 image omitted"),
+            "{fmt:?} should leave the size marker in place"
+        );
+    }
+
+    // Structured JSON deliberately preserves the full payloads.
+    for fmt in [ExportFormat::Json, ExportFormat::JsonPretty] {
+        let out = export_to_string(&conversation, fmt, &opts)
+            .unwrap_or_else(|e| panic!("{fmt:?} export should succeed: {e}"));
+        assert!(
+            out.contains("TOOLRESULTIMGBLOB") && out.contains("iVBORw0KGgo"),
+            "{fmt:?} should preserve full image payloads for machine consumers"
+        );
+    }
+}
+
 /// Regression guard for issue 0001: `--redact all` must remove secrets from
 /// export output. Fixed in Phase 1 by the dispatch-level redaction transform
 /// (`export_to_string`/`export_to_file` → `Conversation::map_entries`).
