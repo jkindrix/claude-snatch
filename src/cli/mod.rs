@@ -2581,6 +2581,12 @@ pub struct MessagesArgs {
     /// (detail=full only). Default shows a pointer plus a result preview.
     #[arg(long)]
     pub subagent_transcripts: bool,
+
+    /// Restrict to the single resolved file instead of reconstructing the full
+    /// resume chain. By default, a resumed/continued session is shown across all
+    /// of its chained files.
+    #[arg(long)]
+    pub no_chain: bool,
 }
 
 /// Arguments for the pick command.

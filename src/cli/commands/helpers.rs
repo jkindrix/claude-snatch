@@ -8,11 +8,60 @@ use chrono::{DateTime, Utc};
 use regex::Regex;
 
 use crate::cli::Cli;
-use crate::discovery::{Project, Session};
+use crate::discovery::{ClaudeDirectory, Project, Session};
 use crate::error::{Result, SnatchError};
 use crate::model::{ContentBlock, LogEntry};
 
 use super::get_claude_dir;
+
+/// Metadata about the resume chain a resolved session belongs to.
+pub struct ChainMeta {
+    /// The root session's file UUID.
+    pub root_id: String,
+    /// All member file UUIDs, in chain order.
+    pub members: Vec<String>,
+}
+
+/// Resolve a session's entries, merging its full resume chain when
+/// `chain_aware` is set and the session belongs to a multi-file chain.
+///
+/// Returns `(entries, unparsed_lines, chain)`. `unparsed_lines` is the
+/// dropped-line count for the single-file path (0 for the merged-chain path,
+/// which does not surface per-line counts). `chain` is `Some` only when a
+/// multi-file chain was merged.
+pub fn resolve_chain_entries(
+    claude_dir: &ClaudeDirectory,
+    session: &Session,
+    chain_aware: bool,
+    max_file_size: Option<u64>,
+) -> Result<(Vec<LogEntry>, usize, Option<ChainMeta>)> {
+    if chain_aware {
+        let project_path = session.project_path().to_string();
+        let file_id = session.session_id().to_string();
+        if let Some(project) = claude_dir
+            .projects()?
+            .into_iter()
+            .find(|p| p.best_path() == project_path || p.decoded_path() == project_path)
+        {
+            for chain in project.session_chains()?.values() {
+                if chain.len() > 1 && chain.contains(&file_id) {
+                    let entries = project.parse_chain(chain)?;
+                    let members = chain.file_ids().iter().map(|s| (*s).to_string()).collect();
+                    return Ok((
+                        entries,
+                        0,
+                        Some(ChainMeta {
+                            root_id: chain.root_id.clone(),
+                            members,
+                        }),
+                    ));
+                }
+            }
+        }
+    }
+    let (entries, unparsed) = session.parse_with_options_counted(max_file_size)?;
+    Ok((entries, unparsed, None))
+}
 
 /// Extract visible text from a LogEntry (user or assistant).
 pub fn extract_text(entry: &LogEntry) -> Option<String> {

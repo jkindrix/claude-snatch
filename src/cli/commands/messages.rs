@@ -109,7 +109,22 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
             })?;
 
     let project_path = session.project_path().to_string();
-    let (entries, unparsed) = session.parse_with_options_counted(cli.max_file_size)?;
+    let chain_aware = !args.no_chain;
+    let (entries, unparsed, chain) = super::helpers::resolve_chain_entries(
+        &claude_dir,
+        &session,
+        chain_aware,
+        cli.max_file_size,
+    )?;
+    if let Some(ref chain) = chain {
+        if !cli.quiet {
+            eprintln!(
+                "ℹ Showing full resume chain: {} files (root {}). Use --no-chain to restrict.",
+                chain.members.len(),
+                chain.root_id
+            );
+        }
+    }
     let conversation = Conversation::from_entries(entries)?;
     let dup_uuids = conversation.duplicate_uuids().len();
     if dup_uuids > 0 && !cli.quiet {
