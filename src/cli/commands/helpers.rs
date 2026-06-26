@@ -25,10 +25,10 @@ pub struct ChainMeta {
 /// Resolve a session's entries, merging its full resume chain when
 /// `chain_aware` is set and the session belongs to a multi-file chain.
 ///
-/// Returns `(entries, unparsed_lines, chain)`. `unparsed_lines` is the
-/// dropped-line count for the single-file path (0 for the merged-chain path,
-/// which does not surface per-line counts). `chain` is `Some` only when a
-/// multi-file chain was merged.
+/// Returns `(entries, unparsed_lines, chain)`. `unparsed_lines` is the total
+/// dropped-line count: for a merged chain it is summed across all member files;
+/// for the single-file path it is that file's count. `chain` is `Some` only when
+/// a multi-file chain was merged.
 pub fn resolve_chain_entries(
     claude_dir: &ClaudeDirectory,
     session: &Session,

@@ -168,8 +168,9 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
     //
     // Known limitation: subagent discovery uses only the resolved file's
     // `subagents/` directory. For a merged chain, subagents spawned by *other*
-    // chain members may live under their own files' directories and are not yet
-    // discovered here; those calls surface as unmatched rather than joined.
+    // chain members may live under those members' directories and are not
+    // scanned here yet, so their Agent/Task calls may remain unlinked (the
+    // subagent may not be discovered at all, not merely reported as unmatched).
     let subagent_matches: SubagentMatches = if detail == "full" {
         match_subagents(
             &session,
