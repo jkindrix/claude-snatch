@@ -34,13 +34,13 @@ expression: output
           "text": "That depends on your goals! Python is great for beginners and data science, while Rust is excellent for systems programming."
         }
       ],
+      "stop_reason": "end_turn",
       "usage": {
         "input_tokens": 15,
         "output_tokens": 35,
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0
-      },
-      "stop_reason": "end_turn"
+      }
     }
   },
   {
@@ -88,13 +88,13 @@ expression: output
           "text": "Python is a versatile, beginner-friendly language known for:\n- Clean, readable syntax\n- Extensive libraries for data science (NumPy, Pandas)\n- Great for web development (Django, Flask)\n- Strong community support"
         }
       ],
+      "stop_reason": "end_turn",
       "usage": {
         "input_tokens": 45,
         "output_tokens": 60,
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0
-      },
-      "stop_reason": "end_turn"
+      }
     }
   },
   {
@@ -116,13 +116,13 @@ expression: output
           "text": "Rust is a systems programming language known for:\n- Memory safety without garbage collection\n- Zero-cost abstractions\n- Excellent concurrency support\n- Growing ecosystem for web (Actix, Axum)"
         }
       ],
+      "stop_reason": "end_turn",
       "usage": {
         "input_tokens": 45,
         "output_tokens": 55,
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0
-      },
-      "stop_reason": "end_turn"
+      }
     }
   }
 ]

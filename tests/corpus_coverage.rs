@@ -320,14 +320,14 @@ fn malformed_lines_skipped_with_diagnostics() {
     );
 }
 
-/// Regression guard for a real fidelity bug found while building this corpus:
-/// `AssistantContent` is `#[serde(rename_all = "camelCase")]`, so it expects a
-/// `stopReason` key, but every real Claude Code session writes snake_case
-/// `stop_reason`. The field has no alias, so `stop_reason` (and `stop_sequence`)
-/// parse to `None` on all real assistant messages. Ignored until the parser is
-/// fixed; see `.tmp/issues/0015`. Flip to active to verify the fix.
+/// Regression guard for issue 0015 (fixed): `AssistantContent` was annotated
+/// `#[serde(rename_all = "camelCase")]`, so it expected a `stopReason` key, but
+/// every real Claude Code session writes snake_case `stop_reason` (the inner
+/// `message` mirrors the snake_case Anthropic API object). The field had no
+/// alias, so `stop_reason`/`stop_sequence` parsed to `None` on all real assistant
+/// messages. Fixed by dropping the camelCase rename; this asserts the value now
+/// rounds through `StopReason::Other`.
 #[test]
-#[ignore = "blocked by issue 0015: stop_reason camelCase mismatch drops the field"]
 fn assistant_stop_reason_parses() {
     let entries = parse_fixture("forward_compat_session.jsonl");
     let asst = entries

@@ -39,13 +39,13 @@ expression: output
           "text": "Let me solve this step by step:\n\n1. Break down 23 into 20 + 3\n2. Calculate 15 × 20 = 300\n3. Calculate 15 × 3 = 45\n4. Add them together: 300 + 45 = **345**\n\nThe answer is 345."
         }
       ],
+      "stop_reason": "end_turn",
       "usage": {
         "input_tokens": 20,
         "output_tokens": 80,
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0
-      },
-      "stop_reason": "end_turn"
+      }
     }
   }
 ]

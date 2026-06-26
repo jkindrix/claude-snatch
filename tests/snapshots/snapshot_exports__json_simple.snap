@@ -1,6 +1,5 @@
 ---
 source: tests/snapshot_exports.rs
-assertion_line: 59
 description: JSON export of simple session
 expression: output
 ---
@@ -36,13 +35,13 @@ expression: output
           "text": "Hello! How can I help you today?"
         }
       ],
+      "stop_reason": "end_turn",
       "usage": {
         "input_tokens": 10,
         "output_tokens": 15,
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0
-      },
-      "stop_reason": "end_turn"
+      }
     }
   },
   {
@@ -81,13 +80,13 @@ expression: output
           }
         }
       ],
+      "stop_reason": "tool_use",
       "usage": {
         "input_tokens": 50,
         "output_tokens": 30,
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0
-      },
-      "stop_reason": "tool_use"
+      }
     }
   },
   {
@@ -133,13 +132,13 @@ expression: output
           "text": "The directory contains one file: `file.txt`. Would you like me to read its contents?"
         }
       ],
+      "stop_reason": "end_turn",
       "usage": {
         "input_tokens": 100,
         "output_tokens": 25,
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0
-      },
-      "stop_reason": "end_turn"
+      }
     }
   }
 ]

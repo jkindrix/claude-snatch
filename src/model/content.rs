@@ -15,8 +15,12 @@ use super::serde_str::{serde_string_enum, without_top_level_type};
 use super::usage::Usage;
 
 /// Assistant message content structure.
+// NOTE: no `rename_all` here. The inner `message` object mirrors the Anthropic
+// API message, which is snake_case (`stop_reason`, `stop_sequence`,
+// `context_management`) — unlike Claude Code's own camelCase envelope. Real logs
+// confirm snake_case (`stop_reason` in 11.7k sessions vs `stopReason` in 9). A
+// camelCase rename here silently routed those fields into `extra` (issue 0015).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AssistantContent {
     /// API message ID (shared across streaming chunks).
     pub id: String,

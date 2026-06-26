@@ -40,13 +40,13 @@ expression: output
           }
         }
       ],
+      "stop_reason": "tool_use",
       "usage": {
         "input_tokens": 30,
         "output_tokens": 20,
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0
-      },
-      "stop_reason": "tool_use"
+      }
     }
   },
   {
@@ -95,13 +95,13 @@ expression: output
           "text": "This appears to be a Rust project with 2 source files: `src/main.rs` and `src/lib.rs`."
         }
       ],
+      "stop_reason": "end_turn",
       "usage": {
         "input_tokens": 70,
         "output_tokens": 30,
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0
-      },
-      "stop_reason": "end_turn"
+      }
     }
   },
   {
