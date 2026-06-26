@@ -219,6 +219,28 @@ impl MarkdownExporter {
         user: &UserMessage,
         options: &ExportOptions,
     ) -> Result<()> {
+        // Render body first to suppress an empty user entry under exclusive
+        // filters (issue 0005), mirroring the assistant path.
+        let mut body = Vec::new();
+        match &user.message {
+            crate::model::UserContent::Simple(simple) => {
+                // Plain-text user content is only shown when user text is
+                // requested — under e.g. --only tool-results the entry is visited
+                // for its tool results, but the prompt text must not leak.
+                if options.should_include_user_text() {
+                    writeln!(body, "{}", simple.content)?;
+                }
+            }
+            crate::model::UserContent::Blocks(blocks) => {
+                for content in &blocks.content {
+                    self.write_content_block(&mut body, content, options, true)?;
+                }
+            }
+        }
+        if body.is_empty() {
+            return Ok(());
+        }
+
         if self.plain_text {
             writeln!(writer, "USER:")?;
         } else {
@@ -229,23 +251,7 @@ impl MarkdownExporter {
             writeln!(writer)?;
         }
         writeln!(writer)?;
-
-        // Write user content
-        match &user.message {
-            crate::model::UserContent::Simple(simple) => {
-                // Plain-text user content is only shown when user text is
-                // requested — under e.g. --only tool-results the entry is visited
-                // for its tool results, but the prompt text must not leak.
-                if options.should_include_user_text() {
-                    writeln!(writer, "{}", simple.content)?;
-                }
-            }
-            crate::model::UserContent::Blocks(blocks) => {
-                for content in &blocks.content {
-                    self.write_content_block(writer, content, options, true)?;
-                }
-            }
-        }
+        writer.write_all(&body)?;
 
         writeln!(writer)?;
         Ok(())
@@ -258,6 +264,17 @@ impl MarkdownExporter {
         assistant: &AssistantMessage,
         options: &ExportOptions,
     ) -> Result<()> {
+        // Render the body first so an entry that yields no content (e.g. --only
+        // code on a turn with no fenced code) is suppressed entirely instead of
+        // leaving an empty header + token footer (issue 0005).
+        let mut body = Vec::new();
+        for content in &assistant.message.content {
+            self.write_content_block(&mut body, content, options, false)?;
+        }
+        if body.is_empty() {
+            return Ok(());
+        }
+
         if self.plain_text {
             writeln!(writer, "ASSISTANT:")?;
         } else {
@@ -268,11 +285,7 @@ impl MarkdownExporter {
             writeln!(writer)?;
         }
         writeln!(writer)?;
-
-        // Write content blocks
-        for content in &assistant.message.content {
-            self.write_content_block(writer, content, options, false)?;
-        }
+        writer.write_all(&body)?;
 
         // Stop reason and usage
         if options.include_metadata {

@@ -412,6 +412,38 @@ fn only_code_extracts_code_through_transform() {
     );
 }
 
+/// Regression guard for issue 0005: `--only code` must suppress entries that
+/// yield no code, rather than emitting an empty assistant header + token footer.
+/// Two assistant turns (prose-only, then code) → exactly one rendered header.
+#[test]
+fn only_code_suppresses_empty_entries() {
+    let jsonl = concat!(
+        r#"{"type":"assistant","uuid":"a0000000-0000-0000-0000-000000000001","parentUuid":null,"timestamp":"2025-01-15T10:00:01.000Z","sessionId":"s","version":"2.1.193","message":{"id":"m1","type":"message","role":"assistant","content":[{"type":"text","text":"Just prose, no code."}],"model":"claude-sonnet-4","stop_reason":"end_turn"}}"#,
+        "\n",
+        r#"{"type":"assistant","uuid":"a0000000-0000-0000-0000-000000000002","parentUuid":"a0000000-0000-0000-0000-000000000001","timestamp":"2025-01-15T10:00:02.000Z","sessionId":"s","version":"2.1.193","message":{"id":"m2","type":"message","role":"assistant","content":[{"type":"text","text":"Code:\n```rust\nfn keeper() {}\n```"}],"model":"claude-sonnet-4","stop_reason":"end_turn"}}"#,
+    );
+    let entries = JsonlParser::new()
+        .parse_str(jsonl)
+        .expect("parse inline entries");
+    let conversation = Conversation::from_entries(entries).expect("build conversation");
+    let opts = ExportOptions::default().with_only([ContentType::Code].into_iter().collect());
+    let out = export_to_string(&conversation, ExportFormat::Markdown, &opts)
+        .expect("code-only export should succeed");
+    assert!(
+        out.contains("fn keeper"),
+        "the code turn's code is extracted"
+    );
+    assert!(
+        !out.contains("Just prose"),
+        "prose is not shown under --only code"
+    );
+    assert_eq!(
+        out.matches("Assistant").count(),
+        1,
+        "the prose-only turn is suppressed, leaving no empty header stub"
+    );
+}
+
 /// Regression guard for issue 0001: `--redact all` must remove secrets from
 /// export output. Fixed in Phase 1 by the dispatch-level redaction transform
 /// (`export_to_string`/`export_to_file` → `Conversation::map_entries`).
