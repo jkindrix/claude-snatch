@@ -768,12 +768,14 @@ pub struct ExportArgs {
     #[arg(long)]
     pub pretty: bool,
 
-    /// Content-preserving export: retain all data including unknown entry
-    /// types, content blocks, and fields. Normalized JSON, not byte-for-byte
-    /// (fields may be reordered; orphan entries are emitted first).
-    /// Implies --metadata, --system, --thinking, --tool-use, --tool-results.
-    #[arg(long)]
-    pub lossless: bool,
+    /// Full export: retain all content including system entries, thinking,
+    /// tool use, and tool results. Implies --metadata, --system, --thinking,
+    /// --tool-use, --tool-results. Note this is content-complete, not
+    /// byte-for-byte (fields may be reordered, orphan entries emitted first);
+    /// for a byte-faithful archive use `-f raw-jsonl`. The former `--lossless`
+    /// name is a deprecated alias.
+    #[arg(long = "full", alias = "lossless")]
+    pub full: bool,
 
     /// Show progress bar for long operations.
     #[arg(long)]

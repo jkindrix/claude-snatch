@@ -77,8 +77,8 @@ fn validate_raw_jsonl_compat(args: &ExportArgs) -> Result<()> {
     if args.pretty {
         bad.push("--pretty");
     }
-    if args.lossless {
-        bad.push("--lossless");
+    if args.full {
+        bad.push("--full");
     }
     if args.resolve_tool_results {
         bad.push("--resolve-tool-results");
@@ -369,7 +369,7 @@ fn export_session_to_gist(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
     // Build export options
     let redaction = args.redact.map(|level| level.into());
     let only_filter = build_only_filter(&args.only);
-    let options = if args.lossless {
+    let options = if args.full {
         let mut opts = ExportOptions::full();
         opts.redaction = redaction;
         opts.redaction_preview = args.redact_preview;
@@ -497,7 +497,7 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
     // Build export options
     let redaction = args.redact.map(|level| level.into());
     let only_filter = build_only_filter(&args.only);
-    let options = if args.lossless {
+    let options = if args.full {
         let mut opts = ExportOptions::full();
         opts.redaction = redaction;
         opts.redaction_preview = args.redact_preview;
@@ -1395,10 +1395,10 @@ fn export_session(
         check_for_pii(&conversation, cli.quiet);
     }
 
-    // Build export options - lossless mode overrides individual settings
+    // Build export options - full mode overrides individual settings
     let redaction = args.redact.map(|level| level.into());
     let only_filter = build_only_filter(&args.only);
-    let options = if args.lossless {
+    let options = if args.full {
         let mut opts = ExportOptions::full();
         opts.redaction = redaction;
         opts.redaction_preview = args.redact_preview;

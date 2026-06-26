@@ -296,7 +296,7 @@ BULK EXPORT
 
 SPECIAL OPTIONS
 ---------------
-  snatch export <id> --lossless          # normalized: include all message data
+  snatch export <id> --full              # normalized: include all message data
   snatch export <id> -f raw-jsonl        # byte-faithful copy of the original JSONL
   snatch export <id> --combine-agents    # Include subagent sessions
   snatch export <id> --main-thread       # Only main conversation thread

@@ -106,8 +106,11 @@ pub struct Conversation {
     /// metadata such as last-prompt / mode / ai-title / permission-mode, plus
     /// queue-operation and turn-end markers). These carry no UUID and are
     /// therefore absent from the node tree. Retained in original input order so
-    /// exporters can surface them and `-f jsonl` is a content-complete
-    /// round-trip.
+    /// exporters can surface them. With them retained, `-f jsonl` is
+    /// content-complete for every successfully-parsed, non-conflicting entry —
+    /// but it is not byte-faithful (fields may reorder, orphans are emitted
+    /// first, and unparseable or content-conflicting duplicate lines are
+    /// dropped). Use `-f raw-jsonl` for a byte-for-byte archive.
     orphan_entries: Vec<LogEntry>,
     /// Entries dropped because their UUID already appeared. The first occurrence
     /// is kept; later duplicates are recorded here (never silently overwritten).
