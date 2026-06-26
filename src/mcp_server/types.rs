@@ -192,8 +192,8 @@ pub struct GetSessionMessagesRequest {
     /// compaction always drops. Default: false.
     pub include_thinking: Option<bool>,
 
-    /// If true and the session is part of a chain, return messages across all
-    /// member files in the chain. Default: false.
+    /// If the session is part of a resume chain, return messages across all
+    /// member files. Default: true (set false to restrict to the single file).
     pub chain_aware: Option<bool>,
 
     /// Only include messages after this timestamp (ISO 8601 or relative like "2h", "30m").
@@ -316,8 +316,8 @@ pub struct GetSessionTimelineRequest {
     /// Maximum timeline entries. Default: 30.
     pub limit: Option<usize>,
 
-    /// If true and the session is part of a chain, build timeline across all
-    /// member files. Default: false.
+    /// If the session is part of a resume chain, build the timeline across all
+    /// member files. Default: true (set false to restrict to the single file).
     pub chain_aware: Option<bool>,
 }
 
@@ -1213,7 +1213,8 @@ pub struct GetEventContextRequest {
     /// Number of turns before/after the target. Default: 2.
     pub context_window: Option<usize>,
 
-    /// If true and the session is part of a chain, search across all chain members.
+    /// If the session is part of a resume chain, search across all chain
+    /// members. Default: true (set false to restrict to the single file).
     pub chain_aware: Option<bool>,
 }
 

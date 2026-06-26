@@ -402,7 +402,7 @@ impl SnatchServer {
         description = "Read conversation messages from a session. Use detail='overview' for prompts only, 'conversation' for user+assistant text (skipping tool-only turns), 'standard' for user+assistant text, 'full' for tool details. At detail='full', Agent/Task calls are linked to the subagent they spawned (subagent_session_id) with a result preview; set include_subagent_transcripts=true to inline each subagent's full transcript. Subagents present on disk but not joinable to a specific call are surfaced in unmatched_subagents rather than dropped. Set include_thinking=true to recover reasoning/decision rationale (always lost in compaction). Supports pagination with offset/limit."
     )]
     async fn get_session_messages(&self, request: GetSessionMessagesRequest) -> ToolOutput {
-        let chain_aware = request.chain_aware.unwrap_or(false);
+        let chain_aware = request.chain_aware.unwrap_or(true);
         let resolved = match resolve_session_with_chain(self, &request.session_id, chain_aware) {
             Ok(r) => r,
             Err(e) => return e,
@@ -823,7 +823,7 @@ impl SnatchServer {
         description = "Get a turn-by-turn narrative timeline of a session. Each turn shows the user prompt, assistant summary, tools used, and files touched. Also surfaces compaction events."
     )]
     async fn get_session_timeline(&self, request: GetSessionTimelineRequest) -> ToolOutput {
-        let chain_aware = request.chain_aware.unwrap_or(false);
+        let chain_aware = request.chain_aware.unwrap_or(true);
         let resolved = match resolve_session_with_chain(self, &request.session_id, chain_aware) {
             Ok(r) => r,
             Err(e) => return e,
@@ -3067,7 +3067,7 @@ impl SnatchServer {
             return ToolOutput::error("Either message_id or timestamp is required");
         }
 
-        let chain_aware = request.chain_aware.unwrap_or(false);
+        let chain_aware = request.chain_aware.unwrap_or(true);
         let resolved = match resolve_session_with_chain(self, &request.session_id, chain_aware) {
             Ok(r) => r,
             Err(e) => return e,
