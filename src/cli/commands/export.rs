@@ -269,8 +269,14 @@ fn export_single_session(cli: &Cli, args: &ExportArgs, session_id: &str) -> Resu
         return export_session_with_template(cli, args, &session, template_name);
     }
 
-    // Export the session
-    let exported = export_session(cli, args, &session, args.output_file.as_ref())?;
+    // Export the session (chain-aware by default for single-session export).
+    let exported = export_session(
+        cli,
+        args,
+        &session,
+        args.output_file.as_ref(),
+        !args.no_chain,
+    )?;
 
     // Print success message to stderr if writing to file
     if let (true, Some(output_file)) = (exported && !cli.quiet, args.output_file.as_ref()) {
@@ -792,7 +798,9 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
             continue;
         }
 
-        match export_session(cli, args, session, Some(&output_path)) {
+        // --all keeps single-file semantics for now; chain dedup is handled
+        // separately so a chain isn't exported once per member.
+        match export_session(cli, args, session, Some(&output_path), false) {
             Ok(true) => {
                 exported_count += 1;
                 if cli.verbose {
@@ -1063,6 +1071,7 @@ fn export_session(
     args: &ExportArgs,
     session: &Session,
     output_path: Option<&PathBuf>,
+    chain_aware: bool,
 ) -> Result<bool> {
     // raw-jsonl bypasses parsing/reconstruction entirely and streams the
     // original source file verbatim (byte-for-byte, original order).
@@ -1070,13 +1079,28 @@ fn export_session(
         return export_raw_jsonl(session, output_path);
     }
 
-    // Parse the session with custom max file size if specified
-    let (mut entries, unparsed) = session.parse_with_options_counted(cli.max_file_size)?;
+    // Parse the session, reconstructing the full resume chain when chain-aware.
+    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
+    let (mut entries, unparsed, chain) = super::helpers::resolve_chain_entries(
+        &claude_dir,
+        session,
+        chain_aware,
+        cli.max_file_size,
+    )?;
     if unparsed > 0 {
         eprintln!(
             "⚠ {unparsed} line{} could not be parsed (dropped from export)",
             if unparsed == 1 { "" } else { "s" }
         );
+    }
+    if let Some(ref chain) = chain {
+        if !cli.quiet {
+            eprintln!(
+                "ℹ Exporting full resume chain: {} files (root {}). Use --no-chain to restrict.",
+                chain.members.len(),
+                chain.root_id
+            );
+        }
     }
     if args.resolve_tool_results {
         resolve_persisted_outputs(&mut entries, session);

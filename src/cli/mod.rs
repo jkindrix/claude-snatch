@@ -754,6 +754,11 @@ pub struct ExportArgs {
     #[arg(long)]
     pub main_thread: bool,
 
+    /// Restrict single-session export to the resolved file instead of
+    /// reconstructing the full resume chain (chain-aware by default).
+    #[arg(long)]
+    pub no_chain: bool,
+
     /// Pretty-print JSON output.
     #[arg(long)]
     pub pretty: bool,
@@ -2483,6 +2488,11 @@ pub struct TimelineArgs {
     /// Maximum timeline entries.
     #[arg(short = 'l', long, default_value = "50")]
     pub limit: usize,
+
+    /// Restrict to the single resolved file instead of reconstructing the full
+    /// resume chain (chain-aware by default).
+    #[arg(long)]
+    pub no_chain: bool,
 }
 
 /// Detail level for messages output.
