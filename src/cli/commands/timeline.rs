@@ -15,6 +15,17 @@ use super::get_claude_dir;
 #[derive(serde::Serialize)]
 struct TimelineOutput {
     session_id: String,
+    /// Root file id of the resume chain, when chain members were merged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chain_id: Option<String>,
+    /// All member file ids (chain order), when chain members were merged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chain_members: Option<Vec<String>>,
+    /// Number of files merged, when this session is part of a chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chain_member_count: Option<usize>,
+    /// Lines the lenient parser skipped (mirrors the text-mode warning).
+    unparsed_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     start_time: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -130,6 +141,10 @@ pub fn run(cli: &Cli, args: &TimelineArgs) -> Result<()> {
         OutputFormat::Json => {
             let output = TimelineOutput {
                 session_id: args.session_id.clone(),
+                chain_id: chain.as_ref().map(|c| c.root_id.clone()),
+                chain_members: chain.as_ref().map(|c| c.members.clone()),
+                chain_member_count: chain.as_ref().map(|c| c.members.len()),
+                unparsed_count: unparsed,
                 start_time,
                 end_time,
                 span,

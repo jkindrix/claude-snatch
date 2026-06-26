@@ -30,6 +30,8 @@ pub struct JsonExporter {
     include_tree_metadata: bool,
     /// Wrap entries in envelope with metadata.
     use_envelope: bool,
+    /// Resume-chain metadata, when this export merges a multi-file chain.
+    chain: Option<ChainExportMeta>,
 }
 
 impl Default for JsonExporter {
@@ -47,7 +49,15 @@ impl JsonExporter {
             include_analytics: true,
             include_tree_metadata: true,
             use_envelope: true,
+            chain: None,
         }
+    }
+
+    /// Attach resume-chain metadata to the export envelope.
+    #[must_use]
+    pub fn with_chain(mut self, chain: Option<ChainExportMeta>) -> Self {
+        self.chain = chain;
+        self
     }
 
     /// Enable pretty-printing.
@@ -97,12 +107,13 @@ impl Exporter for JsonExporter {
         options: &ExportOptions,
     ) -> Result<()> {
         if self.use_envelope {
-            let export = ConversationExport::from_conversation(
+            let mut export = ConversationExport::from_conversation(
                 conversation,
                 options,
                 self.include_analytics,
                 self.include_tree_metadata,
             );
+            export.chain = self.chain.clone();
 
             let value = serde_json::to_value(&export)?;
             self.write_json(writer, &value)?;
@@ -249,6 +260,9 @@ pub struct ConversationExport {
     /// Session metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<ExportMetadata>,
+    /// Resume-chain metadata, present only when a multi-file chain was merged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain: Option<ChainExportMeta>,
     /// Analytics summary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub analytics: Option<ExportAnalytics>,
@@ -332,11 +346,24 @@ impl ConversationExport {
                 version: crate::VERSION.to_string(),
             },
             metadata,
+            // Set by the exporter (it knows whether a chain was merged).
+            chain: None,
             analytics,
             tree,
             entries: filtered_entries,
         }
     }
+}
+
+/// Resume-chain metadata embedded in the JSON export envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainExportMeta {
+    /// Root file id of the chain.
+    pub root_id: String,
+    /// All member file ids, in chain order.
+    pub members: Vec<String>,
+    /// Number of files merged.
+    pub member_count: usize,
 }
 
 /// Exporter tool information.

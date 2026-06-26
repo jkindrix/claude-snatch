@@ -16,9 +16,9 @@ use crate::config::{
 use crate::discovery::{Session, SessionFilter};
 use crate::error::{Result, SnatchError};
 use crate::export::{
-    conversation_to_jsonl, ContentType, CsvExporter, ExportOptions, Exporter, HtmlExporter,
-    JsonExporter, MarkdownExporter, OtelExporter, SessionMeta, SqliteExporter, TextExporter,
-    XmlExporter,
+    conversation_to_jsonl, ChainExportMeta, ContentType, CsvExporter, ExportOptions, Exporter,
+    HtmlExporter, JsonExporter, MarkdownExporter, OtelExporter, SessionMeta, SqliteExporter,
+    TextExporter, XmlExporter,
 };
 use crate::model::{ContentBlock, LogEntry};
 use crate::reconstruction::Conversation;
@@ -251,6 +251,31 @@ fn export_single_session(cli: &Cli, args: &ExportArgs, session_id: &str) -> Resu
                 eprintln!("  snatch export <session> --template summary");
             }
             return Ok(());
+        }
+    }
+
+    // --combine-agents / --gist / --template operate on the single resolved
+    // file only; chain reconstruction is not applied to these modes yet. Surface
+    // that explicitly when the session is part of a multi-file chain so the
+    // omission isn't silent (a plain export reconstructs the full chain).
+    if (args.combine_agents || args.gist || args.template.is_some()) && !args.no_chain && !cli.quiet
+    {
+        let in_chain = claude_dir.projects().ok().is_some_and(|projects| {
+            projects.into_iter().any(|p| {
+                (p.best_path() == session.project_path()
+                    || p.decoded_path() == session.project_path())
+                    && p.session_chains().ok().is_some_and(|chains| {
+                        chains
+                            .values()
+                            .any(|c| c.len() > 1 && c.contains(session.session_id()))
+                    })
+            })
+        });
+        if in_chain {
+            eprintln!(
+                "Note: --combine-agents/--gist/--template export only the single resolved file; \
+                 chain reconstruction is not applied. Use a plain export for the full chain."
+            );
         }
     }
 
@@ -1041,29 +1066,90 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
     Ok(())
 }
 
-/// Export a single session to the specified output.
+/// Stream a session's original JSONL verbatim (byte-for-byte) to the output.
 ///
-/// Uses atomic file writes for file output to ensure data integrity.
-/// Stream a session's original JSONL file verbatim (byte-for-byte, original
-/// order) to the output. This is the archival `raw-jsonl` mode: no parsing,
-/// reconstruction, filtering, redaction, or reordering is applied.
-///
-/// Chain-aware export is not yet wired, so this is a single-file passthrough.
-fn export_raw_jsonl(session: &Session, output_path: Option<&PathBuf>) -> Result<bool> {
-    let mut source = std::fs::File::open(session.path())?;
+/// This is the archival `raw-jsonl` mode: no parsing, reconstruction, filtering,
+/// redaction, or reordering. When chain-aware and the session is part of a
+/// multi-file resume chain, the member files are concatenated in chain order
+/// (chain-order passthrough, not original single-file passthrough); otherwise a
+/// single file is streamed. Uses atomic file writes for file output.
+fn export_raw_jsonl(
+    cli: &Cli,
+    session: &Session,
+    output_path: Option<&PathBuf>,
+    chain_aware: bool,
+) -> Result<bool> {
+    let (paths, chain) = raw_chain_source_paths(cli, session, chain_aware)?;
+    if let Some((root, count)) = &chain {
+        if !cli.quiet {
+            eprintln!(
+                "ℹ raw-jsonl chain-order passthrough: {count} files (root {root}). \
+                 Use --no-chain to restrict."
+            );
+        }
+    }
+    let copy_all = |writer: &mut dyn Write| -> Result<()> {
+        for p in &paths {
+            let mut src = std::fs::File::open(p)?;
+            std::io::copy(&mut src, writer)?;
+        }
+        Ok(())
+    };
     if let Some(path) = output_path {
         let mut atomic = AtomicFile::create(path)?;
         let mut writer = std::io::BufWriter::new(atomic.writer());
-        std::io::copy(&mut source, &mut writer)?;
+        copy_all(&mut writer)?;
         writer.flush()?;
         drop(writer);
         atomic.finish()?;
     } else {
         let mut writer = io::stdout().lock();
-        std::io::copy(&mut source, &mut writer)?;
+        copy_all(&mut writer)?;
         writer.flush()?;
     }
     Ok(true)
+}
+
+/// Ordered raw source files plus optional `(root_id, member_count)` when a chain
+/// was used.
+type RawChainSources = (Vec<PathBuf>, Option<(String, usize)>);
+
+/// Resolve the ordered source files for `raw-jsonl`: the full chain in chain
+/// order when chain-aware and part of a multi-file chain, else just the resolved
+/// file. Returns the paths plus `Some((root_id, member_count))` when a chain was
+/// used. Falls back to single-file if any member file can't be resolved.
+fn raw_chain_source_paths(
+    cli: &Cli,
+    session: &Session,
+    chain_aware: bool,
+) -> Result<RawChainSources> {
+    if chain_aware {
+        let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
+        if let Some(project) = claude_dir.projects()?.into_iter().find(|p| {
+            p.best_path() == session.project_path() || p.decoded_path() == session.project_path()
+        }) {
+            let chains = project.session_chains()?;
+            if let Some(chain) = chains
+                .values()
+                .find(|c| c.len() > 1 && c.contains(session.session_id()))
+            {
+                let sessions = project.sessions()?;
+                let map: std::collections::HashMap<&str, PathBuf> = sessions
+                    .iter()
+                    .map(|s| (s.session_id(), s.path().to_path_buf()))
+                    .collect();
+                let paths: Vec<PathBuf> = chain
+                    .members
+                    .iter()
+                    .filter_map(|m| map.get(m.file_id.as_str()).cloned())
+                    .collect();
+                if paths.len() == chain.len() {
+                    return Ok((paths, Some((chain.root_id.clone(), chain.len()))));
+                }
+            }
+        }
+    }
+    Ok((vec![session.path().to_path_buf()], None))
 }
 
 fn export_session(
@@ -1074,9 +1160,10 @@ fn export_session(
     chain_aware: bool,
 ) -> Result<bool> {
     // raw-jsonl bypasses parsing/reconstruction entirely and streams the
-    // original source file verbatim (byte-for-byte, original order).
+    // original source file(s) verbatim (byte-for-byte). Chain-order when
+    // chain-aware and part of a multi-file chain.
     if matches!(args.format, ExportFormatArg::RawJsonl) {
-        return export_raw_jsonl(session, output_path);
+        return export_raw_jsonl(cli, session, output_path, chain_aware);
     }
 
     // Parse the session, reconstructing the full resume chain when chain-aware.
@@ -1109,6 +1196,13 @@ fn export_session(
     if entries.is_empty() {
         return Ok(false);
     }
+
+    // Chain metadata for the JSON export envelope (carried like messages JSON).
+    let chain_export = chain.as_ref().map(|c| ChainExportMeta {
+        root_id: c.root_id.clone(),
+        members: c.members.clone(),
+        member_count: c.members.len(),
+    });
 
     // Build conversation tree
     let conversation = Conversation::from_entries(entries)?;
@@ -1235,11 +1329,15 @@ fn export_session(
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
             ExportFormatArg::Json => {
-                let exporter = JsonExporter::new().pretty(args.pretty);
+                let exporter = JsonExporter::new()
+                    .pretty(args.pretty)
+                    .with_chain(chain_export.clone());
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
             ExportFormatArg::JsonPretty => {
-                let exporter = JsonExporter::new().pretty(true);
+                let exporter = JsonExporter::new()
+                    .pretty(true)
+                    .with_chain(chain_export.clone());
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
             ExportFormatArg::Text => {
@@ -1294,11 +1392,15 @@ fn export_session(
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
             ExportFormatArg::Json => {
-                let exporter = JsonExporter::new().pretty(args.pretty);
+                let exporter = JsonExporter::new()
+                    .pretty(args.pretty)
+                    .with_chain(chain_export.clone());
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
             ExportFormatArg::JsonPretty => {
-                let exporter = JsonExporter::new().pretty(true);
+                let exporter = JsonExporter::new()
+                    .pretty(true)
+                    .with_chain(chain_export.clone());
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
             ExportFormatArg::Text => {
