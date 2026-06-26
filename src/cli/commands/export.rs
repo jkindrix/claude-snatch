@@ -46,12 +46,93 @@ fn build_only_filter(filters: &[ContentFilter]) -> HashSet<ContentType> {
     filters.iter().map(|f| content_filter_to_type(*f)).collect()
 }
 
+/// Validate that `-f raw-jsonl` is not combined with any option it cannot
+/// honor. raw-jsonl is a verbatim archival passthrough of the source file: no
+/// parsing, filtering, redaction, transformation, or reordering is applied, so
+/// any such flag would be silently ignored. Reject the combination with a clear
+/// error instead.
+fn validate_raw_jsonl_compat(args: &ExportArgs) -> Result<()> {
+    if !matches!(args.format, ExportFormatArg::RawJsonl) {
+        return Ok(());
+    }
+    let mut bad: Vec<&str> = Vec::new();
+    if args.all {
+        bad.push("--all");
+    }
+    if !args.only.is_empty() {
+        bad.push("--only");
+    }
+    if args.redact.is_some() {
+        bad.push("--redact");
+    }
+    if args.redact_preview {
+        bad.push("--redact-preview");
+    }
+    if args.warn_pii {
+        bad.push("--warn-pii");
+    }
+    if args.main_thread {
+        bad.push("--main-thread");
+    }
+    if args.pretty {
+        bad.push("--pretty");
+    }
+    if args.lossless {
+        bad.push("--lossless");
+    }
+    if args.resolve_tool_results {
+        bad.push("--resolve-tool-results");
+    }
+    if args.subagents {
+        bad.push("--subagents");
+    }
+    if args.combine_agents {
+        bad.push("--combine-agents");
+    }
+    if args.toc {
+        bad.push("--toc");
+    }
+    if args.dark {
+        bad.push("--dark");
+    }
+    if args.gist {
+        bad.push("--gist");
+    }
+    if args.gist_public {
+        bad.push("--gist-public");
+    }
+    if args.gist_description.is_some() {
+        bad.push("--gist-description");
+    }
+    if args.clipboard {
+        bad.push("--clipboard");
+    }
+    if args.template.is_some() {
+        bad.push("--template");
+    }
+    if bad.is_empty() {
+        return Ok(());
+    }
+    Err(SnatchError::ConfigError {
+        message: format!(
+            "raw-jsonl is a byte-faithful passthrough and is incompatible with: {}. \
+             Use -f jsonl for a normalized, filterable export.",
+            bad.join(", ")
+        ),
+    })
+}
+
 /// Run the export command.
 pub fn run(cli: &Cli, args: &ExportArgs) -> Result<()> {
     // Handle --list-templates
     if args.list_templates {
         return handle_list_templates(cli);
     }
+
+    // Validate raw-jsonl compatibility before any external checks (e.g. the
+    // `gh` availability probe for --gist), so an incompatible-flag combination
+    // reports the clear raw-jsonl error rather than an unrelated tooling error.
+    validate_raw_jsonl_compat(args)?;
 
     // Always validate date filters early to catch typos/errors immediately
     if let Some(ref since) = args.since {
@@ -109,57 +190,6 @@ pub fn run(cli: &Cli, args: &ExportArgs) -> Result<()> {
         if matches!(args.format, ExportFormatArg::Sqlite) {
             return Err(SnatchError::ConfigError {
                 message: "--clipboard is not compatible with SQLite format".to_string(),
-            });
-        }
-    }
-
-    // raw-jsonl is a verbatim archival passthrough of the source file. It must
-    // not be combined with anything that would filter, transform, or reorder.
-    if matches!(args.format, ExportFormatArg::RawJsonl) {
-        let mut bad: Vec<&str> = Vec::new();
-        if args.all {
-            bad.push("--all");
-        }
-        if !args.only.is_empty() {
-            bad.push("--only");
-        }
-        if args.redact.is_some() {
-            bad.push("--redact");
-        }
-        if args.redact_preview {
-            bad.push("--redact-preview");
-        }
-        if args.main_thread {
-            bad.push("--main-thread");
-        }
-        if args.pretty {
-            bad.push("--pretty");
-        }
-        if args.lossless {
-            bad.push("--lossless");
-        }
-        if args.resolve_tool_results {
-            bad.push("--resolve-tool-results");
-        }
-        if args.combine_agents {
-            bad.push("--combine-agents");
-        }
-        if args.gist {
-            bad.push("--gist");
-        }
-        if args.clipboard {
-            bad.push("--clipboard");
-        }
-        if args.template.is_some() {
-            bad.push("--template");
-        }
-        if !bad.is_empty() {
-            return Err(SnatchError::ConfigError {
-                message: format!(
-                    "raw-jsonl is a byte-faithful passthrough and is incompatible with: {}. \
-                     Use -f jsonl for a normalized, filterable export.",
-                    bad.join(", ")
-                ),
             });
         }
     }
@@ -1867,5 +1897,50 @@ mod tests {
         assert_eq!(get_format_extension(ExportFormatArg::Text), "txt");
         assert_eq!(get_format_extension(ExportFormatArg::Jsonl), "jsonl");
         assert_eq!(get_format_extension(ExportFormatArg::RawJsonl), "jsonl");
+    }
+
+    #[test]
+    fn test_raw_jsonl_rejects_warn_pii() {
+        use clap::Parser;
+        let args =
+            ExportArgs::try_parse_from(["export", "abc", "-f", "raw-jsonl", "--warn-pii"]).unwrap();
+        let err = validate_raw_jsonl_compat(&args).unwrap_err().to_string();
+        assert!(
+            err.contains("--warn-pii"),
+            "expected --warn-pii rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_raw_jsonl_rejects_subagents() {
+        use clap::Parser;
+        let args = ExportArgs::try_parse_from(["export", "abc", "-f", "raw-jsonl", "--subagents"])
+            .unwrap();
+        let err = validate_raw_jsonl_compat(&args).unwrap_err().to_string();
+        assert!(
+            err.contains("--subagents"),
+            "expected --subagents rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_raw_jsonl_gist_yields_raw_jsonl_error_first() {
+        // Compatibility validation runs before the gh-availability probe, so the
+        // clear raw-jsonl error is what surfaces (not a GitHub CLI error).
+        use clap::Parser;
+        let args =
+            ExportArgs::try_parse_from(["export", "abc", "-f", "raw-jsonl", "--gist"]).unwrap();
+        let err = validate_raw_jsonl_compat(&args).unwrap_err().to_string();
+        assert!(
+            err.contains("raw-jsonl") && err.contains("--gist"),
+            "expected raw-jsonl/--gist error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_raw_jsonl_plain_is_accepted() {
+        use clap::Parser;
+        let args = ExportArgs::try_parse_from(["export", "abc", "-f", "raw-jsonl"]).unwrap();
+        assert!(validate_raw_jsonl_compat(&args).is_ok());
     }
 }

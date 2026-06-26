@@ -1213,8 +1213,9 @@ pub struct GetEventContextRequest {
     /// Number of turns before/after the target. Default: 2.
     pub context_window: Option<usize>,
 
-    /// If the session is part of a resume chain, search across all chain
-    /// members. Default: true (set false to restrict to the single file).
+    /// Currently a no-op for search: results are annotated with `chain_id` so a
+    /// caller can group chain members, but matches are not merged across the
+    /// chain. (Cross-chain search merging is planned with the chain-aware work.)
     pub chain_aware: Option<bool>,
 }
 

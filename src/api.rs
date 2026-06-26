@@ -68,7 +68,8 @@ pub struct SnatchClient {
 pub enum ExportFormat {
     /// Markdown format (human-readable)
     Markdown,
-    /// JSON format (lossless, machine-readable)
+    /// JSON format (normalized, content-preserving; machine-readable). Not
+    /// byte-for-byte identical to the source — use `raw-jsonl` for that.
     Json,
     /// Pretty-printed JSON
     JsonPretty,

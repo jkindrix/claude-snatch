@@ -183,7 +183,8 @@ snatch export <SESSION> --no-tool-results          # exclude tool results
 snatch export <SESSION> --system                   # include system messages
 snatch export <SESSION> --metadata                 # include UUIDs and metadata
 snatch export <SESSION> --main-thread              # exclude branches
-snatch export <SESSION> --lossless                 # preserve all data
+snatch export <SESSION> --lossless                 # normalized: all data (not byte-exact)
+snatch export <SESSION> -f raw-jsonl               # byte-faithful copy of original JSONL
 
 Note: --timestamps and --usage are enabled by default. Use --no-timestamps
 or --no-usage to exclude them.
