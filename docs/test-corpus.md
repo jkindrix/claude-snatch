@@ -81,12 +81,12 @@ Legend — **Cov:** ✅ existing fixture · ⚠️ partial · ❌ gap.
 | `Summary` | `summary` | ✅ | harvest (423) | system |
 | `FileHistorySnapshot` | `file-history-snapshot` | ❌ | harvest (2431) | rich_entries |
 | `QueueOperation` | `queue-operation` | ❌ | harvest (697) | rich_entries |
-| `TurnEnd` | `turn_end` | ❌ | harvest — verify | rich_entries |
+| `TurnEnd` | `turn_end` | ❌ | synth (0 on disk) | forward_compat |
 | `Progress` | `progress` | ❌ | harvest (5212) | subagent / rich_entries |
 | `Attachment` | `attachment` | ❌ | harvest (1544) | rich_entries |
-| `LastPrompt` | `last-prompt` | ❌ | harvest — verify | rich_entries |
-| `Mode` | `mode` | ❌ | harvest — verify | rich_entries |
-| `PermissionMode` | `permission-mode` | ❌ | harvest — verify | rich_entries |
+| `LastPrompt` | `last-prompt` | ❌ | harvest (200+) | rich_entries |
+| `Mode` | `mode` | ❌ | harvest (200+) | rich_entries |
+| `PermissionMode` | `permission-mode` | ❌ | harvest (200+) | rich_entries |
 | `AiTitle` | `ai-title` | ❌ | harvest (289) | rich_entries |
 | `Unknown` | (unknown/absent `type`) | ❌ | synth | forward_compat |
 
@@ -124,10 +124,10 @@ Legend — **Cov:** ✅ existing fixture · ⚠️ partial · ❌ gap.
 | On-disk subagent files: `subagents/agent-*.jsonl` | discovery/paths.rs:11 | ❌ | harvest (1197 dirs) — synth for exact count | subagent |
 | `FileHistorySnapshot.snapshot.tracked_file_backups` | message.rs:902 | ❌ | harvest (2431) | rich_entries |
 | System api_error retry fields (`error`, `retry_in_ms`, …) | message.rs:761 | ❌ | harvest (63) | system (extend) |
-| System `stop_hook_summary` (`hook_infos`) | message.rs:782 | ❌ | harvest — verify | system (extend) |
-| System checkpoint/rewind/rename | message.rs:807 | ❌ | harvest — verify | system (extend) |
-| `Todo` / `todos` on user message | message.rs:563, metadata.rs:56 | ❌ | harvest — verify | rich_entries |
-| MCP tool-use (`mcp__server__method`) / server tool (`srvtoolu_`) | content.rs:380 | ❌ | harvest — verify | content_blocks |
+| System `stop_hook_summary` (`hook_infos`) | message.rs:782 | ❌ | harvest (3) | system (extend) |
+| System checkpoint/rewind/rename/init/resume/permission/tool subtypes | message.rs:807 | ❌ | synth (0 on disk) | forward_compat |
+| `Todo` / `todos` on user message | message.rs:563, metadata.rs:56 | ❌ | harvest (200+) | rich_entries |
+| MCP tool-use (`mcp__server__method`) / server tool (`srvtoolu_`) | content.rs:380 | ❌ | harvest (200+) | content_blocks |
 | Tool-result 3-state error (`is_error` true/false/absent) | content.rs:438 | ⚠️ absent only | harvest | content_blocks |
 | `ImageSource` Base64 / Url / File (no `Other` fallback) | content.rs:592 | ❌ | base64 harvest (31) + synth url/file | content_blocks |
 | `ToolResultContent::Array` (image-bearing, redaction path) | content.rs:475 | ❌ | harvest (31) | content_blocks |
@@ -144,6 +144,11 @@ API/format spec:
 
 - `LogEntry::Unknown` and `ContentBlock::Unknown` (forward-compat) — incl.
   `redacted_thinking` (0 on disk).
+- `LogEntry::TurnEnd` (`turn_end`) and the `SystemSubtype` values
+  `checkpoint` / `rewind` / `rename` / `init` / `resume` / `permission` / `tool`
+  — all modeled but **absent from all 12,353 current sessions** (scan 2026-06-26).
+  Synthesize from the model definitions. (Note: that the model defines subtypes
+  current CC doesn't emit is itself a fidelity observation worth a follow-up.)
 - Every enum `Other(...)` arm (fake-future values).
 - `ImageSource::Url` / `ImageSource::File` (if absent from harvest).
 - Malformed lines, truncated lines, duplicate UUIDs.
@@ -152,7 +157,8 @@ API/format spec:
 
 ## Next steps (after this checklist)
 
-1. Run the "harvest — verify" scans to confirm/locate the unscanned shapes.
+1. ~~Run the "harvest — verify" scans~~ — done (scan 2026-06-26; all rows
+   resolved to harvest/synth above).
 2. Author the new fixtures (harvested shapes first, synth gaps second), each with
    provenance.
 3. Rebuild `tests/generators/` on real `src/model` types.
