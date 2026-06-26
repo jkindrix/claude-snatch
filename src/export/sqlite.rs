@@ -223,8 +223,9 @@ impl SqliteExporter {
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
 
-            -- Messages table
-            CREATE TABLE IF NOT EXISTS messages (
+            -- Entries table (one row per raw log entry; the session
+            -- stats store the collapsed logical count separately)
+            CREATE TABLE IF NOT EXISTS entries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_fk INTEGER NOT NULL,
                 uuid TEXT,
@@ -252,7 +253,7 @@ impl SqliteExporter {
                 block_type TEXT NOT NULL,
                 content TEXT,
                 block_order INTEGER,
-                FOREIGN KEY (message_fk) REFERENCES messages(id) ON DELETE CASCADE
+                FOREIGN KEY (message_fk) REFERENCES entries(id) ON DELETE CASCADE
             );
 
             -- Thinking blocks table
@@ -262,7 +263,7 @@ impl SqliteExporter {
                 signature TEXT,
                 thinking TEXT,
                 block_order INTEGER,
-                FOREIGN KEY (message_fk) REFERENCES messages(id) ON DELETE CASCADE
+                FOREIGN KEY (message_fk) REFERENCES entries(id) ON DELETE CASCADE
             );
 
             -- Tool uses table
@@ -273,7 +274,7 @@ impl SqliteExporter {
                 tool_name TEXT NOT NULL,
                 input_json TEXT,
                 block_order INTEGER,
-                FOREIGN KEY (message_fk) REFERENCES messages(id) ON DELETE CASCADE
+                FOREIGN KEY (message_fk) REFERENCES entries(id) ON DELETE CASCADE
             );
 
             -- Tool results table
@@ -285,7 +286,7 @@ impl SqliteExporter {
                 status TEXT,
                 output TEXT,
                 block_order INTEGER,
-                FOREIGN KEY (message_fk) REFERENCES messages(id) ON DELETE CASCADE
+                FOREIGN KEY (message_fk) REFERENCES entries(id) ON DELETE CASCADE
             );
 
             -- Usage statistics table
@@ -318,9 +319,9 @@ impl SqliteExporter {
             );
 
             -- Create indexes
-            CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_fk);
-            CREATE INDEX IF NOT EXISTS idx_messages_uuid ON messages(uuid);
-            CREATE INDEX IF NOT EXISTS idx_messages_type ON messages(message_type);
+            CREATE INDEX IF NOT EXISTS idx_entries_session ON entries(session_fk);
+            CREATE INDEX IF NOT EXISTS idx_entries_uuid ON entries(uuid);
+            CREATE INDEX IF NOT EXISTS idx_entries_type ON entries(message_type);
             CREATE INDEX IF NOT EXISTS idx_content_blocks_message ON content_blocks(message_fk);
             CREATE INDEX IF NOT EXISTS idx_thinking_blocks_message ON thinking_blocks(message_fk);
             CREATE INDEX IF NOT EXISTS idx_tool_uses_message ON tool_uses(message_fk);
@@ -340,16 +341,16 @@ impl SqliteExporter {
     /// Create full-text search index.
     fn create_fts_index(&self, conn: &Connection) -> Result<()> {
         let fts_sql = r#"
-            -- Create FTS virtual table for messages
-            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+            -- Create FTS virtual table for entries
+            CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
                 content,
-                content='messages',
+                content='entries',
                 content_rowid='id'
             );
 
             -- Populate FTS index
-            INSERT INTO messages_fts(rowid, content)
-            SELECT id, content FROM messages WHERE content IS NOT NULL;
+            INSERT INTO entries_fts(rowid, content)
+            SELECT id, content FROM entries WHERE content IS NOT NULL;
 
             -- Create FTS virtual table for thinking
             CREATE VIRTUAL TABLE IF NOT EXISTS thinking_fts USING fts5(
@@ -472,7 +473,7 @@ impl SqliteExporter {
                     .map(|m| serde_json::to_string(&m.triggers).unwrap_or_default());
 
                 conn.execute(
-                    "INSERT INTO messages (session_fk, uuid, parent_uuid, message_type, role, timestamp, content, is_sidechain, thinking_level, thinking_disabled, thinking_triggers)
+                    "INSERT INTO entries (session_fk, uuid, parent_uuid, message_type, role, timestamp, content, is_sidechain, thinking_level, thinking_disabled, thinking_triggers)
                      VALUES (?1, ?2, ?3, 'user', 'user', ?4, ?5, ?6, ?7, ?8, ?9)",
                     params![session_fk, uuid, parent_uuid, timestamp, content, is_sidechain, thinking_level, thinking_disabled, thinking_triggers],
                 )
@@ -541,7 +542,7 @@ impl SqliteExporter {
                     .join("\n");
 
                 conn.execute(
-                    "INSERT INTO messages (session_fk, uuid, parent_uuid, message_type, role, model, timestamp, content, is_sidechain, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens)
+                    "INSERT INTO entries (session_fk, uuid, parent_uuid, message_type, role, model, timestamp, content, is_sidechain, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens)
                      VALUES (?1, ?2, ?3, 'assistant', 'assistant', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     params![session_fk, uuid, parent_uuid, model, timestamp, text_content, is_sidechain, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens],
                 )
@@ -563,7 +564,7 @@ impl SqliteExporter {
                 let is_sidechain = entry.is_sidechain();
 
                 conn.execute(
-                    "INSERT INTO messages (session_fk, uuid, message_type, role, timestamp, content, is_sidechain)
+                    "INSERT INTO entries (session_fk, uuid, message_type, role, timestamp, content, is_sidechain)
                      VALUES (?1, ?2, 'system', 'system', ?3, ?4, ?5)",
                     params![session_fk, uuid, timestamp, content, is_sidechain],
                 )
@@ -575,7 +576,7 @@ impl SqliteExporter {
                 let uuid = entry.uuid();
 
                 conn.execute(
-                    "INSERT INTO messages (session_fk, uuid, message_type, role, content)
+                    "INSERT INTO entries (session_fk, uuid, message_type, role, content)
                      VALUES (?1, ?2, 'summary', 'system', ?3)",
                     params![session_fk, uuid, summary.summary],
                 )

@@ -508,7 +508,7 @@ fn output_session_stats(cli: &Cli, args: &StatsArgs, analytics: &SessionAnalytic
             // carry tool results rather than human prompts, so the tool-result
             // block share is surfaced additively. "Total" is the conversation
             // basis (user + assistant), matching `snatch info`'s Messages count.
-            println!("Messages:");
+            println!("Messages (logical):");
             println!(
                 "  User:         {:>10}",
                 format_count(summary.user_messages)
@@ -644,7 +644,7 @@ fn output_project_stats(
             println!();
 
             // Messages
-            println!("Messages:");
+            println!("Messages (logical):");
             println!(
                 "  User:      {}",
                 format_count(analytics.message_counts.user)
@@ -794,7 +794,7 @@ fn output_multi_project_stats(
             println!();
 
             // Messages
-            println!("Messages:");
+            println!("Messages (logical):");
             println!(
                 "  User:      {}",
                 format_count(analytics.message_counts.user)
@@ -921,7 +921,7 @@ fn output_global_stats(cli: &Cli, args: &StatsArgs, analytics: &ProjectAnalytics
             println!();
 
             // Messages
-            println!("Messages:");
+            println!("Messages (logical):");
             println!(
                 "  User:      {}",
                 format_count(analytics.message_counts.user)

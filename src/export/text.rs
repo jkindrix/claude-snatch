@@ -171,7 +171,7 @@ impl TextExporter {
             writeln!(writer, "STATISTICS:")?;
             writeln!(
                 writer,
-                "  Messages: {} ({} user, {} assistant)",
+                "  Messages (logical): {} ({} user, {} assistant)",
                 summary.total_messages, summary.user_messages, summary.assistant_messages
             )?;
             writeln!(writer, "  Work Tokens: {}", summary.total_tokens)?;

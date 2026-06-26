@@ -9,7 +9,7 @@ expression: markdown
 **Span:** 1m 15s
 
 ## Statistics
-- **Messages:** 6 (3 user, 3 assistant)
+- **Messages (logical):** 6 (3 user, 3 assistant)
 - **Work Tokens:** 255
 - **Total Processed Tokens:** 255
 - **Input Tokens:** 105
