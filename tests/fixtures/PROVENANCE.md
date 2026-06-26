@@ -19,6 +19,7 @@ data or PII.
 | `content_blocks_session.jsonl` | image/MCP shapes harvested from real sessions; `ImageSource::Url`/`File` and `srvtoolu_` server tool spec-authored (absent from disk) | 2.1.193 | `Image` block with `ImageSource` base64/url/file, MCP tool-use (`mcp__server__method`), server tool-use (`srvtoolu_`), tool-result 3-state error (true/false/absent) |
 | `forward_compat_session.jsonl` | spec-authored (forward-compat shapes never emitted by current CC) | 2.1.193 | `LogEntry::Unknown` (future entry type), `ContentBlock::Unknown` (`redacted_thinking` + future block), `SystemSubtype::Other`, `CompactTrigger::Other`, `StopReason::Other` (blocked by issue 0015) |
 | `malformed_session.jsonl` | spec-authored | 2.1.193 | truncated/invalid JSONL lines (lenient skip + diagnostic retention), duplicate-UUID pair (for future reconstruction tests) |
+| `redaction_session.jsonl` | spec-authored (planted dummy secret) | 2.1.193 | a planted email in assistant text, for the issue 0001 redaction guard |
 
 ## Notes
 

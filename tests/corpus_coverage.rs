@@ -5,14 +5,26 @@
 //! key fields survive. See `docs/test-corpus.md` for the corpus strategy and the
 //! per-fixture provenance in `tests/fixtures/PROVENANCE.md`.
 
+use std::collections::HashSet;
+use std::io::Cursor;
 use std::path::PathBuf;
 
 use claude_snatch::discovery::Session;
+use claude_snatch::export::{ContentType, ExportOptions, Exporter, MarkdownExporter};
 use claude_snatch::model::{
     CompactTrigger, ContentBlock, ImageSource, LogEntry, StopReason, SystemSubtype, ToolResult,
     ToolUse, UserContent,
 };
 use claude_snatch::parser::JsonlParser;
+
+/// Render entries to a markdown string with the given options.
+fn markdown_with(entries: &[LogEntry], opts: &ExportOptions) -> String {
+    let mut buf = Cursor::new(Vec::new());
+    MarkdownExporter::new()
+        .export_entries(entries, &mut buf, opts)
+        .expect("markdown export should succeed");
+    String::from_utf8(buf.into_inner()).expect("export output should be valid UTF-8")
+}
 
 fn fixture_path(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -325,5 +337,37 @@ fn assistant_stop_reason_parses() {
     assert!(
         matches!(asst.message.stop_reason, Some(StopReason::Other(_))),
         "snake_case stop_reason should parse (currently dropped to None)"
+    );
+}
+
+/// Regression guard for issue 0001: redaction is plumbed into ExportOptions but
+/// no exporter calls it, so `--redact all` silently passes secrets through.
+/// Ignored until the transform pass (Phase 1) applies redaction; flip to active
+/// to verify the fix.
+#[test]
+#[ignore = "blocked by issue 0001: exporters never apply the redaction config"]
+fn redaction_removes_planted_secret() {
+    let entries = parse_fixture("redaction_session.jsonl");
+    let opts = ExportOptions::default().with_full_redaction();
+    let out = markdown_with(&entries, &opts);
+    assert!(
+        !out.contains("secret@example.com"),
+        "the planted email should be redacted from --redact all output"
+    );
+}
+
+/// Regression guard for issue 0003: `--only tool-results` returns zero tool
+/// results because tool results live in user-role entries that the filter skips.
+/// Ignored until the filter is corrected (Phase 1).
+#[test]
+#[ignore = "blocked by issue 0003: --only tool-results drops user-entry tool results"]
+fn only_tool_results_includes_tool_results() {
+    let entries = parse_fixture("content_blocks_session.jsonl");
+    let only: HashSet<ContentType> = [ContentType::ToolResults].into_iter().collect();
+    let opts = ExportOptions::default().with_only(only);
+    let out = markdown_with(&entries, &opts);
+    assert!(
+        out.contains("ok success"),
+        "tool-result content should be present under --only tool-results"
     );
 }
