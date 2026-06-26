@@ -14,7 +14,8 @@ snatch supports multiple export formats for conversation logs. Each format has s
 | CSV | `.csv` | Spreadsheet analysis |
 | XML | `.xml` | Enterprise integration |
 | SQLite | `.db` | Database queries, analysis |
-| JSONL | `.jsonl` | Line-by-line processing, streaming |
+| JSONL | `.jsonl` | Normalized line-by-line export (filterable, not byte-faithful) |
+| raw-jsonl | `.jsonl` | Byte-faithful archival passthrough of the original log |
 | OpenTelemetry | `.json` | Observability pipelines, distributed tracing |
 
 ## Command Line Usage
@@ -80,50 +81,46 @@ Structured data format for programmatic access.
 
 ```json
 {
-  "metadata": {
-    "session_id": "abc12345-def6-7890-abcd-ef1234567890",
-    "exported_at": "2025-01-15T10:30:00Z",
-    "total_messages": 42,
-    "schema_version": "1.0"
-  },
-  "messages": [
+  "version": "1.0",
+  "exported_at": "2025-01-15T10:30:00Z",
+  "exporter": "snatch",
+  "metadata": { "session_id": "abc12345-def6-7890-abcd-ef1234567890" },
+  "analytics": { "total_messages": 42 },
+  "tree": { },
+  "entries": [
     {
       "type": "user",
       "timestamp": "2025-01-15T10:30:15Z",
-      "content": "Can you help me with this code?"
+      "message": { "role": "user", "content": "Can you help me with this code?" }
     },
     {
       "type": "assistant",
       "timestamp": "2025-01-15T10:30:18Z",
-      "content": [
-        {
-          "type": "text",
-          "text": "Of course! Let me analyze your code..."
-        }
-      ]
+      "message": { "role": "assistant", "content": [{ "type": "text", "text": "..." }] }
     }
   ]
 }
 ```
 
-Use `--format json-pretty` for indented output.
+The top-level conversation array is `entries` (one element per log entry). Use
+`--format json-pretty` for indented output.
 
 ### HTML
 
 Self-contained HTML file with embedded CSS for web viewing.
 
 Features:
-- Dark/light theme support
+- Light (default) / dark theme support
 - Syntax highlighted code blocks
 - Collapsible thinking blocks
 - Responsive design
 
 ```bash
-# Dark theme (default)
+# Light theme (default)
 snatch export <session-id> --format html
 
-# Light theme
-snatch export <session-id> --format html --theme light
+# Dark theme
+snatch export <session-id> --format html --dark
 ```
 
 ### Plain Text
@@ -191,18 +188,21 @@ Database format for complex queries and analysis.
 
 Tables:
 - `sessions`: Session metadata
-- `messages`: All messages with full content
-- `tool_calls`: Tool invocations
+- `entries`: One row per raw log entry, with full content
+- `content_blocks`: Content blocks belonging to an entry
+- `tool_uses`: Tool invocations
 - `tool_results`: Tool execution results
 - `thinking_blocks`: Extended thinking content
-- `tokens`: Token usage per message
+- `usage_stats`: Per-session token/cost statistics (logical message counts)
+- `tool_usage`: Per-tool invocation counts
+- `entries_fts` / `thinking_fts`: Full-text search indexes
 
 ```bash
 # Export to SQLite
 snatch export <session-id> --format sqlite
 
 # Query the database
-sqlite3 session.db "SELECT * FROM messages WHERE type='assistant'"
+sqlite3 session.db "SELECT * FROM entries WHERE role='assistant'"
 ```
 
 ### JSONL (JSON Lines)
@@ -219,6 +219,24 @@ Ideal for:
 - Streaming processing
 - Large file handling
 - Log aggregation tools
+
+`jsonl` is normalized (content-preserving but reordered/reshaped). For a
+byte-for-byte copy of the original Claude Code log, use `raw-jsonl`.
+
+### raw-jsonl (archival passthrough)
+
+Byte-faithful passthrough of the original Claude Code JSONL — no parsing,
+filtering, redaction, or reordering. This is the archival mode.
+
+```bash
+snatch export <session-id> --format raw-jsonl -O archive.jsonl
+```
+
+Notes:
+- Rejects `--redact`, `--only`, and other transforming flags (it must stay
+  byte-identical to the source).
+- Single-file by design: subagent transcripts (the `subagents/` directory) are
+  **not** included; snatch warns when they exist so the omission isn't silent.
 
 ### OpenTelemetry (OTLP)
 
@@ -279,21 +297,40 @@ Redaction replaces sensitive data with type-specific placeholders:
 - `[REDACTED:EMAIL]`
 - `[REDACTED:IP_ADDRESS]`
 
+### Content Filtering
+
+Control which content appears in the export:
+
+- `--only <types>`: Exclusive whitelist — include only the listed content types
+  (e.g. `--only prompts`, `--only tool-results`, `--only user`, `--only code`).
+  Accepts a comma-separated list.
+- `--no-thinking` / `--no-tool-use` / `--no-tool-results`: Exclude a content type
+  while keeping everything else (the blocklist counterpart to `--only`).
+- `--full`: Include everything (system messages, metadata, etc.).
+- `--warn-pii`: Scan the export (including tool-result content) for sensitive data
+  and warn before writing.
+
+`--only` is a focus filter; `--redact` is the privacy control. Use `--redact` to
+remove secrets, not `--only`.
+
+### Subagents
+
+- `--combine-agents`: Interleave a parent session with its subagent transcripts
+  into a single export (works with markdown/json/sqlite/jsonl).
+- `--subagents`: Affects `--all` batch listing only; inert on a single session.
+- `raw-jsonl` cannot include subagents (single-file); snatch warns when they exist.
+
+### Destinations
+
+- `-O, --out <FILE>`: Write to a file (otherwise stdout).
+- `--gist`: Upload the export to a GitHub gist (requires `gh`).
+- `--clipboard`: Copy the export to the clipboard.
+- `--template <name>`: Render with a custom template (`--template list` to see them).
+
 ### Format-Specific Options
 
-**HTML:**
-- `--theme <dark|light>`: Color theme
-- `--standalone`: Include all CSS inline
-
-**Text:**
-- `--width <n>`: Line width for wrapping
-
-**JSON:**
-- `--pretty`: Pretty-print with indentation
-
-**CSV:**
-- `--delimiter <char>`: Field delimiter (default: comma)
-- `--quote <char>`: Quote character (default: double-quote)
+- **HTML:** `--dark` (dark theme; default is light), `--toc` (table of contents).
+- **JSON:** `--pretty` (or use the `json-pretty` format).
 
 ## Batch Export
 
@@ -304,10 +341,10 @@ Export multiple sessions at once:
 snatch export --project /path/to/project --format markdown
 
 # Export sessions from a date range
-snatch export --project /path/to/project --after 2025-01-01 --before 2025-01-31
+snatch export --all --project /path/to/project --since 2025-01-01 --until 2025-01-31
 
-# Export to a directory
-snatch export --project /path/to/project --output-dir ./exports/
+# Export all matching sessions
+snatch export --all --project /path/to/project --format markdown
 ```
 
 ## Programmatic Export
