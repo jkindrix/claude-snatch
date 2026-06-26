@@ -11,7 +11,7 @@ use crate::analytics::SessionAnalytics;
 use crate::error::Result;
 use crate::model::{
     content::{ImageBlock, ImageSource, ThinkingBlock, ToolResult, ToolUse},
-    AssistantMessage, ContentBlock, LogEntry, SystemMessage, UserMessage,
+    AssistantMessage, ContentBlock, LogEntry, SummaryMessage, SystemMessage, UserMessage,
 };
 use crate::reconstruction::Conversation;
 
@@ -837,6 +837,34 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
         Ok(())
     }
 
+    /// Write a summary (e.g. compaction) message.
+    fn write_summary_message<W: Write>(
+        &self,
+        writer: &mut W,
+        summary: &SummaryMessage,
+        options: &ExportOptions,
+    ) -> Result<()> {
+        writeln!(writer, "<article class=\"message message-system\">")?;
+        writeln!(writer, "  <div class=\"message-header\">")?;
+        writeln!(writer, "    <span class=\"message-role\">Summary</span>")?;
+        writeln!(writer, "  </div>")?;
+        writeln!(writer, "  <div class=\"message-content\">")?;
+        writeln!(writer, "    <p>{}</p>", escape_html(&summary.summary))?;
+        if options.include_metadata {
+            if let Some(leaf_uuid) = &summary.leaf_uuid {
+                writeln!(
+                    writer,
+                    "    <p class=\"message-meta\">Leaf UUID: <code>{}</code></p>",
+                    escape_html(leaf_uuid)
+                )?;
+            }
+        }
+        writeln!(writer, "  </div>")?;
+        writeln!(writer, "</article>")?;
+
+        Ok(())
+    }
+
     /// Write a thinking block.
     fn write_thinking<W: Write>(&self, writer: &mut W, thinking: &ThinkingBlock) -> Result<()> {
         let collapsed_class = if self.collapse_thinking {
@@ -1059,12 +1087,10 @@ impl Exporter for HtmlExporter {
         self.write_document_start(writer, &title)?;
         self.write_session_header(writer, conversation)?;
 
-        // Get entries based on options
-        let entries = if options.main_thread_only {
-            conversation.main_thread_entries()
-        } else {
-            conversation.chronological_entries()
-        };
+        // Get entries based on options. Use entries_for_export (like the other
+        // exporters) so uuid-less entries — notably compaction summaries — are
+        // surfaced rather than silently dropped.
+        let entries = conversation.entries_for_export(options.main_thread_only);
 
         for entry in entries {
             match entry {
@@ -1076,6 +1102,9 @@ impl Exporter for HtmlExporter {
                 }
                 LogEntry::System(system) if options.should_include_system() => {
                     self.write_system_message(writer, system, options)?;
+                }
+                LogEntry::Summary(summary) => {
+                    self.write_summary_message(writer, summary, options)?;
                 }
                 _ => {}
             }

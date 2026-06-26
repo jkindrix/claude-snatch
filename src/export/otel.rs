@@ -420,7 +420,14 @@ impl OtelExporter {
         conversation: &Conversation,
         options: &ExportOptions,
     ) -> OtlpExportData {
-        let entries = conversation.main_thread_entries();
+        // Honor the main_thread_only option like the other exporters, rather
+        // than always restricting to the main thread (which silently dropped
+        // sidechains regardless of the flag).
+        let entries = if options.main_thread_only {
+            conversation.main_thread_entries()
+        } else {
+            conversation.chronological_entries()
+        };
 
         let session_id = entries
             .first()

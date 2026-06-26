@@ -507,14 +507,17 @@ impl MarkdownExporter {
             writeln!(writer, "[Image: {media_type}]")?;
         } else {
             match &image.source {
-                ImageSource::Base64 { media_type, data } => {
-                    // Write as embedded base64 image
+                ImageSource::Base64 { media_type, .. } => {
+                    // A truncated base64 data URI renders as a broken image, so
+                    // emit an honest placeholder with the estimated decoded size
+                    // instead. The full bytes remain available in the json and
+                    // raw-jsonl exports.
+                    let approx_bytes = image.source.approximate_size().unwrap_or(0);
                     writeln!(
                         writer,
-                        "![Image](data:{media_type};base64,{}...)",
-                        &data[..std::cmp::min(50, data.len())]
+                        "[Image: {media_type}, ~{}]",
+                        format_image_size(approx_bytes)
                     )?;
-                    writeln!(writer, "*({} base64 encoded)*", data.len())?;
                 }
                 ImageSource::Url { url } => {
                     writeln!(writer, "![Image]({url})")?;
@@ -838,6 +841,20 @@ fn format_timestamp(ts: &DateTime<Utc>) -> String {
     ts.format("%Y-%m-%d %H:%M:%S UTC").to_string()
 }
 
+/// Format an approximate byte count for an image placeholder.
+fn format_image_size(bytes: usize) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    let b = bytes as f64;
+    if b >= MB {
+        format!("{:.1} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.1} KB", b / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 /// Format a stop reason for display.
 fn format_stop_reason(reason: &StopReason) -> String {
     match reason {
@@ -1081,5 +1098,32 @@ mod tests {
 
         let exporter = MarkdownExporter::new().with_toc(false);
         assert!(!exporter.include_toc);
+    }
+
+    #[test]
+    fn test_image_renders_honest_placeholder_not_broken_uri() {
+        use crate::model::content::{ImageBlock, ImageSource};
+        let exporter = MarkdownExporter::new();
+        let mut output = Vec::new();
+        let image = ImageBlock {
+            source: ImageSource::Base64 {
+                media_type: "image/png".to_string(),
+                data: "A".repeat(4096), // ~3 KB decoded
+            },
+            extra: indexmap::IndexMap::new(),
+        };
+        exporter.write_image(&mut output, &image).unwrap();
+        let result = String::from_utf8(output).unwrap();
+        // No truncated base64 data URI (which renders as a broken image).
+        assert!(!result.contains("data:image"));
+        assert!(result.contains("[Image: image/png"));
+        assert!(result.contains("KB"));
+    }
+
+    #[test]
+    fn test_format_image_size() {
+        assert_eq!(format_image_size(512), "512 B");
+        assert_eq!(format_image_size(1536), "1.5 KB");
+        assert_eq!(format_image_size(2 * 1024 * 1024), "2.0 MB");
     }
 }
