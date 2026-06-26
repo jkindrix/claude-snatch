@@ -840,6 +840,7 @@ mod tests {
             message: UserContent::Simple(UserSimpleContent {
                 role: "user".to_string(),
                 content: "test".to_string(),
+                extra: IndexMap::new(),
             }),
             extra: IndexMap::new(),
         })
@@ -1091,6 +1092,7 @@ mod tests {
             u.message = UserContent::Simple(UserSimpleContent {
                 role: "user".to_string(),
                 content: "different content".to_string(),
+                extra: IndexMap::new(),
             });
         }
         let entries = vec![make_user_entry("1", None), first, second];

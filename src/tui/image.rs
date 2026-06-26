@@ -104,10 +104,10 @@ impl ImageRenderer {
             ImageSource::Base64 { data, .. } => base64::engine::general_purpose::STANDARD
                 .decode(data)
                 .map_err(|e| ImageError::DecodeError(format!("Base64 decode failed: {e}"))),
-            ImageSource::Url { url } => Err(ImageError::UnsupportedSource(format!(
+            ImageSource::Url { url, .. } => Err(ImageError::UnsupportedSource(format!(
                 "URL images not supported in TUI: {url}"
             ))),
-            ImageSource::File { file_id } => Err(ImageError::UnsupportedSource(format!(
+            ImageSource::File { file_id, .. } => Err(ImageError::UnsupportedSource(format!(
                 "File API images not supported: {file_id}"
             ))),
         }

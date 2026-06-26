@@ -303,6 +303,7 @@ mod tests {
             message: UserContent::Simple(UserSimpleContent {
                 role: "user".to_string(),
                 content: "hello".to_string(),
+                extra: IndexMap::new(),
             }),
             extra: IndexMap::new(),
         })

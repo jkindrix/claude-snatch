@@ -592,6 +592,9 @@ pub struct UserSimpleContent {
     pub role: String,
     /// The text content.
     pub content: String,
+    /// Unknown fields for forward compatibility.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
 }
 
 /// User content with array of blocks.
@@ -601,6 +604,9 @@ pub struct UserBlocksContent {
     pub role: String,
     /// Array of content blocks.
     pub content: Vec<ContentBlock>,
+    /// Unknown fields for forward compatibility.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
 }
 
 /// User content block - individual pieces of user content.
@@ -1337,6 +1343,22 @@ mod tests {
                 "round-trip mismatch for {json}"
             );
         }
+    }
+
+    #[test]
+    fn test_user_content_preserves_unknown_fields() {
+        // Unknown keys inside the inner user `message` object (alongside
+        // role/content) must survive via the flattened `extra`.
+        let json = r#"{"role":"user","content":"hi","providerMetadata":{"k":1}}"#;
+        let content: UserContent = serde_json::from_str(json).unwrap();
+        match &content {
+            UserContent::Simple(s) => {
+                assert!(s.extra.contains_key("providerMetadata"));
+            }
+            UserContent::Blocks(_) => panic!("expected simple content"),
+        }
+        let original: Value = serde_json::from_str(json).unwrap();
+        assert_eq!(serde_json::to_value(&content).unwrap(), original);
     }
 
     #[test]

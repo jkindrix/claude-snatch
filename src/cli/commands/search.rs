@@ -2063,6 +2063,7 @@ mod tests {
             message: UserContent::Simple(UserSimpleContent {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
+                extra: IndexMap::new(),
             }),
             extra: IndexMap::new(),
         };
@@ -2107,6 +2108,7 @@ mod tests {
             message: UserContent::Simple(UserSimpleContent {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
+                extra: IndexMap::new(),
             }),
             extra: IndexMap::new(),
         };

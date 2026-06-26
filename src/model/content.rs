@@ -597,18 +597,27 @@ pub enum ImageSource {
         media_type: String,
         /// Base64-encoded image data.
         data: String,
+        /// Unknown fields for forward compatibility.
+        #[serde(flatten)]
+        extra: IndexMap<String, Value>,
     },
 
     /// Public URL reference.
     Url {
         /// The URL.
         url: String,
+        /// Unknown fields for forward compatibility.
+        #[serde(flatten)]
+        extra: IndexMap<String, Value>,
     },
 
     /// Files API file ID (beta feature).
     File {
         /// File ID.
         file_id: String,
+        /// Unknown fields for forward compatibility.
+        #[serde(flatten)]
+        extra: IndexMap<String, Value>,
     },
 }
 
@@ -774,6 +783,30 @@ mod tests {
         let url_json = r#"{"type":"url","url":"https://example.com/image.png"}"#;
         let source: ImageSource = serde_json::from_str(url_json).unwrap();
         assert!(!source.is_base64());
+    }
+
+    #[test]
+    fn test_image_source_preserves_unknown_fields() {
+        // ImageSource is internally tagged on `type`; ensure a flattened `extra`
+        // round-trips without duplicating or dropping the discriminator.
+        let json = r#"{"type":"base64","media_type":"image/png","data":"AAAA","detail":"high"}"#;
+        let src: ImageSource = serde_json::from_str(json).unwrap();
+        match &src {
+            ImageSource::Base64 { extra, .. } => {
+                assert_eq!(extra.get("detail").and_then(|v| v.as_str()), Some("high"));
+            }
+            _ => panic!("expected base64"),
+        }
+        let out = serde_json::to_string(&src).unwrap();
+        // The tag must appear exactly once (flatten must not re-emit it).
+        assert_eq!(
+            out.matches("\"type\"").count(),
+            1,
+            "tag must not duplicate: {out}"
+        );
+        let reparsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(reparsed["type"], "base64");
+        assert_eq!(reparsed["detail"], "high");
     }
 
     #[test]

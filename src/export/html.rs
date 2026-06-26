@@ -987,7 +987,9 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
         writeln!(writer, "    <div class=\"message-image\">")?;
 
         match &image.source {
-            ImageSource::Base64 { media_type, data } if self.inline_images => {
+            ImageSource::Base64 {
+                media_type, data, ..
+            } if self.inline_images => {
                 // Inline as data URL
                 writeln!(
                     writer,
@@ -1005,7 +1007,9 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
                     )?;
                 }
             }
-            ImageSource::Base64 { media_type, data } => {
+            ImageSource::Base64 {
+                media_type, data, ..
+            } => {
                 // Show placeholder with size info
                 if let Some(size) = image.source.approximate_size() {
                     let size_str = format_bytes(size);
@@ -1032,7 +1036,7 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
                     writeln!(writer, "      </div>")?;
                 }
             }
-            ImageSource::Url { url } => {
+            ImageSource::Url { url, .. } => {
                 // External URL - embed or link based on settings
                 if self.inline_images {
                     writeln!(
@@ -1056,7 +1060,7 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
                     writeln!(writer, "      </div>")?;
                 }
             }
-            ImageSource::File { file_id } => {
+            ImageSource::File { file_id, .. } => {
                 // Files API reference (beta feature) - show file ID
                 writeln!(writer, "      <div class=\"image-error\">")?;
                 writeln!(
@@ -1287,6 +1291,7 @@ mod tests {
             source: ImageSource::Base64 {
                 media_type: "image/png".to_string(),
                 data: "iVBORw0KGgo=".to_string(),
+                extra: indexmap::IndexMap::new(),
             },
             extra: indexmap::IndexMap::new(),
         };
@@ -1307,6 +1312,7 @@ mod tests {
         let image = ImageBlock {
             source: ImageSource::Url {
                 url: "https://example.com/image.png".to_string(),
+                extra: indexmap::IndexMap::new(),
             },
             extra: indexmap::IndexMap::new(),
         };

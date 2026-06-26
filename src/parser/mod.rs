@@ -63,11 +63,6 @@ pub const DEFAULT_MAX_FILE_SIZE: u64 = 0;
 pub struct JsonlParser {
     /// Detected schema version.
     schema_version: Option<SchemaVersion>,
-    /// Reserved for raw-line preservation. Currently unused: parsed entries do
-    /// not retain their original JSON source line. Unknown entry types and
-    /// content blocks are instead preserved as raw `Value` within the model
-    /// itself, so JSONL export round-trips by content (not byte-for-byte).
-    preserve_raw: bool,
     /// Whether to skip malformed lines instead of failing.
     lenient: bool,
     /// Maximum file size in bytes (0 = unlimited).
@@ -125,19 +120,10 @@ impl JsonlParser {
     pub fn new() -> Self {
         Self {
             schema_version: None,
-            preserve_raw: false,
             lenient: true,
             max_file_size: DEFAULT_MAX_FILE_SIZE,
             stats: ParseStats::default(),
         }
-    }
-
-    /// Reserved for future raw-line preservation. Currently a no-op: the flag is
-    /// stored but parsed entries do not retain their original JSON source line.
-    #[must_use]
-    pub fn with_raw_preservation(mut self, preserve: bool) -> Self {
-        self.preserve_raw = preserve;
-        self
     }
 
     /// Set lenient mode (skip malformed lines instead of failing).

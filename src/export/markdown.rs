@@ -519,10 +519,10 @@ impl MarkdownExporter {
                         format_image_size(approx_bytes)
                     )?;
                 }
-                ImageSource::Url { url } => {
+                ImageSource::Url { url, .. } => {
                     writeln!(writer, "![Image]({url})")?;
                 }
-                ImageSource::File { file_id } => {
+                ImageSource::File { file_id, .. } => {
                     writeln!(writer, "*Image file: {file_id}*")?;
                 }
             }
@@ -1109,6 +1109,7 @@ mod tests {
             source: ImageSource::Base64 {
                 media_type: "image/png".to_string(),
                 data: "A".repeat(4096), // ~3 KB decoded
+                extra: indexmap::IndexMap::new(),
             },
             extra: indexmap::IndexMap::new(),
         };
