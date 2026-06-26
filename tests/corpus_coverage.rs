@@ -387,6 +387,31 @@ fn image_payloads_stripped_in_text_formats_preserved_in_json() {
     }
 }
 
+/// Regression guard for the transform/code-only interaction (issue 0016): the
+/// dispatch transform prunes text blocks under an exclusive `--only` filter, but
+/// `--only code` extracts code *from* text at render time, so text must survive.
+/// Routed through `export_to_string` (which applies the transform) — the
+/// `markdown_with` helper bypasses it and would not exercise the prune.
+#[test]
+fn only_code_extracts_code_through_transform() {
+    let jsonl = r#"{"type":"assistant","uuid":"a0000000-0000-0000-0000-000000000001","parentUuid":null,"timestamp":"2025-01-15T10:00:01.000Z","sessionId":"s","version":"2.1.193","message":{"id":"m1","type":"message","role":"assistant","content":[{"type":"text","text":"Here:\n```rust\nfn demo() {}\n```\n"}],"model":"claude-sonnet-4","stop_reason":"end_turn"}}"#;
+    let entries = JsonlParser::new()
+        .parse_str(jsonl)
+        .expect("parse inline entry");
+    let conversation = Conversation::from_entries(entries).expect("build conversation");
+    let only: HashSet<ContentType> = [ContentType::Code].into_iter().collect();
+    let out = export_to_string(
+        &conversation,
+        ExportFormat::Markdown,
+        &ExportOptions::default().with_only(only),
+    )
+    .expect("code-only export should succeed");
+    assert!(
+        out.contains("fn demo"),
+        "--only code must still extract code from text blocks after the transform prune"
+    );
+}
+
 /// Regression guard for issue 0001: `--redact all` must remove secrets from
 /// export output. Fixed in Phase 1 by the dispatch-level redaction transform
 /// (`export_to_string`/`export_to_file` → `Conversation::map_entries`).

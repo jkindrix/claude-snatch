@@ -1219,23 +1219,86 @@ fn redact_entry_text(entry: &mut LogEntry, options: &ExportOptions) {
     }
 }
 
+/// Prune content blocks excluded by an exclusive `--only` filter, in place.
+///
+/// Only acts when `--only` is set (`has_exclusive_filter`). Block inclusion is
+/// role-aware: user text and assistant text are filtered independently (a tool
+/// result lives in a user-role entry but is not user *text*), which the coarse
+/// per-exporter checks could not express. Whole-entry inclusion (system/summary,
+/// or skipping an emptied entry) remains the exporters' responsibility.
+fn filter_entry_content(entry: &mut LogEntry, options: &ExportOptions) {
+    use crate::model::{ContentBlock, UserContent};
+
+    if !options.has_exclusive_filter() {
+        return;
+    }
+
+    let keep_block = |block: &ContentBlock, user_role: bool| match block {
+        ContentBlock::Text(_) => {
+            // `--only code` extracts code from text blocks at render time, so the
+            // text must survive the prune even though neither user nor assistant
+            // text is in the filter set.
+            if options.is_code_only() {
+                true
+            } else if user_role {
+                options.should_include_user_text()
+            } else {
+                options.should_include(ContentType::Assistant)
+            }
+        }
+        ContentBlock::Image(_) => {
+            if user_role {
+                options.should_include_user_text()
+            } else {
+                options.should_include(ContentType::Assistant)
+            }
+        }
+        ContentBlock::Thinking(_) => options.should_include_thinking(),
+        ContentBlock::ToolUse(_) => options.should_include_tool_use(),
+        ContentBlock::ToolResult(_) => options.should_include_tool_results(),
+        ContentBlock::Unknown { .. } => true,
+    };
+
+    match entry {
+        LogEntry::User(u) => match &mut u.message {
+            UserContent::Simple(s) => {
+                if !options.should_include_user_text() {
+                    s.content.clear();
+                }
+            }
+            UserContent::Blocks(b) => b.content.retain(|block| keep_block(block, true)),
+        },
+        LogEntry::Assistant(a) => a.message.content.retain(|block| keep_block(block, false)),
+        _ => {}
+    }
+}
+
 /// Apply export-time content transforms to a conversation, returning a borrowed
 /// handle when nothing is configured and an owned, transformed copy otherwise.
 ///
 /// This is the single chokepoint every export path must funnel through so that
-/// `--redact` applies uniformly regardless of which dispatcher renders the
-/// output. Structure-preserving: only text content is rewritten. `raw-jsonl` is
-/// the one exception — it is byte-faithful and rejects `--redact` at validation,
-/// so it never reaches here.
+/// `--redact` and `--only` apply uniformly regardless of which dispatcher renders
+/// the output. Structure-preserving: redaction rewrites text in place; filtering
+/// prunes excluded blocks. `raw-jsonl` is the one exception — it is byte-faithful
+/// and rejects `--redact`/`--only` at validation, so it never reaches here.
 #[must_use]
 pub fn apply_export_transform<'a>(
     conversation: &'a Conversation,
     options: &ExportOptions,
 ) -> std::borrow::Cow<'a, Conversation> {
-    if options.redaction.is_none() {
+    let redact = options.redaction.is_some();
+    let filter = options.has_exclusive_filter();
+    if !redact && !filter {
         return std::borrow::Cow::Borrowed(conversation);
     }
-    std::borrow::Cow::Owned(conversation.map_entries(|entry| redact_entry_text(entry, options)))
+    std::borrow::Cow::Owned(conversation.map_entries(|entry| {
+        if redact {
+            redact_entry_text(entry, options);
+        }
+        if filter {
+            filter_entry_content(entry, options);
+        }
+    }))
 }
 
 /// Export a conversation to a file.
