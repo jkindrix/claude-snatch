@@ -44,6 +44,50 @@ pub fn run(cli: &Cli, args: &InfoArgs) -> Result<()> {
     show_directory_info(cli, args, &claude_dir)
 }
 
+/// Compute chain-wide totals by parsing all members of a resume chain.
+/// Returns `None` if the project/chain can't be resolved or parsed.
+fn compute_chain_summary(
+    claude_dir: &crate::discovery::ClaudeDirectory,
+    project_path: &str,
+    chain: &crate::discovery::chain::SessionChain,
+    max_file_size: Option<u64>,
+) -> Option<ChainSummaryOutput> {
+    let project = claude_dir
+        .projects()
+        .ok()?
+        .into_iter()
+        .find(|p| p.best_path() == project_path || p.decoded_path() == project_path)?;
+    let (entries, _) = project.parse_chain_counted(chain, max_file_size).ok()?;
+    let entry_count = entries.len();
+    let compactions = entries
+        .iter()
+        .filter(|e| {
+            matches!(e, LogEntry::System(s)
+                if s.subtype == Some(crate::model::SystemSubtype::CompactBoundary))
+        })
+        .count();
+    let conversation = Conversation::from_entries(entries).ok()?;
+    let a = SessionAnalytics::from_conversation(&conversation);
+    Some(ChainSummaryOutput {
+        root_id: chain.root_id.clone(),
+        latest_session_id: chain
+            .members
+            .last()
+            .map_or_else(|| chain.root_id.clone(), |m| m.file_id.clone()),
+        member_count: chain.len(),
+        members: chain.file_ids().iter().map(|s| (*s).to_string()).collect(),
+        totals: ChainTotalsOutput {
+            entries: entry_count,
+            messages: a.message_counts.user + a.message_counts.assistant,
+            user_messages: a.message_counts.user,
+            assistant_messages: a.message_counts.assistant,
+            tokens: a.usage.usage.work_tokens(),
+            tools: a.tool_counts.values().sum(),
+            compactions,
+        },
+    })
+}
+
 /// Show session information.
 fn show_session_info(
     cli: &Cli,
@@ -88,6 +132,16 @@ fn show_session_info(
             .into_values()
             .find(|c| c.contains(&summary.session_id))
     });
+
+    // Chain-wide totals, appended as a distinct block (top-level/file fields stay
+    // single-file). --no-chain suppresses the block only. Only multi-file chains.
+    let chain_summary = if args.no_chain {
+        None
+    } else {
+        chain_info.as_ref().filter(|c| c.len() > 1).and_then(|c| {
+            compute_chain_summary(&claude_dir, &summary.project_path, c, cli.max_file_size)
+        })
+    };
 
     match cli.effective_output() {
         OutputFormat::Json => {
@@ -167,6 +221,7 @@ fn show_session_info(
                     chain_position: chain_info
                         .as_ref()
                         .and_then(|c| c.position_of(&summary.session_id)),
+                    chain: chain_summary.clone(),
                     file_size: summary.file_size,
                     file_size_human: summary.file_size_human.clone(),
                     entry_count: summary.entry_count,
@@ -379,6 +434,23 @@ fn show_session_info(
                         println!("Tags:         {}", meta.tags.join(", "));
                     }
                 }
+            }
+
+            // Chain Totals block: aggregate conversation stats across the whole
+            // resume chain. The fields above remain resolved-file values.
+            if let Some(cs) = &chain_summary {
+                println!();
+                println!("Chain Totals ({} files)", cs.member_count);
+                println!("  Root:         {}", cs.root_id);
+                println!("  Latest:       {}", cs.latest_session_id);
+                println!("  Members:      {}", cs.members.join(", "));
+                println!("  Entries:      {}", cs.totals.entries);
+                println!("  Messages:     {}  (user + assistant)", cs.totals.messages);
+                println!("    User:       {}", cs.totals.user_messages);
+                println!("    Assistant:  {}", cs.totals.assistant_messages);
+                println!("  Work Tokens:  {}", cs.totals.tokens);
+                println!("  Tools:        {}", cs.totals.tools);
+                println!("  Compactions:  {}", cs.totals.compactions);
             }
 
             // Show tree structure if requested
@@ -824,6 +896,28 @@ fn show_directory_info(
     Ok(())
 }
 
+/// Chain-wide totals for a resumed session, appended to single-file info.
+#[derive(Debug, Clone, serde::Serialize)]
+struct ChainSummaryOutput {
+    root_id: String,
+    latest_session_id: String,
+    member_count: usize,
+    members: Vec<String>,
+    totals: ChainTotalsOutput,
+}
+
+/// Aggregate conversation totals across all chain members.
+#[derive(Debug, Clone, serde::Serialize)]
+struct ChainTotalsOutput {
+    entries: usize,
+    messages: usize,
+    user_messages: usize,
+    assistant_messages: usize,
+    tokens: u64,
+    tools: usize,
+    compactions: usize,
+}
+
 /// Session info for JSON output.
 #[derive(Debug, serde::Serialize)]
 struct SessionInfoOutput {
@@ -840,6 +934,10 @@ struct SessionInfoOutput {
     chain_length: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     chain_position: Option<usize>,
+    /// Chain-wide totals (nested; top-level fields stay single-file). Present
+    /// only when the session is part of a multi-file chain and --no-chain is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chain: Option<ChainSummaryOutput>,
     file_size: u64,
     file_size_human: String,
     entry_count: usize,
@@ -970,6 +1068,7 @@ mod tests {
             chain_id: None,
             chain_length: None,
             chain_position: None,
+            chain: None,
             file_size: 1024,
             file_size_human: "1 KB".to_string(),
             entry_count: 50,
@@ -1072,6 +1171,7 @@ mod tests {
             chain_id: None,
             chain_length: None,
             chain_position: None,
+            chain: None,
             file_size: 0,
             file_size_human: "0 B".to_string(),
             entry_count: 0,

@@ -1154,6 +1154,11 @@ pub struct InfoArgs {
     /// Session IDs support short prefixes like "780893e4".
     pub target: Option<String>,
 
+    /// Suppress the chain-totals block for a resumed session. The existing
+    /// single-file fields are unaffected; this only hides the aggregate block.
+    #[arg(long)]
+    pub no_chain: bool,
+
     /// Show tree structure.
     #[arg(long)]
     pub tree: bool,

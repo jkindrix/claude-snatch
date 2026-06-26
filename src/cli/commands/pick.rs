@@ -151,6 +151,7 @@ pub fn run(cli: &Cli, args: &PickArgs) -> Result<()> {
             // Run info command
             let info_args = crate::cli::InfoArgs {
                 target: Some(session_id.to_string()),
+                no_chain: false,
                 tree: false,
                 raw: false,
                 entry: None,
