@@ -93,6 +93,11 @@ pub fn run(cli: &Cli, args: &TimelineArgs) -> Result<()> {
         }
     }
     let conversation = Conversation::from_entries(entries)?;
+    if !cli.quiet {
+        if let Some(notice) = conversation.duplicate_notice() {
+            eprintln!("{notice}");
+        }
+    }
     let turns = conversation.turns();
 
     let analytics = crate::analytics::SessionAnalytics::from_conversation(&conversation);

@@ -797,6 +797,7 @@ impl SnatchServer {
             .collect();
 
         let returned = messages.len();
+        let duplicate_notice = resolved.conversation.duplicate_notice();
         let response = SessionMessagesResponse {
             session_id: resolved.session_id,
             project_path: resolved.project_path,
@@ -805,6 +806,7 @@ impl SnatchServer {
             offset,
             messages,
             unmatched_subagents,
+            duplicate_notice,
         };
 
         match ToolOutput::json(&response) {
@@ -882,6 +884,7 @@ impl SnatchServer {
             })
             .collect();
 
+        let duplicate_notice = resolved.conversation.duplicate_notice();
         let response = SessionTimelineResponse {
             session_id: resolved.session_id,
             project_path: resolved.project_path,
@@ -893,6 +896,7 @@ impl SnatchServer {
             timeline,
             compaction_events,
             error_events,
+            duplicate_notice,
         };
 
         match ToolOutput::json(&response) {

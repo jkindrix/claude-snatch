@@ -116,12 +116,27 @@ pub struct Conversation {
 }
 
 /// A dropped duplicate-UUID entry, kept for diagnostics.
+///
+/// Duplicate UUIDs come in two flavours with very different significance:
+/// an *exact* duplicate (byte-identical content to the kept first occurrence)
+/// is benign — e.g. an overlapping boundary entry shared by two files in a
+/// resume chain, where dropping the copy loses nothing. A *content conflict*
+/// (same UUID, differing content) is a genuine collision where the dropped
+/// entry's data would otherwise be unrecoverable, so the full entry is retained
+/// here and surfaced loudly to consumers.
 #[derive(Debug, Clone)]
 pub struct DuplicateUuid {
     /// The UUID that was seen more than once.
     pub uuid: String,
     /// Which occurrence this was (2 = the second time the UUID appeared, etc.).
     pub occurrence: usize,
+    /// Whether the dropped occurrence was byte-identical (by serialized content)
+    /// to the kept first occurrence. Exact duplicates are benign; differing
+    /// content is a real collision.
+    pub is_exact: bool,
+    /// The dropped (later) entry, retained so a content conflict is recoverable
+    /// rather than silently lost.
+    pub dropped: LogEntry,
 }
 
 impl Conversation {
@@ -129,7 +144,7 @@ impl Conversation {
     #[instrument(skip(entries), fields(entry_count = entries.len()))]
     pub fn from_entries(entries: Vec<LogEntry>) -> Result<Self> {
         debug!("Building conversation tree");
-        let mut nodes = IndexMap::new();
+        let mut nodes: IndexMap<String, ConversationNode> = IndexMap::new();
         let mut roots = Vec::new();
         let mut tool_uses: HashMap<String, String> = HashMap::new(); // tool_use_id -> node_uuid
         let mut tool_links = HashMap::new();
@@ -143,9 +158,19 @@ impl Conversation {
                 let uuid = uuid.to_string();
                 // Keep the first occurrence; record later duplicates rather than
                 // silently overwriting (which would drop the first entry's data).
-                if nodes.contains_key(&uuid) {
+                // Classify exact duplicates (benign chain overlap) vs content
+                // conflicts (same UUID, differing content) so consumers can stay
+                // quiet about the former and loud about the latter.
+                if let Some(existing) = nodes.get(&uuid) {
+                    let is_exact = serde_json::to_string(&existing.entry).ok()
+                        == serde_json::to_string(&entry).ok();
                     let occurrence = duplicate_uuids.iter().filter(|d| d.uuid == uuid).count() + 2;
-                    duplicate_uuids.push(DuplicateUuid { uuid, occurrence });
+                    duplicate_uuids.push(DuplicateUuid {
+                        uuid,
+                        occurrence,
+                        is_exact,
+                        dropped: entry,
+                    });
                     continue;
                 }
                 // Use logicalParentUuid to bridge compaction boundaries:
@@ -490,10 +515,19 @@ impl Conversation {
         );
 
         if !duplicate_uuids.is_empty() {
-            warn!(
-                count = duplicate_uuids.len(),
-                "Dropped duplicate-UUID entries (kept first occurrence)"
-            );
+            let conflicts = duplicate_uuids.iter().filter(|d| !d.is_exact).count();
+            if conflicts > 0 {
+                warn!(
+                    conflicts,
+                    total = duplicate_uuids.len(),
+                    "Dropped content-conflicting duplicate-UUID entries (kept first occurrence)"
+                );
+            } else {
+                debug!(
+                    count = duplicate_uuids.len(),
+                    "Deduplicated exact-duplicate UUID entries (benign overlap)"
+                );
+            }
         }
 
         Ok(Self {
@@ -512,6 +546,28 @@ impl Conversation {
     #[must_use]
     pub fn duplicate_uuids(&self) -> &[DuplicateUuid] {
         &self.duplicate_uuids
+    }
+
+    /// Duplicate-UUID entries whose content differed from the kept first
+    /// occurrence — genuine collisions, not benign chain overlap.
+    pub fn conflicting_duplicates(&self) -> impl Iterator<Item = &DuplicateUuid> {
+        self.duplicate_uuids.iter().filter(|d| !d.is_exact)
+    }
+
+    /// A one-line human-facing notice if any duplicate-UUID entries had
+    /// *differing* content (a real collision worth surfacing). Returns `None`
+    /// when there are no duplicates or only benign exact duplicates, so callers
+    /// can print it unconditionally without crying wolf over chain overlap.
+    #[must_use]
+    pub fn duplicate_notice(&self) -> Option<String> {
+        let conflicts = self.conflicting_duplicates().count();
+        if conflicts == 0 {
+            return None;
+        }
+        Some(format!(
+            "⚠ {conflicts} duplicate-UUID entr{} with differing content dropped (kept first occurrence)",
+            if conflicts == 1 { "y" } else { "ies" }
+        ))
     }
 
     /// Get all nodes.
@@ -1008,6 +1064,48 @@ mod tests {
         assert!(dups.iter().all(|d| d.uuid == "2"));
         assert_eq!(dups[0].occurrence, 2);
         assert_eq!(dups[1].occurrence, 3);
+    }
+
+    #[test]
+    fn test_exact_duplicate_is_benign() {
+        // Two byte-identical entries with the same UUID (e.g. an overlapping
+        // boundary entry shared by two files in a resume chain). Deduplicated
+        // without surfacing a conflict — nothing is lost.
+        let dup = make_user_entry("2", Some("1"));
+        let entries = vec![make_user_entry("1", None), dup.clone(), dup];
+        let conv = Conversation::from_entries(entries).unwrap();
+        let dups = conv.duplicate_uuids();
+        assert_eq!(dups.len(), 1);
+        assert!(dups[0].is_exact, "identical content is an exact duplicate");
+        assert_eq!(conv.conflicting_duplicates().count(), 0);
+        assert!(conv.duplicate_notice().is_none());
+    }
+
+    #[test]
+    fn test_conflicting_duplicate_is_surfaced_and_recoverable() {
+        // Same UUID, differing content — a genuine collision. The dropped entry
+        // is retained (recoverable) and a notice is surfaced.
+        let first = make_user_entry("2", Some("1"));
+        let mut second = first.clone();
+        if let LogEntry::User(ref mut u) = second {
+            u.message = UserContent::Simple(UserSimpleContent {
+                role: "user".to_string(),
+                content: "different content".to_string(),
+            });
+        }
+        let entries = vec![make_user_entry("1", None), first, second];
+        let conv = Conversation::from_entries(entries).unwrap();
+        let conflicts: Vec<_> = conv.conflicting_duplicates().collect();
+        assert_eq!(conflicts.len(), 1);
+        assert!(!conflicts[0].is_exact);
+        match &conflicts[0].dropped {
+            LogEntry::User(u) => match &u.message {
+                UserContent::Simple(s) => assert_eq!(s.content, "different content"),
+                UserContent::Blocks(_) => panic!("unexpected content shape"),
+            },
+            _ => panic!("expected user entry"),
+        }
+        assert!(conv.duplicate_notice().is_some());
     }
 
     #[test]

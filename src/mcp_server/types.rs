@@ -291,6 +291,11 @@ pub struct SessionMessagesResponse {
     /// to their spawning message instead. Only populated at detail="full".
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unmatched_subagents: Vec<UnmatchedSubagent>,
+    /// Set when duplicate-UUID entries with *differing* content were dropped
+    /// during reconstruction (a real collision, not benign chain overlap), so
+    /// the loss is never silent on this path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duplicate_notice: Option<String>,
 }
 
 /// A subagent present on disk but not joinable to a specific spawn call.
@@ -368,6 +373,11 @@ pub struct SessionTimelineResponse {
     pub compaction_events: Vec<CompactionEvent>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub error_events: Vec<ErrorEvent>,
+    /// Set when duplicate-UUID entries with *differing* content were dropped
+    /// during reconstruction (a real collision, not benign chain overlap), so
+    /// the loss is never silent on this path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duplicate_notice: Option<String>,
 }
 
 // ============================================================================

@@ -194,6 +194,25 @@ fn validate_session(
                 stats.tool_uses, stats.tool_results
             ));
         }
+
+        // Duplicate-UUID diagnostics: content conflicts are real collisions
+        // (the dropped entry's data is lost from reconstruction); exact
+        // duplicates are benign overlap (e.g. a boundary entry shared by two
+        // files in a resume chain).
+        let conflicts = conversation.conflicting_duplicates().count();
+        let exact = conversation.duplicate_uuids().len() - conflicts;
+        if conflicts > 0 {
+            result.warnings.push(format!(
+                "{conflicts} duplicate-UUID entr{} with differing content dropped (data loss; kept first occurrence)",
+                if conflicts == 1 { "y" } else { "ies" }
+            ));
+        }
+        if exact > 0 {
+            result.warnings.push(format!(
+                "{exact} exact-duplicate UUID entr{} deduplicated (benign overlap)",
+                if exact == 1 { "y" } else { "ies" }
+            ));
+        }
     }
 
     // Check for unknown fields

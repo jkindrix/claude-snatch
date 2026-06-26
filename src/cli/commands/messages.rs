@@ -135,12 +135,10 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
         }
     }
     let conversation = Conversation::from_entries(entries)?;
-    let dup_uuids = conversation.duplicate_uuids().len();
-    if dup_uuids > 0 && !cli.quiet {
-        eprintln!(
-            "⚠ {dup_uuids} duplicate-UUID entr{} dropped (kept first occurrence)",
-            if dup_uuids == 1 { "y" } else { "ies" }
-        );
+    if !cli.quiet {
+        if let Some(notice) = conversation.duplicate_notice() {
+            eprintln!("{notice}");
+        }
     }
 
     let detail = args.detail.as_str();
