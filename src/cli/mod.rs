@@ -839,8 +839,13 @@ pub enum ExportFormatArg {
     JsonPretty,
     /// Plain text.
     Text,
-    /// JSONL: content-complete round-trip of all entry types (order may differ).
+    /// JSONL: normalized, content-preserving round-trip from snatch's parsed
+    /// model. Complete and structured, but not byte-for-byte (fields may be
+    /// reordered; orphan entries are emitted first).
     Jsonl,
+    /// raw-jsonl: byte-faithful passthrough of the original Claude Code JSONL
+    /// (no parsing, filtering, redaction, or reordering). The archival mode.
+    RawJsonl,
     /// CSV tabular format.
     Csv,
     /// XML structured markup.
@@ -878,7 +883,11 @@ impl From<ExportFormatArg> for ExportFormat {
             ExportFormatArg::Markdown | ExportFormatArg::Md => ExportFormat::Markdown,
             ExportFormatArg::Json => ExportFormat::Json,
             ExportFormatArg::JsonPretty => ExportFormat::JsonPretty,
-            ExportFormatArg::Text | ExportFormatArg::Jsonl => ExportFormat::Text,
+            // Jsonl/RawJsonl are dispatched specially in the export command and
+            // never reach the exporter framework; map to Text as a harmless fallback.
+            ExportFormatArg::Text | ExportFormatArg::Jsonl | ExportFormatArg::RawJsonl => {
+                ExportFormat::Text
+            }
             ExportFormatArg::Csv => ExportFormat::Csv,
             ExportFormatArg::Xml => ExportFormat::Xml,
             ExportFormatArg::Html => ExportFormat::Html,

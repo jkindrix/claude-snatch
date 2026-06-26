@@ -113,6 +113,57 @@ pub fn run(cli: &Cli, args: &ExportArgs) -> Result<()> {
         }
     }
 
+    // raw-jsonl is a verbatim archival passthrough of the source file. It must
+    // not be combined with anything that would filter, transform, or reorder.
+    if matches!(args.format, ExportFormatArg::RawJsonl) {
+        let mut bad: Vec<&str> = Vec::new();
+        if args.all {
+            bad.push("--all");
+        }
+        if !args.only.is_empty() {
+            bad.push("--only");
+        }
+        if args.redact.is_some() {
+            bad.push("--redact");
+        }
+        if args.redact_preview {
+            bad.push("--redact-preview");
+        }
+        if args.main_thread {
+            bad.push("--main-thread");
+        }
+        if args.pretty {
+            bad.push("--pretty");
+        }
+        if args.lossless {
+            bad.push("--lossless");
+        }
+        if args.resolve_tool_results {
+            bad.push("--resolve-tool-results");
+        }
+        if args.combine_agents {
+            bad.push("--combine-agents");
+        }
+        if args.gist {
+            bad.push("--gist");
+        }
+        if args.clipboard {
+            bad.push("--clipboard");
+        }
+        if args.template.is_some() {
+            bad.push("--template");
+        }
+        if !bad.is_empty() {
+            return Err(SnatchError::ConfigError {
+                message: format!(
+                    "raw-jsonl is a byte-faithful passthrough and is incompatible with: {}. \
+                     Use -f jsonl for a normalized, filterable export.",
+                    bad.join(", ")
+                ),
+            });
+        }
+    }
+
     // Handle --template init without session
     if let Some(ref template_name) = args.template {
         if template_name == "init" {
@@ -454,6 +505,9 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
             ExportFormatArg::Jsonl => {
                 conversation_to_jsonl(&conversation, &mut output, args.main_thread)?;
             }
+            ExportFormatArg::RawJsonl => {
+                unreachable!("raw-jsonl is rejected with --gist in run()")
+            }
             ExportFormatArg::Html => {
                 let exporter = HtmlExporter::new().with_toc(args.toc).dark_theme(args.dark);
                 exporter.export_conversation(&conversation, &mut output, &options)?;
@@ -511,6 +565,9 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
             }
             ExportFormatArg::Jsonl => {
                 conversation_to_jsonl(&conversation, &mut output, args.main_thread)?;
+            }
+            ExportFormatArg::RawJsonl => {
+                unreachable!("raw-jsonl is rejected with --gist in run()")
             }
             ExportFormatArg::Html => {
                 let exporter = HtmlExporter::new().with_toc(args.toc).dark_theme(args.dark);
@@ -949,12 +1006,40 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
 /// Export a single session to the specified output.
 ///
 /// Uses atomic file writes for file output to ensure data integrity.
+/// Stream a session's original JSONL file verbatim (byte-for-byte, original
+/// order) to the output. This is the archival `raw-jsonl` mode: no parsing,
+/// reconstruction, filtering, redaction, or reordering is applied.
+///
+/// Chain-aware export is not yet wired, so this is a single-file passthrough.
+fn export_raw_jsonl(session: &Session, output_path: Option<&PathBuf>) -> Result<bool> {
+    let mut source = std::fs::File::open(session.path())?;
+    if let Some(path) = output_path {
+        let mut atomic = AtomicFile::create(path)?;
+        let mut writer = std::io::BufWriter::new(atomic.writer());
+        std::io::copy(&mut source, &mut writer)?;
+        writer.flush()?;
+        drop(writer);
+        atomic.finish()?;
+    } else {
+        let mut writer = io::stdout().lock();
+        std::io::copy(&mut source, &mut writer)?;
+        writer.flush()?;
+    }
+    Ok(true)
+}
+
 fn export_session(
     cli: &Cli,
     args: &ExportArgs,
     session: &Session,
     output_path: Option<&PathBuf>,
 ) -> Result<bool> {
+    // raw-jsonl bypasses parsing/reconstruction entirely and streams the
+    // original source file verbatim (byte-for-byte, original order).
+    if matches!(args.format, ExportFormatArg::RawJsonl) {
+        return export_raw_jsonl(session, output_path);
+    }
+
     // Parse the session with custom max file size if specified
     let (mut entries, unparsed) = session.parse_with_options_counted(cli.max_file_size)?;
     if unparsed > 0 {
@@ -1103,6 +1188,9 @@ fn export_session(
             ExportFormatArg::Jsonl => {
                 conversation_to_jsonl(&conversation, &mut writer, options.main_thread_only)?;
             }
+            ExportFormatArg::RawJsonl => {
+                unreachable!("raw-jsonl handled at the top of export_session")
+            }
             ExportFormatArg::Csv => {
                 let exporter = CsvExporter::new();
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
@@ -1159,6 +1247,9 @@ fn export_session(
             ExportFormatArg::Jsonl => {
                 conversation_to_jsonl(&conversation, &mut writer, options.main_thread_only)?;
             }
+            ExportFormatArg::RawJsonl => {
+                unreachable!("raw-jsonl handled at the top of export_session")
+            }
             ExportFormatArg::Csv => {
                 let exporter = CsvExporter::new();
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
@@ -1194,7 +1285,7 @@ fn get_format_extension(format: ExportFormatArg) -> &'static str {
         ExportFormatArg::Markdown | ExportFormatArg::Md => "md",
         ExportFormatArg::Json | ExportFormatArg::JsonPretty => "json",
         ExportFormatArg::Text => "txt",
-        ExportFormatArg::Jsonl => "jsonl",
+        ExportFormatArg::Jsonl | ExportFormatArg::RawJsonl => "jsonl",
         ExportFormatArg::Csv => "csv",
         ExportFormatArg::Xml => "xml",
         ExportFormatArg::Html => "html",
@@ -1407,6 +1498,9 @@ fn export_to_string(
         }
         ExportFormatArg::Jsonl => {
             conversation_to_jsonl(conversation, &mut buffer, main_thread_only)?;
+        }
+        ExportFormatArg::RawJsonl => {
+            unreachable!("raw-jsonl is rejected with --template in run()")
         }
         ExportFormatArg::Csv => {
             let exporter = CsvExporter::new();
@@ -1765,5 +1859,6 @@ mod tests {
         assert_eq!(get_format_extension(ExportFormatArg::Json), "json");
         assert_eq!(get_format_extension(ExportFormatArg::Text), "txt");
         assert_eq!(get_format_extension(ExportFormatArg::Jsonl), "jsonl");
+        assert_eq!(get_format_extension(ExportFormatArg::RawJsonl), "jsonl");
     }
 }
