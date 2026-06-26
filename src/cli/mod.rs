@@ -597,6 +597,11 @@ pub struct ListArgs {
     /// Hide projects with 0 sessions (only applies to 'list projects').
     #[arg(long)]
     pub hide_empty: bool,
+
+    /// Show each resume-chain file as its own row instead of collapsing the
+    /// chain into one logical conversation (restores the flat per-file view).
+    #[arg(long)]
+    pub no_chain: bool,
 }
 
 /// What to list.
@@ -2691,6 +2696,11 @@ pub struct RecentArgs {
     /// Filter to specific project (substring match).
     #[arg(short = 'p', long)]
     pub project: Option<String>,
+
+    /// Show each resume-chain file as its own row instead of collapsing the
+    /// chain into one logical conversation (restores the flat per-file view).
+    #[arg(long)]
+    pub no_chain: bool,
 }
 
 /// Arguments for the MCP server command.

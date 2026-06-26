@@ -753,6 +753,50 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
     // Sort by modification time (newest first)
     sessions.sort_by_key(|s| std::cmp::Reverse(s.modified_time()));
 
+    // Collapse resume chains: by default export each logical conversation once,
+    // keyed by the chain root (root_id is used for the output filename and the
+    // representative is reconstructed chain-aware). `--no-chain` keeps the flat
+    // per-file behavior.
+    let chain_aware = !args.no_chain;
+    let member_to_root: std::collections::HashMap<String, String> = if chain_aware {
+        use crate::discovery::chain::detect_chains;
+        let chains = detect_chains(
+            all_sessions
+                .iter()
+                .filter(|s| !s.is_subagent())
+                .map(|s| (s.session_id(), s.path())),
+        );
+        let mut map = std::collections::HashMap::new();
+        for c in chains.values() {
+            if c.len() > 1 {
+                for mem in &c.members {
+                    map.insert(mem.file_id.clone(), c.root_id.clone());
+                }
+            }
+        }
+        map
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    // Build the list of artifacts to export: one per logical conversation. Each
+    // entry pairs the representative session with the id used for its filename
+    // (the chain root id for chained sessions, else the session's own id).
+    let mut seen_roots: HashSet<String> = HashSet::new();
+    let export_targets: Vec<(&Session, String)> = sessions
+        .iter()
+        .filter_map(|s| match member_to_root.get(s.session_id()) {
+            Some(root) => {
+                if seen_roots.insert(root.clone()) {
+                    Some((*s, root.clone()))
+                } else {
+                    None
+                }
+            }
+            None => Some((*s, s.session_id().to_string())),
+        })
+        .collect();
+
     // Determine output directory
     let output_dir = if let Some(ref output) = args.output_file {
         // If output is a directory, use it; otherwise use its parent
@@ -789,7 +833,7 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
 
     // Create progress bar if requested
     let progress = if args.progress && !cli.quiet {
-        let pb = ProgressBar::new(sessions.len() as u64);
+        let pb = ProgressBar::new(export_targets.len() as u64);
         pb.set_style(
             ProgressStyle::default_bar()
                 .template(
@@ -803,12 +847,12 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
         None
     };
 
-    for session in &sessions {
-        // Generate output filename
+    for (session, name_id) in &export_targets {
+        // Generate output filename, keyed by the logical conversation id.
         let filename = format!(
             "{}_{}.{}",
             session.project_path().replace(['/', '\\'], "_"),
-            session.session_id(),
+            name_id,
             extension
         );
         let output_path = output_dir.join(&filename);
@@ -825,9 +869,9 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
             continue;
         }
 
-        // --all keeps single-file semantics for now; chain dedup is handled
-        // separately so a chain isn't exported once per member.
-        match export_session(cli, args, session, Some(&output_path), false) {
+        // Reconstruct the full resume chain once per logical conversation
+        // (chain_aware), or one file per session under --no-chain.
+        match export_session(cli, args, session, Some(&output_path), chain_aware) {
             Ok(true) => {
                 exported_count += 1;
                 if cli.verbose {
@@ -864,7 +908,7 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
         eprintln!(
             "Exported {} of {} sessions to {}{}",
             exported_count,
-            sessions.len(),
+            export_targets.len(),
             output_dir.display(),
             suffix
         );
@@ -929,6 +973,44 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
     // Sort by modification time (oldest first for database insertion order)
     sessions.sort_by_key(|s| s.modified_time());
 
+    // Collapse resume chains: insert each logical conversation once
+    // (chain-aware reconstruction). `--no-chain` keeps per-file inserts.
+    let chain_aware = !args.no_chain;
+    let member_to_root: std::collections::HashMap<String, String> = if chain_aware {
+        use crate::discovery::chain::detect_chains;
+        let chains = detect_chains(
+            all_sessions
+                .iter()
+                .filter(|s| !s.is_subagent())
+                .map(|s| (s.session_id(), s.path())),
+        );
+        let mut map = std::collections::HashMap::new();
+        for c in chains.values() {
+            if c.len() > 1 {
+                for mem in &c.members {
+                    map.insert(mem.file_id.clone(), c.root_id.clone());
+                }
+            }
+        }
+        map
+    } else {
+        std::collections::HashMap::new()
+    };
+    let mut seen_roots: HashSet<String> = HashSet::new();
+    let export_targets: Vec<&Session> = sessions
+        .iter()
+        .filter_map(|s| match member_to_root.get(s.session_id()) {
+            Some(root) => {
+                if seen_roots.insert(root.clone()) {
+                    Some(*s)
+                } else {
+                    None
+                }
+            }
+            None => Some(*s),
+        })
+        .collect();
+
     // Remove existing file if present
     if output_path.exists() {
         std::fs::remove_file(output_path).map_err(|e| {
@@ -967,7 +1049,7 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
 
     // Create progress bar
     let progress = if args.progress && !cli.quiet {
-        let pb = ProgressBar::new(sessions.len() as u64);
+        let pb = ProgressBar::new(export_targets.len() as u64);
         pb.set_style(
             ProgressStyle::default_bar()
                 .template(
@@ -984,9 +1066,16 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
     let mut exported_count = 0;
     let mut error_count = 0;
 
-    for session in &sessions {
-        // Parse session with custom max file size if specified
-        match session.parse_with_options(cli.max_file_size) {
+    for session in &export_targets {
+        // Reconstruct the full resume chain once per logical conversation.
+        match super::helpers::resolve_chain_entries(
+            &claude_dir,
+            session,
+            chain_aware,
+            cli.max_file_size,
+        )
+        .map(|(entries, _, _)| entries)
+        {
             Ok(entries) if !entries.is_empty() => {
                 match Conversation::from_entries(entries) {
                     Ok(conversation) => {

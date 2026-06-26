@@ -268,3 +268,249 @@ fn test_timeline_surfaces_meta_less_subagent() {
         .stdout(predicate::str::contains("Subagents:"))
         .stdout(predicate::str::contains("agent-deadbeef"));
 }
+
+// =============================================================================
+// resume-chain collapse (list / recent / export --all)
+// =============================================================================
+
+const CHAIN_ROOT_ID: &str = "aaaaaaaa-1111-1111-1111-111111111111";
+const CHAIN_CONT_ID: &str = "bbbbbbbb-2222-2222-2222-222222222222";
+
+/// Create a temp Claude dir holding one two-file resume chain.
+///
+/// The continuation file's internal `sessionId` points at the root file's
+/// UUID, which is how Claude Code links resumed sessions into one logical
+/// conversation.
+fn setup_chain_dir() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let encoded = encode_project_path(PROJECT_PATH);
+    let project_dir = tmp.path().join("projects").join(&encoded);
+    std::fs::create_dir_all(&project_dir).expect("failed to create project dir");
+
+    let root_jsonl = format!(
+        r#"{{"type":"user","uuid":"c1111111-1111-1111-1111-111111111111","parentUuid":null,"timestamp":"2025-01-15T10:00:00.000Z","sessionId":"{CHAIN_ROOT_ID}","version":"2.0.74","message":{{"role":"user","content":"first half of the conversation"}}}}"#
+    ) + "\n";
+    std::fs::write(
+        project_dir.join(format!("{CHAIN_ROOT_ID}.jsonl")),
+        root_jsonl,
+    )
+    .expect("write root");
+
+    let cont_jsonl = format!(
+        r#"{{"type":"user","uuid":"c2222222-2222-2222-2222-222222222222","parentUuid":null,"timestamp":"2025-01-15T11:00:00.000Z","sessionId":"{CHAIN_ROOT_ID}","version":"2.0.74","message":{{"role":"user","content":"resumed second half of the conversation with extra text"}}}}"#
+    ) + "\n";
+    std::fs::write(
+        project_dir.join(format!("{CHAIN_CONT_ID}.jsonl")),
+        cont_jsonl,
+    )
+    .expect("write continuation");
+
+    tmp
+}
+
+#[test]
+fn test_list_collapses_chain_by_default_json() {
+    let tmp = setup_chain_dir();
+    let output = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["list", "sessions", "-o", "json", "--full-ids"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).unwrap();
+    let rows: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let arr = rows.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "chain collapses to a single logical row");
+    let row = &arr[0];
+    assert_eq!(row["session_id"], CHAIN_ROOT_ID);
+    assert_eq!(row["latest_session_id"], CHAIN_CONT_ID);
+    assert_eq!(row["chain_member_count"], 2);
+    let members = row["chain_members"].as_array().unwrap();
+    assert_eq!(members.len(), 2);
+    assert_eq!(members[0], CHAIN_ROOT_ID);
+    assert_eq!(members[1], CHAIN_CONT_ID);
+}
+
+#[test]
+fn test_list_no_chain_shows_each_member() {
+    let tmp = setup_chain_dir();
+    let output = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["list", "sessions", "-o", "json", "--full-ids", "--no-chain"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).unwrap();
+    let rows: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let arr = rows.as_array().unwrap();
+    assert_eq!(arr.len(), 2, "--no-chain restores per-file rows");
+    // Flat rows do not carry the collapsed chain fields.
+    assert!(text.contains(CHAIN_ROOT_ID));
+    assert!(text.contains(CHAIN_CONT_ID));
+    assert!(!text.contains("chain_member_count"));
+}
+
+#[test]
+fn test_list_chain_text_marker() {
+    let tmp = setup_chain_dir();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["list", "sessions"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("chain: 2 files"));
+}
+
+#[test]
+fn test_list_sort_size_uses_aggregate() {
+    // A standalone session larger than either chain member individually, but
+    // smaller than the chain's summed size, must rank below the chain when
+    // sorting by aggregate size.
+    let tmp = setup_chain_dir();
+    let encoded = encode_project_path(PROJECT_PATH);
+    let project_dir = tmp.path().join("projects").join(&encoded);
+    let big_id = "dddddddd-3333-3333-3333-333333333333";
+    // Size the standalone file to fall strictly between the largest single
+    // chain member and the chain's summed size, so it only ranks below the
+    // chain when sorting uses the aggregate (not a single member's) size.
+    let root_sz = std::fs::metadata(project_dir.join(format!("{CHAIN_ROOT_ID}.jsonl")))
+        .unwrap()
+        .len();
+    let cont_sz = std::fs::metadata(project_dir.join(format!("{CHAIN_CONT_ID}.jsonl")))
+        .unwrap()
+        .len();
+    let target = (root_sz.max(cont_sz) + (root_sz + cont_sz)) / 2;
+    let empty = format!(
+        r#"{{"type":"user","uuid":"d3333333-3333-3333-3333-333333333333","parentUuid":null,"timestamp":"2025-01-14T09:00:00.000Z","sessionId":"{big_id}","version":"2.0.74","message":{{"role":"user","content":""}}}}"#
+    );
+    let pad = (target as usize).saturating_sub(empty.len() + 1);
+    let big_jsonl = format!(
+        r#"{{"type":"user","uuid":"d3333333-3333-3333-3333-333333333333","parentUuid":null,"timestamp":"2025-01-14T09:00:00.000Z","sessionId":"{big_id}","version":"2.0.74","message":{{"role":"user","content":"{}"}}}}"#,
+        "z".repeat(pad)
+    ) + "\n";
+    std::fs::write(project_dir.join(format!("{big_id}.jsonl")), big_jsonl).expect("write big");
+
+    let output = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["list", "sessions", "-o", "json", "--full-ids", "-s", "size"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).unwrap();
+    let rows: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let arr = rows.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    // Chain (aggregate) sorts first ahead of the larger single file.
+    assert_eq!(arr[0]["session_id"], CHAIN_ROOT_ID);
+    assert_eq!(arr[1]["session_id"], big_id);
+}
+
+#[test]
+fn test_recent_collapses_chain_json() {
+    let tmp = setup_chain_dir();
+    let output = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["recent", "-o", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).unwrap();
+    let rows: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let arr = rows.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["id"], CHAIN_ROOT_ID);
+    assert_eq!(arr[0]["chain_member_count"], 2);
+}
+
+#[test]
+fn test_recent_no_chain_shows_members() {
+    let tmp = setup_chain_dir();
+    let output = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["recent", "-o", "json", "--no-chain"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).unwrap();
+    let rows: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn test_export_all_one_file_per_chain() {
+    let tmp = setup_chain_dir();
+    let out_dir = TempDir::new().unwrap();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "export",
+            "--all",
+            "-f",
+            "markdown",
+            "--out",
+            out_dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let names: Vec<String> = std::fs::read_dir(out_dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    let md: Vec<&String> = names
+        .iter()
+        .filter(|n| {
+            std::path::Path::new(n)
+                .extension()
+                .is_some_and(|e| e == "md")
+        })
+        .collect();
+    assert_eq!(
+        md.len(),
+        1,
+        "one artifact per logical chain, got: {names:?}"
+    );
+    assert!(md[0].contains(CHAIN_ROOT_ID), "filename keyed by root id");
+    assert!(!md[0].contains(CHAIN_CONT_ID));
+}
+
+#[test]
+fn test_export_all_no_chain_one_file_per_member() {
+    let tmp = setup_chain_dir();
+    let out_dir = TempDir::new().unwrap();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "export",
+            "--all",
+            "--no-chain",
+            "-f",
+            "markdown",
+            "--out",
+            out_dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let count = std::fs::read_dir(out_dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            std::path::Path::new(&e.file_name())
+                .extension()
+                .is_some_and(|x| x == "md")
+        })
+        .count();
+    assert_eq!(count, 2, "--no-chain exports each member file");
+}

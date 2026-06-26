@@ -164,7 +164,24 @@ fn list_projects<W: Write>(
 }
 
 /// List sessions.
+///
+/// By default, resume chains are collapsed into one logical-conversation row
+/// keyed by the chain root. `--no-chain` restores the flat per-file view.
 fn list_sessions<W: Write>(
+    cli: &Cli,
+    args: &ListArgs,
+    claude_dir: &crate::discovery::ClaudeDirectory,
+    writer: &mut W,
+) -> Result<()> {
+    if args.no_chain {
+        list_sessions_flat(cli, args, claude_dir, writer)
+    } else {
+        list_sessions_collapsed(cli, args, claude_dir, writer)
+    }
+}
+
+/// List sessions with each chain member as its own row (flat per-file view).
+fn list_sessions_flat<W: Write>(
     cli: &Cli,
     args: &ListArgs,
     claude_dir: &crate::discovery::ClaudeDirectory,
@@ -576,6 +593,434 @@ fn list_sessions<W: Write>(
     Ok(())
 }
 
+/// List sessions with resume chains collapsed into one logical-conversation row.
+fn list_sessions_collapsed<W: Write>(
+    cli: &Cli,
+    args: &ListArgs,
+    claude_dir: &crate::discovery::ClaudeDirectory,
+    writer: &mut W,
+) -> Result<()> {
+    use super::helpers::{group_into_logical, session_overlaps_date};
+
+    // Auto-enable sizes when sorting by size (makes UX intuitive)
+    let show_sizes = args.sizes || matches!(args.sort, SortOrder::Size);
+
+    // Collect the session pool.
+    let mut sessions: Vec<Session> = if let Some(project_filter) = &args.project {
+        let projects = claude_dir.projects()?;
+        let matched = super::helpers::filter_projects(projects, project_filter);
+        let mut matched_sessions = Vec::new();
+        for project in matched {
+            matched_sessions.extend(project.sessions()?);
+        }
+        matched_sessions
+    } else {
+        claude_dir.all_sessions()?
+    };
+
+    // Subagent selection defines the pool (subagents are never collapsed).
+    let filter = SessionFilter::new();
+    let filter = if args.subagents_only {
+        filter.subagents_only()
+    } else if args.subagents {
+        filter
+    } else {
+        filter.main_only()
+    };
+    sessions.retain(|s| filter.matches(s).unwrap_or(false));
+
+    // Group into logical conversations (collapse multi-file resume chains).
+    let mut rows = group_into_logical(sessions);
+
+    // Parse size + date filter bounds.
+    let min_size: Option<u64> = match args.min_size {
+        Some(ref s) => Some(parse_size(s)?),
+        None => None,
+    };
+    let max_size: Option<u64> = match args.max_size {
+        Some(ref s) => Some(parse_size(s)?),
+        None => None,
+    };
+    let since_dt = match args.since.as_deref() {
+        Some(s) => Some(chrono::DateTime::from(super::parse_date_filter(s)?)),
+        None => None,
+    };
+    let until_dt = match args.until.as_deref() {
+        Some(s) => Some(chrono::DateTime::from(super::parse_date_filter(s)?)),
+        None => None,
+    };
+
+    let tag_store = TagStore::load().unwrap_or_default();
+
+    // Active filter (any member).
+    if args.active {
+        rows.retain(|r| r.any_member(|s| s.is_active().unwrap_or(false)));
+    }
+
+    // Date filter — compare against the latest member's activity.
+    if since_dt.is_some() || until_dt.is_some() {
+        rows.retain(|r| session_overlaps_date(r.latest_member(), since_dt, until_dt));
+    }
+
+    // Size filter — aggregate (summed) chain size.
+    if min_size.is_some() || max_size.is_some() {
+        rows.retain(|r| {
+            let size = r.total_size();
+            if let Some(min) = min_size {
+                if size < min {
+                    return false;
+                }
+            }
+            if let Some(max) = max_size {
+                if size > max {
+                    return false;
+                }
+            }
+            true
+        });
+    }
+
+    // Compacted filter (any member).
+    if args.compacted {
+        rows.retain(|r| {
+            r.any_member(|s| {
+                s.quick_metadata_cached()
+                    .map(|m| m.compaction_count > 0)
+                    .unwrap_or(false)
+            })
+        });
+    }
+
+    // Tag filters (any member matches).
+    let tag_filters: Vec<&str> = {
+        let mut tags = Vec::new();
+        if let Some(ref tag) = args.tag {
+            tags.push(tag.as_str());
+        }
+        if let Some(ref tag_list) = args.tags {
+            tags.extend(tag_list.split(',').map(str::trim));
+        }
+        tags
+    };
+    if !tag_filters.is_empty() {
+        rows.retain(|r| {
+            r.any_member(|s| {
+                tag_store
+                    .get(s.session_id())
+                    .map(|meta| {
+                        tag_filters
+                            .iter()
+                            .any(|t| meta.tags.iter().any(|mt| mt.contains(t)))
+                    })
+                    .unwrap_or(false)
+            })
+        });
+    }
+
+    // Bookmark filter (any member).
+    if args.bookmarked {
+        rows.retain(|r| {
+            r.any_member(|s| {
+                tag_store
+                    .get(s.session_id())
+                    .map(|m| m.bookmarked)
+                    .unwrap_or(false)
+            })
+        });
+    }
+
+    // Outcome filter (any member).
+    if let Some(ref outcome_filter) = args.outcome {
+        let outcome_lower = outcome_filter.to_lowercase();
+        rows.retain(|r| {
+            r.any_member(|s| {
+                tag_store
+                    .get(s.session_id())
+                    .and_then(|meta| meta.outcome.as_ref())
+                    .map(|outcome| {
+                        format!("{:?}", outcome)
+                            .to_lowercase()
+                            .contains(&outcome_lower)
+                    })
+                    .unwrap_or(false)
+            })
+        });
+    }
+
+    // Name filter (any member).
+    if let Some(ref name_filter) = args.by_name {
+        let name_lower = name_filter.to_lowercase();
+        rows.retain(|r| {
+            r.any_member(|s| {
+                tag_store
+                    .get(s.session_id())
+                    .and_then(|meta| meta.name.as_ref())
+                    .map(|name| name.to_lowercase().contains(&name_lower))
+                    .unwrap_or(false)
+            })
+        });
+    }
+
+    // Sort logical rows.
+    match args.sort {
+        SortOrder::Modified => {
+            rows.sort_by_key(|r| std::cmp::Reverse(r.latest_modified()));
+        }
+        SortOrder::Oldest => {
+            rows.sort_by_key(|r| r.oldest_sort_key());
+        }
+        SortOrder::Size => {
+            rows.sort_by_key(|r| std::cmp::Reverse(r.total_size()));
+        }
+        SortOrder::Name => {
+            rows.sort_by_key(|r| r.root_id.clone());
+        }
+    }
+
+    // Limit (number of logical rows).
+    let total_count = rows.len();
+    let truncated = args.limit > 0 && total_count > args.limit;
+    if args.limit > 0 {
+        rows.truncate(args.limit);
+    }
+
+    // Output
+    match cli.effective_output() {
+        OutputFormat::Json => {
+            let output: Vec<_> = rows
+                .iter()
+                .map(|r| {
+                    LogicalSessionInfo::from_row(r, &tag_store, args.context, args.context_length)
+                })
+                .collect();
+            writeln!(writer, "{}", serde_json::to_string_pretty(&output)?)?;
+        }
+        OutputFormat::Tsv => {
+            if args.context {
+                writeln!(
+                    writer,
+                    "session_id\tproject\tsize\tmodified\tsubagent\tname\tmember_count\tlatest_session_id\tcontext"
+                )?;
+            } else {
+                writeln!(
+                    writer,
+                    "session_id\tproject\tsize\tmodified\tsubagent\tname\tmember_count\tlatest_session_id"
+                )?;
+            }
+            for row in &rows {
+                let root = row.root();
+                let id = if args.full_ids {
+                    row.root_id.clone()
+                } else {
+                    short_id(&row.root_id)
+                };
+                let latest = if args.full_ids {
+                    row.latest_session_id().to_string()
+                } else {
+                    short_id(row.latest_session_id())
+                };
+                let meta = tag_store.get(&row.root_id);
+                let name = meta.and_then(|m| m.name.as_deref()).unwrap_or("");
+                if args.context {
+                    let context =
+                        get_session_context(root, args.context_length).unwrap_or_default();
+                    let context_escaped = context.replace(['\t', '\n'], " ");
+                    writeln!(
+                        writer,
+                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                        id,
+                        root.project_path(),
+                        row.total_size(),
+                        format_systemtime(row.latest_modified()),
+                        root.is_subagent(),
+                        name,
+                        row.member_count(),
+                        latest,
+                        context_escaped
+                    )?;
+                } else {
+                    writeln!(
+                        writer,
+                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                        id,
+                        root.project_path(),
+                        row.total_size(),
+                        format_systemtime(row.latest_modified()),
+                        root.is_subagent(),
+                        name,
+                        row.member_count(),
+                        latest
+                    )?;
+                }
+            }
+        }
+        OutputFormat::Compact => {
+            for row in &rows {
+                let id = if args.full_ids {
+                    row.root_id.clone()
+                } else {
+                    short_id(&row.root_id)
+                };
+                let marker = if row.is_chain() {
+                    format!(
+                        " (chain: {}, latest {})",
+                        row.member_count(),
+                        short_id(row.latest_session_id())
+                    )
+                } else {
+                    String::new()
+                };
+                if args.context {
+                    if let Some(context) = get_session_context(row.root(), 60) {
+                        writeln!(writer, "{}{}: {}", id, marker, context)?;
+                    } else {
+                        writeln!(writer, "{}{}", id, marker)?;
+                    }
+                } else {
+                    writeln!(writer, "{}{}", id, marker)?;
+                }
+            }
+        }
+        OutputFormat::Text => {
+            if rows.is_empty() {
+                writeln!(writer, "No sessions found.")?;
+                return Ok(());
+            }
+
+            if truncated {
+                writeln!(
+                    writer,
+                    "Sessions (showing {} of {}, use -n 0 for all):",
+                    rows.len(),
+                    total_count
+                )?;
+            } else {
+                writeln!(writer, "Sessions ({} found):", rows.len())?;
+            }
+            writeln!(writer)?;
+
+            for row in &rows {
+                let root = row.root();
+                let id = if args.full_ids {
+                    row.root_id.clone()
+                } else {
+                    short_id(&row.root_id)
+                };
+
+                let meta = tag_store.get(&row.root_id);
+                let bookmark_marker = if meta.map(|m| m.bookmarked).unwrap_or(false) {
+                    "★ "
+                } else {
+                    ""
+                };
+
+                let subagent_marker = if root.is_subagent() {
+                    " [subagent]"
+                } else {
+                    ""
+                };
+
+                let outcome_badge = meta
+                    .and_then(|m| m.outcome.as_ref())
+                    .map(|o| format!(" [{:?}]", o))
+                    .unwrap_or_default();
+
+                let slug = root.quick_metadata_cached().ok().and_then(|m| m.slug);
+                if let Some(name) = meta.and_then(|m| m.name.as_ref()) {
+                    write!(
+                        writer,
+                        "  {}\"{}\" ({}){}{}",
+                        bookmark_marker, name, id, subagent_marker, outcome_badge
+                    )?;
+                } else if let Some(slug) = &slug {
+                    write!(
+                        writer,
+                        "  {}{} [{}]{}{}",
+                        bookmark_marker, id, slug, subagent_marker, outcome_badge
+                    )?;
+                } else {
+                    write!(
+                        writer,
+                        "  {}{}{}{}",
+                        bookmark_marker, id, subagent_marker, outcome_badge
+                    )?;
+                }
+
+                // Collapsed chain marker.
+                if row.is_chain() {
+                    write!(
+                        writer,
+                        " (chain: {} files, latest {})",
+                        row.member_count(),
+                        short_id(row.latest_session_id())
+                    )?;
+                }
+
+                if show_sizes {
+                    let size_str = crate::discovery::format_size(row.total_size());
+                    if row.total_size() == 0 {
+                        write!(
+                            writer,
+                            " ({} - empty, possibly new or interrupted)",
+                            size_str
+                        )?;
+                    } else {
+                        write!(writer, " ({})", size_str)?;
+                    }
+                }
+
+                writeln!(writer)?;
+                writeln!(writer, "    Project: {}", root.project_path())?;
+                writeln!(
+                    writer,
+                    "    Modified: {}",
+                    format_systemtime(row.latest_modified())
+                )?;
+
+                if let Ok(meta) = root.quick_metadata_cached() {
+                    if let Some(span) = meta.duration_human() {
+                        writeln!(writer, "    Span: {span}")?;
+                    }
+                    if meta.compaction_count > 0 {
+                        writeln!(writer, "    Compactions: {}", meta.compaction_count)?;
+                    }
+                }
+
+                if let Some(parent) = root.parent_session_id() {
+                    writeln!(writer, "    Parent: {}", &parent[..8.min(parent.len())])?;
+                }
+
+                if let Some(m) = meta {
+                    if !m.tags.is_empty() {
+                        writeln!(writer, "    Tags: {}", m.tags.join(", "))?;
+                    }
+                }
+
+                if let Ok(state) = root.state() {
+                    if state != crate::discovery::SessionState::Inactive {
+                        writeln!(writer, "    Status: {}", state.description())?;
+                    }
+                }
+
+                if args.context {
+                    if let Some(context) = get_session_context(root, args.context_length) {
+                        writeln!(writer, "    Context: \"{}\"", context)?;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Format a `SystemTime` as the listing's UTC timestamp string.
+fn format_systemtime(t: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(t)
+        .format("%Y-%m-%d %H:%M:%S UTC")
+        .to_string()
+}
+
 /// Get short ID (first 8 chars).
 fn short_id(id: &str) -> String {
     if id.len() > 8 {
@@ -698,6 +1143,77 @@ impl SessionInfo {
             parent_session_id: session.parent_session_id().map(String::from),
             file_size: session.file_size(),
             modified: session.modified_datetime().to_rfc3339(),
+            span,
+            compaction_count,
+            name: meta.and_then(|m| m.name.clone()),
+            context,
+            tags: meta.map(|m| m.tags.clone()).unwrap_or_default(),
+            bookmarked: meta.map(|m| m.bookmarked).unwrap_or(false),
+        }
+    }
+}
+
+/// Collapsed logical-conversation row for JSON output.
+#[derive(Debug, serde::Serialize)]
+struct LogicalSessionInfo {
+    /// Root session file id (the logical conversation's id).
+    session_id: String,
+    /// Last member file id in chain order.
+    latest_session_id: String,
+    /// Number of member files (1 for standalone sessions).
+    chain_member_count: usize,
+    /// Member file ids in chain order.
+    chain_members: Vec<String>,
+    project_path: String,
+    is_subagent: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_session_id: Option<String>,
+    /// Aggregate (summed) size across all member files.
+    file_size: u64,
+    /// Latest member activity time (RFC 3339).
+    modified: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    span: Option<String>,
+    compaction_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    bookmarked: bool,
+}
+
+impl LogicalSessionInfo {
+    fn from_row(
+        row: &super::helpers::LogicalSession,
+        tag_store: &TagStore,
+        include_context: bool,
+        context_length: usize,
+    ) -> Self {
+        let root = row.root();
+        let meta = tag_store.get(&row.root_id);
+        let context = if include_context {
+            get_session_context(root, context_length)
+        } else {
+            None
+        };
+
+        let (span, compaction_count) = root
+            .quick_metadata_cached()
+            .map(|m| (m.duration_human(), m.compaction_count))
+            .unwrap_or((None, 0));
+
+        Self {
+            session_id: row.root_id.clone(),
+            latest_session_id: row.latest_session_id().to_string(),
+            chain_member_count: row.member_count(),
+            chain_members: row.member_ids(),
+            project_path: root.project_path().to_string(),
+            is_subagent: root.is_subagent(),
+            parent_session_id: root.parent_session_id().map(String::from),
+            file_size: row.total_size(),
+            modified: chrono::DateTime::<chrono::Utc>::from(row.latest_modified()).to_rfc3339(),
             span,
             compaction_count,
             name: meta.and_then(|m| m.name.clone()),

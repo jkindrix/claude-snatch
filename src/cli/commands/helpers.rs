@@ -2,7 +2,9 @@
 //!
 //! Extracts common logic used across thread, detect, conflicts, and decisions commands.
 
+use std::collections::HashMap;
 use std::sync::LazyLock;
+use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use regex::Regex;
@@ -61,6 +63,192 @@ pub fn resolve_chain_entries(
     }
     let (entries, unparsed) = session.parse_with_options_counted(max_file_size)?;
     Ok((entries, unparsed, None))
+}
+
+/// A logical conversation keyed by its chain root.
+///
+/// A resume chain's member files collapse into one unit; a standalone session
+/// is a single-member unit. Subagent sessions are never collapsed; they appear
+/// as their own single-member rows.
+pub struct LogicalSession {
+    /// Member sessions in chain order (root first). Always non-empty.
+    /// Length 1 for standalone (non-chained) and subagent sessions.
+    pub members: Vec<Session>,
+    /// Root session file id (the chain root, or the session's own id when
+    /// standalone). Used as the displayed/logical session id.
+    pub root_id: String,
+    /// Chain start time when known (multi-file chains only).
+    pub chain_started: Option<DateTime<Utc>>,
+}
+
+impl LogicalSession {
+    /// The representative session for root-level metadata (project, name, slug).
+    pub fn root(&self) -> &Session {
+        &self.members[0]
+    }
+
+    /// Number of member files (1 for standalone/subagent rows).
+    pub fn member_count(&self) -> usize {
+        self.members.len()
+    }
+
+    /// Whether this row collapses a multi-file resume chain.
+    pub fn is_chain(&self) -> bool {
+        self.members.len() > 1
+    }
+
+    /// Aggregate (summed) size across all member files.
+    pub fn total_size(&self) -> u64 {
+        self.members.iter().map(|s| s.file_size()).sum()
+    }
+
+    /// Latest member activity time (max modified time across members).
+    pub fn latest_modified(&self) -> SystemTime {
+        self.members
+            .iter()
+            .map(|s| s.modified_time())
+            .max()
+            .expect("logical session always has at least one member")
+    }
+
+    /// The last member's file id in chain order.
+    pub fn latest_session_id(&self) -> &str {
+        self.members
+            .last()
+            .expect("logical session always has at least one member")
+            .session_id()
+    }
+
+    /// The member with the latest activity (used for date-range comparison).
+    pub fn latest_member(&self) -> &Session {
+        self.members
+            .iter()
+            .max_by_key(|s| s.modified_time())
+            .expect("logical session always has at least one member")
+    }
+
+    /// Sort key for "oldest": chain start time when known, else the oldest
+    /// member's modified time.
+    pub fn oldest_sort_key(&self) -> SystemTime {
+        self.chain_started.map(SystemTime::from).unwrap_or_else(|| {
+            self.members
+                .iter()
+                .map(|s| s.modified_time())
+                .min()
+                .expect("logical session always has at least one member")
+        })
+    }
+
+    /// All member file ids in chain order.
+    pub fn member_ids(&self) -> Vec<String> {
+        self.members
+            .iter()
+            .map(|s| s.session_id().to_string())
+            .collect()
+    }
+
+    /// Whether any member satisfies the predicate (used for metadata filters).
+    pub fn any_member(&self, mut f: impl FnMut(&Session) -> bool) -> bool {
+        self.members.iter().any(|s| f(s))
+    }
+}
+
+/// Group a flat list of sessions into logical conversations, collapsing each
+/// multi-file resume chain into a single unit keyed by its root.
+///
+/// Chains are detected over the non-subagent sessions in the pool. Standalone
+/// sessions and subagent sessions each become their own single-member unit.
+/// The returned rows are ordered deterministically by `root_id`; callers
+/// apply their own sort afterward.
+pub fn group_into_logical(sessions: Vec<Session>) -> Vec<LogicalSession> {
+    use crate::discovery::chain::detect_chains;
+
+    let chains = detect_chains(
+        sessions
+            .iter()
+            .filter(|s| !s.is_subagent())
+            .map(|s| (s.session_id(), s.path())),
+    );
+
+    // Index sessions by file id so chain members can be pulled out in order.
+    let mut by_id: HashMap<String, Session> = HashMap::with_capacity(sessions.len());
+    for s in sessions {
+        by_id.insert(s.session_id().to_string(), s);
+    }
+
+    let mut rows: Vec<LogicalSession> = Vec::new();
+
+    // Collapse each multi-file chain into one row, in chain order.
+    for chain in chains.values() {
+        if chain.len() <= 1 {
+            continue;
+        }
+        let mut members = Vec::new();
+        for m in &chain.members {
+            if let Some(s) = by_id.remove(&m.file_id) {
+                members.push(s);
+            }
+        }
+        if members.is_empty() {
+            continue;
+        }
+        rows.push(LogicalSession {
+            members,
+            root_id: chain.root_id.clone(),
+            chain_started: chain.started(),
+        });
+    }
+
+    // Everything left is standalone or a subagent — one row each.
+    for (id, s) in by_id {
+        rows.push(LogicalSession {
+            members: vec![s],
+            root_id: id,
+            chain_started: None,
+        });
+    }
+
+    // Deterministic baseline ordering; callers re-sort as needed.
+    rows.sort_by(|a, b| a.root_id.cmp(&b.root_id));
+    rows
+}
+
+/// Whether a session's content time range overlaps `[since, until]`.
+///
+/// Uses content-based start/end timestamps (falling back to file mtime) so
+/// compacted sessions are placed by when the conversation happened, not when
+/// the file was rewritten.
+pub fn session_overlaps_date(
+    session: &Session,
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+) -> bool {
+    let (start, end) = match session.quick_metadata_cached() {
+        Ok(meta) => {
+            let start = meta
+                .start_time
+                .unwrap_or_else(|| DateTime::from(session.modified_time()));
+            let end = meta
+                .end_time
+                .unwrap_or_else(|| DateTime::from(session.modified_time()));
+            (start, end)
+        }
+        Err(_) => {
+            let mt = DateTime::from(session.modified_time());
+            (mt, mt)
+        }
+    };
+    if let Some(since) = since {
+        if end < since {
+            return false;
+        }
+    }
+    if let Some(until) = until {
+        if start > until {
+            return false;
+        }
+    }
+    true
 }
 
 /// Extract visible text from a LogEntry (user or assistant).
@@ -541,34 +729,7 @@ pub fn filter_sessions_by_date(
         None
     };
     if since_dt.is_some() || until_dt.is_some() {
-        sessions.retain(|s| {
-            let (start, end) = match s.quick_metadata_cached() {
-                Ok(meta) => {
-                    let start = meta
-                        .start_time
-                        .unwrap_or_else(|| DateTime::from(s.modified_time()));
-                    let end = meta
-                        .end_time
-                        .unwrap_or_else(|| DateTime::from(s.modified_time()));
-                    (start, end)
-                }
-                Err(_) => {
-                    let mt = DateTime::from(s.modified_time());
-                    (mt, mt)
-                }
-            };
-            if let Some(since) = since_dt {
-                if end < since {
-                    return false;
-                }
-            }
-            if let Some(until) = until_dt {
-                if start > until {
-                    return false;
-                }
-            }
-            true
-        });
+        sessions.retain(|s| session_overlaps_date(s, since_dt, until_dt));
     }
     Ok(())
 }
@@ -751,5 +912,89 @@ mod tests {
         assert_eq!(short_id("abcdef1234567890"), "abcdef12");
         assert_eq!(short_id("abc"), "abc");
         assert_eq!(short_id(""), "");
+    }
+
+    // ─── logical session grouping ───────────────────────────────────
+
+    const ROOT: &str = "aaaaaaaa-0000-0000-0000-000000000001";
+    const CONT: &str = "aaaaaaaa-0000-0000-0000-000000000002";
+    const STAND: &str = "bbbbbbbb-0000-0000-0000-000000000003";
+
+    fn write_session(
+        dir: &std::path::Path,
+        file_id: &str,
+        session_id: &str,
+        body: &str,
+    ) -> Session {
+        use std::io::Write as _;
+        let path = dir.join(format!("{file_id}.jsonl"));
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","uuid":"{file_id}","parentUuid":null,"sessionId":"{session_id}","timestamp":"2026-01-01T00:00:00.000Z","version":"2.0.74","message":{{"role":"user","content":"{body}"}}}}"#
+        )
+        .unwrap();
+        Session::from_path(&path, "/proj").unwrap()
+    }
+
+    #[test]
+    fn test_group_collapses_chain() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = write_session(dir.path(), ROOT, ROOT, "hello root");
+        let cont = write_session(dir.path(), CONT, ROOT, "hello continuation with more bytes");
+        let stand = write_session(dir.path(), STAND, STAND, "standalone");
+
+        // Input order is intentionally scrambled.
+        let rows = group_into_logical(vec![cont, root, stand]);
+        assert_eq!(rows.len(), 2, "chain collapses to one row + standalone");
+
+        let chain_row = rows.iter().find(|r| r.is_chain()).unwrap();
+        assert_eq!(chain_row.member_count(), 2);
+        assert_eq!(chain_row.root_id, ROOT);
+        assert_eq!(chain_row.latest_session_id(), CONT);
+        assert_eq!(
+            chain_row.member_ids(),
+            vec![ROOT.to_string(), CONT.to_string()]
+        );
+
+        let expected_size = std::fs::metadata(dir.path().join(format!("{ROOT}.jsonl")))
+            .unwrap()
+            .len()
+            + std::fs::metadata(dir.path().join(format!("{CONT}.jsonl")))
+                .unwrap()
+                .len();
+        assert_eq!(chain_row.total_size(), expected_size);
+
+        let standalone = rows.iter().find(|r| !r.is_chain()).unwrap();
+        assert_eq!(standalone.root_id, STAND);
+        assert_eq!(standalone.member_count(), 1);
+        assert_eq!(standalone.latest_session_id(), STAND);
+    }
+
+    #[test]
+    fn test_any_member_matches_continuation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = write_session(dir.path(), ROOT, ROOT, "a");
+        let cont = write_session(dir.path(), CONT, ROOT, "b");
+        let rows = group_into_logical(vec![root, cont]);
+        let row = &rows[0];
+        // A predicate that only the continuation satisfies still matches the row.
+        assert!(row.any_member(|s| s.session_id() == CONT));
+        assert!(!row.any_member(|s| s.session_id() == "no-such-id"));
+    }
+
+    #[test]
+    fn test_session_overlaps_date() {
+        use chrono::TimeZone;
+        let dir = tempfile::TempDir::new().unwrap();
+        let s = write_session(dir.path(), STAND, STAND, "x");
+        let before = Utc.with_ymd_and_hms(2025, 12, 31, 0, 0, 0).unwrap();
+        let after = Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap();
+        // Content timestamp is 2026-01-01, inside [before, after].
+        assert!(session_overlaps_date(&s, Some(before), Some(after)));
+        // `since` after the session's activity excludes it.
+        assert!(!session_overlaps_date(&s, Some(after), None));
+        // `until` before the session's activity excludes it.
+        assert!(!session_overlaps_date(&s, None, Some(before)));
     }
 }
