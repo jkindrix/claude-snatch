@@ -317,6 +317,37 @@ fn malformed_lines_skipped_with_diagnostics() {
     );
 }
 
+/// Regression guard for issue 0018 (fixed): a `thinking` block missing the
+/// `signature` field must still parse (preserving the reasoning text and its
+/// entry) rather than failing deserialization and silently dropping the whole
+/// assistant turn. `signature` is now `#[serde(default)]`.
+#[test]
+fn thinking_block_without_signature_parses() {
+    let jsonl = concat!(
+        r#"{"type":"user","uuid":"a0000000-0000-0000-0000-000000000001","parentUuid":null,"timestamp":"2025-01-15T10:00:00.000Z","sessionId":"s","version":"2.1.193","message":{"role":"user","content":"think"}}"#,
+        "\n",
+        r#"{"type":"assistant","uuid":"a0000000-0000-0000-0000-000000000002","parentUuid":"a0000000-0000-0000-0000-000000000001","timestamp":"2025-01-15T10:00:01.000Z","sessionId":"s","version":"2.1.193","message":{"id":"m1","type":"message","role":"assistant","content":[{"type":"thinking","thinking":"NOSIGTHINK"},{"type":"text","text":"the answer"}],"model":"claude-sonnet-4","stop_reason":"end_turn"}}"#,
+    );
+    let entries = JsonlParser::new()
+        .parse_str(jsonl)
+        .expect("parse inline entries");
+    // The assistant turn survived (was previously dropped as unparseable).
+    let asst = entries
+        .iter()
+        .find_map(|e| match e {
+            LogEntry::Assistant(a) => Some(a),
+            _ => None,
+        })
+        .expect("assistant entry should survive a signature-less thinking block");
+    let thinking_ok = asst.message.content.iter().any(|b| {
+        matches!(b, ContentBlock::Thinking(t) if t.thinking == "NOSIGTHINK" && t.signature.is_empty())
+    });
+    assert!(
+        thinking_ok,
+        "thinking block parses with the text preserved and an empty signature"
+    );
+}
+
 /// Regression guard for issue 0015 (fixed): `AssistantContent` was annotated
 /// `#[serde(rename_all = "camelCase")]`, so it expected a `stopReason` key, but
 /// every real Claude Code session writes snake_case `stop_reason` (the inner

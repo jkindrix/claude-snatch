@@ -572,7 +572,10 @@ pub struct ThinkingBlock {
     /// Reasoning text.
     pub thinking: String,
 
-    /// Cryptographic verification hash.
+    /// Cryptographic verification hash. Defaults to empty when absent so a
+    /// thinking block lacking a signature parses (preserving the reasoning text)
+    /// instead of failing deserialization and dropping the whole entry (0018).
+    #[serde(default)]
     pub signature: String,
 
     /// Unknown fields for forward compatibility.
