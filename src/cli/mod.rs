@@ -708,7 +708,8 @@ pub struct ExportArgs {
     #[arg(long)]
     pub until: Option<String>,
 
-    /// Include subagent sessions.
+    /// Include subagent sessions in `--all` batch listing (no effect on a single
+    /// session — use --combine-agents to pull subagents into one export).
     #[arg(long)]
     pub subagents: bool,
 
@@ -855,7 +856,7 @@ pub enum ExportFormatArg {
     /// Markdown format.
     #[default]
     Markdown,
-    /// Compact Markdown.
+    /// Alias for `markdown` (identical output).
     Md,
     /// JSON format.
     Json,

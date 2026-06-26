@@ -219,6 +219,13 @@ pub fn run(cli: &Cli, args: &ExportArgs) -> Result<()> {
                 "Note: --since/--until filters are only applied with --all; single session export ignores them"
             );
         }
+        // --subagents only affects --all batch discovery; on a single session it
+        // is inert (issue 0007). Point the user at the working path.
+        if args.subagents && !args.combine_agents && !cli.quiet {
+            eprintln!(
+                "Note: --subagents only affects --all batch listing; for a single session use --combine-agents to include subagent transcripts"
+            );
+        }
         // Export a single session
         export_single_session(cli, args, session_id)
     } else {
