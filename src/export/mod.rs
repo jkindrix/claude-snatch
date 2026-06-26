@@ -966,6 +966,19 @@ impl ExportOptions {
         !self.only.is_empty()
     }
 
+    /// Whether any block-level content filtering is configured — the exclusive
+    /// `--only` whitelist or any non-exclusive exclusion (`--no-thinking` etc., or
+    /// images off). When false, every block is kept and the filter transform is a
+    /// no-op. Used to decide whether `apply_export_transform` must run.
+    #[must_use]
+    pub fn has_content_filter(&self) -> bool {
+        self.has_exclusive_filter()
+            || !self.include_thinking
+            || !self.include_tool_use
+            || !self.include_tool_results
+            || !self.include_images
+    }
+
     /// Builder: set exclusive content filter.
     #[must_use]
     pub fn with_only(mut self, types: HashSet<ContentType>) -> Self {
@@ -1229,19 +1242,18 @@ fn redact_entry_text(entry: &mut LogEntry, options: &ExportOptions) {
     }
 }
 
-/// Prune content blocks excluded by an exclusive `--only` filter, in place.
+/// Prune content blocks excluded by the active filter, in place.
 ///
-/// Only acts when `--only` is set (`has_exclusive_filter`). Block inclusion is
-/// role-aware: user text and assistant text are filtered independently (a tool
-/// result lives in a user-role entry but is not user *text*), which the coarse
-/// per-exporter checks could not express. Whole-entry inclusion (system/summary,
-/// or skipping an emptied entry) remains the exporters' responsibility.
+/// This is the single source of truth for block-level content filtering — both
+/// the exclusive `--only` whitelist and the non-exclusive `--no-thinking` /
+/// `--no-tool-use` / `--no-tool-results` / image toggles, expressed uniformly via
+/// `ExportOptions::should_include_*`. Block inclusion is role-aware: user text and
+/// assistant text are filtered independently (a tool result lives in a user-role
+/// entry but is not user *text*). Whole-entry inclusion (system/summary, or
+/// skipping an emptied entry) remains the exporters' responsibility — those are
+/// entry-level, not block-level, decisions.
 fn filter_entry_content(entry: &mut LogEntry, options: &ExportOptions) {
     use crate::model::{ContentBlock, UserContent};
-
-    if !options.has_exclusive_filter() {
-        return;
-    }
 
     let keep_block = |block: &ContentBlock, user_role: bool| match block {
         ContentBlock::Text(_) => {
@@ -1257,11 +1269,12 @@ fn filter_entry_content(entry: &mut LogEntry, options: &ExportOptions) {
             }
         }
         ContentBlock::Image(_) => {
-            if user_role {
-                options.should_include_user_text()
-            } else {
-                options.should_include(ContentType::Assistant)
-            }
+            options.include_images
+                && if user_role {
+                    options.should_include_user_text()
+                } else {
+                    options.should_include(ContentType::Assistant)
+                }
         }
         ContentBlock::Thinking(_) => options.should_include_thinking(),
         ContentBlock::ToolUse(_) => options.should_include_tool_use(),
@@ -1297,7 +1310,7 @@ pub fn apply_export_transform<'a>(
     options: &ExportOptions,
 ) -> std::borrow::Cow<'a, Conversation> {
     let redact = options.redaction.is_some();
-    let filter = options.has_exclusive_filter();
+    let filter = options.has_content_filter();
     if !redact && !filter {
         return std::borrow::Cow::Borrowed(conversation);
     }

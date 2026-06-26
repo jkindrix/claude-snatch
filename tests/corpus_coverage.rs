@@ -6,13 +6,10 @@
 //! per-fixture provenance in `tests/fixtures/PROVENANCE.md`.
 
 use std::collections::HashSet;
-use std::io::Cursor;
 use std::path::PathBuf;
 
 use claude_snatch::discovery::Session;
-use claude_snatch::export::{
-    export_to_string, ContentType, ExportFormat, ExportOptions, Exporter, MarkdownExporter,
-};
+use claude_snatch::export::{export_to_string, ContentType, ExportFormat, ExportOptions};
 use claude_snatch::model::{
     CompactTrigger, ContentBlock, ImageSource, LogEntry, StopReason, SystemSubtype, ToolResult,
     ToolUse, UserContent,
@@ -20,13 +17,13 @@ use claude_snatch::model::{
 use claude_snatch::parser::JsonlParser;
 use claude_snatch::reconstruction::Conversation;
 
-/// Render entries to a markdown string with the given options.
+/// Render entries to a markdown string with the given options, through the
+/// dispatch transform (`export_to_string`) — exporters no longer filter on their
+/// own, so a test must go through the transform to exercise `--only`/`--no-*`.
 fn markdown_with(entries: &[LogEntry], opts: &ExportOptions) -> String {
-    let mut buf = Cursor::new(Vec::new());
-    MarkdownExporter::new()
-        .export_entries(entries, &mut buf, opts)
-        .expect("markdown export should succeed");
-    String::from_utf8(buf.into_inner()).expect("export output should be valid UTF-8")
+    let conversation = Conversation::from_entries(entries.to_vec()).expect("build conversation");
+    export_to_string(&conversation, ExportFormat::Markdown, opts)
+        .expect("markdown export should succeed")
 }
 
 fn fixture_path(rel: &str) -> PathBuf {
