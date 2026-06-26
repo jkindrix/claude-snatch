@@ -200,6 +200,60 @@ fn test_warn_pii_detects_tool_result_pii() {
         .stderr(predicate::str::contains("PII").and(predicate::str::contains("email")));
 }
 
+/// Build a temp Claude dir with uniquely-marked tool-use input and tool-result
+/// content (no overlap with prose) so the negation flags can be asserted exactly.
+fn setup_negation_fixture_dir() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let encoded = encode_project_path(PROJECT_PATH);
+    let project_dir = tmp.path().join("projects").join(&encoded);
+    std::fs::create_dir_all(&project_dir).expect("failed to create project dir");
+
+    let lines: &[&str] = &[
+        r#"{"type":"user","uuid":"11111111-1111-1111-1111-111111111111","parentUuid":null,"timestamp":"2025-01-15T10:00:00.000Z","sessionId":"SESSID","version":"2.1.193","message":{"role":"user","content":"run it"}}"#,
+        r#"{"type":"assistant","uuid":"22222222-2222-2222-2222-222222222222","parentUuid":"11111111-1111-1111-1111-111111111111","timestamp":"2025-01-15T10:00:01.000Z","sessionId":"SESSID","version":"2.1.193","message":{"id":"m1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"echo NEGTEST_TOOLUSE"}}],"model":"claude-sonnet-4","stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+        r#"{"type":"user","uuid":"33333333-3333-3333-3333-333333333333","parentUuid":"22222222-2222-2222-2222-222222222222","timestamp":"2025-01-15T10:00:02.000Z","sessionId":"SESSID","version":"2.1.193","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"NEGTEST_TOOLRESULT"}]}}"#,
+        r#"{"type":"assistant","uuid":"44444444-4444-4444-4444-444444444444","parentUuid":"33333333-3333-3333-3333-333333333333","timestamp":"2025-01-15T10:00:03.000Z","sessionId":"SESSID","version":"2.1.193","message":{"id":"m2","type":"message","role":"assistant","content":[{"type":"text","text":"done"}],"model":"claude-sonnet-4","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+    ];
+    let jsonl = lines.join("\n").replace("SESSID", SESSION_ID) + "\n";
+    std::fs::write(project_dir.join(format!("{SESSION_ID}.jsonl")), jsonl)
+        .expect("failed to write negation fixture");
+    tmp
+}
+
+/// Regression guard for issue 0009: the documented `--no-tool-use` /
+/// `--no-tool-results` flags must actually disable content (they previously
+/// didn't exist and were a parse error). Control asserts the markers appear by
+/// default, then each `--no-*` removes its marker.
+#[test]
+fn test_negation_flags_disable_content() {
+    let tmp = setup_negation_fixture_dir();
+
+    // Control: tool use + tool result markers appear by default.
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["export", SESSION_ID, "-f", "markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("NEGTEST_TOOLUSE"))
+        .stdout(predicate::str::contains("NEGTEST_TOOLRESULT"));
+
+    // --no-tool-use removes the tool call.
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["export", SESSION_ID, "-f", "markdown", "--no-tool-use"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("NEGTEST_TOOLUSE").not());
+
+    // --no-tool-results removes the tool result.
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["export", SESSION_ID, "-f", "markdown", "--no-tool-results"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("NEGTEST_TOOLRESULT").not());
+}
+
 // =============================================================================
 // info
 // =============================================================================

@@ -377,9 +377,9 @@ fn export_session_to_gist(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
         opts
     } else {
         ExportOptions {
-            include_thinking: args.thinking,
-            include_tool_use: args.tool_use,
-            include_tool_results: args.tool_results,
+            include_thinking: args.thinking && !args.no_thinking,
+            include_tool_use: args.tool_use && !args.no_tool_use,
+            include_tool_results: args.tool_results && !args.no_tool_results,
             include_system: args.system,
             include_timestamps: args.timestamps,
             relative_timestamps: false,
@@ -509,9 +509,9 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
         opts
     } else {
         ExportOptions {
-            include_thinking: args.thinking,
-            include_tool_use: args.tool_use,
-            include_tool_results: args.tool_results,
+            include_thinking: args.thinking && !args.no_thinking,
+            include_tool_use: args.tool_use && !args.no_tool_use,
+            include_tool_results: args.tool_results && !args.no_tool_results,
             include_system: args.system,
             include_timestamps: args.timestamps,
             relative_timestamps: false,
@@ -1126,7 +1126,7 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
 
     // Build export options
     let options = ExportOptions {
-        include_thinking: args.thinking,
+        include_thinking: args.thinking && !args.no_thinking,
         include_tool_use: true,
         include_tool_results: true,
         include_system: true,
@@ -1416,9 +1416,9 @@ fn export_session(
         opts
     } else {
         ExportOptions {
-            include_thinking: args.thinking,
-            include_tool_use: args.tool_use,
-            include_tool_results: args.tool_results,
+            include_thinking: args.thinking && !args.no_thinking,
+            include_tool_use: args.tool_use && !args.no_tool_use,
+            include_tool_results: args.tool_results && !args.no_tool_results,
             include_system: args.system,
             include_timestamps: args.timestamps,
             relative_timestamps: false,

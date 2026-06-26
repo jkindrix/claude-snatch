@@ -725,13 +725,25 @@ pub struct ExportArgs {
     #[arg(long, default_value = "true")]
     pub thinking: bool,
 
+    /// Exclude thinking blocks (overrides the on-by-default --thinking).
+    #[arg(long = "no-thinking", action = ArgAction::SetTrue)]
+    pub no_thinking: bool,
+
     /// Include tool use blocks (enabled by default, use --no-tool-use to disable).
     #[arg(long, default_value = "true")]
     pub tool_use: bool,
 
+    /// Exclude tool use blocks (overrides the on-by-default --tool-use).
+    #[arg(long = "no-tool-use", action = ArgAction::SetTrue)]
+    pub no_tool_use: bool,
+
     /// Include tool results (enabled by default, use --no-tool-results to disable).
     #[arg(long, default_value = "true")]
     pub tool_results: bool,
+
+    /// Exclude tool results (overrides the on-by-default --tool-results).
+    #[arg(long = "no-tool-results", action = ArgAction::SetTrue)]
+    pub no_tool_results: bool,
 
     /// Include system messages (disabled by default).
     #[arg(long)]
