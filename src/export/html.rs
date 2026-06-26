@@ -740,10 +740,22 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
         writeln!(writer, "  <div class=\"message-content\">")?;
 
         // Write text content (suppressed when user text isn't requested, e.g.
-        // --only tool-results, so the prompt text doesn't appear)
+        // --only tool-results, so the prompt text doesn't appear). Handles both
+        // Simple content and the Text blocks of the Blocks variant — `as_text()`
+        // is Simple-only, so Blocks-variant user text was otherwise dropped
+        // entirely (issue 0017). Images and tool results render separately below.
         if options.should_include_user_text() {
-            if let Some(text) = user.message.as_text() {
-                writeln!(writer, "    <p>{}</p>", escape_html(text))?;
+            match &user.message {
+                crate::model::UserContent::Simple(simple) => {
+                    writeln!(writer, "    <p>{}</p>", escape_html(&simple.content))?;
+                }
+                crate::model::UserContent::Blocks(blocks) => {
+                    for block in &blocks.content {
+                        if let ContentBlock::Text(text) = block {
+                            writeln!(writer, "    <p>{}</p>", escape_html(&text.text))?;
+                        }
+                    }
+                }
             }
         }
 
