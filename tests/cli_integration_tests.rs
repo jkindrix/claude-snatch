@@ -307,6 +307,40 @@ fn test_subagent_count_headlines_inventory() {
         .stdout(predicate::str::contains("**Subagents:** 1"));
 }
 
+/// End-to-end guard that `--only` filtering works through the real CLI dispatch
+/// (the transform), now that exporters no longer self-filter (full strip). Uses
+/// the uniquely-marked tool-use / tool-result fixture.
+#[test]
+fn test_only_filter_via_cli() {
+    let tmp = setup_negation_fixture_dir();
+
+    // --only prompts: human text only — no tool use or tool result.
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["export", SESSION_ID, "-f", "markdown", "--only", "prompts"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("run it"))
+        .stdout(predicate::str::contains("NEGTEST_TOOLUSE").not())
+        .stdout(predicate::str::contains("NEGTEST_TOOLRESULT").not());
+
+    // --only tool-results: the tool result, but not the human prompt.
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "export",
+            SESSION_ID,
+            "-f",
+            "markdown",
+            "--only",
+            "tool-results",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("NEGTEST_TOOLRESULT"))
+        .stdout(predicate::str::contains("run it").not());
+}
+
 // =============================================================================
 // info
 // =============================================================================

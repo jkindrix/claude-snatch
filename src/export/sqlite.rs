@@ -499,13 +499,7 @@ impl SqliteExporter {
                     crate::model::message::UserContent::Blocks(blocks) => {
                         // Extract content blocks from user messages (tool results, images, text)
                         for (order, block) in blocks.content.iter().enumerate() {
-                            self.insert_content_block(
-                                conn,
-                                message_id,
-                                block,
-                                order as i32,
-                                options,
-                            )?;
+                            self.insert_content_block(conn, message_id, block, order as i32)?;
                         }
                     }
                 }
@@ -554,7 +548,7 @@ impl SqliteExporter {
 
                 // Insert content blocks
                 for (order, block) in assistant.message.content.iter().enumerate() {
-                    self.insert_content_block(conn, message_id, block, order as i32, options)?;
+                    self.insert_content_block(conn, message_id, block, order as i32)?;
                 }
             }
             LogEntry::System(system) if options.should_include_system() => {
@@ -590,14 +584,14 @@ impl SqliteExporter {
         Ok(())
     }
 
-    /// Insert a content block.
+    /// Insert a content block. Block-level filtering is applied upstream by the
+    /// dispatch transform, so this inserts whatever blocks it receives.
     fn insert_content_block(
         &self,
         conn: &Connection,
         message_fk: i64,
         block: &ContentBlock,
         order: i32,
-        options: &ExportOptions,
     ) -> Result<()> {
         match block {
             ContentBlock::Unknown { .. } => {}
@@ -610,65 +604,53 @@ impl SqliteExporter {
                 .map_err(|e| SnatchError::export(format!("Failed to insert text block: {}", e)))?;
             }
             ContentBlock::Thinking(thinking) => {
-                if options.should_include_thinking() {
-                    conn.execute(
-                        "INSERT INTO thinking_blocks (message_fk, signature, thinking, block_order)
+                conn.execute(
+                    "INSERT INTO thinking_blocks (message_fk, signature, thinking, block_order)
                          VALUES (?1, ?2, ?3, ?4)",
-                        params![message_fk, thinking.signature, thinking.thinking, order],
-                    )
-                    .map_err(|e| {
-                        SnatchError::export(format!("Failed to insert thinking block: {}", e))
-                    })?;
-                }
+                    params![message_fk, thinking.signature, thinking.thinking, order],
+                )
+                .map_err(|e| {
+                    SnatchError::export(format!("Failed to insert thinking block: {}", e))
+                })?;
             }
             ContentBlock::ToolUse(tool_use) => {
-                if options.should_include_tool_use() {
-                    let input_json = serde_json::to_string(&tool_use.input).unwrap_or_default();
+                let input_json = serde_json::to_string(&tool_use.input).unwrap_or_default();
 
-                    conn.execute(
-                        "INSERT INTO tool_uses (message_fk, tool_use_id, tool_name, input_json, block_order)
+                conn.execute(
+                    "INSERT INTO tool_uses (message_fk, tool_use_id, tool_name, input_json, block_order)
                          VALUES (?1, ?2, ?3, ?4, ?5)",
-                        params![message_fk, tool_use.id, tool_use.name, input_json, order],
-                    )
-                    .map_err(|e| {
-                        SnatchError::export(format!("Failed to insert tool use: {}", e))
-                    })?;
-                }
+                    params![message_fk, tool_use.id, tool_use.name, input_json, order],
+                )
+                .map_err(|e| SnatchError::export(format!("Failed to insert tool use: {}", e)))?;
             }
             ContentBlock::ToolResult(result) => {
-                if options.should_include_tool_results() {
-                    let is_error = result.is_explicit_error();
-                    let status = if is_error {
-                        "error"
-                    } else if result.is_implicit_success() {
-                        "success_implicit"
-                    } else {
-                        "success"
-                    };
+                let is_error = result.is_explicit_error();
+                let status = if is_error {
+                    "error"
+                } else if result.is_implicit_success() {
+                    "success_implicit"
+                } else {
+                    "success"
+                };
 
-                    let output = result.content.as_ref().map(|c| c.to_display_string(false));
+                let output = result.content.as_ref().map(|c| c.to_display_string(false));
 
-                    conn.execute(
-                        "INSERT INTO tool_results (message_fk, tool_use_id, is_error, status, output, block_order)
+                conn.execute(
+                    "INSERT INTO tool_results (message_fk, tool_use_id, is_error, status, output, block_order)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        params![message_fk, result.tool_use_id, is_error as i32, status, output, order],
-                    )
-                    .map_err(|e| {
-                        SnatchError::export(format!("Failed to insert tool result: {}", e))
-                    })?;
-                }
+                    params![message_fk, result.tool_use_id, is_error as i32, status, output, order],
+                )
+                .map_err(|e| {
+                    SnatchError::export(format!("Failed to insert tool result: {}", e))
+                })?;
             }
             ContentBlock::Image(_) => {
-                if options.include_images {
-                    conn.execute(
-                        "INSERT INTO content_blocks (message_fk, block_type, content, block_order)
+                conn.execute(
+                    "INSERT INTO content_blocks (message_fk, block_type, content, block_order)
                          VALUES (?1, 'image', '[image data]', ?2)",
-                        params![message_fk, order],
-                    )
-                    .map_err(|e| {
-                        SnatchError::export(format!("Failed to insert image block: {}", e))
-                    })?;
-                }
+                    params![message_fk, order],
+                )
+                .map_err(|e| SnatchError::export(format!("Failed to insert image block: {}", e)))?;
             }
         }
 

@@ -17,7 +17,7 @@ use crate::error::Result;
 use crate::model::LogEntry;
 use crate::reconstruction::Conversation;
 
-use super::{ContentType, ExportOptions, Exporter};
+use super::{ExportOptions, Exporter};
 
 /// JSON exporter (normalized, content-preserving).
 #[derive(Debug, Clone)]
@@ -188,38 +188,13 @@ pub enum FilteredEntry {
 }
 
 impl FilteredEntry {
-    /// Create from a log entry with filtering.
+    /// Create from a log entry.
+    ///
+    /// Block-level content filtering is applied upstream by the dispatch
+    /// transform, so the entry is already pruned by the time it reaches here.
     fn from_entry(entry: &LogEntry, options: &ExportOptions) -> Self {
         // Serialize to Value first
         let mut value = serde_json::to_value(entry).unwrap_or(Value::Null);
-
-        // Apply content filtering if needed (use exclusive filter methods)
-        if options.has_exclusive_filter()
-            || !options.include_thinking
-            || !options.include_tool_use
-            || !options.include_tool_results
-            || !options.include_images
-        {
-            let is_user = matches!(entry, LogEntry::User(_));
-            if let Some(content) = value.get_mut("message").and_then(|m| m.get_mut("content")) {
-                if let Some(arr) = content.as_array_mut() {
-                    arr.retain(|block| {
-                        let block_type = block.get("type").and_then(Value::as_str);
-                        match block_type {
-                            Some("thinking") => options.should_include_thinking(),
-                            Some("tool_use") => options.should_include_tool_use(),
-                            Some("tool_result") => options.should_include_tool_results(),
-                            Some("image") => options.include_images,
-                            // Role-aware text gate (issue 0016 residual b): user text
-                            // follows the user-text filter, assistant text its own.
-                            Some("text") if is_user => options.should_include_user_text(),
-                            Some("text") => options.should_include(ContentType::Assistant),
-                            _ => true,
-                        }
-                    });
-                }
-            }
-        }
 
         // Apply truncation if configured
         if let Some(max_len) = options.truncate_at {

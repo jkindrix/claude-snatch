@@ -441,6 +441,45 @@ fn only_code_suppresses_empty_entries() {
     );
 }
 
+/// Regression guard for the full-strip: with exporters no longer self-filtering,
+/// the non-exclusive `--no-thinking` (`include_thinking = false`) flag must still
+/// drop thinking via the dispatch transform, while other content survives. Run
+/// across the human exporters that render thinking.
+#[test]
+fn no_thinking_flag_prunes_thinking_through_transform() {
+    let entries = parse_fixture("thinking_session.jsonl");
+    let conversation = Conversation::from_entries(entries).expect("build conversation");
+    let default_opts = ExportOptions::default();
+    let no_thinking = ExportOptions {
+        include_thinking: false,
+        ..ExportOptions::default()
+    };
+    // A phrase that appears only inside the thinking block.
+    let thinking_marker = "break down this multiplication";
+    for fmt in [
+        ExportFormat::Markdown,
+        ExportFormat::Text,
+        ExportFormat::Xml,
+    ] {
+        let with = export_to_string(&conversation, fmt, &default_opts)
+            .unwrap_or_else(|e| panic!("{fmt:?}: {e}"));
+        assert!(
+            with.contains(thinking_marker),
+            "{fmt:?}: thinking shows by default"
+        );
+        let without = export_to_string(&conversation, fmt, &no_thinking)
+            .unwrap_or_else(|e| panic!("{fmt:?}: {e}"));
+        assert!(
+            !without.contains(thinking_marker),
+            "{fmt:?}: --no-thinking drops the thinking block"
+        );
+        assert!(
+            without.len() < with.len(),
+            "{fmt:?}: --no-thinking output is smaller but non-empty"
+        );
+    }
+}
+
 /// Regression guard for issue 0001: `--redact all` must remove secrets from
 /// export output. Fixed in Phase 1 by the dispatch-level redaction transform
 /// (`export_to_string`/`export_to_file` → `Conversation::map_entries`).

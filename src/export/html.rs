@@ -15,7 +15,7 @@ use crate::model::{
 };
 use crate::reconstruction::Conversation;
 
-use super::{ContentType, ExportOptions, Exporter};
+use super::{ExportOptions, Exporter};
 
 /// HTML exporter for conversations.
 #[derive(Debug, Clone)]
@@ -744,16 +744,16 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
         // Simple content and the Text blocks of the Blocks variant — `as_text()`
         // is Simple-only, so Blocks-variant user text was otherwise dropped
         // entirely (issue 0017). Images and tool results render separately below.
-        if options.should_include_user_text() {
-            match &user.message {
-                crate::model::UserContent::Simple(simple) => {
+        match &user.message {
+            crate::model::UserContent::Simple(simple) => {
+                if !simple.content.is_empty() {
                     writeln!(writer, "    <p>{}</p>", escape_html(&simple.content))?;
                 }
-                crate::model::UserContent::Blocks(blocks) => {
-                    for block in &blocks.content {
-                        if let ContentBlock::Text(text) = block {
-                            writeln!(writer, "    <p>{}</p>", escape_html(&text.text))?;
-                        }
+            }
+            crate::model::UserContent::Blocks(blocks) => {
+                for block in &blocks.content {
+                    if let ContentBlock::Text(text) = block {
+                        writeln!(writer, "    <p>{}</p>", escape_html(&text.text))?;
                     }
                 }
             }
@@ -764,11 +764,9 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
             self.write_image(writer, image)?;
         }
 
-        // Write tool results if included
-        if options.should_include_tool_results() {
-            for result in user.message.tool_results() {
-                self.write_tool_result(writer, result)?;
-            }
+        // Write tool results
+        for result in user.message.tool_results() {
+            self.write_tool_result(writer, result)?;
         }
 
         writeln!(writer, "  </div>")?;
@@ -798,20 +796,14 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
 
         writeln!(writer, "  <div class=\"message-content\">")?;
 
+        // Block-level filtering happens upstream in the dispatch transform.
         for content in &assistant.message.content {
             match content {
                 ContentBlock::Text(text) => {
-                    // Use should_include() directly for text content to respect exclusive filter
-                    if options.should_include(ContentType::Assistant) {
-                        writeln!(writer, "    <p>{}</p>", escape_html(&text.text))?;
-                    }
+                    writeln!(writer, "    <p>{}</p>", escape_html(&text.text))?;
                 }
-                ContentBlock::Thinking(thinking) if options.should_include_thinking() => {
-                    self.write_thinking(writer, thinking)?;
-                }
-                ContentBlock::ToolUse(tool_use) if options.should_include_tool_use() => {
-                    self.write_tool_use(writer, tool_use)?;
-                }
+                ContentBlock::Thinking(thinking) => self.write_thinking(writer, thinking)?,
+                ContentBlock::ToolUse(tool_use) => self.write_tool_use(writer, tool_use)?,
                 _ => {}
             }
         }

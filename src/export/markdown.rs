@@ -34,7 +34,7 @@ use crate::model::{
 };
 use crate::reconstruction::Conversation;
 
-use super::{ContentType, ExportOptions, Exporter};
+use super::{ExportOptions, Exporter};
 
 /// Markdown exporter for conversations.
 #[derive(Debug, Clone)]
@@ -236,16 +236,16 @@ impl MarkdownExporter {
         let mut body = Vec::new();
         match &user.message {
             crate::model::UserContent::Simple(simple) => {
-                // Plain-text user content is only shown when user text is
-                // requested — under e.g. --only tool-results the entry is visited
-                // for its tool results, but the prompt text must not leak.
-                if options.should_include_user_text() {
+                // The transform clears Simple user text when it is filtered out
+                // (e.g. --only tool-results), so render whatever remains; an empty
+                // string means it was excluded and the entry is skipped below.
+                if !simple.content.is_empty() {
                     writeln!(body, "{}", simple.content)?;
                 }
             }
             crate::model::UserContent::Blocks(blocks) => {
                 for content in &blocks.content {
-                    self.write_content_block(&mut body, content, options, true)?;
+                    self.write_content_block(&mut body, content, options)?;
                 }
             }
         }
@@ -281,7 +281,7 @@ impl MarkdownExporter {
         // leaving an empty header + token footer (issue 0005).
         let mut body = Vec::new();
         for content in &assistant.message.content {
-            self.write_content_block(&mut body, content, options, false)?;
+            self.write_content_block(&mut body, content, options)?;
         }
         if body.is_empty() {
             return Ok(());
@@ -324,12 +324,14 @@ impl MarkdownExporter {
     }
 
     /// Write a content block.
+    ///
+    /// Block-level content filtering (`--only`/`--no-*`) is applied upstream by
+    /// the dispatch transform, so this renders whatever blocks it receives.
     fn write_content_block<W: Write>(
         &self,
         writer: &mut W,
         content: &ContentBlock,
         options: &ExportOptions,
-        is_user: bool,
     ) -> Result<()> {
         match content {
             ContentBlock::Unknown { kind, raw } => {
@@ -352,7 +354,8 @@ impl MarkdownExporter {
                 writeln!(writer)?;
             }
             ContentBlock::Text(text) => {
-                // Handle code-only mode - extract code blocks instead of full text
+                // Code-only mode extracts code blocks instead of full text (the
+                // transform keeps text blocks alive under --only code for this).
                 if options.is_code_only() {
                     for code_block in extract_code_blocks(&text.text) {
                         writeln!(
@@ -364,36 +367,17 @@ impl MarkdownExporter {
                         writeln!(writer, "```")?;
                         writeln!(writer)?;
                     }
-                } else if (is_user && options.should_include_user_text())
-                    || (!is_user && options.should_include(ContentType::Assistant))
-                {
-                    // Role-aware: user text follows the user-text filter, assistant
-                    // text the assistant filter (issue 0016 residual b). Tool
-                    // results live in user entries but are not user *text*.
+                } else {
                     writeln!(writer, "{}", text.text)?;
                     writeln!(writer)?;
                 }
             }
-            ContentBlock::Thinking(thinking) => {
-                if options.should_include_thinking() {
-                    self.write_thinking(writer, thinking)?;
-                }
-            }
-            ContentBlock::ToolUse(tool_use) => {
-                if options.should_include_tool_use() {
-                    self.write_tool_use(writer, tool_use)?;
-                }
-            }
+            ContentBlock::Thinking(thinking) => self.write_thinking(writer, thinking)?,
+            ContentBlock::ToolUse(tool_use) => self.write_tool_use(writer, tool_use)?,
             ContentBlock::ToolResult(result) => {
-                if options.should_include_tool_results() {
-                    self.write_tool_result(writer, result, options)?;
-                }
+                self.write_tool_result(writer, result, options)?;
             }
-            ContentBlock::Image(image) => {
-                if options.include_images {
-                    self.write_image(writer, image)?;
-                }
-            }
+            ContentBlock::Image(image) => self.write_image(writer, image)?,
         }
         Ok(())
     }

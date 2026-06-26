@@ -15,7 +15,7 @@ use crate::model::{
 };
 use crate::reconstruction::Conversation;
 
-use super::{ContentType, ExportOptions, Exporter};
+use super::{ExportOptions, Exporter};
 
 /// Plain text exporter for conversations.
 #[derive(Debug, Clone)]
@@ -202,18 +202,18 @@ impl TextExporter {
         Ok(())
     }
 
-    /// Check if a user message has displayable text content.
-    fn has_user_text_content(user: &UserMessage, options: &ExportOptions) -> bool {
+    /// Check if a user message has any renderable content left after filtering.
+    ///
+    /// The dispatch transform has already pruned excluded blocks, so any block
+    /// that remains is content to show (a non-empty text block, or any non-text
+    /// block).
+    fn has_user_text_content(user: &UserMessage) -> bool {
         match &user.message {
             crate::model::UserContent::Simple(simple) => !simple.content.trim().is_empty(),
             crate::model::UserContent::Blocks(blocks) => {
                 blocks.content.iter().any(|block| match block {
                     ContentBlock::Text(t) => !t.text.trim().is_empty(),
-                    ContentBlock::ToolResult(_) => options.should_include_tool_results(),
-                    ContentBlock::ToolUse(_) => options.should_include_tool_use(),
-                    ContentBlock::Thinking(_) => options.should_include_thinking(),
-                    ContentBlock::Image(_) => true,
-                    ContentBlock::Unknown { .. } => true,
+                    _ => true,
                 })
             }
         }
@@ -227,7 +227,7 @@ impl TextExporter {
         options: &ExportOptions,
     ) -> Result<()> {
         // Skip empty user messages (e.g., tool result placeholders with no text)
-        if !Self::has_user_text_content(user, options) {
+        if !Self::has_user_text_content(user) {
             return Ok(());
         }
 
@@ -241,13 +241,13 @@ impl TextExporter {
         // Write user content
         match &user.message {
             crate::model::UserContent::Simple(simple) => {
-                if options.should_include_user_text() {
+                if !simple.content.is_empty() {
                     write!(writer, "{}", self.wrap_text(&simple.content))?;
                 }
             }
             crate::model::UserContent::Blocks(blocks) => {
                 for content in &blocks.content {
-                    self.write_content_block(writer, content, options, true)?;
+                    self.write_content_block(writer, content, options)?;
                 }
             }
         }
@@ -272,7 +272,7 @@ impl TextExporter {
 
         // Write content blocks
         for content in &assistant.message.content {
-            self.write_content_block(writer, content, options, false)?;
+            self.write_content_block(writer, content, options)?;
         }
 
         // Usage
@@ -293,12 +293,14 @@ impl TextExporter {
     }
 
     /// Write a content block.
+    ///
+    /// Block-level filtering happens upstream in the dispatch transform, so this
+    /// renders whatever blocks it receives.
     fn write_content_block<W: Write>(
         &self,
         writer: &mut W,
         content: &ContentBlock,
-        options: &ExportOptions,
-        is_user: bool,
+        _options: &ExportOptions,
     ) -> Result<()> {
         match content {
             ContentBlock::Unknown { kind, raw } => {
@@ -316,34 +318,15 @@ impl TextExporter {
                 writeln!(writer)?;
             }
             ContentBlock::Text(text) => {
-                // Role-aware text gate (issue 0016 residual b).
-                if (is_user && options.should_include_user_text())
-                    || (!is_user && options.should_include(ContentType::Assistant))
-                {
-                    write!(writer, "{}", self.wrap_text(&text.text))?;
-                    writeln!(writer)?;
-                }
+                write!(writer, "{}", self.wrap_text(&text.text))?;
+                writeln!(writer)?;
             }
-            ContentBlock::Thinking(thinking) => {
-                if options.should_include_thinking() {
-                    self.write_thinking(writer, thinking)?;
-                }
-            }
-            ContentBlock::ToolUse(tool_use) => {
-                if options.should_include_tool_use() {
-                    self.write_tool_use(writer, tool_use)?;
-                }
-            }
-            ContentBlock::ToolResult(result) => {
-                if options.should_include_tool_results() {
-                    self.write_tool_result(writer, result)?;
-                }
-            }
+            ContentBlock::Thinking(thinking) => self.write_thinking(writer, thinking)?,
+            ContentBlock::ToolUse(tool_use) => self.write_tool_use(writer, tool_use)?,
+            ContentBlock::ToolResult(result) => self.write_tool_result(writer, result)?,
             ContentBlock::Image(image) => {
-                if options.include_images {
-                    let media_type = image.source.media_type().unwrap_or("image");
-                    writeln!(writer, "[Image: {media_type}]")?;
-                }
+                let media_type = image.source.media_type().unwrap_or("image");
+                writeln!(writer, "[Image: {media_type}]")?;
             }
         }
         Ok(())

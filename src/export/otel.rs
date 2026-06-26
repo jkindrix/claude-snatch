@@ -554,8 +554,9 @@ impl OtelExporter {
                             self.truncate_content(&extract_text_content(assistant_entry), 1000),
                         ));
 
-                        // Add thinking as events if enabled
-                        if self.include_thinking_events && options.should_include_thinking() {
+                        // Add thinking as events if enabled (block-level content
+                        // filtering already applied upstream by the transform)
+                        if self.include_thinking_events {
                             if let Some(thinking) = extract_thinking_content(assistant_entry) {
                                 turn_events.push(SpanEvent {
                                     name: "thinking".to_string(),
@@ -569,7 +570,7 @@ impl OtelExporter {
                         }
 
                         // Add tool calls as child spans
-                        if self.include_tool_details && options.should_include_tool_use() {
+                        if self.include_tool_details {
                             let tool_calls = extract_tool_calls(assistant_entry);
                             for (tool_idx, (tool_name, tool_input)) in tool_calls.iter().enumerate()
                             {

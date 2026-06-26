@@ -15,7 +15,7 @@ use crate::model::{
 };
 use crate::reconstruction::Conversation;
 
-use super::{ContentType, ExportOptions, Exporter};
+use super::{ExportOptions, Exporter};
 
 /// XML exporter for conversation data.
 #[derive(Debug, Clone)]
@@ -327,13 +327,13 @@ impl XmlExporter {
             self.write_open_tag(writer, 3, "content", &[])?;
             match &user.message {
                 crate::model::UserContent::Simple(s) => {
-                    if options.should_include_user_text() {
+                    if !s.content.is_empty() {
                         self.write_cdata(writer, 4, "text", &s.content)?;
                     }
                 }
                 crate::model::UserContent::Blocks(b) => {
                     for block in &b.content {
-                        self.write_content_block(writer, 4, block, options, true)?;
+                        self.write_content_block(writer, 4, block)?;
                     }
                 }
             }
@@ -411,7 +411,7 @@ impl XmlExporter {
             // Content
             self.write_open_tag(writer, 3, "content", &[])?;
             for block in &assistant.message.content {
-                self.write_content_block(writer, 4, block, options, false)?;
+                self.write_content_block(writer, 4, block)?;
             }
             self.write_close_tag(writer, 3, "content")?;
 
@@ -421,44 +421,23 @@ impl XmlExporter {
     }
 
     /// Write a content block.
+    /// Block-level filtering happens upstream in the dispatch transform, so this
+    /// renders whatever blocks it receives.
     fn write_content_block<W: Write>(
         &self,
         writer: &mut W,
         depth: usize,
         block: &ContentBlock,
-        options: &ExportOptions,
-        is_user: bool,
     ) -> Result<()> {
         match block {
             ContentBlock::Unknown { .. } => {}
-            ContentBlock::Text(text) => {
-                // Role-aware text gate (issue 0016 residual b).
-                if (is_user && options.should_include_user_text())
-                    || (!is_user && options.should_include(ContentType::Assistant))
-                {
-                    self.write_cdata(writer, depth, "text", &text.text)?;
-                }
-            }
-            ContentBlock::Thinking(thinking) => {
-                if options.should_include_thinking() {
-                    self.write_thinking(writer, depth, thinking)?;
-                }
-            }
-            ContentBlock::ToolUse(tool_use) => {
-                if options.should_include_tool_use() {
-                    self.write_tool_use(writer, depth, tool_use)?;
-                }
-            }
-            ContentBlock::ToolResult(result) => {
-                if options.should_include_tool_results() {
-                    self.write_tool_result(writer, depth, result)?;
-                }
-            }
+            ContentBlock::Text(text) => self.write_cdata(writer, depth, "text", &text.text)?,
+            ContentBlock::Thinking(thinking) => self.write_thinking(writer, depth, thinking)?,
+            ContentBlock::ToolUse(tool_use) => self.write_tool_use(writer, depth, tool_use)?,
+            ContentBlock::ToolResult(result) => self.write_tool_result(writer, depth, result)?,
             ContentBlock::Image(image) => {
-                if options.include_images {
-                    let media_type = image.source.media_type().unwrap_or("image/unknown");
-                    self.write_empty_tag(writer, depth, "image", &[("media-type", media_type)])?;
-                }
+                let media_type = image.source.media_type().unwrap_or("image/unknown");
+                self.write_empty_tag(writer, depth, "image", &[("media-type", media_type)])?;
             }
         }
         Ok(())
