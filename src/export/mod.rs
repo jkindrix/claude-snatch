@@ -1219,6 +1219,25 @@ fn redact_entry_text(entry: &mut LogEntry, options: &ExportOptions) {
     }
 }
 
+/// Apply export-time content transforms to a conversation, returning a borrowed
+/// handle when nothing is configured and an owned, transformed copy otherwise.
+///
+/// This is the single chokepoint every export path must funnel through so that
+/// `--redact` applies uniformly regardless of which dispatcher renders the
+/// output. Structure-preserving: only text content is rewritten. `raw-jsonl` is
+/// the one exception — it is byte-faithful and rejects `--redact` at validation,
+/// so it never reaches here.
+#[must_use]
+pub fn apply_export_transform<'a>(
+    conversation: &'a Conversation,
+    options: &ExportOptions,
+) -> std::borrow::Cow<'a, Conversation> {
+    if options.redaction.is_none() {
+        return std::borrow::Cow::Borrowed(conversation);
+    }
+    std::borrow::Cow::Owned(conversation.map_entries(|entry| redact_entry_text(entry, options)))
+}
+
 /// Export a conversation to a file.
 ///
 /// This function uses atomic file writes to ensure data integrity.
@@ -1234,16 +1253,11 @@ pub fn export_to_file(
     let path = path.as_ref();
     debug!(nodes = conversation.len(), "Exporting conversation to file");
 
-    // Apply redaction once, up front, when configured — structure-preserving, so
-    // every downstream exporter renders already-redacted entries. raw-jsonl/jsonl
-    // route through separate paths and intentionally never reach here.
-    let redacted_conv;
-    let conversation = if options.redaction.is_some() {
-        redacted_conv = conversation.map_entries(|e| redact_entry_text(e, options));
-        &redacted_conv
-    } else {
-        conversation
-    };
+    // Apply transforms once, up front, so every downstream exporter renders
+    // already-transformed entries. raw-jsonl routes through a separate path and
+    // intentionally never reaches here.
+    let transformed = apply_export_transform(conversation, options);
+    let conversation = transformed.as_ref();
 
     // SQLite handles its own file creation
     if matches!(format, ExportFormat::Sqlite) {
@@ -1322,14 +1336,9 @@ pub fn export_to_string(
         "Exporting conversation to string"
     );
 
-    // Apply redaction once, up front, when configured (see `export_to_file`).
-    let redacted_conv;
-    let conversation = if options.redaction.is_some() {
-        redacted_conv = conversation.map_entries(|e| redact_entry_text(e, options));
-        &redacted_conv
-    } else {
-        conversation
-    };
+    // Apply transforms once, up front (see `export_to_file`).
+    let transformed = apply_export_transform(conversation, options);
+    let conversation = transformed.as_ref();
 
     let mut buffer = Vec::new();
 

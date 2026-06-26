@@ -257,6 +257,10 @@ pub async fn export_conversation_async<W: std::io::Write + Send + 'static>(
         OtelExporter, TextExporter, XmlExporter,
     };
 
+    // Single transform chokepoint: apply redaction/filtering before rendering so
+    // async export honors --redact like the CLI (issue 0016).
+    let conversation = crate::export::apply_export_transform(&conversation, &options).into_owned();
+
     // Run the export in a blocking task
     tokio::task::spawn_blocking(move || match format {
         ExportFormat::Markdown => {

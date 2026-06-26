@@ -1896,6 +1896,11 @@ impl AppState {
         format: &ExportFormat,
         options: &ExportOptions,
     ) -> Result<()> {
+        // Single transform chokepoint: apply redaction/filtering before any export
+        // branch so the TUI honors --redact like the CLI (issue 0016).
+        let transformed = crate::export::apply_export_transform(conversation, options);
+        let conversation = transformed.as_ref();
+
         // Handle SQLite separately as it manages its own file
         if matches!(format, ExportFormat::Sqlite) {
             let exporter = SqliteExporter::new();

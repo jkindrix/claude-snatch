@@ -124,6 +124,49 @@ fn test_export_produces_output() {
         .stdout(predicate::str::contains("Hello"));
 }
 
+/// Build a temp Claude dir holding a session whose user prompt contains a planted
+/// secret email, for end-to-end redaction tests.
+fn setup_secret_fixture_dir() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let encoded = encode_project_path(PROJECT_PATH);
+    let project_dir = tmp.path().join("projects").join(&encoded);
+    std::fs::create_dir_all(&project_dir).expect("failed to create project dir");
+
+    let lines: &[&str] = &[
+        r#"{"type":"user","uuid":"11111111-1111-1111-1111-111111111111","parentUuid":null,"timestamp":"2025-01-15T10:00:00.000Z","sessionId":"SESSID","version":"2.1.193","message":{"role":"user","content":"My email is secret@example.com, please remember it."}}"#,
+        r#"{"type":"assistant","uuid":"22222222-2222-2222-2222-222222222222","parentUuid":"11111111-1111-1111-1111-111111111111","timestamp":"2025-01-15T10:00:01.000Z","sessionId":"SESSID","version":"2.1.193","message":{"id":"msg_001","type":"message","role":"assistant","content":[{"type":"text","text":"Noted."}],"model":"claude-sonnet-4-20250514","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}}"#,
+    ];
+    let jsonl = lines.join("\n").replace("SESSID", SESSION_ID) + "\n";
+    let session_file = project_dir.join(format!("{SESSION_ID}.jsonl"));
+    std::fs::write(&session_file, jsonl).expect("failed to write secret fixture");
+    tmp
+}
+
+/// Regression guard for issue 0016: `--redact all` must remove secrets through the
+/// real CLI dispatch (not just the module-level `export_to_string`). The control
+/// assertion (secret present without `--redact`) proves redaction is acting rather
+/// than the secret merely being absent.
+#[test]
+fn test_export_redact_removes_secret_via_cli() {
+    let tmp = setup_secret_fixture_dir();
+
+    // Control: without --redact, the secret is present.
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["export", SESSION_ID, "-f", "markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("secret@example.com"));
+
+    // With --redact all, the secret must be gone.
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["export", SESSION_ID, "-f", "markdown", "--redact", "all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("secret@example.com").not());
+}
+
 // =============================================================================
 // info
 // =============================================================================

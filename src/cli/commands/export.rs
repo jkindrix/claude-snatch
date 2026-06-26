@@ -397,6 +397,10 @@ fn export_session_to_gist(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
         }
     };
 
+    // Apply redaction/filtering once before rendering (single transform
+    // chokepoint; the local export_to_string below bypasses it otherwise — 0016).
+    let conversation = crate::export::apply_export_transform(&conversation, &options).into_owned();
+
     // Export to string. Gist is single-file (no chain reconstruction), so no
     // chain envelope metadata is attached.
     let content = export_to_string(
@@ -524,6 +528,12 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
             only: only_filter,
         }
     };
+
+    // Apply redaction/filtering once, before any export branch (sqlite/file/
+    // stdout) below, so every path renders already-transformed entries. This is
+    // the single transform chokepoint; without it the direct exporter calls in
+    // this function bypass redaction entirely (issue 0016).
+    let conversation = crate::export::apply_export_transform(&conversation, &options).into_owned();
 
     // Handle SQLite separately as it manages its own file
     if matches!(args.format, ExportFormatArg::Sqlite) {
@@ -1426,6 +1436,10 @@ fn export_session(
         }
     };
 
+    // Apply redaction/filtering once, before any export branch (sqlite/clipboard/
+    // file/stdout) below — the single transform chokepoint (issue 0016).
+    let conversation = crate::export::apply_export_transform(&conversation, &options).into_owned();
+
     // Handle SQLite separately as it manages its own file
     if matches!(args.format, ExportFormatArg::Sqlite) {
         if args.clipboard {
@@ -1902,6 +1916,22 @@ fn export_session_with_template(
     if args.warn_pii {
         check_for_pii(&conversation, cli.quiet);
     }
+
+    // Apply redaction before any template render branch — templates otherwise
+    // bypass --redact (issue 0016). Only transform when redaction is configured
+    // so the common path keeps the borrowed conversation. (--only filtering is
+    // not modeled for the custom-template renderer.)
+    let redaction = args.redact.map(|level| level.into());
+    let conversation = if redaction.is_some() {
+        let opts = ExportOptions {
+            redaction,
+            redaction_preview: args.redact_preview,
+            ..Default::default()
+        };
+        crate::export::apply_export_transform(&conversation, &opts).into_owned()
+    } else {
+        conversation
+    };
 
     // Handle clipboard export
     if args.clipboard {

@@ -257,6 +257,10 @@ impl SnatchClient {
         options: &ExportOptions,
     ) -> Result<String> {
         let conversation = self.build_conversation(session_id)?;
+        // Single transform chokepoint: apply redaction/filtering before rendering
+        // so the API surface honors --redact like the CLI (issue 0016).
+        let conversation =
+            crate::export::apply_export_transform(&conversation, options).into_owned();
         let mut buffer = Cursor::new(Vec::new());
 
         match format {
