@@ -247,7 +247,7 @@ impl TextExporter {
             }
             crate::model::UserContent::Blocks(blocks) => {
                 for content in &blocks.content {
-                    self.write_content_block(writer, content, options)?;
+                    self.write_content_block(writer, content, options, true)?;
                 }
             }
         }
@@ -272,7 +272,7 @@ impl TextExporter {
 
         // Write content blocks
         for content in &assistant.message.content {
-            self.write_content_block(writer, content, options)?;
+            self.write_content_block(writer, content, options, false)?;
         }
 
         // Usage
@@ -298,6 +298,7 @@ impl TextExporter {
         writer: &mut W,
         content: &ContentBlock,
         options: &ExportOptions,
+        is_user: bool,
     ) -> Result<()> {
         match content {
             ContentBlock::Unknown { kind, raw } => {
@@ -315,8 +316,10 @@ impl TextExporter {
                 writeln!(writer)?;
             }
             ContentBlock::Text(text) => {
-                // Use should_include() directly for text content to respect exclusive filter
-                if options.should_include(ContentType::Assistant) {
+                // Role-aware text gate (issue 0016 residual b).
+                if (is_user && options.should_include_user_text())
+                    || (!is_user && options.should_include(ContentType::Assistant))
+                {
                     write!(writer, "{}", self.wrap_text(&text.text))?;
                     writeln!(writer)?;
                 }

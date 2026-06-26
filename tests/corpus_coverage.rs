@@ -475,3 +475,34 @@ fn only_user_includes_tool_results_unlike_prompts() {
         "--only user must differ from --only prompts"
     );
 }
+
+/// Regression guard for issue 0016 residual (b): user-role text is gated by the
+/// user-text filter, not the assistant filter. Under `--only prompts` the user's
+/// (Blocks-variant) text must appear while assistant text is dropped — previously
+/// markdown/text/xml/json wrongly dropped user text via a role-unaware gate.
+/// Routed through `export_to_string` so the dispatch transform is exercised.
+/// (html is excluded: it has a separate, pre-existing gap rendering Blocks-variant
+/// user text — see issue 0017 — unrelated to filtering.)
+#[test]
+fn only_prompts_keeps_user_text_role_aware() {
+    let entries = parse_fixture("content_blocks_session.jsonl");
+    let conversation = Conversation::from_entries(entries).expect("build conversation");
+    let opts = ExportOptions::default().with_only([ContentType::Prompts].into_iter().collect());
+    for fmt in [
+        ExportFormat::Markdown,
+        ExportFormat::Text,
+        ExportFormat::Xml,
+        ExportFormat::Json,
+    ] {
+        let out = export_to_string(&conversation, fmt, &opts)
+            .unwrap_or_else(|e| panic!("{fmt:?} export should succeed: {e}"));
+        assert!(
+            out.contains("Here are three images"),
+            "{fmt:?}: --only prompts must keep user text"
+        );
+        assert!(
+            !out.contains("Searching and looking up"),
+            "{fmt:?}: --only prompts must drop assistant text"
+        );
+    }
+}

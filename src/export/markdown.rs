@@ -242,7 +242,7 @@ impl MarkdownExporter {
             }
             crate::model::UserContent::Blocks(blocks) => {
                 for content in &blocks.content {
-                    self.write_content_block(writer, content, options)?;
+                    self.write_content_block(writer, content, options, true)?;
                 }
             }
         }
@@ -271,7 +271,7 @@ impl MarkdownExporter {
 
         // Write content blocks
         for content in &assistant.message.content {
-            self.write_content_block(writer, content, options)?;
+            self.write_content_block(writer, content, options, false)?;
         }
 
         // Stop reason and usage
@@ -304,6 +304,7 @@ impl MarkdownExporter {
         writer: &mut W,
         content: &ContentBlock,
         options: &ExportOptions,
+        is_user: bool,
     ) -> Result<()> {
         match content {
             ContentBlock::Unknown { kind, raw } => {
@@ -338,8 +339,12 @@ impl MarkdownExporter {
                         writeln!(writer, "```")?;
                         writeln!(writer)?;
                     }
-                } else if options.should_include(ContentType::Assistant) {
-                    // Use should_include() directly for text content to respect exclusive filter
+                } else if (is_user && options.should_include_user_text())
+                    || (!is_user && options.should_include(ContentType::Assistant))
+                {
+                    // Role-aware: user text follows the user-text filter, assistant
+                    // text the assistant filter (issue 0016 residual b). Tool
+                    // results live in user entries but are not user *text*.
                     writeln!(writer, "{}", text.text)?;
                     writeln!(writer)?;
                 }

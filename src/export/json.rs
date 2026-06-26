@@ -200,6 +200,7 @@ impl FilteredEntry {
             || !options.include_tool_results
             || !options.include_images
         {
+            let is_user = matches!(entry, LogEntry::User(_));
             if let Some(content) = value.get_mut("message").and_then(|m| m.get_mut("content")) {
                 if let Some(arr) = content.as_array_mut() {
                     arr.retain(|block| {
@@ -209,7 +210,9 @@ impl FilteredEntry {
                             Some("tool_use") => options.should_include_tool_use(),
                             Some("tool_result") => options.should_include_tool_results(),
                             Some("image") => options.include_images,
-                            // Use should_include() directly for text to respect exclusive filter
+                            // Role-aware text gate (issue 0016 residual b): user text
+                            // follows the user-text filter, assistant text its own.
+                            Some("text") if is_user => options.should_include_user_text(),
                             Some("text") => options.should_include(ContentType::Assistant),
                             _ => true,
                         }

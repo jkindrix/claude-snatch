@@ -333,7 +333,7 @@ impl XmlExporter {
                 }
                 crate::model::UserContent::Blocks(b) => {
                     for block in &b.content {
-                        self.write_content_block(writer, 4, block, options)?;
+                        self.write_content_block(writer, 4, block, options, true)?;
                     }
                 }
             }
@@ -411,7 +411,7 @@ impl XmlExporter {
             // Content
             self.write_open_tag(writer, 3, "content", &[])?;
             for block in &assistant.message.content {
-                self.write_content_block(writer, 4, block, options)?;
+                self.write_content_block(writer, 4, block, options, false)?;
             }
             self.write_close_tag(writer, 3, "content")?;
 
@@ -427,12 +427,15 @@ impl XmlExporter {
         depth: usize,
         block: &ContentBlock,
         options: &ExportOptions,
+        is_user: bool,
     ) -> Result<()> {
         match block {
             ContentBlock::Unknown { .. } => {}
             ContentBlock::Text(text) => {
-                // Use should_include() directly for text content to respect exclusive filter
-                if options.should_include(ContentType::Assistant) {
+                // Role-aware text gate (issue 0016 residual b).
+                if (is_user && options.should_include_user_text())
+                    || (!is_user && options.should_include(ContentType::Assistant))
+                {
                     self.write_cdata(writer, depth, "text", &text.text)?;
                 }
             }
