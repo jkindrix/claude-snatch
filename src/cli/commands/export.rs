@@ -397,7 +397,8 @@ fn export_session_to_gist(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
         }
     };
 
-    // Export to string
+    // Export to string. Gist is single-file (no chain reconstruction), so no
+    // chain envelope metadata is attached.
     let content = export_to_string(
         &conversation,
         args.format,
@@ -406,6 +407,7 @@ fn export_session_to_gist(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
         args.main_thread,
         args.toc,
         args.dark,
+        None,
     )?;
 
     // Generate filename
@@ -1146,6 +1148,13 @@ fn raw_chain_source_paths(
                 if paths.len() == chain.len() {
                     return Ok((paths, Some((chain.root_id.clone(), chain.len()))));
                 }
+                // A chain was detected but some member files could not be
+                // resolved. For an archival passthrough, do not silently degrade
+                // to the single file — fail clearly.
+                return Err(SnatchError::export(
+                    "Detected a chain, but could not resolve all member files for raw-jsonl \
+                     passthrough. Use --no-chain to export only the resolved file.",
+                ));
             }
         }
     }
@@ -1294,6 +1303,7 @@ fn export_session(
             args.main_thread,
             args.toc,
             args.dark,
+            chain_export.clone(),
         )?;
 
         match arboard::Clipboard::new() {
@@ -1631,6 +1641,7 @@ fn upload_to_gist(
 
 /// Export a conversation to a string for gist upload.
 #[allow(clippy::fn_params_excessive_bools)]
+#[allow(clippy::too_many_arguments)]
 fn export_to_string(
     conversation: &Conversation,
     format: ExportFormatArg,
@@ -1639,6 +1650,7 @@ fn export_to_string(
     main_thread_only: bool,
     toc: bool,
     dark: bool,
+    chain: Option<ChainExportMeta>,
 ) -> Result<String> {
     let mut buffer = Vec::new();
 
@@ -1648,11 +1660,11 @@ fn export_to_string(
             exporter.export_conversation(conversation, &mut buffer, options)?;
         }
         ExportFormatArg::Json => {
-            let exporter = JsonExporter::new().pretty(pretty);
+            let exporter = JsonExporter::new().pretty(pretty).with_chain(chain);
             exporter.export_conversation(conversation, &mut buffer, options)?;
         }
         ExportFormatArg::JsonPretty => {
-            let exporter = JsonExporter::new().pretty(true);
+            let exporter = JsonExporter::new().pretty(true).with_chain(chain);
             exporter.export_conversation(conversation, &mut buffer, options)?;
         }
         ExportFormatArg::Text => {
