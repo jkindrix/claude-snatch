@@ -167,6 +167,39 @@ fn test_export_redact_removes_secret_via_cli() {
         .stdout(predicate::str::contains("secret@example.com").not());
 }
 
+/// Build a temp Claude dir whose only PII (an email) lives inside a tool result
+/// in a user-role entry — the case `--warn-pii` was blind to (issue 0002).
+fn setup_tool_result_pii_dir() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let encoded = encode_project_path(PROJECT_PATH);
+    let project_dir = tmp.path().join("projects").join(&encoded);
+    std::fs::create_dir_all(&project_dir).expect("failed to create project dir");
+
+    let lines: &[&str] = &[
+        r#"{"type":"user","uuid":"11111111-1111-1111-1111-111111111111","parentUuid":null,"timestamp":"2025-01-15T10:00:00.000Z","sessionId":"SESSID","version":"2.1.193","message":{"role":"user","content":"show the git log"}}"#,
+        r#"{"type":"assistant","uuid":"22222222-2222-2222-2222-222222222222","parentUuid":"11111111-1111-1111-1111-111111111111","timestamp":"2025-01-15T10:00:01.000Z","sessionId":"SESSID","version":"2.1.193","message":{"id":"m1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"git log"}}],"model":"claude-sonnet-4","stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+        r#"{"type":"user","uuid":"33333333-3333-3333-3333-333333333333","parentUuid":"22222222-2222-2222-2222-222222222222","timestamp":"2025-01-15T10:00:02.000Z","sessionId":"SESSID","version":"2.1.193","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"Author: leaked@example.com committed"}]}}"#,
+    ];
+    let jsonl = lines.join("\n").replace("SESSID", SESSION_ID) + "\n";
+    std::fs::write(project_dir.join(format!("{SESSION_ID}.jsonl")), jsonl)
+        .expect("failed to write tool-result PII fixture");
+    tmp
+}
+
+/// Regression guard for issue 0002: `--warn-pii` must scan tool-result content,
+/// not just user/assistant prose. The email lives only inside a tool result in a
+/// user-role entry; the warning is printed to stderr.
+#[test]
+fn test_warn_pii_detects_tool_result_pii() {
+    let tmp = setup_tool_result_pii_dir();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["export", SESSION_ID, "-f", "markdown", "--warn-pii"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("PII").and(predicate::str::contains("email")));
+}
+
 // =============================================================================
 // info
 // =============================================================================

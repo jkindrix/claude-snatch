@@ -1661,7 +1661,7 @@ fn check_for_pii(conversation: &Conversation, quiet: bool) -> HashSet<SensitiveD
         let texts = extract_entry_texts(entry);
 
         for text in texts {
-            let types = detect_sensitive(text, &config);
+            let types = detect_sensitive(&text, &config);
             for data_type in types {
                 if detected_types.insert(data_type) && !quiet && sample_count < MAX_SAMPLES {
                     // Print the first warning for this type
@@ -1689,43 +1689,50 @@ fn check_for_pii(conversation: &Conversation, quiet: bool) -> HashSet<SensitiveD
     detected_types
 }
 
-/// Extract text content from a log entry.
-fn extract_entry_texts(entry: &LogEntry) -> Vec<&str> {
-    let mut texts = Vec::new();
+/// Extract scannable text from a log entry for PII detection.
+///
+/// Returns owned strings (rather than borrows) so tool-result content can be
+/// included: tool results live in **user-role** entries and may carry PII that
+/// exists nowhere else (issue 0002). Coverage mirrors what `--redact` scrubs —
+/// user/assistant text + thinking, string and array tool results, system, and
+/// summary — plus tool-use JSON input.
+fn extract_entry_texts(entry: &LogEntry) -> Vec<String> {
+    use crate::model::{ToolResultContent, UserContent};
 
+    fn push_blocks(blocks: &[ContentBlock], texts: &mut Vec<String>) {
+        for content in blocks {
+            match content {
+                ContentBlock::Text(t) => texts.push(t.text.clone()),
+                ContentBlock::Thinking(th) => texts.push(th.thinking.clone()),
+                ContentBlock::ToolUse(tool) => match tool.input.as_str() {
+                    Some(input_str) => texts.push(input_str.to_string()),
+                    None => texts.push(tool.input.to_string()),
+                },
+                ContentBlock::ToolResult(result) => match &result.content {
+                    Some(ToolResultContent::String(s)) => texts.push(s.clone()),
+                    Some(ToolResultContent::Array(arr)) => {
+                        texts.push(serde_json::to_string(arr).unwrap_or_default());
+                    }
+                    None => {}
+                },
+                _ => {}
+            }
+        }
+    }
+
+    let mut texts = Vec::new();
     match entry {
-        LogEntry::User(user) => {
-            if let Some(text) = user.message.as_text() {
-                texts.push(text);
-            }
-        }
-        LogEntry::Assistant(assistant) => {
-            for content in &assistant.message.content {
-                match content {
-                    ContentBlock::Text(t) => texts.push(&t.text),
-                    ContentBlock::Thinking(th) => texts.push(&th.thinking),
-                    ContentBlock::ToolUse(tool) => {
-                        // Check tool input as JSON string
-                        if let Some(input_str) = tool.input.as_str() {
-                            texts.push(input_str);
-                        }
-                    }
-                    ContentBlock::ToolResult(result) => {
-                        if let Some(content_str) = result.content_as_string() {
-                            // Can't push borrowed string from owned, so we skip this for now
-                            // The text will be detected when it appears elsewhere
-                            let _ = content_str;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+        LogEntry::User(user) => match &user.message {
+            UserContent::Simple(simple) => texts.push(simple.content.clone()),
+            UserContent::Blocks(blocks) => push_blocks(&blocks.content, &mut texts),
+        },
+        LogEntry::Assistant(assistant) => push_blocks(&assistant.message.content, &mut texts),
         LogEntry::System(system) => {
             if let Some(content) = &system.content {
-                texts.push(content);
+                texts.push(content.clone());
             }
         }
+        LogEntry::Summary(summary) => texts.push(summary.summary.clone()),
         _ => {}
     }
 
