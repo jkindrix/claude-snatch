@@ -807,16 +807,9 @@ impl MarkdownExporter {
             }
             LogEntry::User(user) => {
                 if options.should_include_user() {
-                    // Under exclusive filtering, skip a user entry only if nothing
-                    // will render: no visible text, and its tool results are not
-                    // being included. (Pure tool-result entries must survive
-                    // --only tool-results / --only user.)
-                    if options.has_exclusive_filter()
-                        && !user.message.has_visible_text()
-                        && !options.should_include_tool_results()
-                    {
-                        return Ok(());
-                    }
+                    // write_user_message renders the (already block-filtered) entry
+                    // and self-skips when nothing remains, so no entry-level
+                    // content heuristic is needed here.
                     self.write_user_message(writer, user, options)?;
                 }
             }
