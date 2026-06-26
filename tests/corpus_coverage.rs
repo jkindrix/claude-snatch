@@ -10,12 +10,15 @@ use std::io::Cursor;
 use std::path::PathBuf;
 
 use claude_snatch::discovery::Session;
-use claude_snatch::export::{ContentType, ExportOptions, Exporter, MarkdownExporter};
+use claude_snatch::export::{
+    export_to_string, ContentType, ExportFormat, ExportOptions, Exporter, MarkdownExporter,
+};
 use claude_snatch::model::{
     CompactTrigger, ContentBlock, ImageSource, LogEntry, StopReason, SystemSubtype, ToolResult,
     ToolUse, UserContent,
 };
 use claude_snatch::parser::JsonlParser;
+use claude_snatch::reconstruction::Conversation;
 
 /// Render entries to a markdown string with the given options.
 fn markdown_with(entries: &[LogEntry], opts: &ExportOptions) -> String {
@@ -340,16 +343,16 @@ fn assistant_stop_reason_parses() {
     );
 }
 
-/// Regression guard for issue 0001: redaction is plumbed into ExportOptions but
-/// no exporter calls it, so `--redact all` silently passes secrets through.
-/// Ignored until the transform pass (Phase 1) applies redaction; flip to active
-/// to verify the fix.
+/// Regression guard for issue 0001: `--redact all` must remove secrets from
+/// export output. Fixed in Phase 1 by the dispatch-level redaction transform
+/// (`export_to_string`/`export_to_file` → `Conversation::map_entries`).
 #[test]
-#[ignore = "blocked by issue 0001: exporters never apply the redaction config"]
 fn redaction_removes_planted_secret() {
     let entries = parse_fixture("redaction_session.jsonl");
+    let conversation = Conversation::from_entries(entries).expect("build conversation");
     let opts = ExportOptions::default().with_full_redaction();
-    let out = markdown_with(&entries, &opts);
+    let out = export_to_string(&conversation, ExportFormat::Markdown, &opts)
+        .expect("redacted export should succeed");
     assert!(
         !out.contains("secret@example.com"),
         "the planted email should be redacted from --redact all output"

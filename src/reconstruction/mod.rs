@@ -88,7 +88,7 @@ impl ConversationNode {
 }
 
 /// A reconstructed conversation with tree structure.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Conversation {
     /// All nodes indexed by UUID.
     nodes: IndexMap<String, ConversationNode>,
@@ -672,6 +672,28 @@ impl Conversation {
             entries.extend(self.chronological_entries());
         }
         entries
+    }
+
+    /// Return a copy of this conversation with `f` applied to every owned
+    /// `LogEntry` — node entries, orphan entries, and dropped-duplicate entries.
+    ///
+    /// The tree structure (UUIDs, parent/child links, ordering) is preserved, so
+    /// this is only sound for content transforms that do not alter entry identity
+    /// (e.g. redaction rewriting text in place). Cloning the whole conversation is
+    /// the cost of transforming once, up front, rather than per exporter.
+    #[must_use]
+    pub fn map_entries(&self, mut f: impl FnMut(&mut LogEntry)) -> Self {
+        let mut cloned = self.clone();
+        for node in cloned.nodes.values_mut() {
+            f(&mut node.entry);
+        }
+        for entry in &mut cloned.orphan_entries {
+            f(entry);
+        }
+        for dup in &mut cloned.duplicate_uuids {
+            f(&mut dup.dropped);
+        }
+        cloned
     }
 
     /// Get all entries in chronological order (flattened tree).

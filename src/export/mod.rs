@@ -1153,6 +1153,57 @@ pub trait Exporter {
     ) -> Result<()>;
 }
 
+/// Apply the configured redaction to the text-bearing fields of one entry,
+/// in place. Reuses [`ExportOptions::redact`], so it honours preview mode.
+///
+/// Covers human-visible text: user content, assistant text/thinking, string
+/// tool results, system content, and summaries. Tool-use JSON inputs and array
+/// tool-result payloads are not yet walked (tracked as a follow-up).
+fn redact_entry_text(entry: &mut LogEntry, options: &ExportOptions) {
+    use crate::model::{ContentBlock, ToolResultContent, UserContent};
+
+    fn red(s: &mut String, options: &ExportOptions) {
+        let redacted = options.redact(s).into_owned();
+        *s = redacted;
+    }
+
+    fn red_block(block: &mut ContentBlock, options: &ExportOptions) {
+        match block {
+            ContentBlock::Text(t) => red(&mut t.text, options),
+            ContentBlock::Thinking(th) => red(&mut th.thinking, options),
+            ContentBlock::ToolResult(tr) => {
+                if let Some(ToolResultContent::String(s)) = &mut tr.content {
+                    red(s, options);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    match entry {
+        LogEntry::User(u) => match &mut u.message {
+            UserContent::Simple(s) => red(&mut s.content, options),
+            UserContent::Blocks(b) => {
+                for block in &mut b.content {
+                    red_block(block, options);
+                }
+            }
+        },
+        LogEntry::Assistant(a) => {
+            for block in &mut a.message.content {
+                red_block(block, options);
+            }
+        }
+        LogEntry::System(s) => {
+            if let Some(content) = &mut s.content {
+                red(content, options);
+            }
+        }
+        LogEntry::Summary(s) => red(&mut s.summary, options),
+        _ => {}
+    }
+}
+
 /// Export a conversation to a file.
 ///
 /// This function uses atomic file writes to ensure data integrity.
@@ -1167,6 +1218,17 @@ pub fn export_to_file(
 ) -> Result<()> {
     let path = path.as_ref();
     debug!(nodes = conversation.len(), "Exporting conversation to file");
+
+    // Apply redaction once, up front, when configured — structure-preserving, so
+    // every downstream exporter renders already-redacted entries. raw-jsonl/jsonl
+    // route through separate paths and intentionally never reach here.
+    let redacted_conv;
+    let conversation = if options.redaction.is_some() {
+        redacted_conv = conversation.map_entries(|e| redact_entry_text(e, options));
+        &redacted_conv
+    } else {
+        conversation
+    };
 
     // SQLite handles its own file creation
     if matches!(format, ExportFormat::Sqlite) {
@@ -1244,6 +1306,16 @@ pub fn export_to_string(
         nodes = conversation.len(),
         "Exporting conversation to string"
     );
+
+    // Apply redaction once, up front, when configured (see `export_to_file`).
+    let redacted_conv;
+    let conversation = if options.redaction.is_some() {
+        redacted_conv = conversation.map_entries(|e| redact_entry_text(e, options));
+        &redacted_conv
+    } else {
+        conversation
+    };
+
     let mut buffer = Vec::new();
 
     match format {
