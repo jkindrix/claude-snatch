@@ -739,9 +739,12 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
 
         writeln!(writer, "  <div class=\"message-content\">")?;
 
-        // Write text content
-        if let Some(text) = user.message.as_text() {
-            writeln!(writer, "    <p>{}</p>", escape_html(text))?;
+        // Write text content (suppressed when user text isn't requested, e.g.
+        // --only tool-results, so the prompt text doesn't appear)
+        if options.should_include_user_text() {
+            if let Some(text) = user.message.as_text() {
+                writeln!(writer, "    <p>{}</p>", escape_html(text))?;
+            }
         }
 
         // Write images

@@ -359,11 +359,10 @@ fn redaction_removes_planted_secret() {
     );
 }
 
-/// Regression guard for issue 0003: `--only tool-results` returns zero tool
-/// results because tool results live in user-role entries that the filter skips.
-/// Ignored until the filter is corrected (Phase 1).
+/// Regression guard for issue 0003: `--only tool-results` returns the tool
+/// results that live in user-role entries. Fixed in Phase 1 by making
+/// `should_include_user` reach user entries when tool results are requested.
 #[test]
-#[ignore = "blocked by issue 0003: --only tool-results drops user-entry tool results"]
 fn only_tool_results_includes_tool_results() {
     let entries = parse_fixture("content_blocks_session.jsonl");
     let only: HashSet<ContentType> = [ContentType::ToolResults].into_iter().collect();
@@ -372,5 +371,38 @@ fn only_tool_results_includes_tool_results() {
     assert!(
         out.contains("ok success"),
         "tool-result content should be present under --only tool-results"
+    );
+    // ...and the assistant's prose should not leak in (exclusive filter).
+    assert!(
+        !out.contains("Searching and looking up"),
+        "--only tool-results must not include assistant text"
+    );
+}
+
+/// Regression guard for issue 0004 (resolved as option A): `--only user`
+/// includes the tool results within user entries (matching its help text), so it
+/// differs from `--only prompts`, which is human-typed text only.
+#[test]
+fn only_user_includes_tool_results_unlike_prompts() {
+    let entries = parse_fixture("content_blocks_session.jsonl");
+    let user_out = markdown_with(
+        &entries,
+        &ExportOptions::default().with_only([ContentType::User].into_iter().collect()),
+    );
+    let prompts_out = markdown_with(
+        &entries,
+        &ExportOptions::default().with_only([ContentType::Prompts].into_iter().collect()),
+    );
+    assert!(
+        user_out.contains("ok success"),
+        "--only user should include tool results within user entries"
+    );
+    assert!(
+        !prompts_out.contains("ok success"),
+        "--only prompts should exclude tool results"
+    );
+    assert_ne!(
+        user_out, prompts_out,
+        "--only user must differ from --only prompts"
     );
 }

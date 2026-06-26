@@ -327,7 +327,9 @@ impl XmlExporter {
             self.write_open_tag(writer, 3, "content", &[])?;
             match &user.message {
                 crate::model::UserContent::Simple(s) => {
-                    self.write_cdata(writer, 4, "text", &s.content)?;
+                    if options.should_include_user_text() {
+                        self.write_cdata(writer, 4, "text", &s.content)?;
+                    }
                 }
                 crate::model::UserContent::Blocks(b) => {
                     for block in &b.content {

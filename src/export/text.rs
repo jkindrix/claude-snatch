@@ -241,7 +241,9 @@ impl TextExporter {
         // Write user content
         match &user.message {
             crate::model::UserContent::Simple(simple) => {
-                write!(writer, "{}", self.wrap_text(&simple.content))?;
+                if options.should_include_user_text() {
+                    write!(writer, "{}", self.wrap_text(&simple.content))?;
+                }
             }
             crate::model::UserContent::Blocks(blocks) => {
                 for content in &blocks.content {

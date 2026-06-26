@@ -233,7 +233,12 @@ impl MarkdownExporter {
         // Write user content
         match &user.message {
             crate::model::UserContent::Simple(simple) => {
-                writeln!(writer, "{}", simple.content)?;
+                // Plain-text user content is only shown when user text is
+                // requested — under e.g. --only tool-results the entry is visited
+                // for its tool results, but the prompt text must not leak.
+                if options.should_include_user_text() {
+                    writeln!(writer, "{}", simple.content)?;
+                }
             }
             crate::model::UserContent::Blocks(blocks) => {
                 for content in &blocks.content {
@@ -788,10 +793,14 @@ impl MarkdownExporter {
             }
             LogEntry::User(user) => {
                 if options.should_include_user() {
-                    // Skip user messages that have no visible text content when using
-                    // exclusive filtering (--only user). This prevents empty entries
-                    // from tool results appearing in the output.
-                    if options.has_exclusive_filter() && !user.message.has_visible_text() {
+                    // Under exclusive filtering, skip a user entry only if nothing
+                    // will render: no visible text, and its tool results are not
+                    // being included. (Pure tool-result entries must survive
+                    // --only tool-results / --only user.)
+                    if options.has_exclusive_filter()
+                        && !user.message.has_visible_text()
+                        && !options.should_include_tool_results()
+                    {
                         return Ok(());
                     }
                     self.write_user_message(writer, user, options)?;

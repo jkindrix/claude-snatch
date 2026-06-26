@@ -990,7 +990,26 @@ impl ExportOptions {
     #[must_use]
     pub fn should_include_user(&self) -> bool {
         if self.has_exclusive_filter() {
-            // Include user entries if User or Prompts is in the filter
+            // Visit user entries when their text (User/Prompts) is requested, OR
+            // when tool results are requested — tool results live in user-role
+            // entries, so `--only tool-results` must reach them here.
+            self.only.contains(&ContentType::User)
+                || self.only.contains(&ContentType::Prompts)
+                || self.only.contains(&ContentType::ToolResults)
+        } else {
+            true
+        }
+    }
+
+    /// Whether human-typed user text (Simple content and user Text blocks)
+    /// should be rendered. Distinct from [`should_include_user`], which also
+    /// lets a user entry through so its tool results can render — text and tool
+    /// results within a user entry are filtered independently.
+    ///
+    /// [`should_include_user`]: Self::should_include_user
+    #[must_use]
+    pub fn should_include_user_text(&self) -> bool {
+        if self.has_exclusive_filter() {
             self.only.contains(&ContentType::User) || self.only.contains(&ContentType::Prompts)
         } else {
             true
@@ -1027,18 +1046,14 @@ impl ExportOptions {
 
     /// Check if tool results should be included.
     ///
-    /// When `--only prompts` is used, tool results within user messages are excluded
-    /// unless `--only tool-results` is also specified.
+    /// Tool results render when explicitly requested (`--only tool-results`) or
+    /// when `User` is requested — `--only user` includes the tool results within
+    /// user entries, matching its help text. `--only prompts` is human-typed text
+    /// only and excludes them.
     #[must_use]
     pub fn should_include_tool_results(&self) -> bool {
         if self.has_exclusive_filter() {
-            // If Prompts is in the filter without ToolResults, exclude tool results
-            if self.only.contains(&ContentType::Prompts)
-                && !self.only.contains(&ContentType::ToolResults)
-            {
-                return false;
-            }
-            self.only.contains(&ContentType::ToolResults)
+            self.only.contains(&ContentType::ToolResults) || self.only.contains(&ContentType::User)
         } else {
             self.include_tool_results
         }
