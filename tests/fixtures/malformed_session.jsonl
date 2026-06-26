@@ -1,0 +1,5 @@
+{"type":"user","uuid":"d0000000-0000-0000-0000-000000000001","parentUuid":null,"timestamp":"2026-01-20T08:00:00.000Z","sessionId":"test-malformed-001","version":"2.1.193","message":{"role":"user","content":"A valid prompt."}}
+{"type":"user","uuid":"d0000000-0000-0000-0000-000000000099","truncated line with no closing brace
+this line is not valid json at all
+{"type":"assistant","uuid":"d0000000-0000-0000-0000-000000000001","parentUuid":"d0000000-0000-0000-0000-000000000001","timestamp":"2026-01-20T08:00:01.000Z","sessionId":"test-malformed-001","version":"2.1.193","message":{"id":"msg_dup_001","type":"message","role":"assistant","content":[{"type":"text","text":"Duplicate uuid of line 1, for reconstruction tests."}],"model":"claude-opus-4-20250514","stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":9,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
+{"type":"user","uuid":"d0000000-0000-0000-0000-000000000005","parentUuid":"d0000000-0000-0000-0000-000000000001","timestamp":"2026-01-20T08:00:02.000Z","sessionId":"test-malformed-001","version":"2.1.193","message":{"role":"user","content":"Another valid prompt."}}

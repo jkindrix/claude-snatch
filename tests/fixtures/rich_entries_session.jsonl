@@ -1,0 +1,9 @@
+{"type":"file-history-snapshot","messageId":"f1111111-0000-0000-0000-000000000001","isSnapshotUpdate":false,"snapshot":{"messageId":"f1111111-0000-0000-0000-000000000001","trackedFileBackups":{},"timestamp":"2026-01-17T08:00:00.000Z"}}
+{"type":"queue-operation","operation":"enqueue","content":"<task-notification>queued</task-notification>","sessionId":"test-rich-001","timestamp":"2026-01-17T08:00:01.000Z"}
+{"type":"attachment","uuid":"a0000000-0000-0000-0000-000000000002","parentUuid":null,"timestamp":"2026-01-17T08:00:02.000Z","sessionId":"test-rich-001","version":"2.1.193","attachment":{"type":"hook_success","hookName":"SessionStart:startup","hookEvent":"SessionStart","content":"injected context"}}
+{"type":"progress","uuid":"a0000000-0000-0000-0000-000000000003","parentUuid":null,"timestamp":"2026-01-17T08:00:03.000Z","sessionId":"test-rich-001","version":"2.1.193","isSidechain":true,"toolUseID":"toolu_p01","parentToolUseID":"toolu_p00","data":{"type":"hook_progress","command":"do work","hookEvent":"PostToolUse","hookName":"format"}}
+{"type":"last-prompt","leafUuid":"a0000000-0000-0000-0000-000000000004","sessionId":"test-rich-001"}
+{"type":"mode","mode":"normal","sessionId":"test-rich-001"}
+{"type":"permission-mode","permissionMode":"bypassPermissions","sessionId":"test-rich-001"}
+{"type":"ai-title","aiTitle":"Rich entries coverage fixture","sessionId":"test-rich-001"}
+{"type":"user","uuid":"a0000000-0000-0000-0000-000000000005","parentUuid":null,"timestamp":"2026-01-17T08:00:05.000Z","sessionId":"test-rich-001","version":"2.1.193","todos":[{"content":"do the thing","status":"pending","activeForm":"doing the thing"},{"content":"finish the thing","status":"in_progress","activeForm":"finishing the thing"}],"message":{"role":"user","content":"Update the todo list."}}
