@@ -110,8 +110,11 @@ pub struct ParseError {
     pub line: usize,
     /// Error message.
     pub message: String,
-    /// Original line content (truncated).
-    pub content_preview: String,
+    /// The full original line content, retained for diagnosing real corruption
+    /// (e.g. a truncated trailing line on an active session). The line is
+    /// dropped from parsed output — only this diagnostic copy remains; use
+    /// `-f raw-jsonl` to recover the bytes in context.
+    pub raw_line: String,
 }
 
 impl JsonlParser {
@@ -224,7 +227,7 @@ impl JsonlParser {
                         self.stats.errors.push(ParseError {
                             line: line_num,
                             message: format!("I/O error: {e}"),
-                            content_preview: String::new(),
+                            raw_line: String::new(),
                         });
                         warn!(line = line_num, error = %e, "I/O error reading line, skipping");
                         continue;
@@ -264,7 +267,7 @@ impl JsonlParser {
                         self.stats.errors.push(ParseError {
                             line: line_num,
                             message: e.to_string(),
-                            content_preview: truncate_preview(trimmed, 100),
+                            raw_line: trimmed.to_string(),
                         });
                         trace!(line = line_num, error = %e, "Parse error, skipping line");
                         continue;
@@ -320,22 +323,6 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.1} KB", bytes as f64 / KB as f64)
     } else {
         format!("{bytes} B")
-    }
-}
-
-/// Truncate a string for preview display.
-///
-/// Uses character-aware truncation to avoid panicking on multi-byte UTF-8 characters.
-fn truncate_preview(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        // Find a valid character boundary at or before max_len
-        let mut end = max_len;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}...", &s[..end])
     }
 }
 
@@ -409,7 +396,7 @@ impl<R: BufRead> Iterator for LogEntryIterator<R> {
                         self.errors.push(ParseError {
                             line: self.line_num,
                             message: format!("I/O error: {e}"),
-                            content_preview: String::new(),
+                            raw_line: String::new(),
                         });
                         continue;
                     }
@@ -432,7 +419,7 @@ impl<R: BufRead> Iterator for LogEntryIterator<R> {
                         self.errors.push(ParseError {
                             line: self.line_num,
                             message: e.to_string(),
-                            content_preview: truncate_preview(trimmed, 100),
+                            raw_line: trimmed.to_string(),
                         });
                         continue;
                     }

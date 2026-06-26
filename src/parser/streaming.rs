@@ -513,7 +513,7 @@ impl MmapParser {
                         self.errors.push(crate::parser::ParseError {
                             line: self.line_num,
                             message: format!("Invalid UTF-8: {e}"),
-                            content_preview: String::new(),
+                            raw_line: String::new(),
                         });
                         continue;
                     }
@@ -535,7 +535,7 @@ impl MmapParser {
                         self.errors.push(crate::parser::ParseError {
                             line: self.line_num,
                             message: e.to_string(),
-                            content_preview: line_str.chars().take(100).collect(),
+                            raw_line: line_str.to_string(),
                         });
                         continue;
                     }
