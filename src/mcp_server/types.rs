@@ -470,6 +470,11 @@ pub struct SearchSessionsRequest {
 
     /// Maximum results to return. Default: 20.
     pub limit: Option<usize>,
+
+    /// When `session_id` is set and that session is part of a resume chain,
+    /// search the whole chain. Default: true; set false to restrict to the
+    /// single file.
+    pub chain_aware: Option<bool>,
 }
 
 /// A search result match.

@@ -1155,13 +1155,45 @@ impl SnatchServer {
             Err(e) => return ToolOutput::error(format!("Invalid regex pattern: {e}")),
         };
 
+        let chain_aware = request.chain_aware.unwrap_or(true);
+
         // Determine which sessions to search
         let sessions = if let Some(ref session_id) = request.session_id {
-            match claude_dir.find_session(session_id) {
-                Ok(Some(s)) => vec![s],
+            let session = match claude_dir.find_session(session_id) {
+                Ok(Some(s)) => s,
                 Ok(None) => return ToolOutput::error(format!("Session not found: {session_id}")),
                 Err(e) => return ToolOutput::error(format!("Failed to find session: {e}")),
+            };
+            // When chain-aware and the session is part of a multi-file resume
+            // chain, expand the search to every member file (once), consistent
+            // with the other chain-aware tools.
+            let mut expanded: Option<Vec<Session>> = None;
+            if chain_aware {
+                if let Ok(projects) = claude_dir.projects() {
+                    if let Some(project) = projects.iter().find(|p| {
+                        p.best_path() == session.project_path()
+                            || p.decoded_path() == session.project_path()
+                    }) {
+                        if let Ok(chains) = project.session_chains() {
+                            if let Some(chain) = chains
+                                .values()
+                                .find(|c| c.len() > 1 && c.contains(session.session_id()))
+                            {
+                                let mut members = Vec::new();
+                                for fid in chain.file_ids() {
+                                    if let Ok(Some(s)) = claude_dir.find_session(fid) {
+                                        members.push(s);
+                                    }
+                                }
+                                if !members.is_empty() {
+                                    expanded = Some(members);
+                                }
+                            }
+                        }
+                    }
+                }
             }
+            expanded.unwrap_or_else(|| vec![session])
         } else {
             let mut all = match claude_dir.all_sessions() {
                 Ok(s) => s,
@@ -3567,10 +3599,97 @@ mod tests {
                     scope: None,
                     ignore_case: None,
                     limit: None,
+                    chain_aware: None,
                 })
                 .await,
         );
         assert!(text.contains(sid));
+    }
+
+    /// Build a temp Claude dir with a two-file resume chain. The continuation's
+    /// internal `sessionId` points at the root file's UUID.
+    fn setup_chain_claude_dir(
+        root_id: &str,
+        cont_id: &str,
+        project_path: &str,
+        root_text: &str,
+        cont_text: &str,
+    ) -> TempDir {
+        let tmp = TempDir::new().expect("failed to create temp dir");
+        let encoded = encode_project_path(project_path);
+        let project_dir = tmp.path().join("projects").join(&encoded);
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let root_line = format!(
+            r#"{{"type":"user","uuid":"c1111111-1111-1111-1111-111111111111","parentUuid":null,"timestamp":"2025-01-15T10:00:00.000Z","sessionId":"{root_id}","version":"2.0.74","message":{{"role":"user","content":"{root_text}"}}}}"#
+        );
+        std::fs::write(
+            project_dir.join(format!("{root_id}.jsonl")),
+            format!("{root_line}\n"),
+        )
+        .unwrap();
+        let cont_line = format!(
+            r#"{{"type":"user","uuid":"c2222222-2222-2222-2222-222222222222","parentUuid":null,"timestamp":"2025-01-15T11:00:00.000Z","sessionId":"{root_id}","version":"2.0.74","message":{{"role":"user","content":"{cont_text}"}}}}"#
+        );
+        std::fs::write(
+            project_dir.join(format!("{cont_id}.jsonl")),
+            format!("{cont_line}\n"),
+        )
+        .unwrap();
+        tmp
+    }
+
+    #[tokio::test]
+    async fn test_search_sessions_chain_aware_covers_whole_chain() {
+        let root = "aaaaaaaa-1111-1111-1111-111111111111";
+        let cont = "bbbbbbbb-2222-2222-2222-222222222222";
+        let tmp = setup_chain_claude_dir(
+            root,
+            cont,
+            PROJECT_PATH,
+            "alpha_root_marker only here",
+            "beta_cont_marker only here",
+        );
+        let server = make_server(&tmp);
+
+        // Default (chain-aware): searching the continuation finds text that
+        // lives only in the root file.
+        let text = unwrap_output(
+            server
+                .search_sessions(SearchSessionsRequest {
+                    pattern: "alpha_root_marker".to_string(),
+                    project: None,
+                    session_id: Some(cont.to_string()),
+                    scope: None,
+                    ignore_case: None,
+                    limit: None,
+                    chain_aware: None,
+                })
+                .await,
+        );
+        assert!(
+            text.contains("alpha_root_marker"),
+            "chain-aware search should reach the root file: {text}"
+        );
+
+        // chain_aware=false restricts to the single continuation file, which
+        // does not contain the root-only text.
+        let text = unwrap_output(
+            server
+                .search_sessions(SearchSessionsRequest {
+                    pattern: "alpha_root_marker".to_string(),
+                    project: None,
+                    session_id: Some(cont.to_string()),
+                    scope: None,
+                    ignore_case: None,
+                    limit: None,
+                    chain_aware: Some(false),
+                })
+                .await,
+        );
+        assert!(
+            text.contains("\"total_matches\": 0"),
+            "single-file search should not reach the root file: {text}"
+        );
     }
 
     #[tokio::test]
@@ -3587,6 +3706,7 @@ mod tests {
                     scope: None,
                     ignore_case: None,
                     limit: None,
+                    chain_aware: None,
                 })
                 .await,
         );
