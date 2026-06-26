@@ -1269,6 +1269,30 @@ fn export_raw_jsonl(
             );
         }
     }
+
+    // raw-jsonl is single-file by design; subagent transcripts live in a separate
+    // subagents/ directory and are NOT included. Warn so the omission isn't silent
+    // (issue 0012) — for a session with many subagents this can be most of the
+    // content. There is no byte-faithful subagent-inclusive mode yet.
+    if !cli.quiet {
+        let subagents = session.subagent_links();
+        if !subagents.is_empty() {
+            let total_bytes: u64 = subagents
+                .iter()
+                .filter_map(|link| std::fs::metadata(&link.path).ok().map(|m| m.len()))
+                .sum();
+            let size = if total_bytes >= 1024 * 1024 {
+                format!("{:.1} MB", total_bytes as f64 / (1024.0 * 1024.0))
+            } else {
+                format!("{} KB", total_bytes / 1024)
+            };
+            eprintln!(
+                "⚠️  {} subagent file(s) ({size}) are not included in raw-jsonl. \
+                 Copy the session's subagents/ directory to archive them.",
+                subagents.len()
+            );
+        }
+    }
     let copy_all = |writer: &mut dyn Write| -> Result<()> {
         for p in &paths {
             let mut src = std::fs::File::open(p)?;

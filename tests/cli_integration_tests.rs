@@ -254,6 +254,44 @@ fn test_negation_flags_disable_content() {
         .stdout(predicate::str::contains("NEGTEST_TOOLRESULT").not());
 }
 
+/// Build a temp Claude dir with a parent session plus one on-disk subagent
+/// transcript (`<id>/subagents/agent-*.jsonl`).
+fn setup_session_with_subagents_dir() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let encoded = encode_project_path(PROJECT_PATH);
+    let project_dir = tmp.path().join("projects").join(&encoded);
+    std::fs::create_dir_all(&project_dir).expect("failed to create project dir");
+
+    let parent = r#"{"type":"user","uuid":"11111111-1111-1111-1111-111111111111","parentUuid":null,"timestamp":"2025-01-15T10:00:00.000Z","sessionId":"SESSID","version":"2.1.193","message":{"role":"user","content":"hi"}}"#
+        .replace("SESSID", SESSION_ID);
+    std::fs::write(
+        project_dir.join(format!("{SESSION_ID}.jsonl")),
+        parent + "\n",
+    )
+    .expect("failed to write parent");
+
+    let sub_dir = project_dir.join(SESSION_ID).join("subagents");
+    std::fs::create_dir_all(&sub_dir).expect("failed to create subagents dir");
+    let sub = r#"{"type":"user","uuid":"a1111111-1111-1111-1111-111111111111","parentUuid":null,"timestamp":"2025-01-15T10:00:00.000Z","sessionId":"agent-test","version":"2.1.193","message":{"role":"user","content":"subagent work"}}"#;
+    std::fs::write(sub_dir.join("agent-test.jsonl"), format!("{sub}\n"))
+        .expect("failed to write subagent");
+    tmp
+}
+
+/// Regression guard for issue 0012: `raw-jsonl` is single-file and silently
+/// excludes subagent transcripts; it must at least warn (to stderr) that they
+/// are not included, rather than dropping them silently.
+#[test]
+fn test_raw_jsonl_warns_about_excluded_subagents() {
+    let tmp = setup_session_with_subagents_dir();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["export", SESSION_ID, "-f", "raw-jsonl"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("subagent").and(predicate::str::contains("not included")));
+}
+
 // =============================================================================
 // info
 // =============================================================================
