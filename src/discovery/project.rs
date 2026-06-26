@@ -225,13 +225,25 @@ impl Project {
     ///
     /// Resolves file IDs to paths within this project directory.
     pub fn parse_chain(&self, chain: &SessionChain) -> Result<Vec<crate::model::LogEntry>> {
+        Ok(self.parse_chain_counted(chain, None)?.0)
+    }
+
+    /// Like [`Project::parse_chain`], but honors a `max_file_size` cap and also
+    /// returns the count of lines skipped by the lenient parser across the chain.
+    pub fn parse_chain_counted(
+        &self,
+        chain: &SessionChain,
+        max_file_size: Option<u64>,
+    ) -> Result<(Vec<crate::model::LogEntry>, usize)> {
         let sessions = self.sessions()?;
         let session_map: std::collections::HashMap<&str, &std::path::Path> = sessions
             .iter()
             .map(|s| (s.session_id(), s.path()))
             .collect();
 
-        chain.parse_entries(|file_id| session_map.get(file_id).map(|p| p.to_path_buf()))
+        chain.parse_entries_counted(max_file_size, |file_id| {
+            session_map.get(file_id).map(|p| p.to_path_buf())
+        })
     }
 
     /// Get the number of sessions in this project.

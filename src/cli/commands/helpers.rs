@@ -45,11 +45,11 @@ pub fn resolve_chain_entries(
         {
             for chain in project.session_chains()?.values() {
                 if chain.len() > 1 && chain.contains(&file_id) {
-                    let entries = project.parse_chain(chain)?;
+                    let (entries, unparsed) = project.parse_chain_counted(chain, max_file_size)?;
                     let members = chain.file_ids().iter().map(|s| (*s).to_string()).collect();
                     return Ok((
                         entries,
-                        0,
+                        unparsed,
                         Some(ChainMeta {
                             root_id: chain.root_id.clone(),
                             members,

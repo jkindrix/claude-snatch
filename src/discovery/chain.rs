@@ -286,8 +286,19 @@ impl SessionChain {
         &self,
         resolve_path: impl Fn(&str) -> Option<std::path::PathBuf>,
     ) -> Result<Vec<LogEntry>> {
+        Ok(self.parse_entries_counted(None, resolve_path)?.0)
+    }
+
+    /// Like [`SessionChain::parse_entries`], but honors a `max_file_size` cap
+    /// and also returns the total count of lines the lenient parser skipped
+    /// across all members, so callers can surface a drop notice.
+    pub fn parse_entries_counted(
+        &self,
+        max_file_size: Option<u64>,
+        resolve_path: impl Fn(&str) -> Option<std::path::PathBuf>,
+    ) -> Result<(Vec<LogEntry>, usize)> {
         let mut all_entries = Vec::new();
-        let mut parser = JsonlParser::new().with_lenient(true);
+        let mut unparsed = 0usize;
 
         for member in &self.members {
             let path = resolve_path(&member.file_id).ok_or_else(|| {
@@ -295,7 +306,12 @@ impl SessionChain {
                     path: std::path::PathBuf::from(&member.file_id),
                 }
             })?;
+            let mut parser = JsonlParser::new().with_lenient(true);
+            if let Some(max) = max_file_size {
+                parser = parser.with_max_file_size(max);
+            }
             let entries = parser.parse_file(&path)?;
+            unparsed += parser.stats().lines_skipped;
             debug!(
                 file_id = %member.file_id,
                 entries = entries.len(),
@@ -308,9 +324,10 @@ impl SessionChain {
             chain_root = %self.root_id,
             total_entries = all_entries.len(),
             members = self.members.len(),
+            unparsed,
             "Parsed full chain"
         );
-        Ok(all_entries)
+        Ok((all_entries, unparsed))
     }
 
     /// Number of files in this chain.

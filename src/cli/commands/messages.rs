@@ -23,6 +23,15 @@ use super::get_claude_dir;
 struct MessagesOutput {
     session_id: String,
     project_path: String,
+    /// Root file id of the resume chain, when chain members were merged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chain_id: Option<String>,
+    /// All member file ids (chain order), when chain members were merged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chain_members: Option<Vec<String>>,
+    /// Number of files merged, when this session is part of a chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chain_member_count: Option<usize>,
     total_messages: usize,
     returned: usize,
     offset: usize,
@@ -156,6 +165,11 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
 
     // Match Agent/Task calls to spawned subagents (only "full" detail renders tool
     // details). Uses the unfiltered thread for spawn-order joining.
+    //
+    // Known limitation: subagent discovery uses only the resolved file's
+    // `subagents/` directory. For a merged chain, subagents spawned by *other*
+    // chain members may live under their own files' directories and are not yet
+    // discovered here; those calls surface as unmatched rather than joined.
     let subagent_matches: SubagentMatches = if detail == "full" {
         match_subagents(
             &session,
@@ -259,6 +273,9 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
             let output = MessagesOutput {
                 session_id: args.session_id.clone(),
                 project_path,
+                chain_id: chain.as_ref().map(|c| c.root_id.clone()),
+                chain_members: chain.as_ref().map(|c| c.members.clone()),
+                chain_member_count: chain.as_ref().map(|c| c.members.len()),
                 total_messages,
                 returned: messages.len(),
                 offset,
