@@ -111,6 +111,13 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
     let project_path = session.project_path().to_string();
     let (entries, unparsed) = session.parse_with_options_counted(cli.max_file_size)?;
     let conversation = Conversation::from_entries(entries)?;
+    let dup_uuids = conversation.duplicate_uuids().len();
+    if dup_uuids > 0 && !cli.quiet {
+        eprintln!(
+            "⚠ {dup_uuids} duplicate-UUID entr{} dropped (kept first occurrence)",
+            if dup_uuids == 1 { "y" } else { "ies" }
+        );
+    }
 
     let detail = args.detail.as_str();
     let msg_type_filter = args.message_type.as_str();

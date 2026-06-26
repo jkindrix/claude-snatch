@@ -45,7 +45,7 @@ pub use tree::*;
 use std::collections::HashMap;
 
 use indexmap::IndexMap;
-use tracing::{debug, instrument, trace};
+use tracing::{debug, instrument, trace, warn};
 
 use crate::error::Result;
 use crate::model::{ContentBlock, LogEntry};
@@ -109,6 +109,19 @@ pub struct Conversation {
     /// exporters can surface them and `-f jsonl` is a content-complete
     /// round-trip.
     orphan_entries: Vec<LogEntry>,
+    /// Entries dropped because their UUID already appeared. The first occurrence
+    /// is kept; later duplicates are recorded here (never silently overwritten).
+    /// This mainly surfaces when combining files (resume chains / subagents).
+    duplicate_uuids: Vec<DuplicateUuid>,
+}
+
+/// A dropped duplicate-UUID entry, kept for diagnostics.
+#[derive(Debug, Clone)]
+pub struct DuplicateUuid {
+    /// The UUID that was seen more than once.
+    pub uuid: String,
+    /// Which occurrence this was (2 = the second time the UUID appeared, etc.).
+    pub occurrence: usize,
 }
 
 impl Conversation {
@@ -122,11 +135,19 @@ impl Conversation {
         let mut tool_links = HashMap::new();
         let mut message_groups: HashMap<String, Vec<String>> = HashMap::new();
         let mut orphan_entries: Vec<LogEntry> = Vec::new();
+        let mut duplicate_uuids: Vec<DuplicateUuid> = Vec::new();
 
         // First pass: create nodes and track tool uses
         for entry in entries {
             if let Some(uuid) = entry.uuid() {
                 let uuid = uuid.to_string();
+                // Keep the first occurrence; record later duplicates rather than
+                // silently overwriting (which would drop the first entry's data).
+                if nodes.contains_key(&uuid) {
+                    let occurrence = duplicate_uuids.iter().filter(|d| d.uuid == uuid).count() + 2;
+                    duplicate_uuids.push(DuplicateUuid { uuid, occurrence });
+                    continue;
+                }
                 // Use logicalParentUuid to bridge compaction boundaries:
                 // When parentUuid is null but logicalParentUuid exists (compact_boundary),
                 // use the logical parent to maintain a continuous main thread.
@@ -468,6 +489,13 @@ impl Conversation {
             "Tool and message linkage complete"
         );
 
+        if !duplicate_uuids.is_empty() {
+            warn!(
+                count = duplicate_uuids.len(),
+                "Dropped duplicate-UUID entries (kept first occurrence)"
+            );
+        }
+
         Ok(Self {
             nodes,
             roots,
@@ -476,7 +504,14 @@ impl Conversation {
             tool_links,
             message_groups,
             orphan_entries,
+            duplicate_uuids,
         })
+    }
+
+    /// Entries dropped because their UUID already appeared (first kept).
+    #[must_use]
+    pub fn duplicate_uuids(&self) -> &[DuplicateUuid] {
+        &self.duplicate_uuids
     }
 
     /// Get all nodes.
@@ -950,6 +985,29 @@ mod tests {
         assert_eq!(conv.roots()[0], "2");
         // Main thread should include all 3 entries
         assert_eq!(conv.main_thread().len(), 3);
+    }
+
+    #[test]
+    fn test_duplicate_uuid_keeps_first_and_records_diagnostic() {
+        // Two entries share UUID "2". The first is kept; later duplicates are
+        // recorded with their occurrence index instead of silently overwriting.
+        let entries = vec![
+            make_user_entry("1", None),
+            make_user_entry("2", Some("1")),
+            make_user_entry("2", Some("1")), // 2nd occurrence
+            make_user_entry("2", Some("1")), // 3rd occurrence
+        ];
+        let conv = Conversation::from_entries(entries).unwrap();
+        assert_eq!(
+            conv.len(),
+            2,
+            "only first occurrence of each uuid is a node"
+        );
+        let dups = conv.duplicate_uuids();
+        assert_eq!(dups.len(), 2);
+        assert!(dups.iter().all(|d| d.uuid == "2"));
+        assert_eq!(dups[0].occurrence, 2);
+        assert_eq!(dups[1].occurrence, 3);
     }
 
     #[test]
