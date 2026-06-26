@@ -14,6 +14,7 @@ data or PII.
 | `system_session.jsonl` | hand-authored (pre-existing) | — | bare system banner, summary |
 | `branching_session.jsonl` | hand-authored (pre-existing) | — | isSidechain marker (orphan) |
 | `compaction_session.jsonl` | shape derived from real `compact_boundary` session (project `-tmp-rust-mssql-driver`, session `961711c0`, captured v2.1.170) | 2.1.193 | `compact_boundary` system entry, `compactMetadata{trigger,preTokens,postTokens,durationMs}`, `logicalParentUuid`, `isCompactSummary` user entry, cross-boundary chain |
+| `subagent_session/` (directory tree) | layout derived from real subagent session (project `-tmp-rust-mssql-driver`, session `85a67f74`, captured v2.1.170) | 2.1.193 | on-disk `<uuid>/subagents/agent-*.jsonl` transcripts + `agent-*.meta.json` sidecars (`agentType`/`description`/`toolUseId`), parent `Task` tool_use spawn, `isSidechain`/`agentId`, partial sidecar (agent-3 omits `toolUseId`) |
 
 ## Notes
 
