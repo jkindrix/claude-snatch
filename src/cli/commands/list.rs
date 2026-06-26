@@ -761,6 +761,55 @@ fn list_sessions_collapsed<W: Write>(
         });
     }
 
+    // Metadata filters above match if ANY chain member matches, but a collapsed
+    // row displays the ROOT's metadata. To avoid silently confusing JSON/script
+    // users (a row returned because a continuation matched, yet showing no such
+    // metadata on the root), expose which members satisfied the active metadata
+    // filters via the JSON-only `matched_member_ids` field below.
+    let outcome_lower = args.outcome.as_ref().map(|o| o.to_lowercase());
+    let name_lower = args.by_name.as_ref().map(|n| n.to_lowercase());
+    let metadata_filter_active = !tag_filters.is_empty()
+        || args.bookmarked
+        || outcome_lower.is_some()
+        || name_lower.is_some();
+    let member_matches_metadata = |s: &Session| -> bool {
+        let meta = tag_store.get(s.session_id());
+        if !tag_filters.is_empty() {
+            let ok = meta
+                .map(|m| {
+                    tag_filters
+                        .iter()
+                        .any(|t| m.tags.iter().any(|mt| mt.contains(t)))
+                })
+                .unwrap_or(false);
+            if !ok {
+                return false;
+            }
+        }
+        if args.bookmarked && !meta.map(|m| m.bookmarked).unwrap_or(false) {
+            return false;
+        }
+        if let Some(ref o) = outcome_lower {
+            let ok = meta
+                .and_then(|m| m.outcome.as_ref())
+                .map(|x| format!("{:?}", x).to_lowercase().contains(o))
+                .unwrap_or(false);
+            if !ok {
+                return false;
+            }
+        }
+        if let Some(ref n) = name_lower {
+            let ok = meta
+                .and_then(|m| m.name.as_ref())
+                .map(|x| x.to_lowercase().contains(n))
+                .unwrap_or(false);
+            if !ok {
+                return false;
+            }
+        }
+        true
+    };
+
     // Sort logical rows.
     match args.sort {
         SortOrder::Modified => {
@@ -790,7 +839,30 @@ fn list_sessions_collapsed<W: Write>(
             let output: Vec<_> = rows
                 .iter()
                 .map(|r| {
-                    LogicalSessionInfo::from_row(r, &tag_store, args.context, args.context_length)
+                    // Surface non-root metadata matches so a chain returned by a
+                    // filter on a continuation isn't silently shown as root-only.
+                    let matched = if metadata_filter_active {
+                        let ids: Vec<String> = r
+                            .members
+                            .iter()
+                            .filter(|s| member_matches_metadata(s))
+                            .map(|s| s.session_id().to_string())
+                            .collect();
+                        if ids.iter().any(|id| id != &r.root_id) {
+                            Some(ids)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    LogicalSessionInfo::from_row(
+                        r,
+                        &tag_store,
+                        args.context,
+                        args.context_length,
+                        matched,
+                    )
                 })
                 .collect();
             writeln!(writer, "{}", serde_json::to_string_pretty(&output)?)?;
@@ -1154,6 +1226,11 @@ impl SessionInfo {
 }
 
 /// Collapsed logical-conversation row for JSON output.
+///
+/// Displayed metadata (`name`, `tags`, `bookmarked`, `compaction_count`, …) is
+/// the ROOT session's. Metadata filters match any chain member, so a row may be
+/// returned because a continuation matched; `matched_member_ids` then lists the
+/// members that satisfied the active metadata filters.
 #[derive(Debug, serde::Serialize)]
 struct LogicalSessionInfo {
     /// Root session file id (the logical conversation's id).
@@ -1164,6 +1241,10 @@ struct LogicalSessionInfo {
     chain_member_count: usize,
     /// Member file ids in chain order.
     chain_members: Vec<String>,
+    /// Members that satisfied the active metadata filters, when the match
+    /// included a non-root member. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matched_member_ids: Option<Vec<String>>,
     project_path: String,
     is_subagent: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1190,6 +1271,7 @@ impl LogicalSessionInfo {
         tag_store: &TagStore,
         include_context: bool,
         context_length: usize,
+        matched_member_ids: Option<Vec<String>>,
     ) -> Self {
         let root = row.root();
         let meta = tag_store.get(&row.root_id);
@@ -1209,6 +1291,7 @@ impl LogicalSessionInfo {
             latest_session_id: row.latest_session_id().to_string(),
             chain_member_count: row.member_count(),
             chain_members: row.member_ids(),
+            matched_member_ids,
             project_path: root.project_path().to_string(),
             is_subagent: root.is_subagent(),
             parent_session_id: root.parent_session_id().map(String::from),

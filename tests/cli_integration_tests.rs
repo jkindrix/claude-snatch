@@ -514,3 +514,247 @@ fn test_export_all_no_chain_one_file_per_member() {
         .count();
     assert_eq!(count, 2, "--no-chain exports each member file");
 }
+
+// =============================================================================
+// chain-aware date filtering (export --all) and metadata visibility (list)
+// =============================================================================
+
+/// Build a temp Claude dir with a two-file chain whose members carry the given
+/// timestamps (root first, continuation second).
+fn setup_dated_chain_dir(root_ts: &str, cont_ts: &str) -> TempDir {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let encoded = encode_project_path(PROJECT_PATH);
+    let project_dir = tmp.path().join("projects").join(&encoded);
+    std::fs::create_dir_all(&project_dir).expect("failed to create project dir");
+
+    let root_jsonl = format!(
+        r#"{{"type":"user","uuid":"c1111111-1111-1111-1111-111111111111","parentUuid":null,"timestamp":"{root_ts}","sessionId":"{CHAIN_ROOT_ID}","version":"2.0.74","message":{{"role":"user","content":"first half"}}}}"#
+    ) + "\n";
+    std::fs::write(
+        project_dir.join(format!("{CHAIN_ROOT_ID}.jsonl")),
+        root_jsonl,
+    )
+    .unwrap();
+
+    let cont_jsonl = format!(
+        r#"{{"type":"user","uuid":"c2222222-2222-2222-2222-222222222222","parentUuid":null,"timestamp":"{cont_ts}","sessionId":"{CHAIN_ROOT_ID}","version":"2.0.74","message":{{"role":"user","content":"resumed second half"}}}}"#
+    ) + "\n";
+    std::fs::write(
+        project_dir.join(format!("{CHAIN_CONT_ID}.jsonl")),
+        cont_jsonl,
+    )
+    .unwrap();
+
+    tmp
+}
+
+fn md_count(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            std::path::Path::new(&e.file_name())
+                .extension()
+                .is_some_and(|x| x == "md")
+        })
+        .count()
+}
+
+fn md_names(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| {
+            std::path::Path::new(n)
+                .extension()
+                .is_some_and(|x| x == "md")
+        })
+        .collect()
+}
+
+#[test]
+fn test_export_all_until_excludes_chain_by_latest_member() {
+    // Root before the cutoff, continuation after it: the chain's latest member
+    // is after --until, so the whole chain must be excluded (even though the
+    // root file alone is before the cutoff).
+    let tmp = setup_dated_chain_dir("2025-01-10T10:00:00.000Z", "2025-01-20T10:00:00.000Z");
+    let out_dir = TempDir::new().unwrap();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "export",
+            "--all",
+            "--until",
+            "2025-01-15",
+            "-f",
+            "markdown",
+            "--out",
+            out_dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        md_count(out_dir.path()),
+        0,
+        "chain excluded by latest member"
+    );
+}
+
+#[test]
+fn test_export_all_since_includes_chain_by_latest_member() {
+    // Root before the cutoff, continuation after it: the chain's latest member
+    // is after --since, so the chain is included and exported once using the
+    // root-id filename.
+    let tmp = setup_dated_chain_dir("2025-01-10T10:00:00.000Z", "2025-01-20T10:00:00.000Z");
+    let out_dir = TempDir::new().unwrap();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "export",
+            "--all",
+            "--since",
+            "2025-01-15",
+            "-f",
+            "markdown",
+            "--out",
+            out_dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let names = md_names(out_dir.path());
+    assert_eq!(names.len(), 1, "chain exported once, got: {names:?}");
+    assert!(
+        names[0].contains(CHAIN_ROOT_ID),
+        "filename keyed by root id"
+    );
+    assert!(!names[0].contains(CHAIN_CONT_ID));
+}
+
+#[test]
+fn test_export_all_sqlite_date_filter_once_per_chain() {
+    let tmp = setup_dated_chain_dir("2025-01-10T10:00:00.000Z", "2025-01-20T10:00:00.000Z");
+
+    // --since before the latest member: chain included exactly once.
+    let db_in = TempDir::new().unwrap();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "export",
+            "--all",
+            "--since",
+            "2025-01-15",
+            "-f",
+            "sqlite",
+            "--out",
+            db_in.path().join("in.db").to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Exported 1 sessions"));
+
+    // --until before the latest member: chain excluded.
+    let db_out = TempDir::new().unwrap();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "export",
+            "--all",
+            "--until",
+            "2025-01-15",
+            "-f",
+            "sqlite",
+            "--out",
+            db_out.path().join("out.db").to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Exported 0 sessions"));
+}
+
+/// Write a tags.json under an isolated XDG config home so the CLI subprocess
+/// reads it instead of the real user store.
+fn write_tags_config(config_home: &std::path::Path, json: &str) {
+    let dir = config_home.join("claude-snatch");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("tags.json"), json).unwrap();
+}
+
+#[test]
+fn test_list_tag_matches_continuation_member() {
+    let tmp = setup_chain_dir();
+    let cfg = TempDir::new().unwrap();
+    write_tags_config(
+        cfg.path(),
+        &format!(r#"{{"version":1,"sessions":{{"{CHAIN_CONT_ID}":{{"tags":["mychaintag"]}}}}}}"#),
+    );
+
+    let output = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .env("XDG_CONFIG_HOME", cfg.path())
+        .args([
+            "list",
+            "sessions",
+            "-o",
+            "json",
+            "--full-ids",
+            "--tag",
+            "mychaintag",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let rows: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(output).unwrap()).unwrap();
+    let arr = rows.as_array().unwrap();
+    assert_eq!(
+        arr.len(),
+        1,
+        "tag on continuation still returns the chain row"
+    );
+    assert_eq!(arr[0]["session_id"], CHAIN_ROOT_ID);
+    // The non-root match is surfaced for JSON consumers.
+    let matched = arr[0]["matched_member_ids"].as_array().unwrap();
+    assert!(matched.iter().any(|m| m == CHAIN_CONT_ID));
+}
+
+#[test]
+fn test_list_by_name_matches_continuation_member() {
+    let tmp = setup_chain_dir();
+    let cfg = TempDir::new().unwrap();
+    write_tags_config(
+        cfg.path(),
+        &format!(r#"{{"version":1,"sessions":{{"{CHAIN_CONT_ID}":{{"name":"mychainname"}}}}}}"#),
+    );
+
+    let output = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .env("XDG_CONFIG_HOME", cfg.path())
+        .args([
+            "list",
+            "sessions",
+            "-o",
+            "json",
+            "--full-ids",
+            "--by-name",
+            "mychainname",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let rows: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(output).unwrap()).unwrap();
+    let arr = rows.as_array().unwrap();
+    assert_eq!(
+        arr.len(),
+        1,
+        "name on continuation still returns the chain row"
+    );
+    assert_eq!(arr[0]["session_id"], CHAIN_ROOT_ID);
+    let matched = arr[0]["matched_member_ids"].as_array().unwrap();
+    assert!(matched.iter().any(|m| m == CHAIN_CONT_ID));
+}

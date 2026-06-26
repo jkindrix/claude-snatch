@@ -705,6 +705,8 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
 
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
 
+    let chain_aware = !args.no_chain;
+
     // Build session filter
     let mut filter = SessionFilter::new();
 
@@ -713,21 +715,28 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
         filter = filter.main_only();
     }
 
-    // Parse date filters
-    if let Some(ref since) = args.since {
-        let since_time = parse_date_filter(since)?;
-        filter.modified_after = Some(since_time);
-    }
-
-    if let Some(ref until) = args.until {
-        let until_time = parse_date_filter(until)?;
-        filter.modified_before = Some(until_time);
+    // Parse date filters. For chain-aware export, date filtering is applied to
+    // the logical conversation (latest member activity) after chains are
+    // grouped, so the SessionFilter only carries the date bounds in the flat
+    // `--no-chain` mode.
+    let since_dt: Option<chrono::DateTime<Utc>> = match args.since {
+        Some(ref since) => Some(chrono::DateTime::from(parse_date_filter(since)?)),
+        None => None,
+    };
+    let until_dt: Option<chrono::DateTime<Utc>> = match args.until {
+        Some(ref until) => Some(chrono::DateTime::from(parse_date_filter(until)?)),
+        None => None,
+    };
+    if !chain_aware {
+        filter.modified_after = since_dt.map(std::time::SystemTime::from);
+        filter.modified_before = until_dt.map(std::time::SystemTime::from);
     }
 
     // Get all sessions
     let all_sessions = claude_dir.all_sessions()?;
 
-    // Filter sessions
+    // Filter sessions (project + subagent; date is applied per logical chain
+    // below when chain-aware).
     let mut sessions: Vec<&Session> = all_sessions
         .iter()
         .filter(|s| {
@@ -757,7 +766,6 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
     // keyed by the chain root (root_id is used for the output filename and the
     // representative is reconstructed chain-aware). `--no-chain` keeps the flat
     // per-file behavior.
-    let chain_aware = !args.no_chain;
     let member_to_root: std::collections::HashMap<String, String> = if chain_aware {
         use crate::discovery::chain::detect_chains;
         let chains = detect_chains(
@@ -779,21 +787,54 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
         std::collections::HashMap::new()
     };
 
+    // Latest member activity per chain root, used for chain-aware date filtering
+    // (a chain is included/excluded by its latest member, not its root file).
+    let mut chain_latest: std::collections::HashMap<String, &Session> =
+        std::collections::HashMap::new();
+    if chain_aware {
+        for s in &all_sessions {
+            if let Some(root) = member_to_root.get(s.session_id()) {
+                chain_latest
+                    .entry(root.clone())
+                    .and_modify(|cur| {
+                        if s.modified_time() > cur.modified_time() {
+                            *cur = s;
+                        }
+                    })
+                    .or_insert(s);
+            }
+        }
+    }
+
+    let date_active = chain_aware && (since_dt.is_some() || until_dt.is_some());
+    let passes_date = |latest: &Session| -> bool {
+        !date_active || super::helpers::session_overlaps_date(latest, since_dt, until_dt)
+    };
+
     // Build the list of artifacts to export: one per logical conversation. Each
     // entry pairs the representative session with the id used for its filename
     // (the chain root id for chained sessions, else the session's own id).
+    // Chain-aware date filtering compares against the chain's latest member.
     let mut seen_roots: HashSet<String> = HashSet::new();
     let export_targets: Vec<(&Session, String)> = sessions
         .iter()
         .filter_map(|s| match member_to_root.get(s.session_id()) {
             Some(root) => {
-                if seen_roots.insert(root.clone()) {
-                    Some((*s, root.clone()))
-                } else {
-                    None
+                if !seen_roots.insert(root.clone()) {
+                    return None;
                 }
+                let latest = chain_latest.get(root).copied().unwrap_or(*s);
+                if !passes_date(latest) {
+                    return None;
+                }
+                Some((*s, root.clone()))
             }
-            None => Some((*s, s.session_id().to_string())),
+            None => {
+                if !passes_date(s) {
+                    return None;
+                }
+                Some((*s, s.session_id().to_string()))
+            }
         })
         .collect();
 
@@ -930,6 +971,8 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
         )
     })?;
 
+    let chain_aware = !args.no_chain;
+
     // Build session filter
     let mut filter = SessionFilter::new();
 
@@ -937,20 +980,26 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
         filter = filter.main_only();
     }
 
-    if let Some(ref since) = args.since {
-        let since_time = parse_date_filter(since)?;
-        filter.modified_after = Some(since_time);
-    }
-
-    if let Some(ref until) = args.until {
-        let until_time = parse_date_filter(until)?;
-        filter.modified_before = Some(until_time);
+    // Date filters: per logical chain (latest member activity) when chain-aware,
+    // else per physical file via the SessionFilter (flat `--no-chain` mode).
+    let since_dt: Option<chrono::DateTime<Utc>> = match args.since {
+        Some(ref since) => Some(chrono::DateTime::from(parse_date_filter(since)?)),
+        None => None,
+    };
+    let until_dt: Option<chrono::DateTime<Utc>> = match args.until {
+        Some(ref until) => Some(chrono::DateTime::from(parse_date_filter(until)?)),
+        None => None,
+    };
+    if !chain_aware {
+        filter.modified_after = since_dt.map(std::time::SystemTime::from);
+        filter.modified_before = until_dt.map(std::time::SystemTime::from);
     }
 
     // Get all sessions
     let all_sessions = claude_dir.all_sessions()?;
 
-    // Filter sessions
+    // Filter sessions (project + subagent; date applied per logical chain below
+    // when chain-aware).
     let mut sessions: Vec<&Session> = all_sessions
         .iter()
         .filter(|s| {
@@ -975,7 +1024,6 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
 
     // Collapse resume chains: insert each logical conversation once
     // (chain-aware reconstruction). `--no-chain` keeps per-file inserts.
-    let chain_aware = !args.no_chain;
     let member_to_root: std::collections::HashMap<String, String> = if chain_aware {
         use crate::discovery::chain::detect_chains;
         let chains = detect_chains(
@@ -996,18 +1044,50 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
     } else {
         std::collections::HashMap::new()
     };
+
+    // Latest member activity per chain root, for chain-aware date filtering.
+    let mut chain_latest: std::collections::HashMap<String, &Session> =
+        std::collections::HashMap::new();
+    if chain_aware {
+        for s in &all_sessions {
+            if let Some(root) = member_to_root.get(s.session_id()) {
+                chain_latest
+                    .entry(root.clone())
+                    .and_modify(|cur| {
+                        if s.modified_time() > cur.modified_time() {
+                            *cur = s;
+                        }
+                    })
+                    .or_insert(s);
+            }
+        }
+    }
+
+    let date_active = chain_aware && (since_dt.is_some() || until_dt.is_some());
+    let passes_date = |latest: &Session| -> bool {
+        !date_active || super::helpers::session_overlaps_date(latest, since_dt, until_dt)
+    };
+
     let mut seen_roots: HashSet<String> = HashSet::new();
     let export_targets: Vec<&Session> = sessions
         .iter()
         .filter_map(|s| match member_to_root.get(s.session_id()) {
             Some(root) => {
-                if seen_roots.insert(root.clone()) {
-                    Some(*s)
-                } else {
-                    None
+                if !seen_roots.insert(root.clone()) {
+                    return None;
                 }
+                let latest = chain_latest.get(root).copied().unwrap_or(*s);
+                if !passes_date(latest) {
+                    return None;
+                }
+                Some(*s)
             }
-            None => Some(*s),
+            None => {
+                if !passes_date(s) {
+                    return None;
+                }
+                Some(*s)
+            }
         })
         .collect();
 
