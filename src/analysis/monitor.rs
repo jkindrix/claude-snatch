@@ -11,8 +11,14 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::analysis::conflict_detection::{ConflictDetection, ConflictPair};
-use crate::analysis::project_lessons::RecurringError;
+use crate::analysis::conflict_detection::{
+    detect_registry_conflicts, ConflictDetection, ConflictPair,
+};
+use crate::analysis::project_lessons::{
+    aggregate_project_lessons, ProjectLessonsParams, RecurringError,
+};
+use crate::decisions::DecisionStore;
+use crate::discovery::Session;
 
 /// The kind of cross-session insight surfaced by the monitor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +27,30 @@ pub enum InsightKind {
     RecurringError,
     /// Two still-active decisions that appear to contradict each other.
     DecisionConflict,
+}
+
+impl InsightKind {
+    /// Stable lowercase tag for JSON / machine output.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RecurringError => "recurring_error",
+            Self::DecisionConflict => "decision_conflict",
+        }
+    }
+}
+
+/// Tunables for [`insights_from`].
+#[derive(Debug, Clone)]
+pub struct MonitorParams {
+    /// Minimum occurrences for an error cluster to count as recurring.
+    pub min_occurrences: usize,
+}
+
+impl Default for MonitorParams {
+    fn default() -> Self {
+        Self { min_occurrences: 3 }
+    }
 }
 
 /// A single ranked, surfaceable insight.
@@ -134,6 +164,33 @@ pub fn decision_conflict_insights(conflicts: &[ConflictPair]) -> Vec<Insight> {
             }
         })
         .collect()
+}
+
+/// Compose the existing analyzers over already-resolved inputs into the full
+/// insight set (unranked, un-cooled-down).
+///
+/// Session resolution and the decision store are the caller's responsibility, so
+/// this composes cleanly behind both the CLI and the MCP surfaces.
+#[must_use]
+pub fn insights_from(
+    sessions: &[Session],
+    store: &DecisionStore,
+    params: &MonitorParams,
+    max_file_size: Option<u64>,
+) -> Vec<Insight> {
+    let lessons_params = ProjectLessonsParams {
+        category: "all".to_string(),
+        limit: 200,
+        min_occurrences: params.min_occurrences,
+    };
+    let lessons = aggregate_project_lessons(sessions, &lessons_params, max_file_size);
+    let mut insights = recurring_error_insights(&lessons.recurring_errors);
+
+    let mut conflicts = Vec::new();
+    detect_registry_conflicts(store, &None, &mut conflicts);
+    insights.extend(decision_conflict_insights(&conflicts));
+
+    insights
 }
 
 /// Rank insights by attention score (then recency, then fingerprint for a

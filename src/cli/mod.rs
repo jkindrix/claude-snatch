@@ -300,6 +300,10 @@ pub enum Commands {
     #[command(display_order = 24)]
     Priorities(PrioritiesArgs),
 
+    /// Surface proactive cross-session insights (recurring errors, decision conflicts).
+    #[command(display_order = 24)]
+    Monitor(MonitorArgs),
+
     /// Contextual zoom around a specific event in a session.
     #[command(display_order = 24)]
     Context(ContextArgs),
@@ -2378,6 +2382,41 @@ pub struct ProjectLessonsArgs {
     pub until: Option<String>,
 }
 
+/// Arguments for the monitor command.
+#[derive(Debug, Parser)]
+pub struct MonitorArgs {
+    /// Project path filter (substring match). Required.
+    pub project: String,
+
+    /// Filter to sessions since this date (bound the scan; the hook uses this to stay fast).
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Minimum occurrences for an error to count as recurring.
+    #[arg(long, default_value = "3")]
+    pub min_occurrences: usize,
+
+    /// Exclude subagent sessions.
+    #[arg(long)]
+    pub no_subagents: bool,
+
+    /// Maximum insights to surface.
+    #[arg(long, default_value = "10")]
+    pub top: usize,
+
+    /// Proactive surface: apply the cooldown and print a compact block (silent when empty).
+    #[arg(long)]
+    pub inject: bool,
+
+    /// Record surfaced insights so they don't re-surface until they worsen (only with --inject).
+    #[arg(long)]
+    pub mark_shown: bool,
+
+    /// Days an unchanged insight stays suppressed after being shown.
+    #[arg(long, default_value = "7")]
+    pub cooldown_days: i64,
+}
+
 /// Arguments for the health command.
 #[derive(Debug, Parser)]
 pub struct HealthArgs {
@@ -2929,6 +2968,7 @@ pub fn run() -> Result<()> {
         Some(Commands::Detect(args)) => commands::detect::run(&cli, args),
         Some(Commands::Conflicts(args)) => commands::conflicts::run(&cli, args),
         Some(Commands::ProjectLessons(args)) => commands::project_lessons::run(&cli, args),
+        Some(Commands::Monitor(args)) => commands::monitor::run(&cli, args),
         Some(Commands::Health(args)) => commands::health::run(&cli, args),
         Some(Commands::Retrospective(args)) => commands::retrospective::run(&cli, args),
         Some(Commands::FileEvolution(args)) => commands::file_evolution::run(&cli, args),

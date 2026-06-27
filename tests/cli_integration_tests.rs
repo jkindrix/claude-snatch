@@ -1028,3 +1028,27 @@ fn test_list_by_name_matches_continuation_member() {
     let matched = arr[0]["matched_member_ids"].as_array().unwrap();
     assert!(matched.iter().any(|m| m == CHAIN_CONT_ID));
 }
+
+/// Phase 2 of the active monitor (0023): a project with no recurring errors
+/// yields no insights, and `--inject` is completely silent — the not-nagging
+/// guarantee at the CLI boundary.
+#[test]
+fn test_monitor_no_insights_is_clean() {
+    let tmp = setup_fixture_dir();
+
+    // Plain on-demand view: a clear "nothing here" message, success.
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["monitor", "test-project"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No monitor insights"));
+
+    // Proactive --inject surface: silent (empty stdout) when nothing qualifies.
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["monitor", "test-project", "--inject"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
