@@ -86,10 +86,53 @@ fn clip(s: &str, n: usize) -> String {
     }
 }
 
-/// Attention score for a recurring error: more occurrences → higher, with a
-/// ceiling so a runaway count can't dominate forever. 3 → 60, 5 → 100.
+/// Attention score for a recurring error.
+///
+/// Log-scaled by occurrence count so frequency actually *discriminates* instead
+/// of saturating — the recurrence floor (3×) sits mid-scale and very frequent
+/// errors approach, but rarely reach, the ceiling. Examples: 3 → 50, 6 → 60,
+/// 12 → 69, 24 → 79, 48 → 89. Heuristic, tuned against real data rather than
+/// derived — a flat `count × k` made nearly everything hit 100.
 fn error_severity(count: usize) -> u32 {
-    (count as u32 * 20).min(100)
+    let ratio = (count.max(1) as f64) / 3.0;
+    (50.0 + 14.0 * ratio.ln()).round().clamp(0.0, 100.0) as u32
+}
+
+/// Whether a recurring-error pattern is upstream extraction noise rather than a
+/// real project error worth surfacing.
+///
+/// `aggregate_project_lessons` occasionally mis-flags *successful* tool output:
+/// a `Read` whose file content literally contains words like "error"/"panic", or
+/// a `Bash` run whose salient output is a cargo build/test success (often paired
+/// with a trailing command that exits nonzero). This drops only the unambiguous
+/// success cases — never anything that also looks like a real failure. It is a
+/// surgical monitor-side patch; the root cause lives in the shared extractor.
+fn is_extraction_noise(tool_name: &str, pattern: &str) -> bool {
+    match tool_name {
+        "Read" => starts_with_line_marker(pattern),
+        "Bash" => looks_like_build_or_test_success(pattern),
+        _ => false,
+    }
+}
+
+/// A leading `<number><tab|→|pipe>` marks line-numbered file/search output — a
+/// successful read, not an error.
+fn starts_with_line_marker(s: &str) -> bool {
+    let t = s.trim_start();
+    let digits = t.chars().take_while(char::is_ascii_digit).count();
+    if digits == 0 {
+        return false;
+    }
+    let rest = &t[digits..];
+    rest.starts_with('\t') || rest.starts_with('→') || rest.starts_with('|')
+}
+
+/// Cargo build/test success — but never when the same text also shows a failure.
+fn looks_like_build_or_test_success(p: &str) -> bool {
+    if p.contains("error[E") || p.contains("FAILED") || p.contains("panicked") {
+        return false;
+    }
+    (p.contains("Finished `") && p.contains("profile")) || p.contains("test result: ok")
 }
 
 /// Attention score for a conflict: scaled detection confidence (0–1 → 0–100).
@@ -106,6 +149,7 @@ fn conflict_severity(confidence: f64) -> u32 {
 pub fn recurring_error_insights(errors: &[RecurringError]) -> Vec<Insight> {
     errors
         .iter()
+        .filter(|e| !is_extraction_noise(&e.tool_name, &e.error_pattern))
         .map(|e| {
             let resolution = e
                 .example_resolution
@@ -249,16 +293,42 @@ mod tests {
         assert!(
             i.title.contains("Bash") && i.title.contains("5×") && i.title.contains("3 session")
         );
-        assert_eq!(i.severity, 100); // 5 * 20, capped
+        assert_eq!(i.severity, 57); // log-scaled: 50 + 14*ln(5/3)
         assert_eq!(i.fingerprint, "error:tool:bash:exit 1");
         assert!(i.recency.is_some());
     }
 
     #[test]
-    fn error_severity_scales_and_caps() {
-        assert_eq!(error_severity(3), 60);
-        assert_eq!(error_severity(5), 100);
-        assert_eq!(error_severity(50), 100);
+    fn error_severity_spreads_and_caps() {
+        // The recurrence floor lands mid-scale, frequency discriminates, and
+        // extreme counts saturate at the ceiling (no overflow).
+        assert_eq!(error_severity(3), 50);
+        assert!(error_severity(6) > error_severity(3));
+        assert!(error_severity(48) > error_severity(6));
+        assert!(
+            error_severity(48) < 100,
+            "realistic counts stay under the cap"
+        );
+        assert_eq!(error_severity(1_000_000), 100);
+    }
+
+    #[test]
+    fn extraction_noise_is_filtered() {
+        // A successful Read (line-numbered content) mis-flagged as an error.
+        let read_noise = err("Read", "1\t//! Message types for Claude Code", 8, 5);
+        // A cargo build success (paired with a trailing nonzero exit upstream).
+        let build_noise = err(
+            "Bash",
+            "Compiling claude-snatch v0.1.0\n    Finished `test` profile [optimized]",
+            9,
+            6,
+        );
+        // A genuine compile error must survive.
+        let real = err("Bash", "Exit code 101\nerror[E0061]: wrong arg count", 5, 4);
+        let insights = recurring_error_insights(&[read_noise, build_noise, real]);
+        assert_eq!(insights.len(), 1, "only the real error should remain");
+        assert!(insights[0].title.contains("Bash"));
+        assert!(insights[0].evidence.contains("error[E0061]"));
     }
 
     #[test]
@@ -296,8 +366,8 @@ mod tests {
     #[test]
     fn rank_orders_by_severity_then_caps() {
         let mut all = recurring_error_insights(&[
-            err("Bash", "tool:bash:a", 3, 1), // severity 60
-            err("Edit", "tool:edit:b", 5, 1), // severity 100
+            err("Bash", "tool:bash:a", 3, 1), // severity 50
+            err("Edit", "tool:edit:b", 5, 1), // severity 57
         ]);
         all.extend(decision_conflict_insights(&[conflict(
             ConflictDetection::Registry,
@@ -305,8 +375,8 @@ mod tests {
         )])); // severity 80
         let ranked = rank(all, 2);
         assert_eq!(ranked.len(), 2);
-        assert_eq!(ranked[0].severity, 100); // Edit error
-        assert_eq!(ranked[1].severity, 80); // conflict beats the 60 error
+        assert_eq!(ranked[0].severity, 80); // conflict highest
+        assert_eq!(ranked[1].severity, 57); // the 5× error beats the 3× error
     }
 
     #[test]
