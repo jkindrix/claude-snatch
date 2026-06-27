@@ -20,6 +20,7 @@ data or PII.
 | `forward_compat_session.jsonl` | spec-authored (forward-compat shapes never emitted by current CC) | 2.1.193 | `LogEntry::Unknown` (future entry type), `ContentBlock::Unknown` (`redacted_thinking` + future block), `SystemSubtype::Other`, `CompactTrigger::Other`, `StopReason::Other` (blocked by issue 0015) |
 | `malformed_session.jsonl` | spec-authored | 2.1.193 | truncated/invalid JSONL lines (lenient skip + diagnostic retention), duplicate-UUID pair (for future reconstruction tests) |
 | `redaction_session.jsonl` | spec-authored (planted dummy secret) | 2.1.193 | a planted email in assistant text, for the issue 0001 redaction guard |
+| `tool_render_session.jsonl` | tool-use input shapes (`Edit`/`MultiEdit`/`Bash`/`Write`/`TodoWrite`) from `model` types, dummy content | 2.1.193 | readable tool rendering (issue 0020): `Edit`→diff, `MultiEdit`→multi-diff, `Bash`→shell+description, `Write`→code, `TodoWrite`→checklist, plus an unmodeled `Read` tool for the JSON fallback |
 
 ## Notes
 

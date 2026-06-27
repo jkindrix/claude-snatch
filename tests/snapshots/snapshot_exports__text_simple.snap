@@ -21,9 +21,8 @@ Can you list the files in the current directory?
 
   [TOOL: Bash]
   ID: toolu_001
-  | {
-  |   "command": "ls -la"
-  | }
+  Command:
+  | ls -la
   [/TOOL]
 
 

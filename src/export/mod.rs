@@ -38,6 +38,7 @@ mod otel;
 pub mod schema;
 mod sqlite;
 mod text;
+mod tool_render;
 mod xml;
 
 pub use csv::*;

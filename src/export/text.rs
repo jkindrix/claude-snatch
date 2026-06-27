@@ -7,6 +7,7 @@ use std::io::Write;
 
 use chrono::{DateTime, Utc};
 
+use super::tool_render::{self, ToolInputView};
 use crate::analytics::SessionAnalytics;
 use crate::error::Result;
 use crate::model::{
@@ -347,12 +348,62 @@ impl TextExporter {
     fn write_tool_use<W: Write>(&self, writer: &mut W, tool_use: &ToolUse) -> Result<()> {
         writeln!(writer, "  [TOOL: {}]", tool_use.name)?;
         writeln!(writer, "  ID: {}", tool_use.id)?;
-        let input = serde_json::to_string_pretty(&tool_use.input).unwrap_or_default();
-        for line in input.lines() {
-            writeln!(writer, "  | {line}")?;
-        }
+        self.write_tool_input(writer, tool_use)?;
         writeln!(writer, "  [/TOOL]")?;
         writeln!(writer)?;
+        Ok(())
+    }
+
+    /// Write a tool call's input, rendering common tools readably (Edit → diff,
+    /// Bash → shell, Write → code, TodoWrite → checklist) and falling back to
+    /// pretty-JSON for everything else. Body lines keep the `  | ` prefix.
+    fn write_tool_input<W: Write>(&self, writer: &mut W, tool_use: &ToolUse) -> Result<()> {
+        let prefixed = |writer: &mut W, body: &str| -> Result<()> {
+            for line in body.lines() {
+                writeln!(writer, "  | {line}")?;
+            }
+            Ok(())
+        };
+        match tool_render::classify(tool_use) {
+            ToolInputView::Edit { file_path, edits } => {
+                if edits.len() > 1 {
+                    writeln!(writer, "  Edit: {} ({} changes)", file_path, edits.len())?;
+                } else {
+                    writeln!(writer, "  Edit: {file_path}")?;
+                }
+                for edit in &edits {
+                    prefixed(
+                        writer,
+                        &tool_render::unified_diff(edit.old_string, edit.new_string),
+                    )?;
+                }
+            }
+            ToolInputView::Bash {
+                command,
+                description,
+            } => {
+                if let Some(desc) = description {
+                    writeln!(writer, "  Command: {desc}")?;
+                } else {
+                    writeln!(writer, "  Command:")?;
+                }
+                prefixed(writer, command)?;
+            }
+            ToolInputView::Write { file_path, content } => {
+                writeln!(writer, "  Write: {file_path}")?;
+                prefixed(writer, content)?;
+            }
+            ToolInputView::Todos(items) => {
+                writeln!(writer, "  Todos:")?;
+                for item in &items {
+                    writeln!(writer, "  | {} {}", item.checkbox(), item.content)?;
+                }
+            }
+            ToolInputView::Json => {
+                let input = serde_json::to_string_pretty(&tool_use.input).unwrap_or_default();
+                prefixed(writer, &input)?;
+            }
+        }
         Ok(())
     }
 

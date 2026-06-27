@@ -605,3 +605,92 @@ fn only_prompts_keeps_user_text_role_aware() {
         );
     }
 }
+
+/// Render entries in an arbitrary format through the dispatch transform.
+fn export_with(entries: &[LogEntry], fmt: ExportFormat, opts: &ExportOptions) -> String {
+    let conversation = Conversation::from_entries(entries.to_vec()).expect("build conversation");
+    export_to_string(&conversation, fmt, opts).expect("export should succeed")
+}
+
+#[test]
+fn tool_render_markdown_renders_common_tools_readably() {
+    let entries = parse_fixture("tool_render_session.jsonl");
+    let out = markdown_with(&entries, &ExportOptions::full());
+
+    // Edit → unified diff (not escaped JSON).
+    assert!(out.contains("**Edit:** `src/foo.rs`"), "Edit label missing");
+    assert!(out.contains("```diff"), "Edit should render a diff fence");
+    assert!(
+        out.contains("-    println!(\"old\");") && out.contains("+    println!(\"new\");"),
+        "Edit diff should show old/new lines"
+    );
+
+    // MultiEdit → one diff per edit, with a change count.
+    assert!(
+        out.contains("**Edit:** `src/bar.rs` (2 changes)"),
+        "MultiEdit should label the change count"
+    );
+    assert!(out.contains("-let a = 1;") && out.contains("+let a = 2;"));
+    assert!(out.contains("-let b = 3;") && out.contains("+let b = 4;"));
+
+    // Bash → shell block + description.
+    assert!(
+        out.contains("*Run the test suite*"),
+        "Bash description missing"
+    );
+    assert!(
+        out.contains("```bash\ncargo test --all"),
+        "Bash should render a shell block"
+    );
+
+    // Write → code block with the file content.
+    assert!(
+        out.contains("**Write:** `src/new.rs`"),
+        "Write label missing"
+    );
+    assert!(
+        out.contains("pub fn answer() -> u32 {"),
+        "Write should render the content"
+    );
+
+    // TodoWrite → checklist with status markers.
+    assert!(out.contains("**Todos:**"), "Todos label missing");
+    assert!(out.contains("- [x] Write the parser"));
+    assert!(out.contains("- [~] Wire the exporter"));
+    assert!(out.contains("- [ ] Add tests"));
+
+    // Unknown tool (Read) → JSON fallback (today's behavior preserved).
+    assert!(
+        out.contains("Tool: `Read`") && out.contains("```json"),
+        "Read should fall back to JSON rendering"
+    );
+}
+
+#[test]
+fn tool_render_text_and_html_render_readably() {
+    let entries = parse_fixture("tool_render_session.jsonl");
+
+    let text = export_with(&entries, ExportFormat::Text, &ExportOptions::full());
+    assert!(
+        text.contains("  Edit: src/foo.rs"),
+        "text Edit label missing"
+    );
+    assert!(
+        text.contains("  | +    println!(\"new\");"),
+        "text diff should be line-prefixed"
+    );
+    assert!(
+        text.contains("  | [x] Write the parser"),
+        "text checklist missing"
+    );
+
+    let html = export_with(&entries, ExportFormat::Html, &ExportOptions::full());
+    assert!(
+        html.contains("language-diff"),
+        "html Edit should use a diff code block"
+    );
+    assert!(
+        html.contains("<ul class=\"todos\">") && html.contains("<li>[~] Wire the exporter</li>"),
+        "html should render a todos list"
+    );
+}

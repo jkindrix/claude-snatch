@@ -23,11 +23,8 @@ Can you list the files in the current directory?
 
 **ID:** `toolu_001`
 
-**Input:**
-```json
-{
-  "command": "ls -la"
-}
+```bash
+ls -la
 ```
 
 

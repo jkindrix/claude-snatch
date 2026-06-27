@@ -15,6 +15,7 @@ use crate::model::{
 };
 use crate::reconstruction::Conversation;
 
+use super::tool_render::{self, ToolInputView};
 use super::{ExportOptions, Exporter};
 
 /// HTML exporter for conversations.
@@ -933,14 +934,82 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
         )?;
         writeln!(writer, "      </div>")?;
         writeln!(writer, "      <div class=\"tool-body{}\">", collapsed_class)?;
-        writeln!(
-            writer,
-            "        <pre><code>{}</code></pre>",
-            escape_html(&serde_json::to_string_pretty(&tool_use.input).unwrap_or_default())
-        )?;
+        self.write_tool_input(writer, tool_use)?;
         writeln!(writer, "      </div>")?;
         writeln!(writer, "    </div>")?;
 
+        Ok(())
+    }
+
+    /// Write a tool call's input, rendering common tools readably (Edit → diff,
+    /// Bash → shell, Write → code, TodoWrite → checklist) and falling back to
+    /// pretty-JSON for everything else.
+    fn write_tool_input<W: Write>(&self, writer: &mut W, tool_use: &ToolUse) -> Result<()> {
+        match tool_render::classify(tool_use) {
+            ToolInputView::Edit { file_path, edits } => {
+                let label = if edits.len() > 1 {
+                    format!("Edit: {} ({} changes)", escape_html(file_path), edits.len())
+                } else {
+                    format!("Edit: {}", escape_html(file_path))
+                };
+                writeln!(writer, "        <div class=\"tool-target\">{label}</div>")?;
+                for edit in &edits {
+                    writeln!(
+                        writer,
+                        "        <pre><code class=\"language-diff\">{}</code></pre>",
+                        escape_html(&tool_render::unified_diff(edit.old_string, edit.new_string))
+                    )?;
+                }
+            }
+            ToolInputView::Bash {
+                command,
+                description,
+            } => {
+                if let Some(desc) = description {
+                    writeln!(
+                        writer,
+                        "        <div class=\"tool-desc\">{}</div>",
+                        escape_html(desc)
+                    )?;
+                }
+                writeln!(
+                    writer,
+                    "        <pre><code class=\"language-bash\">{}</code></pre>",
+                    escape_html(command)
+                )?;
+            }
+            ToolInputView::Write { file_path, content } => {
+                writeln!(
+                    writer,
+                    "        <div class=\"tool-target\">Write: {}</div>",
+                    escape_html(file_path)
+                )?;
+                writeln!(
+                    writer,
+                    "        <pre><code>{}</code></pre>",
+                    escape_html(content)
+                )?;
+            }
+            ToolInputView::Todos(items) => {
+                writeln!(writer, "        <ul class=\"todos\">")?;
+                for item in &items {
+                    writeln!(
+                        writer,
+                        "          <li>{} {}</li>",
+                        item.checkbox(),
+                        escape_html(item.content)
+                    )?;
+                }
+                writeln!(writer, "        </ul>")?;
+            }
+            ToolInputView::Json => {
+                writeln!(
+                    writer,
+                    "        <pre><code>{}</code></pre>",
+                    escape_html(&serde_json::to_string_pretty(&tool_use.input).unwrap_or_default())
+                )?;
+            }
+        }
         Ok(())
     }
 
