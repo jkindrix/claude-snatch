@@ -1139,16 +1139,26 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
         .with_foreign_keys(true)
         .with_usage(true);
 
-    // Build export options
+    // Build export options. Redaction and content filters must be wired from
+    // args (and applied via the transform below) or this batch path silently
+    // drops them — the single-session path's 0016 fix did not cover this
+    // function (issue 0022). include_system/usage/metadata stay on: this is a
+    // full archive to one database.
+    let redaction = args.redact.map(|level| level.into());
+    let only_filter = build_only_filter(&args.only);
     let options = ExportOptions {
         include_thinking: args.thinking && !args.no_thinking,
-        include_tool_use: true,
-        include_tool_results: true,
+        include_tool_use: args.tool_use && !args.no_tool_use,
+        include_tool_results: args.tool_results && !args.no_tool_results,
+        include_images: args.images && !args.no_images,
         include_system: true,
         include_usage: true,
         include_timestamps: true,
         include_metadata: true,
         main_thread_only: false,
+        redaction,
+        redaction_preview: args.redact_preview,
+        only: only_filter,
         ..Default::default()
     };
 
@@ -1184,6 +1194,12 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
             Ok(entries) if !entries.is_empty() => {
                 match Conversation::from_entries(entries) {
                     Ok(conversation) => {
+                        // Apply redaction/filtering before the direct exporter
+                        // call, so the database is redacted/filtered like every
+                        // other export path (issue 0022).
+                        let conversation =
+                            crate::export::apply_export_transform(&conversation, &options)
+                                .into_owned();
                         // Build session metadata
                         let meta = SessionMeta {
                             project_path: Some(session.project_path().to_string()),

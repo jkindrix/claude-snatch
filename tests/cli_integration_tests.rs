@@ -167,6 +167,59 @@ fn test_export_redact_removes_secret_via_cli() {
         .stdout(predicate::str::contains("secret@example.com").not());
 }
 
+/// Regression guard for issue 0022: the multi-session (`--all`) SQLite export
+/// path builds its own options and calls the exporter directly, so it must apply
+/// the redaction transform too — 0016 fixed only the single-session path. The
+/// control (secret present without `--redact`) proves redaction is acting.
+#[test]
+fn test_export_all_sqlite_redacts_secret() {
+    let tmp = setup_secret_fixture_dir();
+
+    // Control: without --redact, the secret is written to the database.
+    let ctrl = TempDir::new().unwrap();
+    let ctrl_db = ctrl.path().join("ctrl.db");
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "export",
+            "--all",
+            "-f",
+            "sqlite",
+            "--out",
+            ctrl_db.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let ctrl_bytes = std::fs::read(&ctrl_db).expect("read control db");
+    assert!(
+        String::from_utf8_lossy(&ctrl_bytes).contains("secret@example.com"),
+        "control: the secret should be present in the db without --redact"
+    );
+
+    // With --redact all, the secret must not reach the database.
+    let red = TempDir::new().unwrap();
+    let red_db = red.path().join("red.db");
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "export",
+            "--all",
+            "-f",
+            "sqlite",
+            "--redact",
+            "all",
+            "--out",
+            red_db.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let red_bytes = std::fs::read(&red_db).expect("read redacted db");
+    assert!(
+        !String::from_utf8_lossy(&red_bytes).contains("secret@example.com"),
+        "issue 0022: batch sqlite --redact all must remove the secret"
+    );
+}
+
 /// Build a temp Claude dir whose only PII (an email) lives inside a tool result
 /// in a user-role entry — the case `--warn-pii` was blind to (issue 0002).
 fn setup_tool_result_pii_dir() -> TempDir {
