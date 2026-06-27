@@ -304,8 +304,10 @@ Control which content appears in the export:
 - `--only <types>`: Exclusive whitelist — include only the listed content types
   (e.g. `--only prompts`, `--only tool-results`, `--only user`, `--only code`).
   Accepts a comma-separated list.
-- `--no-thinking` / `--no-tool-use` / `--no-tool-results`: Exclude a content type
-  while keeping everything else (the blocklist counterpart to `--only`).
+- `--no-thinking` / `--no-tool-use` / `--no-tool-results` / `--no-images`: Exclude
+  a content type while keeping everything else (the blocklist counterpart to
+  `--only`). `--no-images` prunes top-level image blocks; images embedded inside
+  tool-result content are not affected.
 - `--full`: Include everything (system messages, metadata, etc.).
 - `--warn-pii`: Scan the export (including tool-result content) for sensitive data
   and warn before writing.

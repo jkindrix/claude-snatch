@@ -180,6 +180,7 @@ snatch export <SESSION> --only thinking,assistant  # thinking + assistant
 snatch export <SESSION> --no-thinking              # exclude thinking
 snatch export <SESSION> --no-tool-use              # exclude tool calls
 snatch export <SESSION> --no-tool-results          # exclude tool results
+snatch export <SESSION> --no-images                # exclude image blocks
 snatch export <SESSION> --system                   # include system messages
 snatch export <SESSION> --metadata                 # include UUIDs and metadata
 snatch export <SESSION> --main-thread              # exclude branches

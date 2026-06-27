@@ -667,6 +667,37 @@ fn tool_render_markdown_renders_common_tools_readably() {
 }
 
 #[test]
+fn no_images_prunes_image_blocks() {
+    let entries = parse_fixture("content_blocks_session.jsonl");
+
+    // With images included (default), the markers are present.
+    let with = markdown_with(&entries, &ExportOptions::full());
+    assert!(
+        with.contains("[Image:") || with.contains("![Image]"),
+        "image markers should render when images are included"
+    );
+
+    // include_images=false (the `--no-images` flag) prunes image blocks via the
+    // transform, so no image marker survives in any human format.
+    let without_opts = ExportOptions {
+        include_images: false,
+        ..ExportOptions::full()
+    };
+    for fmt in [
+        ExportFormat::Markdown,
+        ExportFormat::Text,
+        ExportFormat::Xml,
+        ExportFormat::Html,
+    ] {
+        let out = export_with(&entries, fmt, &without_opts);
+        assert!(
+            !out.contains("[Image:") && !out.contains("![Image]") && !out.contains("Image file:"),
+            "{fmt:?}: --no-images must prune image markers"
+        );
+    }
+}
+
+#[test]
 fn tool_render_text_and_html_render_readably() {
     let entries = parse_fixture("tool_render_session.jsonl");
 

@@ -746,6 +746,14 @@ pub struct ExportArgs {
     #[arg(long = "no-tool-results", action = ArgAction::SetTrue)]
     pub no_tool_results: bool,
 
+    /// Include image blocks (enabled by default, use --no-images to disable).
+    #[arg(long, default_value = "true")]
+    pub images: bool,
+
+    /// Exclude image blocks (overrides the on-by-default --images).
+    #[arg(long = "no-images", action = ArgAction::SetTrue)]
+    pub no_images: bool,
+
     /// Include system messages (disabled by default).
     #[arg(long)]
     pub system: bool,
