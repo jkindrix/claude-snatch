@@ -677,8 +677,28 @@ fn no_images_prunes_image_blocks() {
         "image markers should render when images are included"
     );
 
+    // Nested tool-result images render too (the array-variant tool result's
+    // image is shown via the base64-omission marker).
+    assert!(
+        with.contains("base64 image omitted"),
+        "a nested tool-result image marker should render when images are included"
+    );
+
+    // The json export carries full image data, including the `toolUseResult`
+    // sidecar image (its unique base64 prefix).
+    let json_with = export_with(&entries, ExportFormat::Json, &ExportOptions::full());
+    assert!(
+        json_with.contains("\"type\":\"image\""),
+        "json should carry image content blocks when images are included"
+    );
+    assert!(
+        json_with.contains("VFVSU0lERUNBUmltYWdl"),
+        "json should carry the toolUseResult image when images are included"
+    );
+
     // include_images=false (the `--no-images` flag) prunes image blocks via the
-    // transform, so no image marker survives in any human format.
+    // transform, so no image marker survives in any human format — including
+    // nested tool-result images.
     let without_opts = ExportOptions {
         include_images: false,
         ..ExportOptions::full()
@@ -691,10 +711,23 @@ fn no_images_prunes_image_blocks() {
     ] {
         let out = export_with(&entries, fmt, &without_opts);
         assert!(
-            !out.contains("[Image:") && !out.contains("![Image]") && !out.contains("Image file:"),
-            "{fmt:?}: --no-images must prune image markers"
+            !out.contains("[Image:")
+                && !out.contains("![Image]")
+                && !out.contains("Image file:")
+                && !out.contains("base64 image omitted"),
+            "{fmt:?}: --no-images must prune image markers (including nested tool-result images)"
         );
     }
+
+    // json: every image is stripped — both content-block/tool-result images and
+    // the `toolUseResult` sidecar image.
+    let json_without = export_with(&entries, ExportFormat::Json, &without_opts);
+    assert!(
+        !json_without.contains("\"type\":\"image\"")
+            && !json_without.contains("VFVSU0lERUNBUmltYWdl")
+            && !json_without.contains("TOOLRESULTIMGBLOB"),
+        "--no-images must strip all images from json, including the toolUseResult sidecar"
+    );
 }
 
 #[test]

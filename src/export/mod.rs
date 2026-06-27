@@ -1284,16 +1284,79 @@ fn filter_entry_content(entry: &mut LogEntry, options: &ExportOptions) {
     };
 
     match entry {
-        LogEntry::User(u) => match &mut u.message {
-            UserContent::Simple(s) => {
-                if !options.should_include_user_text() {
-                    s.content.clear();
+        LogEntry::User(u) => {
+            // Images nested inside tool results (rendered tool-result blocks in
+            // human formats, plus the `toolUseResult` sidecar serialized by the
+            // json export) are stripped alongside top-level image blocks.
+            if !options.include_images {
+                if let Some(tur) = u.tool_use_result.as_mut() {
+                    strip_value_images(tur);
+                }
+                if u.tool_use_result.as_ref().is_some_and(is_image_value) {
+                    u.tool_use_result = None;
                 }
             }
-            UserContent::Blocks(b) => b.content.retain(|block| keep_block(block, true)),
-        },
-        LogEntry::Assistant(a) => a.message.content.retain(|block| keep_block(block, false)),
+            match &mut u.message {
+                UserContent::Simple(s) => {
+                    if !options.should_include_user_text() {
+                        s.content.clear();
+                    }
+                }
+                UserContent::Blocks(b) => {
+                    if !options.include_images {
+                        b.content.iter_mut().for_each(strip_tool_result_images);
+                    }
+                    b.content.retain(|block| keep_block(block, true));
+                }
+            }
+        }
+        LogEntry::Assistant(a) => {
+            if !options.include_images {
+                a.message
+                    .content
+                    .iter_mut()
+                    .for_each(strip_tool_result_images);
+            }
+            a.message.content.retain(|block| keep_block(block, false));
+        }
         _ => {}
+    }
+}
+
+/// Whether a JSON value is an image content object (`{"type": "image", …}`) —
+/// the same shape recognized everywhere images are handled.
+fn is_image_value(value: &serde_json::Value) -> bool {
+    value.get("type").and_then(serde_json::Value::as_str) == Some("image")
+}
+
+/// Recursively remove image content objects from a JSON value: image elements
+/// are dropped from arrays, and remaining values are walked. A value that is
+/// *itself* an image object can't remove itself here — callers handle that case.
+fn strip_value_images(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(arr) => {
+            arr.retain(|elem| !is_image_value(elem));
+            arr.iter_mut().for_each(strip_value_images);
+        }
+        serde_json::Value::Object(map) => map.values_mut().for_each(strip_value_images),
+        _ => {}
+    }
+}
+
+/// Drop image entries nested inside a tool-result's array content.
+///
+/// Top-level `Image` blocks are handled by `keep_block`, but a tool returning an
+/// image carries it as an `{"type": "image", …}` element inside a
+/// `ToolResultContent::Array`. With `--no-images`, those are stripped too.
+fn strip_tool_result_images(block: &mut crate::model::ContentBlock) {
+    use crate::model::content::ToolResultContent;
+    use crate::model::ContentBlock;
+
+    if let ContentBlock::ToolResult(result) = block {
+        if let Some(ToolResultContent::Array(arr)) = &mut result.content {
+            arr.retain(|elem| !is_image_value(elem));
+            arr.iter_mut().for_each(strip_value_images);
+        }
     }
 }
 
