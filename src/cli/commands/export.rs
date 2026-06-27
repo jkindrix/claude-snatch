@@ -62,6 +62,18 @@ fn validate_raw_jsonl_compat(args: &ExportArgs) -> Result<()> {
     if !args.only.is_empty() {
         bad.push("--only");
     }
+    if args.no_thinking {
+        bad.push("--no-thinking");
+    }
+    if args.no_tool_use {
+        bad.push("--no-tool-use");
+    }
+    if args.no_tool_results {
+        bad.push("--no-tool-results");
+    }
+    if args.no_images {
+        bad.push("--no-images");
+    }
     if args.redact.is_some() {
         bad.push("--redact");
     }
@@ -2336,6 +2348,22 @@ mod tests {
             err.contains("raw-jsonl") && err.contains("--gist"),
             "expected raw-jsonl/--gist error, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_raw_jsonl_rejects_no_content_flags() {
+        use clap::Parser;
+        for flag in [
+            "--no-thinking",
+            "--no-tool-use",
+            "--no-tool-results",
+            "--no-images",
+        ] {
+            let args =
+                ExportArgs::try_parse_from(["export", "abc", "-f", "raw-jsonl", flag]).unwrap();
+            let err = validate_raw_jsonl_compat(&args).unwrap_err().to_string();
+            assert!(err.contains(flag), "expected {flag} rejection, got: {err}");
+        }
     }
 
     #[test]
