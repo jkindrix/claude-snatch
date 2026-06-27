@@ -197,7 +197,8 @@ snatch export <session-id> -f markdown -o output.md
 
 ### JSON
 
-Lossless structured data export, preserving all JSONL elements.
+Normalized structured export that retains all JSONL elements (content-preserving,
+not byte-exact — fields may be reordered; use `raw-jsonl` for a byte-faithful archive).
 
 ```bash
 snatch export <session-id> -f json -o output.json
