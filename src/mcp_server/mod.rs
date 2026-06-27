@@ -68,7 +68,8 @@ use types::{
     GetStatsRequest, GetToolCallsRequest, GoalEntry, HotspotFileEntry, LessonsSummary,
     ListSessionsRequest, ManageDecisionsRequest, ManageDecisionsResponse, ManageGoalsRequest,
     ManageGoalsResponse, ManageNotesRequest, ManageNotesResponse, MessageEntry, MessageTagEntry,
-    NoteEntry, PriorityItemEntry, PrioritySourceEntry, ProjectAggregate, ProjectHistoryResponse,
+    MonitorInsightEntry, MonitorProjectRequest, MonitorProjectResponse, NoteEntry,
+    PriorityItemEntry, PrioritySourceEntry, ProjectAggregate, ProjectHistoryResponse,
     ProjectRetrospectiveRequest, ProjectRetrospectiveResponse, ProjectSessionEntry,
     RecurringCorrectionEntry, RecurringErrorEntry, RetrospectiveSummaryEntry, ReworkFileEntry,
     SearchMatch, SearchSessionsRequest, SearchSessionsResponse, SessionDigestResponse,
@@ -2620,6 +2621,85 @@ impl SnatchServer {
             top_failure_modes: result.summary.top_failure_modes,
             recurring_errors,
             recurring_corrections,
+        };
+
+        match ToolOutput::json(&response) {
+            Ok(output) => output,
+            Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+        }
+    }
+
+    // ========================================================================
+    // New Tool: monitor_project
+    // ========================================================================
+
+    /// Proactive cross-session insights: recurring errors + unresolved decision conflicts.
+    #[tool(
+        description = "Surface ranked cross-session insights for a project without being asked: recurring error patterns and unresolved decision conflicts, each scored by an attention level (0-100). Answers 'what should I be watching out for in this project right now?'. Read-only — does not affect the SessionStart-hook cooldown."
+    )]
+    async fn monitor_project(&self, request: MonitorProjectRequest) -> ToolOutput {
+        use crate::analysis::monitor::{insights_from, rank, MonitorParams};
+
+        let claude_dir = match self.get_claude_dir() {
+            Ok(dir) => dir,
+            Err(e) => return ToolOutput::error(e),
+        };
+
+        let period = request.period.as_deref().unwrap_or("7d");
+        let cutoff = match period_cutoff(period) {
+            Ok(c) => c,
+            Err(e) => return ToolOutput::error(format!("Invalid period: {e}")),
+        };
+
+        let mut sessions = match claude_dir.all_sessions() {
+            Ok(s) => s,
+            Err(e) => return ToolOutput::error(format!("Failed to list sessions: {e}")),
+        };
+        sessions.retain(|s| s.project_path().contains(request.project.as_str()));
+        if request.no_subagents.unwrap_or(true) {
+            sessions.retain(|s| !s.is_subagent());
+        }
+        if let Some(cutoff_dt) = cutoff {
+            let cutoff_systime = std::time::SystemTime::from(cutoff_dt);
+            sessions.retain(|s| s.modified_time() >= cutoff_systime);
+        }
+
+        // Load the decision store for conflict detection (empty if absent).
+        let store = match claude_dir.projects() {
+            Ok(projects) => projects
+                .iter()
+                .find(|p| {
+                    p.path()
+                        .to_string_lossy()
+                        .contains(request.project.as_str())
+                })
+                .and_then(|p| crate::decisions::load_decisions(p.path()).ok())
+                .unwrap_or_default(),
+            Err(_) => crate::decisions::DecisionStore::default(),
+        };
+
+        let params = MonitorParams {
+            min_occurrences: request.min_occurrences.unwrap_or(3),
+        };
+        let all = insights_from(&sessions, &store, &params, self.max_file_size);
+        let top = rank(all, request.limit.unwrap_or(10));
+
+        let insights: Vec<MonitorInsightEntry> = top
+            .into_iter()
+            .map(|i| MonitorInsightEntry {
+                kind: i.kind.as_str().to_string(),
+                title: i.title,
+                evidence: i.evidence,
+                severity: i.severity,
+                fingerprint: i.fingerprint,
+            })
+            .collect();
+
+        let response = MonitorProjectResponse {
+            project_path: request.project,
+            period: period.to_string(),
+            count: insights.len(),
+            insights,
         };
 
         match ToolOutput::json(&response) {
