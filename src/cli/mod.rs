@@ -344,7 +344,7 @@ pub enum Commands {
     // ═══════════════════════════════════════════════════════════════════════
     // INTERACTIVE - Live session viewing
     // ═══════════════════════════════════════════════════════════════════════
-    /// Launch interactive TUI browser.
+    /// Launch interactive TUI browser (requires the `tui` feature).
     #[command(alias = "ui", display_order = 40)]
     Tui(TuiArgs),
 
