@@ -24,7 +24,7 @@ pub mod monitor;
 pub mod monitor_state;
 pub mod priorities;
 pub mod project_health;
-pub mod project_lessons;
+pub(crate) mod project_lessons;
 pub mod search;
 pub mod subagents;
 pub mod threading;
