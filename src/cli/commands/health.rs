@@ -83,7 +83,7 @@ pub fn run(cli: &Cli, args: &HealthArgs) -> Result<()> {
         }
         _ => {
             println!(
-                "Project health: {} sessions, {} errors, {} tool calls\n",
+                "Project health: {} sessions, {} tool failures, {} tool calls\n",
                 result.sessions_analyzed, result.total_errors, result.total_tool_calls,
             );
 
@@ -131,7 +131,7 @@ pub fn run(cli: &Cli, args: &HealthArgs) -> Result<()> {
                 for s in &result.session_stats {
                     let ts = s.timestamp.as_deref().unwrap_or("?");
                     println!(
-                        "  [{}] {} — {} errors, {} tools",
+                        "  [{}] {} — {} tool failures, {} tools",
                         short_id(&s.session_id),
                         ts,
                         s.error_count,

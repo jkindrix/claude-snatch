@@ -66,7 +66,7 @@ pub fn run(cli: &Cli, args: &PrioritiesArgs) -> Result<()> {
         }
         _ => {
             println!(
-                "Priorities for '{}': {} sessions, {} errors, {} open goals, {} proposed decisions\n",
+                "Priorities for '{}': {} sessions, {} tool failures, {} open goals, {} proposed decisions\n",
                 args.project, result.sessions_analyzed, result.total_errors,
                 result.open_goals, result.proposed_decisions,
             );
