@@ -85,7 +85,7 @@ impl std::fmt::Display for PrioritySource {
             } => {
                 write!(
                     f,
-                    "error: [{}] {}x across {} sessions",
+                    "tool failure: [{}] {}x across {} sessions",
                     tool, count, sessions
                 )
             }
@@ -167,7 +167,7 @@ pub fn suggest_priorities(
             rank: 0,
             category: "reliability".to_string(),
             summary: format!(
-                "[{}] error occurring {}x across {} sessions",
+                "[{}] tool failure occurring {}x across {} sessions",
                 error.tool_name, error.count, session_count,
             ),
             score,

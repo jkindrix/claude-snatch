@@ -4,7 +4,9 @@
 //! all sessions for a project. Deduplicates similar errors, ranks by frequency,
 //! and identifies recurring patterns.
 //!
-//! Used by both CLI `project-lessons` and MCP `get_project_lessons` tools.
+//! Internal aggregator: the `project-lessons` command and `get_project_lessons`
+//! MCP tool were removed; `recurring_errors` is now consumed by `priorities`
+//! and `monitor`.
 
 use std::collections::HashMap;
 
@@ -53,15 +55,6 @@ pub struct RecurringCorrection {
     pub examples: Vec<String>,
 }
 
-/// Files ranked by error frequency.
-#[derive(Debug, Clone)]
-#[allow(missing_docs)]
-pub struct ErrorProneFile {
-    pub path: String,
-    pub error_count: usize,
-    pub sessions: Vec<String>,
-}
-
 /// Summary statistics for project lessons.
 #[derive(Debug, Clone)]
 #[allow(missing_docs)]
@@ -78,7 +71,6 @@ pub struct ProjectLessonsSummary {
 pub struct ProjectLessonsResult {
     pub recurring_errors: Vec<RecurringError>,
     pub recurring_corrections: Vec<RecurringCorrection>,
-    pub error_prone_files: Vec<ErrorProneFile>,
     pub summary: ProjectLessonsSummary,
 }
 
@@ -250,20 +242,6 @@ pub fn aggregate_project_lessons(
     recurring_corrections.sort_by_key(|b| std::cmp::Reverse(b.count));
     recurring_corrections.truncate(params.limit);
 
-    // Error-prone files (populated during clustering if file paths available)
-    let file_errors: HashMap<String, (usize, Vec<String>)> = HashMap::new();
-
-    let mut error_prone_files: Vec<ErrorProneFile> = file_errors
-        .into_iter()
-        .map(|(path, (count, sessions))| ErrorProneFile {
-            path,
-            error_count: count,
-            sessions,
-        })
-        .collect();
-    error_prone_files.sort_by_key(|b| std::cmp::Reverse(b.error_count));
-    error_prone_files.truncate(20);
-
     // Top failure modes (tool → count)
     let mut tool_counts: HashMap<String, usize> = HashMap::new();
     for re in &recurring_errors {
@@ -275,7 +253,6 @@ pub fn aggregate_project_lessons(
     ProjectLessonsResult {
         recurring_errors,
         recurring_corrections,
-        error_prone_files,
         summary: ProjectLessonsSummary {
             sessions_analyzed,
             total_errors,
