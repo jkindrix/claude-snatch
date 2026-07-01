@@ -49,7 +49,7 @@ pub fn run(cli: &Cli, args: &PrioritiesArgs) -> Result<()> {
             let output = serde_json::json!({
                 "project": args.project,
                 "sessions_analyzed": result.sessions_analyzed,
-                "total_errors": result.total_errors,
+                "total_tool_failures": result.total_errors,
                 "open_goals": result.open_goals,
                 "proposed_decisions": result.proposed_decisions,
                 "priorities": result.priorities.iter().map(|p| {

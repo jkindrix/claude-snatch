@@ -45,7 +45,7 @@ pub fn run(cli: &Cli, args: &HealthArgs) -> Result<()> {
             let output = serde_json::json!({
                 "project": args.project,
                 "sessions_analyzed": result.sessions_analyzed,
-                "total_errors": result.total_errors,
+                "total_tool_failures": result.total_errors,
                 "total_tool_calls": result.total_tool_calls,
                 "hotspot_files": result.hotspot_files.iter().map(|f| {
                     serde_json::json!({
@@ -74,7 +74,7 @@ pub fn run(cli: &Cli, args: &HealthArgs) -> Result<()> {
                     serde_json::json!({
                         "session_id": s.session_id,
                         "timestamp": s.timestamp,
-                        "error_count": s.error_count,
+                        "tool_failure_count": s.error_count,
                         "tool_count": s.tool_count,
                     })
                 }).collect::<Vec<_>>(),

@@ -1171,7 +1171,7 @@ pub struct SessionHealthEntry {
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
-    pub error_count: usize,
+    pub tool_failure_count: usize,
     pub tool_count: usize,
 }
 
@@ -1181,7 +1181,7 @@ pub struct GetProjectHealthResponse {
     pub project_path: String,
     pub period: String,
     pub sessions_analyzed: usize,
-    pub total_errors: usize,
+    pub total_tool_failures: usize,
     pub total_tool_calls: usize,
     pub hotspot_files: Vec<HotspotFileEntry>,
     pub rework_files: Vec<ReworkFileEntry>,
@@ -1286,7 +1286,7 @@ pub struct SuggestPrioritiesResponse {
     pub project_path: String,
     pub period: String,
     pub sessions_analyzed: usize,
-    pub total_errors: usize,
+    pub total_tool_failures: usize,
     pub open_goals: usize,
     pub proposed_decisions: usize,
     pub priorities: Vec<PriorityItemEntry>,

@@ -2678,7 +2678,7 @@ impl SnatchServer {
             project_path: request.project,
             period: period.to_string(),
             sessions_analyzed: result.sessions_analyzed,
-            total_errors: result.total_errors,
+            total_tool_failures: result.total_errors,
             total_tool_calls: result.total_tool_calls,
             hotspot_files: result
                 .hotspot_files
@@ -2711,7 +2711,7 @@ impl SnatchServer {
                 .map(|s| SessionHealthEntry {
                     session_id: s.session_id,
                     timestamp: s.timestamp,
-                    error_count: s.error_count,
+                    tool_failure_count: s.error_count,
                     tool_count: s.tool_count,
                 })
                 .collect(),
@@ -2792,7 +2792,7 @@ impl SnatchServer {
             project_path: request.project,
             period: period.to_string(),
             sessions_analyzed: result.sessions_analyzed,
-            total_errors: result.total_errors,
+            total_tool_failures: result.total_errors,
             open_goals: result.open_goals,
             proposed_decisions: result.proposed_decisions,
             priorities: result
