@@ -11,6 +11,12 @@ cargo build --features tui     # with TUI
 cargo test                     # run tests
 ```
 
+**Before pushing:** run `just ci` (the local CI mirror: `fmt-check clippy
+test-locked doc-check`). It is stricter than GitHub CI — it runs
+`--all-features --locked` tests plus `cargo doc -D warnings` (doc-check),
+which plain `cargo test`/`clippy --features mcp` do not cover. Push only when
+`just ci` is green.
+
 ## Session History Recall (snatch MCP)
 
 This project provides an MCP server (`snatch serve-mcp`) that exposes 21 tools for querying Claude Code session history. When you need to recall what happened in previous sessions or understand the narrative of past work, use these tools:
