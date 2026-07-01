@@ -100,7 +100,7 @@ snatch tui
 | `pick` | `browse` | Interactively pick a session using fuzzy search |
 | `tui` | `ui` | Launch interactive terminal UI |
 | `diff` | | Compare two sessions or files |
-| `tag` | | Manage session tags, names, and bookmarks (subcommands: `msg`, `unmsg`, `mtags`) |
+| `tag` | | Manage session tags, names, and bookmarks |
 | `prompts` | | Extract user prompts from sessions |
 | `code` | | Extract code blocks from sessions |
 | `summary` | | Show quick summary of Claude Code usage |
@@ -352,7 +352,6 @@ claude-snatch/
 │   ├── error.rs       # Error types and handling
 │   ├── lib.rs         # Library root
 │   ├── main.rs        # CLI entry point
-│   ├── message_tags.rs# Message tagging
 │   └── tags.rs        # Session tags
 ├── tests/
 │   ├── fixtures/      # Sample JSONL test files

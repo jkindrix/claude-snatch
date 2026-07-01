@@ -2255,9 +2255,9 @@ impl SnatchServer {
     // New Tool: monitor_project
     // ========================================================================
 
-    /// Proactive cross-session insights: recurring errors + unresolved decision conflicts.
+    /// Proactive cross-session insights: recurring error patterns.
     #[tool(
-        description = "Surface ranked cross-session insights for a project without being asked: recurring error patterns and unresolved decision conflicts, each scored by an attention level (0-100). Answers 'what should I be watching out for in this project right now?'. Read-only — does not affect the SessionStart-hook cooldown."
+        description = "Surface ranked cross-session insights for a project without being asked: recurring error patterns, each scored by an attention level (0-100). Answers 'what should I be watching out for in this project right now?'. Read-only — does not affect the SessionStart-hook cooldown."
     )]
     async fn monitor_project(&self, request: MonitorProjectRequest) -> ToolOutput {
         use crate::analysis::monitor::{insights_from, rank, MonitorParams};

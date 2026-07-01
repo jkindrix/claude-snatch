@@ -1,5 +1,14 @@
 # Decision Mining Features
 
+> **Status (2026-07-01): partially retired.** `thread` (Feature 1), the
+> decision registry (Feature 2, `manage_decisions`), and search ergonomics
+> (Feature 8) shipped and are kept. **Feature 3 (contradiction detection /
+> `conflicts`), Feature 4 (decision detection / `detect`), and Feature 5
+> (message-level tagging / `tag_message`) were built, then cut** — detect/
+> conflicts had structural precision problems (heuristic false positives) and
+> message tagging went unused. Their sections below are archival design
+> rationale, not current behavior.
+
 Features to support extracting, tracking, and threading design decisions from Claude Code conversation histories.
 
 **Context:** A user with 452 sessions on a programming language project needs to retroactively catalog all design decisions and make future decisions easier to find. Snatch's search and analysis tools get ~70% of the way there. These features close the gap.

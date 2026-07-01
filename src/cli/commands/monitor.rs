@@ -1,7 +1,6 @@
 //! Active-monitoring command (goal #8, design `.tmp/issues/0023`).
 //!
-//! Surfaces ranked cross-session insights (recurring errors + unresolved
-//! decision conflicts). Two modes:
+//! Surfaces ranked cross-session insights (recurring errors). Two modes:
 //! - default: a full read-only "what's going on" view (cooldown ignored);
 //! - `--inject`: the proactive surface for the SessionStart hook — applies the
 //!   cooldown, prints a compact block, and is **silent when nothing passes**.

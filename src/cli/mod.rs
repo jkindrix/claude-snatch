@@ -284,7 +284,7 @@ pub enum Commands {
     #[command(display_order = 24)]
     Priorities(PrioritiesArgs),
 
-    /// Surface proactive cross-session insights (recurring errors, decision conflicts).
+    /// Surface proactive cross-session insights (recurring errors).
     #[command(display_order = 24)]
     Monitor(MonitorArgs),
 
