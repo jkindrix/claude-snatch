@@ -153,7 +153,14 @@ impl Default for LessonOptions {
 fn starts_with_line_number(s: &str) -> bool {
     let trimmed = s.trim_start();
     let digit_end = trimmed.find(|c: char| !c.is_ascii_digit()).unwrap_or(0);
-    digit_end > 0 && trimmed[digit_end..].starts_with('→')
+    digit_end > 0 && {
+        // Read output prefixes line numbers with either an arrow ("1→", older
+        // format) or a tab ("1\t", current cat -n format). Accept both, or every
+        // line-numbered file read whose content trips the soft-error regex is
+        // misclassified as an error.
+        let rest = &trimmed[digit_end..];
+        rest.starts_with('→') || rest.starts_with('\t')
+    }
 }
 
 /// Check if text starts with grep-style line output (e.g., "21:", "21-").
@@ -847,6 +854,10 @@ mod tests {
         assert!(is_likely_false_positive("Read", "1→hello"));
         assert!(is_likely_false_positive("Read", "787→#[cfg(test)]"));
         assert!(is_likely_false_positive("Read", "   42→some line"));
+        // Read: tab-delimited line numbers (current cat -n format)
+        assert!(is_likely_false_positive("Read", "1\t//! module doc"));
+        assert!(is_likely_false_positive("Read", "595\t    ] {"));
+        assert!(is_likely_false_positive("Read", "     42\tsome line"));
         assert!(!is_likely_false_positive("Read", "File does not exist."));
         assert!(!is_likely_false_positive(
             "Read",
