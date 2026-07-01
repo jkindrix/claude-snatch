@@ -98,9 +98,10 @@ fn validate_raw_jsonl_compat(args: &ExportArgs) -> Result<()> {
     if args.subagents {
         bad.push("--subagents");
     }
-    if args.combine_agents {
-        bad.push("--combine-agents");
-    }
+    // --combine-agents IS supported for raw-jsonl: it produces a byte-faithful
+    // bundle of the parent transcript followed by each subagent transcript
+    // verbatim (see export_raw_combined_agents). So it is intentionally absent
+    // from this reject-list.
     if args.toc {
         bad.push("--toc");
     }
@@ -298,8 +299,22 @@ fn export_single_session(cli: &Cli, args: &ExportArgs, session_id: &str) -> Resu
         }
     }
 
-    // Handle combined agents export
+    // Handle combined agents export. raw-jsonl gets a byte-faithful bundle
+    // (parent + subagent transcripts, verbatim); all other formats get the
+    // parsed, time-interleaved combine.
     if args.combine_agents {
+        if matches!(args.format, ExportFormatArg::RawJsonl) {
+            let output = args.output_file.as_ref();
+            export_raw_combined_agents(cli, &session, output, !args.no_chain)?;
+            if let (false, Some(out)) = (cli.quiet, output) {
+                eprintln!(
+                    "Exported session {} bundle to {}",
+                    session_id,
+                    out.display()
+                );
+            }
+            return Ok(());
+        }
         return export_combined_agents(cli, args, &session);
     }
 
@@ -1336,10 +1351,23 @@ fn export_raw_jsonl(
             );
         }
     }
+    stream_raw_paths(&paths, output_path)
+}
+
+/// Concatenate the ordered source files to the sink (file or stdout), preserving
+/// every byte. A single `\n` is inserted between files only when the preceding
+/// file does not already end in one, so concatenating multiple transcripts stays
+/// valid line-delimited JSON without altering any original line. File output is
+/// atomic.
+fn stream_raw_paths(paths: &[PathBuf], output_path: Option<&PathBuf>) -> Result<bool> {
     let copy_all = |writer: &mut dyn Write| -> Result<()> {
-        for p in &paths {
-            let mut src = std::fs::File::open(p)?;
-            std::io::copy(&mut src, writer)?;
+        for (i, p) in paths.iter().enumerate() {
+            let bytes = std::fs::read(p)?;
+            writer.write_all(&bytes)?;
+            let last = i + 1 == paths.len();
+            if !last && !bytes.is_empty() && !bytes.ends_with(b"\n") {
+                writer.write_all(b"\n")?;
+            }
         }
         Ok(())
     };
@@ -1356,6 +1384,64 @@ fn export_raw_jsonl(
         writer.flush()?;
     }
     Ok(true)
+}
+
+/// Byte-faithful bundle of a session plus its subagent transcripts.
+///
+/// Streams the parent session's original JSONL (chain-order when chain-aware),
+/// then each subagent transcript in the agent hierarchy verbatim, in pre-order
+/// (parent, then its subagents depth-first). Every source line is preserved
+/// byte-for-byte; see [`stream_raw_paths`] for the between-file newline guard.
+/// This is the archival counterpart to `--combine-agents` for `raw-jsonl`.
+///
+/// Note: externalized tool outputs (`tool-results/<id>.txt`) remain as their
+/// on-disk `<persisted-output>` stubs here — inlining them would alter the
+/// bytes. Use the readable `--combine-agents --resolve-tool-results` markdown
+/// path when full tool outputs are wanted.
+fn export_raw_combined_agents(
+    cli: &Cli,
+    session: &Session,
+    output_path: Option<&PathBuf>,
+    chain_aware: bool,
+) -> Result<bool> {
+    use crate::discovery::HierarchyBuilder;
+
+    // Parent source file(s): full resume chain in chain order when chain-aware.
+    let (mut paths, chain) = raw_chain_source_paths(cli, session, chain_aware)?;
+    if let Some((root, count)) = &chain {
+        if !cli.quiet {
+            eprintln!("ℹ raw-jsonl chain-order passthrough: {count} files (root {root}).");
+        }
+    }
+
+    // Subagent source files: every descendant in the agent hierarchy, pre-order.
+    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
+    let projects = claude_dir.projects()?;
+    let project = projects
+        .iter()
+        .find(|p| p.decoded_path() == session.project_path())
+        .ok_or_else(|| SnatchError::ProjectNotFound {
+            project_path: session.project_path().to_string(),
+        })?;
+    let hierarchy = HierarchyBuilder::new().build_for_project(project)?;
+
+    let mut subagent_count = 0usize;
+    if let Some(node) = find_node_by_session_id(&hierarchy, session.session_id()) {
+        // flatten() is pre-order with the root first; skip it (its chain files
+        // are already queued) and append every descendant transcript.
+        for (_, sub) in node.flatten().into_iter().skip(1) {
+            paths.push(sub.path().to_path_buf());
+            subagent_count += 1;
+        }
+    }
+
+    if !cli.quiet {
+        eprintln!(
+            "ℹ raw-jsonl bundle: parent + {subagent_count} subagent transcript(s), byte-faithful."
+        );
+    }
+
+    stream_raw_paths(&paths, output_path)
 }
 
 /// Ordered raw source files plus optional `(root_id, member_count)` when a chain
@@ -2370,6 +2456,17 @@ mod tests {
     fn test_raw_jsonl_plain_is_accepted() {
         use clap::Parser;
         let args = ExportArgs::try_parse_from(["export", "abc", "-f", "raw-jsonl"]).unwrap();
+        assert!(validate_raw_jsonl_compat(&args).is_ok());
+    }
+
+    #[test]
+    fn test_raw_jsonl_accepts_combine_agents() {
+        // --combine-agents is the supported way to include subagents in a
+        // byte-faithful raw-jsonl bundle, so it must NOT be rejected.
+        use clap::Parser;
+        let args =
+            ExportArgs::try_parse_from(["export", "abc", "-f", "raw-jsonl", "--combine-agents"])
+                .unwrap();
         assert!(validate_raw_jsonl_compat(&args).is_ok());
     }
 }
