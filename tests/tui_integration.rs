@@ -21,6 +21,7 @@ fn snatch_bin() -> &'static str {
 /// load and makes them flaky, so each holds this lock for its duration.
 static PTY_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[cfg(feature = "tui")]
 mod tui_tests {
     use super::*;
 

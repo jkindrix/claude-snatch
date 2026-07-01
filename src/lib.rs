@@ -100,6 +100,7 @@ pub mod notes;
 pub mod parser;
 pub mod reconstruction;
 pub mod tags;
+#[cfg(feature = "tui")]
 pub mod tui;
 pub mod util;
 
