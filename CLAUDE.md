@@ -13,7 +13,7 @@ cargo test                     # run tests
 
 ## Session History Recall (snatch MCP)
 
-This project provides an MCP server (`snatch serve-mcp`) that exposes 24 tools for querying Claude Code session history. When you need to recall what happened in previous sessions or understand the narrative of past work, use these tools:
+This project provides an MCP server (`snatch serve-mcp`) that exposes 21 tools for querying Claude Code session history. When you need to recall what happened in previous sessions or understand the narrative of past work, use these tools:
 
 | Need | Tool | Example |
 |------|------|---------|
@@ -31,13 +31,10 @@ This project provides an MCP server (`snatch serve-mcp`) that exposes 24 tools f
 | Track long-term goals | `manage_goals` | operation="list", project="snatch" |
 | Capture tactical work state | `manage_notes` | operation="add", project="snatch", text="..." |
 | Track design decisions | `manage_decisions` | operation="list", project="snatch" |
-| Tag key messages | `tag_message` | operation="add", project="snatch", session_id="abc", message_uuid="xyz", tag="decision" |
 | List all sessions | `list_sessions` | project="claude-snatch" |
 | Session metadata | `get_session_info` | session_id="abc123" |
 | Which sessions changed a file? | `get_file_history` | path="src/main.rs", project="snatch" |
 | Thread a topic across sessions | `thread_topic` | pattern="authentication", project="snatch" |
-| Detect decision points | `detect_decisions` | project="snatch", min_confidence=0.5 |
-| Find contradictions | `detect_conflicts` | project="snatch", topic="traits" |
 | Context around an event | `get_event_context` | session_id="abc123", message_id="uuid" |
 | Why did this file change? | `explain_file_evolution` | file_pattern="mod.rs", project="snatch" |
 | What should we work on next? | `suggest_priorities` | project="snatch", period="7d" |

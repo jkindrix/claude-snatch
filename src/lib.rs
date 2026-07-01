@@ -95,7 +95,6 @@ pub mod file_index;
 pub mod git;
 pub mod goals;
 pub mod index;
-pub mod message_tags;
 pub mod model;
 pub mod notes;
 pub mod parser;

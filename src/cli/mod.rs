@@ -1085,7 +1085,7 @@ pub struct SearchArgs {
     #[arg(long)]
     pub phase: Option<String>,
 
-    /// Show message UUIDs in text output (useful for tagging).
+    /// Show message UUIDs in text output (useful for `context` lookups).
     #[arg(long)]
     pub show_uuid: bool,
 }
@@ -1721,45 +1721,6 @@ pub enum TagAction {
     Links {
         /// Session ID to show links for (optional - shows all if not specified).
         session: Option<String>,
-    },
-
-    /// Tag a specific message within a session.
-    #[command(alias = "msg")]
-    Message {
-        /// Session ID (supports short prefixes).
-        session: String,
-        /// Message UUID to tag.
-        message_uuid: String,
-        /// Tag to apply (e.g., "decision", "decision:drop-trait", "reversal").
-        tag: String,
-        /// Project path filter (required for storage location).
-        #[arg(short = 'p', long)]
-        project: Option<String>,
-    },
-
-    /// Remove a tag from a specific message.
-    #[command(alias = "unmsg")]
-    UntagMessage {
-        /// Message UUID to remove tag from.
-        message_uuid: String,
-        /// Tag to remove.
-        tag: String,
-        /// Project path filter (required for storage location).
-        #[arg(short = 'p', long)]
-        project: Option<String>,
-    },
-
-    /// List message tags for a session or search by tag.
-    #[command(alias = "mtags")]
-    MessageTags {
-        /// Session ID to show message tags for, or omit to search by tag.
-        session: Option<String>,
-        /// Filter by tag (exact or prefix match).
-        #[arg(short = 't', long)]
-        tag: Option<String>,
-        /// Project path filter (required for storage location).
-        #[arg(short = 'p', long)]
-        project: Option<String>,
     },
 
     /// Find sessions similar to a given session.

@@ -840,45 +840,6 @@ pub struct ManageDecisionsResponse {
 }
 
 // ============================================================================
-// Message Tagging
-// ============================================================================
-
-/// Request to tag or manage message-level tags.
-#[derive(Debug, Deserialize, ToolInput)]
-pub struct TagMessageRequest {
-    /// Operation: "add", "remove", "list", "search".
-    pub operation: String,
-
-    /// Project path filter (substring match). Required.
-    pub project: String,
-
-    /// Session ID containing the message (required for "add").
-    pub session_id: Option<String>,
-
-    /// Message UUID to tag (required for "add" and "remove").
-    pub message_uuid: Option<String>,
-
-    /// Tag to add or remove (required for "add" and "remove"). For "search", filters by this tag.
-    pub tag: Option<String>,
-}
-
-/// A tagged message entry in responses.
-#[derive(Debug, Serialize)]
-pub struct TaggedMessageEntry {
-    pub session_id: String,
-    pub message_uuid: String,
-    pub tags: Vec<MessageTagEntry>,
-}
-
-/// A single tag on a message.
-#[derive(Debug, Serialize)]
-pub struct MessageTagEntry {
-    pub tag: String,
-    pub created_at: String,
-    pub source: String,
-}
-
-// ============================================================================
 // File History
 // ============================================================================
 
@@ -1259,17 +1220,4 @@ pub struct GetFileHistoryResponse {
     pub total_modifications: usize,
     pub returned: usize,
     pub modifications: Vec<FileModificationEntry>,
-}
-
-/// Response for tag_message.
-#[derive(Debug, Serialize)]
-pub struct TagMessageResponse {
-    pub operation: String,
-    pub project_path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub messages: Option<Vec<TaggedMessageEntry>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tags: Option<Vec<String>>,
 }

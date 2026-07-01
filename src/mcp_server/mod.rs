@@ -60,16 +60,15 @@ use types::{
     GetSessionLessonsRequest, GetSessionMessagesRequest, GetSessionTimelineRequest,
     GetStatsRequest, GetToolCallsRequest, GoalEntry, HotspotFileEntry, LessonsSummary,
     ListSessionsRequest, ManageDecisionsRequest, ManageDecisionsResponse, ManageGoalsRequest,
-    ManageGoalsResponse, ManageNotesRequest, ManageNotesResponse, MessageEntry, MessageTagEntry,
+    ManageGoalsResponse, ManageNotesRequest, ManageNotesResponse, MessageEntry,
     MonitorInsightEntry, MonitorProjectRequest, MonitorProjectResponse, NoteEntry,
     PriorityItemEntry, PrioritySourceEntry, ProjectAggregate, ProjectHistoryResponse,
     ProjectSessionEntry, ReworkFileEntry, SearchMatch, SearchSessionsRequest,
     SearchSessionsResponse, SessionDigestResponse, SessionHealthEntry, SessionInfoResponse,
     SessionLessonsResponse, SessionMessagesResponse, SessionSummary, SessionTimelineResponse,
     StatsResponse, SubagentSummary, SuggestPrioritiesRequest, SuggestPrioritiesResponse,
-    TagMessageRequest, TagMessageResponse, TaggedMessageEntry, ThreadExchangeEntry,
-    ThreadTopicRequest, ThreadTopicResponse, TimelineTurn, ToolCallEntry, ToolCallsResponse,
-    ToolCallsSummary, ToolDetail, UnmatchedSubagent, UserCorrection,
+    ThreadExchangeEntry, ThreadTopicRequest, ThreadTopicResponse, TimelineTurn, ToolCallEntry,
+    ToolCallsResponse, ToolCallsSummary, ToolDetail, UnmatchedSubagent, UserCorrection,
 };
 
 // ============================================================================
@@ -2074,198 +2073,6 @@ impl SnatchServer {
 
             other => ToolOutput::error(format!(
                 "Unknown operation '{other}'. Use: list, add, update, remove, supersede. For auto-scoring use CLI: snatch decisions score -p <project>"
-            )),
-        }
-    }
-
-    #[tool(
-        description = "Tag individual messages within a session for retrieval. Tags like 'decision', 'reversal', 'correction', 'bug', 'milestone' mark key moments. Use 'decision:topic' for topic-specific decision tags. Operations: add (tag a message), remove (untag), list (show tags for a session), search (find messages by tag)."
-    )]
-    async fn tag_message(&self, request: TagMessageRequest) -> ToolOutput {
-        use crate::message_tags::{load_message_tags, save_message_tags, TagSource};
-
-        let resolved = match resolve_project(self, &request.project) {
-            Ok(r) => r,
-            Err(e) => return e,
-        };
-
-        fn to_entry(msg: &crate::message_tags::TaggedMessage) -> TaggedMessageEntry {
-            TaggedMessageEntry {
-                session_id: msg.session_id.clone(),
-                message_uuid: msg.message_uuid.clone(),
-                tags: msg
-                    .tags
-                    .iter()
-                    .map(|t| MessageTagEntry {
-                        tag: t.tag.clone(),
-                        created_at: t.created_at.to_rfc3339(),
-                        source: format!("{:?}", t.source).to_lowercase(),
-                    })
-                    .collect(),
-            }
-        }
-
-        match request.operation.as_str() {
-            "add" => {
-                let session_id = match &request.session_id {
-                    Some(s) => s.clone(),
-                    None => return ToolOutput::error("'session_id' is required for add operation"),
-                };
-                let message_uuid = match &request.message_uuid {
-                    Some(u) => u.clone(),
-                    None => {
-                        return ToolOutput::error("'message_uuid' is required for add operation")
-                    }
-                };
-                let tag = match &request.tag {
-                    Some(t) => t.clone(),
-                    None => return ToolOutput::error("'tag' is required for add operation"),
-                };
-
-                let mut store = match load_message_tags(&resolved.project_dir) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        return ToolOutput::error(format!("Failed to load message tags: {e}"))
-                    }
-                };
-
-                let added = store.add_tag(&session_id, &message_uuid, &tag, TagSource::Manual);
-
-                if let Err(e) = save_message_tags(&resolved.project_dir, &store) {
-                    return ToolOutput::error(format!("Failed to save message tags: {e}"));
-                }
-
-                let response = TagMessageResponse {
-                    operation: "add".into(),
-                    project_path: resolved.project_path,
-                    message: Some(if added {
-                        format!("Tagged message {message_uuid} with '{tag}'")
-                    } else {
-                        format!("Message {message_uuid} already has tag '{tag}'")
-                    }),
-                    messages: None,
-                    tags: None,
-                };
-
-                match ToolOutput::json(&response) {
-                    Ok(output) => output,
-                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
-                }
-            }
-
-            "remove" => {
-                let message_uuid = match &request.message_uuid {
-                    Some(u) => u.clone(),
-                    None => {
-                        return ToolOutput::error("'message_uuid' is required for remove operation")
-                    }
-                };
-                let tag = match &request.tag {
-                    Some(t) => t.clone(),
-                    None => return ToolOutput::error("'tag' is required for remove operation"),
-                };
-
-                let mut store = match load_message_tags(&resolved.project_dir) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        return ToolOutput::error(format!("Failed to load message tags: {e}"))
-                    }
-                };
-
-                let removed = store.remove_tag(&message_uuid, &tag);
-
-                if let Err(e) = save_message_tags(&resolved.project_dir, &store) {
-                    return ToolOutput::error(format!("Failed to save message tags: {e}"));
-                }
-
-                let response = TagMessageResponse {
-                    operation: "remove".into(),
-                    project_path: resolved.project_path,
-                    message: Some(if removed {
-                        format!("Removed tag '{tag}' from message {message_uuid}")
-                    } else {
-                        format!("Message {message_uuid} does not have tag '{tag}'")
-                    }),
-                    messages: None,
-                    tags: None,
-                };
-
-                match ToolOutput::json(&response) {
-                    Ok(output) => output,
-                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
-                }
-            }
-
-            "list" => {
-                let store = match load_message_tags(&resolved.project_dir) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        return ToolOutput::error(format!("Failed to load message tags: {e}"))
-                    }
-                };
-
-                let messages = if let Some(ref session_id) = request.session_id {
-                    store
-                        .messages_in_session(session_id)
-                        .into_iter()
-                        .map(to_entry)
-                        .collect()
-                } else {
-                    store.messages.values().map(to_entry).collect()
-                };
-
-                let response = TagMessageResponse {
-                    operation: "list".into(),
-                    project_path: resolved.project_path,
-                    message: None,
-                    messages: Some(messages),
-                    tags: Some(store.all_tags()),
-                };
-
-                match ToolOutput::json(&response) {
-                    Ok(output) => output,
-                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
-                }
-            }
-
-            "search" => {
-                let tag = match &request.tag {
-                    Some(t) => t.clone(),
-                    None => return ToolOutput::error("'tag' is required for search operation"),
-                };
-
-                let store = match load_message_tags(&resolved.project_dir) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        return ToolOutput::error(format!("Failed to load message tags: {e}"))
-                    }
-                };
-
-                let messages: Vec<TaggedMessageEntry> = store
-                    .messages_with_tag(&tag)
-                    .into_iter()
-                    .map(to_entry)
-                    .collect();
-
-                let response = TagMessageResponse {
-                    operation: "search".into(),
-                    project_path: resolved.project_path,
-                    message: Some(format!(
-                        "Found {} messages with tag '{tag}'",
-                        messages.len()
-                    )),
-                    messages: Some(messages),
-                    tags: None,
-                };
-
-                match ToolOutput::json(&response) {
-                    Ok(output) => output,
-                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
-                }
-            }
-
-            other => ToolOutput::error(format!(
-                "Unknown operation '{other}'. Use: add, remove, list, search"
             )),
         }
     }

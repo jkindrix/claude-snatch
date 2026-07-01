@@ -161,7 +161,6 @@ Configure it in your Claude Code MCP settings:
 | `manage_goals` | Create, update, list, and complete goals |
 | `manage_notes` | Create, list, and delete session notes |
 | `manage_decisions` | Record and recall architectural decisions |
-| `tag_message` | Tag specific messages for later recall |
 
 ## Analysis and Recall
 
@@ -427,7 +426,7 @@ cargo build --features "tui,mcp,image-preview,mmap,tracing"
 | Feature | Description |
 |---------|-------------|
 | `tui` | Interactive terminal UI (`snatch tui`) |
-| `mcp` | MCP server exposing 14 tools for session recall, search, lesson extraction, goal and decision management, and message tagging |
+| `mcp` | MCP server exposing tools for session recall, search, lesson extraction, and goal and decision management |
 | `image-preview` | Terminal image rendering using sixel, kitty, or iterm2 protocols |
 | `mmap` | Memory-mapped file parsing for very large JSONL files |
 | `tracing` | Enable tracing/diagnostic instrumentation |
