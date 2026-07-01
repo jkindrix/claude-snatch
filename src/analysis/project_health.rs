@@ -91,6 +91,7 @@ pub fn analyze_project_health(
     let mut file_edits: HashMap<String, (usize, Vec<String>)> = HashMap::new();
     for (path, mods) in &file_index.entries {
         let mut session_ids: Vec<String> = mods.iter().map(|m| m.session_id.clone()).collect();
+        session_ids.sort();
         session_ids.dedup();
         file_edits.insert(path.clone(), (mods.len(), session_ids));
     }

@@ -172,6 +172,7 @@ pub fn aggregate_project_lessons(
             entries.sort_by(|a, b| b.0.timestamp.cmp(&a.0.timestamp));
             let count = entries.len();
             let mut sessions: Vec<String> = entries.iter().map(|(_, sid)| sid.clone()).collect();
+            sessions.sort();
             sessions.dedup();
             let last_seen = entries.first().and_then(|(p, _)| p.timestamp.clone());
             let example_resolution = entries
@@ -225,6 +226,7 @@ pub fn aggregate_project_lessons(
         .map(|(_, entries)| {
             let count = entries.len();
             let mut sessions: Vec<String> = entries.iter().map(|(_, sid)| sid.clone()).collect();
+            sessions.sort();
             sessions.dedup();
             let examples: Vec<String> = entries
                 .iter()
