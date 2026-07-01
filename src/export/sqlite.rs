@@ -727,28 +727,26 @@ impl Exporter for SqliteExporter {
     fn export_conversation<W: Write>(
         &self,
         _conversation: &Conversation,
-        writer: &mut W,
+        _writer: &mut W,
         _options: &ExportOptions,
     ) -> Result<()> {
-        // SQLite export requires a file path, not a writer
-        writeln!(
-            writer,
-            "SQLite export requires a file path. Use --output <path.db> to specify the database file."
-        )?;
-        Ok(())
+        // SQLite writes a binary database file, not a stream. It cannot honor
+        // the writer-based Exporter contract; fail explicitly rather than write
+        // an explanatory message and report success. Use `export_to_file`.
+        Err(SnatchError::unsupported(
+            "SQLite export requires a file path (use SqliteExporter::export_to_file), not a stream",
+        ))
     }
 
     fn export_entries<W: Write>(
         &self,
         _entries: &[LogEntry],
-        writer: &mut W,
+        _writer: &mut W,
         _options: &ExportOptions,
     ) -> Result<()> {
-        writeln!(
-            writer,
-            "SQLite export requires a file path. Use --output <path.db> to specify the database file."
-        )?;
-        Ok(())
+        Err(SnatchError::unsupported(
+            "SQLite export requires a file path (use SqliteExporter::export_to_file), not a stream",
+        ))
     }
 }
 
