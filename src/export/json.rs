@@ -689,6 +689,51 @@ pub fn conversation_to_jsonl<W: Write>(
     Ok(())
 }
 
+/// [`Exporter`] wrapper for JSONL (line-delimited JSON entries).
+///
+/// The library counterpart to the CLI's `jsonl` format, for consumers that
+/// dispatch over the [`Exporter`] trait rather than calling
+/// [`conversation_to_jsonl`] directly.
+///
+/// Note: `raw-jsonl` (the byte-faithful passthrough of the original Claude Code
+/// source file) is intentionally *not* an `Exporter` — it streams bytes from
+/// disk rather than rendering a [`Conversation`], so it has no
+/// `Conversation`-based representation to expose here. It stays a CLI/file-level
+/// operation by design.
+#[derive(Debug, Default)]
+pub struct JsonlExporter;
+
+impl JsonlExporter {
+    /// Create a new JSONL exporter.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Exporter for JsonlExporter {
+    fn export_conversation<W: Write>(
+        &self,
+        conversation: &Conversation,
+        writer: &mut W,
+        options: &ExportOptions,
+    ) -> Result<()> {
+        conversation_to_jsonl(conversation, writer, options.main_thread_only)
+    }
+
+    fn export_entries<W: Write>(
+        &self,
+        entries: &[LogEntry],
+        writer: &mut W,
+        _options: &ExportOptions,
+    ) -> Result<()> {
+        for entry in entries {
+            writeln!(writer, "{}", serde_json::to_string(entry)?)?;
+        }
+        Ok(())
+    }
+}
+
 /// Parse JSONL and re-export (for round-trip testing).
 pub fn round_trip_jsonl(input: &str) -> Result<String> {
     let mut output = String::new();
@@ -829,6 +874,37 @@ mod tests {
         assert_eq!(counts.get("last-prompt"), Some(&1));
         // All four input entry types are present in the output.
         assert_eq!(counts.values().sum::<usize>(), 4);
+    }
+
+    #[test]
+    fn test_jsonl_exporter_matches_function() {
+        let lines = [
+            r#"{"type":"user","uuid":"1","sessionId":"s","version":"2.0","message":{"role":"user","content":"hi"},"timestamp":"2026-01-01T00:00:00Z"}"#,
+            r#"{"type":"summary","summary":"a title","leafUuid":"1"}"#,
+        ];
+        let entries: Vec<LogEntry> = lines
+            .iter()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let conv = Conversation::from_entries(entries.clone()).unwrap();
+        let opts = ExportOptions::default();
+
+        // The Exporter wrapper produces exactly what the function does.
+        let mut via_fn = Vec::new();
+        conversation_to_jsonl(&conv, &mut via_fn, opts.main_thread_only).unwrap();
+        let mut via_exporter = Vec::new();
+        JsonlExporter::new()
+            .export_conversation(&conv, &mut via_exporter, &opts)
+            .unwrap();
+        assert_eq!(via_fn, via_exporter);
+
+        // export_entries emits one JSON line per entry.
+        let mut ent_out = Vec::new();
+        JsonlExporter::new()
+            .export_entries(&entries, &mut ent_out, &opts)
+            .unwrap();
+        let ent_out = String::from_utf8(ent_out).unwrap();
+        assert_eq!(ent_out.lines().filter(|l| !l.is_empty()).count(), 2);
     }
 
     #[test]
