@@ -13,7 +13,7 @@ cargo test                     # run tests
 
 ## Session History Recall (snatch MCP)
 
-This project provides an MCP server (`snatch serve-mcp`) that exposes 26 tools for querying Claude Code session history. When you need to recall what happened in previous sessions or understand the narrative of past work, use these tools:
+This project provides an MCP server (`snatch serve-mcp`) that exposes 24 tools for querying Claude Code session history. When you need to recall what happened in previous sessions or understand the narrative of past work, use these tools:
 
 | Need | Tool | Example |
 |------|------|---------|
@@ -26,7 +26,6 @@ This project provides an MCP server (`snatch serve-mcp`) that exposes 26 tools f
 | Find where X was discussed | `search_sessions` | pattern="authentication", project="myproject" |
 | Search reasoning/decisions | `search_sessions` | pattern="decided|because", scope="thinking" |
 | What went wrong & how fixed? | `get_session_lessons` | session_id="abc123" |
-| What keeps going wrong? | `get_project_lessons` | project="snatch", period="30d" |
 | Project health dashboard | `get_project_health` | project="snatch", period="7d" |
 | What files were changed? | `get_tool_calls` | session_id="abc123", tool_filter="Write,Edit" |
 | Track long-term goals | `manage_goals` | operation="list", project="snatch" |
@@ -40,7 +39,6 @@ This project provides an MCP server (`snatch serve-mcp`) that exposes 26 tools f
 | Detect decision points | `detect_decisions` | project="snatch", min_confidence=0.5 |
 | Find contradictions | `detect_conflicts` | project="snatch", topic="traits" |
 | Context around an event | `get_event_context` | session_id="abc123", message_id="uuid" |
-| How is the project going? | `project_retrospective` | project="snatch", period="7d" |
 | Why did this file change? | `explain_file_evolution` | file_pattern="mod.rs", project="snatch" |
 | What should we work on next? | `suggest_priorities` | project="snatch", period="7d" |
 | What should I watch out for? | `monitor_project` | project="snatch", period="7d" |
