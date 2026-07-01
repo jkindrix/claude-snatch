@@ -472,7 +472,13 @@ fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.replace('\n', " ").replace('\r', "")
     } else {
-        format!("{}...", s[..max_len].replace('\n', " ").replace('\r', ""))
+        // Slice at the nearest char boundary at or before max_len; byte-indexing
+        // at an arbitrary offset panics inside a multi-byte char (em dash, emoji).
+        let end = (0..=max_len)
+            .rev()
+            .find(|&i| s.is_char_boundary(i))
+            .unwrap_or(0);
+        format!("{}...", s[..end].replace('\n', " ").replace('\r', ""))
     }
 }
 
@@ -507,5 +513,15 @@ mod tests {
         assert_eq!(truncate("short", 10), "short");
         assert_eq!(truncate("this is longer", 10), "this is lo...");
         assert_eq!(truncate("with\nnewline", 20), "with newline");
+    }
+
+    #[test]
+    fn test_truncate_multibyte_boundary() {
+        // Cutting inside a multi-byte char must not panic; it backs off to the
+        // nearest char boundary. "a—b" is a(1) + em-dash(3 bytes) + b(1).
+        assert_eq!(truncate("a—b cdef", 2), "a...");
+        assert_eq!(truncate("😀😀😀😀", 5), "😀...");
+        // A boundary that lands exactly between chars keeps the whole char.
+        assert_eq!(truncate("a—b cdef", 4), "a—...");
     }
 }
