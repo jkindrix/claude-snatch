@@ -60,7 +60,7 @@ pub struct Insight {
     pub evidence: String,
     /// 0–100 attention score; ranking key.
     pub severity: u32,
-    /// Stable identity for cooldown dedup.
+    /// Stable identity; deterministic tiebreak when ranking.
     pub fingerprint: String,
     /// Most-recent timestamp associated with the insight (ranking tiebreak).
     pub recency: Option<DateTime<Utc>>,
