@@ -164,8 +164,78 @@ pub fn aggregate_project_lessons(
         })
         .collect();
 
+    // Drop extraction noise (successful Read/build/test output the extractor
+    // mis-flags as errors) at the source, so every consumer — monitor,
+    // priorities — sees the same cleaned recurring-error set.
+    recurring_errors.retain(|e| !is_extraction_noise(&e.tool_name, &e.error_pattern));
     recurring_errors.sort_by_key(|b| std::cmp::Reverse(b.count));
     recurring_errors.truncate(params.limit);
 
     ProjectLessonsResult { recurring_errors }
+}
+
+/// Whether a recurring "error" is actually mis-flagged successful tool output.
+///
+/// `aggregate_project_lessons` occasionally flags success as failure: a `Read`
+/// whose file content literally contains words like "error"/"panic", or a
+/// `Bash` run whose salient output is a cargo build/test success (often paired
+/// with a trailing command that exits nonzero). This drops only the unambiguous
+/// success cases — never anything that also looks like a real failure.
+fn is_extraction_noise(tool_name: &str, pattern: &str) -> bool {
+    match tool_name {
+        "Read" => starts_with_line_marker(pattern),
+        "Bash" => looks_like_build_or_test_success(pattern),
+        _ => false,
+    }
+}
+
+/// A leading `<number><tab|→|pipe>` marks line-numbered file/search output — a
+/// successful read, not an error.
+fn starts_with_line_marker(s: &str) -> bool {
+    let t = s.trim_start();
+    let digits = t.chars().take_while(char::is_ascii_digit).count();
+    if digits == 0 {
+        return false;
+    }
+    let rest = &t[digits..];
+    rest.starts_with('\t') || rest.starts_with('→') || rest.starts_with('|')
+}
+
+/// Cargo build/test success — but never when the same text also shows a failure.
+fn looks_like_build_or_test_success(p: &str) -> bool {
+    if p.contains("error[E") || p.contains("FAILED") || p.contains("panicked") {
+        return false;
+    }
+    (p.contains("Finished `") && p.contains("profile")) || p.contains("test result: ok")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extraction_noise_drops_success_keeps_failures() {
+        // Successful Read (line-numbered content) mis-flagged as an error.
+        assert!(is_extraction_noise(
+            "Read",
+            "1\t//! Message types for Claude Code"
+        ));
+        // Cargo build success (even paired with a trailing nonzero exit upstream).
+        assert!(is_extraction_noise(
+            "Bash",
+            "Compiling claude-snatch v0.1.0\n    Finished `test` profile [optimized]"
+        ));
+        // A genuine compile error must survive (not noise).
+        assert!(!is_extraction_noise(
+            "Bash",
+            "Exit code 101\nerror[E0061]: wrong arg count"
+        ));
+        // Build output that ALSO shows a failure is a real error.
+        assert!(!is_extraction_noise(
+            "Bash",
+            "Compiling ...\ntest result: FAILED"
+        ));
+        // Other tools are never treated as extraction noise.
+        assert!(!is_extraction_noise("Edit", "String to replace not found"));
+    }
 }

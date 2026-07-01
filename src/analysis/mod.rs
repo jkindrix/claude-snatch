@@ -19,7 +19,6 @@ pub mod file_evolution;
 pub mod filters;
 pub mod lessons;
 pub mod monitor;
-pub mod monitor_state;
 pub mod priorities;
 pub mod project_health;
 pub(crate) mod project_lessons;

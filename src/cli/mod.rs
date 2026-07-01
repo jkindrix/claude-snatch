@@ -2227,7 +2227,7 @@ pub struct MonitorArgs {
     /// Project path filter (substring match). Required.
     pub project: String,
 
-    /// Filter to sessions since this date (bound the scan; the hook uses this to stay fast).
+    /// Filter to sessions since this date (bounds the scan).
     #[arg(long)]
     pub since: Option<String>,
 
@@ -2242,18 +2242,6 @@ pub struct MonitorArgs {
     /// Maximum insights to surface.
     #[arg(long, default_value = "10")]
     pub top: usize,
-
-    /// Proactive surface: apply the cooldown and print a compact block (silent when empty).
-    #[arg(long)]
-    pub inject: bool,
-
-    /// Record surfaced insights so they don't re-surface until they worsen (only with --inject).
-    #[arg(long)]
-    pub mark_shown: bool,
-
-    /// Days an unchanged insight stays suppressed after being shown.
-    #[arg(long, default_value = "7")]
-    pub cooldown_days: i64,
 }
 
 /// Arguments for the health command.

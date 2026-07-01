@@ -1,13 +1,11 @@
 //! Active-monitoring insights (goal #8, design `.tmp/issues/0023`).
 //!
-//! Goal #8 surfaces cross-session insights "without being asked". The analysis
-//! already exists elsewhere (`project_lessons`); this
-//! module is the *delivery* layer's pure core: it maps existing analyzer output
-//! into a small ranked [`Insight`] set. The IO (running the analyzers over
-//! sessions / the decision store), the cooldown state, and the surfaces
-//! (CLI / MCP / hook) live in later phases — this module stays pure and
-//! testable so the ranking and the fingerprints (which the cooldown depends on)
-//! are verifiable in isolation.
+//! Goal #8 surfaces cross-session insights on demand. The analysis already
+//! exists elsewhere (`project_lessons`); this module is the *delivery* layer's
+//! pure core: it maps existing analyzer output into a small ranked [`Insight`]
+//! set. The IO (running the analyzers over sessions) and the surfaces
+//! (CLI / MCP) live in the command layer — this module stays pure and testable
+//! so the ranking and the fingerprints are verifiable in isolation.
 
 use chrono::{DateTime, Utc};
 
@@ -49,16 +47,16 @@ impl Default for MonitorParams {
 /// A single ranked, surfaceable insight.
 ///
 /// `severity` is a 0–100 "attention score" comparable across kinds so a single
-/// ranking can interleave them. `fingerprint` is a stable identity used by the
-/// cooldown (Phase 2) to decide whether an insight has already been shown — it
-/// must not drift when surface wording changes.
+/// ranking can interleave them. `fingerprint` is a stable identity (used as the
+/// deterministic tiebreak in [`rank`]) that must not drift when surface wording
+/// changes.
 #[derive(Debug, Clone)]
 pub struct Insight {
     /// Which kind of insight this is.
     pub kind: InsightKind,
     /// One-line headline.
     pub title: String,
-    /// Supporting detail (counts, the pattern, the conflicting texts).
+    /// Supporting detail (counts, the error pattern, last fix).
     pub evidence: String,
     /// 0–100 attention score; ranking key.
     pub severity: u32,
@@ -94,50 +92,16 @@ fn error_severity(count: usize) -> u32 {
 /// Whether a recurring-error pattern is upstream extraction noise rather than a
 /// real project error worth surfacing.
 ///
-/// `aggregate_project_lessons` occasionally mis-flags *successful* tool output:
-/// a `Read` whose file content literally contains words like "error"/"panic", or
-/// a `Bash` run whose salient output is a cargo build/test success (often paired
-/// with a trailing command that exits nonzero). This drops only the unambiguous
-/// success cases — never anything that also looks like a real failure. It is a
-/// surgical monitor-side patch; the root cause lives in the shared extractor.
-fn is_extraction_noise(tool_name: &str, pattern: &str) -> bool {
-    match tool_name {
-        "Read" => starts_with_line_marker(pattern),
-        "Bash" => looks_like_build_or_test_success(pattern),
-        _ => false,
-    }
-}
-
-/// A leading `<number><tab|→|pipe>` marks line-numbered file/search output — a
-/// successful read, not an error.
-fn starts_with_line_marker(s: &str) -> bool {
-    let t = s.trim_start();
-    let digits = t.chars().take_while(char::is_ascii_digit).count();
-    if digits == 0 {
-        return false;
-    }
-    let rest = &t[digits..];
-    rest.starts_with('\t') || rest.starts_with('→') || rest.starts_with('|')
-}
-
-/// Cargo build/test success — but never when the same text also shows a failure.
-fn looks_like_build_or_test_success(p: &str) -> bool {
-    if p.contains("error[E") || p.contains("FAILED") || p.contains("panicked") {
-        return false;
-    }
-    (p.contains("Finished `") && p.contains("profile")) || p.contains("test result: ok")
-}
-
 /// Map clustered recurring errors into insights.
 ///
-/// `errors` is `ProjectLessonsResult::recurring_errors` (already clustered and
-/// occurrence-filtered upstream). `error_pattern` is the normalized cluster key,
+/// `errors` is `ProjectLessonsResult::recurring_errors` (already clustered,
+/// occurrence-filtered, and extraction-noise-filtered upstream in
+/// `aggregate_project_lessons`). `error_pattern` is the normalized cluster key,
 /// so it makes a stable fingerprint.
 #[must_use]
 pub fn recurring_error_insights(errors: &[RecurringError]) -> Vec<Insight> {
     errors
         .iter()
-        .filter(|e| !is_extraction_noise(&e.tool_name, &e.error_pattern))
         .map(|e| {
             let resolution = e
                 .example_resolution
@@ -240,25 +204,6 @@ mod tests {
             "realistic counts stay under the cap"
         );
         assert_eq!(error_severity(1_000_000), 100);
-    }
-
-    #[test]
-    fn extraction_noise_is_filtered() {
-        // A successful Read (line-numbered content) mis-flagged as an error.
-        let read_noise = err("Read", "1\t//! Message types for Claude Code", 8, 5);
-        // A cargo build success (paired with a trailing nonzero exit upstream).
-        let build_noise = err(
-            "Bash",
-            "Compiling claude-snatch v0.1.0\n    Finished `test` profile [optimized]",
-            9,
-            6,
-        );
-        // A genuine compile error must survive.
-        let real = err("Bash", "Exit code 101\nerror[E0061]: wrong arg count", 5, 4);
-        let insights = recurring_error_insights(&[read_noise, build_noise, real]);
-        assert_eq!(insights.len(), 1, "only the real error should remain");
-        assert!(insights[0].title.contains("Bash"));
-        assert!(insights[0].evidence.contains("error[E0061]"));
     }
 
     #[test]
