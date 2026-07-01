@@ -19,8 +19,6 @@
 //! - `manage_decisions` - Persistent decision registry across sessions
 //! - `get_file_history` - Reverse index: file path → sessions that modified it
 //! - `thread_topic` - Cross-session topic threading with conversation context
-//! - `detect_decisions` - Decision point detection with confidence scoring
-//! - `detect_conflicts` - Contradiction detection across sessions and decision registry
 //! - `get_project_health` - Project health dashboard: hotspots, rework, error trends
 //! - `get_event_context` - Contextual zoom around a specific event by message_id or timestamp
 //! - `explain_file_evolution` - Why a file changed: modification history with conversation context
@@ -54,25 +52,24 @@ use helpers::{
     resolve_project, resolve_session, resolve_session_with_chain, search_entry_text, truncate_text,
 };
 use types::{
-    ChangeEventEntry, CompactionEvent, ConflictPairEntry, ContextTurnEntry, DecisionChurnEntry,
-    DecisionEntry, DetectConflictsRequest, DetectConflictsResponse, DetectDecisionsRequest,
-    DetectDecisionsResponse, DetectedDecisionEntry, ErrorFixLesson, ExplainFileEvolutionRequest,
-    ExplainFileEvolutionResponse, FileEvolutionEntry, FileModificationEntry,
-    GetEventContextRequest, GetEventContextResponse, GetFileHistoryRequest, GetFileHistoryResponse,
-    GetProjectHealthRequest, GetProjectHealthResponse, GetProjectHistoryRequest,
-    GetSessionDigestRequest, GetSessionInfoRequest, GetSessionLessonsRequest,
-    GetSessionMessagesRequest, GetSessionTimelineRequest, GetStatsRequest, GetToolCallsRequest,
-    GoalEntry, HotspotFileEntry, LessonsSummary, ListSessionsRequest, ManageDecisionsRequest,
-    ManageDecisionsResponse, ManageGoalsRequest, ManageGoalsResponse, ManageNotesRequest,
-    ManageNotesResponse, MessageEntry, MessageTagEntry, MonitorInsightEntry, MonitorProjectRequest,
-    MonitorProjectResponse, NoteEntry, PriorityItemEntry, PrioritySourceEntry, ProjectAggregate,
-    ProjectHistoryResponse, ProjectSessionEntry, ReworkFileEntry, SearchMatch,
-    SearchSessionsRequest, SearchSessionsResponse, SessionDigestResponse, SessionHealthEntry,
-    SessionInfoResponse, SessionLessonsResponse, SessionMessagesResponse, SessionSummary,
-    SessionTimelineResponse, StatsResponse, SubagentSummary, SuggestPrioritiesRequest,
-    SuggestPrioritiesResponse, TagMessageRequest, TagMessageResponse, TaggedMessageEntry,
-    ThreadExchangeEntry, ThreadTopicRequest, ThreadTopicResponse, TimelineTurn, ToolCallEntry,
-    ToolCallsResponse, ToolCallsSummary, ToolDetail, UnmatchedSubagent, UserCorrection,
+    ChangeEventEntry, CompactionEvent, ContextTurnEntry, DecisionChurnEntry, DecisionEntry,
+    ErrorFixLesson, ExplainFileEvolutionRequest, ExplainFileEvolutionResponse, FileEvolutionEntry,
+    FileModificationEntry, GetEventContextRequest, GetEventContextResponse, GetFileHistoryRequest,
+    GetFileHistoryResponse, GetProjectHealthRequest, GetProjectHealthResponse,
+    GetProjectHistoryRequest, GetSessionDigestRequest, GetSessionInfoRequest,
+    GetSessionLessonsRequest, GetSessionMessagesRequest, GetSessionTimelineRequest,
+    GetStatsRequest, GetToolCallsRequest, GoalEntry, HotspotFileEntry, LessonsSummary,
+    ListSessionsRequest, ManageDecisionsRequest, ManageDecisionsResponse, ManageGoalsRequest,
+    ManageGoalsResponse, ManageNotesRequest, ManageNotesResponse, MessageEntry, MessageTagEntry,
+    MonitorInsightEntry, MonitorProjectRequest, MonitorProjectResponse, NoteEntry,
+    PriorityItemEntry, PrioritySourceEntry, ProjectAggregate, ProjectHistoryResponse,
+    ProjectSessionEntry, ReworkFileEntry, SearchMatch, SearchSessionsRequest,
+    SearchSessionsResponse, SessionDigestResponse, SessionHealthEntry, SessionInfoResponse,
+    SessionLessonsResponse, SessionMessagesResponse, SessionSummary, SessionTimelineResponse,
+    StatsResponse, SubagentSummary, SuggestPrioritiesRequest, SuggestPrioritiesResponse,
+    TagMessageRequest, TagMessageResponse, TaggedMessageEntry, ThreadExchangeEntry,
+    ThreadTopicRequest, ThreadTopicResponse, TimelineTurn, ToolCallEntry, ToolCallsResponse,
+    ToolCallsSummary, ToolDetail, UnmatchedSubagent, UserCorrection,
 };
 
 // ============================================================================
@@ -2447,94 +2444,6 @@ impl SnatchServer {
         }
     }
 
-    /// Detect candidate decision points across sessions using structural patterns,
-    /// explicit markers, and reversal detection.
-    #[tool(
-        description = "Detect candidate decision points across sessions. Uses three detection methods: (1) structural pattern matching (question→options→confirmation), (2) explicit markers ('DEF-001', 'we decided', 'design decision'), (3) reversal patterns ('changed my mind', 'scratch that'). Returns candidates with confidence scores. Use to find decisions that should be tracked."
-    )]
-    async fn detect_decisions(&self, request: DetectDecisionsRequest) -> ToolOutput {
-        use crate::analysis::decision_detection::{detect_decisions, DetectParams};
-        use crate::cli::helpers::{filter_sessions_by_date, truncate};
-
-        let claude_dir = match self.get_claude_dir() {
-            Ok(dir) => dir,
-            Err(e) => return ToolOutput::error(e),
-        };
-
-        let mut sessions = if let Some(ref session_id) = request.session_id {
-            match claude_dir.find_session(session_id) {
-                Ok(Some(s)) => vec![s],
-                Ok(None) => return ToolOutput::error(format!("Session not found: {session_id}")),
-                Err(e) => return ToolOutput::error(format!("Failed to find session: {e}")),
-            }
-        } else {
-            let mut all = match claude_dir.all_sessions() {
-                Ok(s) => s,
-                Err(e) => return ToolOutput::error(format!("Failed to list sessions: {e}")),
-            };
-            if let Some(ref project) = request.project {
-                all.retain(|s| s.project_path().contains(project));
-            }
-            all
-        };
-
-        if request.no_subagents.unwrap_or(true) {
-            sessions.retain(|s| !s.is_subagent());
-        }
-
-        if request.since.is_some() || request.until.is_some() {
-            if let Err(e) = filter_sessions_by_date(
-                &mut sessions,
-                request.since.as_deref(),
-                request.until.as_deref(),
-            ) {
-                return ToolOutput::error(format!("Date filter error: {e}"));
-            }
-        }
-
-        let topic_filter = if let Some(ref topic) = request.topic {
-            match regex::Regex::new(topic) {
-                Ok(r) => Some(r),
-                Err(e) => return ToolOutput::error(format!("Invalid topic regex: {e}")),
-            }
-        } else {
-            None
-        };
-
-        let params = DetectParams {
-            min_confidence: request.min_confidence.unwrap_or(0.5),
-            limit: request.limit.unwrap_or(50),
-            topic_filter,
-        };
-
-        let result = detect_decisions(&sessions, &params, self.max_file_size);
-
-        let candidates: Vec<DetectedDecisionEntry> = result
-            .candidates
-            .into_iter()
-            .map(|c| DetectedDecisionEntry {
-                timestamp: c.timestamp.to_rfc3339(),
-                session_id: c.session_id,
-                entry_uuid: c.entry_uuid,
-                detection_method: format!("{}", c.detection_method),
-                confidence: c.confidence,
-                question: truncate(&c.question, 300),
-                response: truncate(&c.response, 500),
-                confirmation: c.confirmation.map(|t| truncate(&t, 200)),
-            })
-            .collect();
-
-        let response = DetectDecisionsResponse {
-            total_candidates: candidates.len(),
-            candidates,
-        };
-
-        match ToolOutput::json(&response) {
-            Ok(output) => output,
-            Err(e) => ToolOutput::error(format!("JSON error: {e}")),
-        }
-    }
-
     // ========================================================================
     // New Tool: monitor_project
     // ========================================================================
@@ -2570,24 +2479,10 @@ impl SnatchServer {
             sessions.retain(|s| s.modified_time() >= cutoff_systime);
         }
 
-        // Load the decision store for conflict detection (empty if absent).
-        let store = match claude_dir.projects() {
-            Ok(projects) => projects
-                .iter()
-                .find(|p| {
-                    p.path()
-                        .to_string_lossy()
-                        .contains(request.project.as_str())
-                })
-                .and_then(|p| crate::decisions::load_decisions(p.path()).ok())
-                .unwrap_or_default(),
-            Err(_) => crate::decisions::DecisionStore::default(),
-        };
-
         let params = MonitorParams {
             min_occurrences: request.min_occurrences.unwrap_or(3),
         };
-        let all = insights_from(&sessions, &store, &params, self.max_file_size);
+        let all = insights_from(&sessions, &params, self.max_file_size);
         let top = rank(all, request.limit.unwrap_or(10));
 
         let insights: Vec<MonitorInsightEntry> = top
@@ -2985,128 +2880,6 @@ impl SnatchServer {
             after: result.after.into_iter().map(to_entry).collect(),
             related_files: result.related_files,
             error_count: result.error_count,
-        };
-
-        match ToolOutput::json(&response) {
-            Ok(output) => output,
-            Err(e) => ToolOutput::error(format!("JSON error: {e}")),
-        }
-    }
-
-    // ========================================================================
-    // New Tool: detect_conflicts
-    // ========================================================================
-
-    /// Detect contradictions and conflicts across sessions and the decision registry.
-    #[tool(
-        description = "Detect contradictions across sessions. Two methods: (1) Registry-based: finds decisions sharing tags with opposing language, and supersede chains. Requires 'project'. (2) Search-based: finds opposing language about a topic across session conclusions. Requires 'topic'. Use to find where positions have changed or conflict."
-    )]
-    async fn detect_conflicts(&self, request: DetectConflictsRequest) -> ToolOutput {
-        use crate::analysis::conflict_detection::{
-            detect_registry_conflicts, detect_search_conflicts, ConflictPair,
-        };
-        use crate::cli::helpers::{filter_sessions_by_date, truncate};
-
-        let claude_dir = match self.get_claude_dir() {
-            Ok(dir) => dir,
-            Err(e) => return ToolOutput::error(e),
-        };
-
-        let mut conflicts: Vec<ConflictPair> = Vec::new();
-
-        // Registry-based detection
-        if let Some(ref project) = request.project {
-            let projects = match claude_dir.projects() {
-                Ok(p) => p,
-                Err(e) => return ToolOutput::error(format!("Failed to list projects: {e}")),
-            };
-
-            if let Some(proj) = projects
-                .iter()
-                .find(|p| p.path().to_string_lossy().contains(project.as_str()))
-            {
-                let project_dir = proj.path();
-                // No decision store — skip registry detection
-                if let Ok(store) = crate::decisions::load_decisions(project_dir) {
-                    detect_registry_conflicts(&store, &request.topic, &mut conflicts);
-                }
-            }
-        }
-
-        // Search-based detection
-        if let Some(ref topic) = request.topic {
-            let mut sessions = if let Some(ref project) = request.project {
-                let mut all = match claude_dir.all_sessions() {
-                    Ok(s) => s,
-                    Err(e) => return ToolOutput::error(format!("Failed to list sessions: {e}")),
-                };
-                all.retain(|s| s.project_path().contains(project.as_str()));
-                all
-            } else {
-                match claude_dir.all_sessions() {
-                    Ok(s) => s,
-                    Err(e) => return ToolOutput::error(format!("Failed to list sessions: {e}")),
-                }
-            };
-
-            if request.no_subagents.unwrap_or(true) {
-                sessions.retain(|s| !s.is_subagent());
-            }
-
-            if request.since.is_some() || request.until.is_some() {
-                if let Err(e) = filter_sessions_by_date(
-                    &mut sessions,
-                    request.since.as_deref(),
-                    request.until.as_deref(),
-                ) {
-                    return ToolOutput::error(format!("Date filter error: {e}"));
-                }
-            }
-
-            match detect_search_conflicts(
-                &sessions,
-                topic,
-                request.exclude_session.as_deref(),
-                self.max_file_size,
-            ) {
-                Ok(search_conflicts) => conflicts.extend(search_conflicts),
-                Err(e) => {
-                    return ToolOutput::error(format!("Search conflict detection error: {e}"))
-                }
-            }
-        }
-
-        let min_confidence = request.min_confidence.unwrap_or(0.3);
-        conflicts.retain(|c| c.confidence >= min_confidence);
-
-        conflicts.sort_by(|a, b| {
-            b.confidence
-                .partial_cmp(&a.confidence)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.earlier_time.cmp(&b.earlier_time))
-        });
-
-        let limit = request.limit.unwrap_or(50);
-        conflicts.truncate(limit);
-
-        let entries: Vec<ConflictPairEntry> = conflicts
-            .into_iter()
-            .map(|c| ConflictPairEntry {
-                topic: c.topic,
-                detection_method: format!("{}", c.detection),
-                confidence: c.confidence,
-                earlier_timestamp: c.earlier_time.to_rfc3339(),
-                earlier_session_id: c.earlier_session,
-                earlier_text: truncate(&c.earlier_text, 500),
-                later_timestamp: c.later_time.to_rfc3339(),
-                later_session_id: c.later_session,
-                later_text: truncate(&c.later_text, 500),
-            })
-            .collect();
-
-        let response = DetectConflictsResponse {
-            total_conflicts: entries.len(),
-            conflicts: entries,
         };
 
         match ToolOutput::json(&response) {

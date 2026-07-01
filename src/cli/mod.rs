@@ -249,14 +249,6 @@ pub enum Commands {
     #[command(display_order = 11)]
     Thread(ThreadArgs),
 
-    /// Detect candidate decision points in conversations.
-    #[command(display_order = 12)]
-    Detect(DetectArgs),
-
-    /// Detect potential contradictions between decisions across sessions.
-    #[command(display_order = 13)]
-    Conflicts(ConflictsArgs),
-
     // ═══════════════════════════════════════════════════════════════════════
     // ANALYSIS - Usage analytics and comparisons
     // ═══════════════════════════════════════════════════════════════════════
@@ -2274,98 +2266,6 @@ pub struct ThreadArgs {
     pub summary: bool,
 }
 
-/// Arguments for the detect command.
-#[derive(Debug, Parser)]
-pub struct DetectArgs {
-    /// Search in specific project.
-    #[arg(short = 'p', long)]
-    pub project: Option<String>,
-
-    /// Filter by session ID.
-    #[arg(short = 's', long)]
-    pub session: Option<String>,
-
-    /// Minimum confidence threshold (0.0-1.0, default: 0.5).
-    #[arg(long, default_value = "0.5")]
-    pub min_confidence: f64,
-
-    /// Exclude subagent sessions.
-    #[arg(long)]
-    pub no_subagents: bool,
-
-    /// Filter to sessions since this date (YYYY-MM-DD or relative like "1week").
-    #[arg(long)]
-    pub since: Option<String>,
-
-    /// Filter to sessions until this date.
-    #[arg(long)]
-    pub until: Option<String>,
-
-    /// Limit to N most recent sessions.
-    #[arg(long)]
-    pub recent: Option<usize>,
-
-    /// Maximum results (default: 50).
-    #[arg(short = 'n', long, default_value = "50")]
-    pub limit: usize,
-
-    /// Show all results without limit.
-    #[arg(long)]
-    pub no_limit: bool,
-
-    /// Register confirmed candidates (structural with confirmation) to the decision registry.
-    #[arg(long)]
-    pub register: bool,
-
-    /// Preview what --register would do without writing (requires --register).
-    #[arg(long)]
-    pub dry_run: bool,
-
-    /// Only detect decisions related to this topic (regex pattern).
-    #[arg(long)]
-    pub topic: Option<String>,
-}
-
-/// Arguments for the conflicts command.
-#[derive(Debug, Parser)]
-pub struct ConflictsArgs {
-    /// Search in specific project.
-    #[arg(short = 'p', long)]
-    pub project: Option<String>,
-
-    /// Topic pattern to search for contradictions (regex supported).
-    #[arg(short = 't', long)]
-    pub topic: Option<String>,
-
-    /// Minimum confidence threshold (0.0-1.0, default: 0.3).
-    #[arg(long, default_value = "0.3")]
-    pub min_confidence: f64,
-
-    /// Exclude subagent sessions.
-    #[arg(long)]
-    pub no_subagents: bool,
-
-    /// Filter to sessions since this date.
-    #[arg(long)]
-    pub since: Option<String>,
-
-    /// Filter to sessions until this date.
-    #[arg(long)]
-    pub until: Option<String>,
-
-    /// Maximum results (default: 20).
-    #[arg(short = 'n', long, default_value = "20")]
-    pub limit: usize,
-
-    /// Show all results without limit.
-    #[arg(long)]
-    pub no_limit: bool,
-
-    /// Exclude results from this session (useful when resolving conflicts in current session).
-    #[arg(long)]
-    pub exclude_session: Option<String>,
-}
-
 /// Arguments for the monitor command.
 #[derive(Debug, Parser)]
 pub struct MonitorArgs {
@@ -2915,8 +2815,6 @@ pub fn run() -> Result<()> {
         Some(Commands::Notes(args)) => commands::notes::run(&cli, args),
         Some(Commands::Decisions(args)) => commands::decisions::run(&cli, args),
         Some(Commands::Thread(args)) => commands::thread::run(&cli, args),
-        Some(Commands::Detect(args)) => commands::detect::run(&cli, args),
-        Some(Commands::Conflicts(args)) => commands::conflicts::run(&cli, args),
         Some(Commands::Monitor(args)) => commands::monitor::run(&cli, args),
         Some(Commands::Health(args)) => commands::health::run(&cli, args),
         Some(Commands::FileEvolution(args)) => commands::file_evolution::run(&cli, args),

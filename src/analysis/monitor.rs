@@ -1,7 +1,7 @@
 //! Active-monitoring insights (goal #8, design `.tmp/issues/0023`).
 //!
 //! Goal #8 surfaces cross-session insights "without being asked". The analysis
-//! already exists elsewhere (`project_lessons`, `conflict_detection`, …); this
+//! already exists elsewhere (`project_lessons`); this
 //! module is the *delivery* layer's pure core: it maps existing analyzer output
 //! into a small ranked [`Insight`] set. The IO (running the analyzers over
 //! sessions / the decision store), the cooldown state, and the surfaces
@@ -11,13 +11,9 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::analysis::conflict_detection::{
-    detect_registry_conflicts, ConflictDetection, ConflictPair,
-};
 use crate::analysis::project_lessons::{
     aggregate_project_lessons, ProjectLessonsParams, RecurringError,
 };
-use crate::decisions::DecisionStore;
 use crate::discovery::Session;
 
 /// The kind of cross-session insight surfaced by the monitor.
@@ -25,8 +21,6 @@ use crate::discovery::Session;
 pub enum InsightKind {
     /// An error pattern that recurred across sessions.
     RecurringError,
-    /// Two still-active decisions that appear to contradict each other.
-    DecisionConflict,
 }
 
 impl InsightKind {
@@ -35,7 +29,6 @@ impl InsightKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::RecurringError => "recurring_error",
-            Self::DecisionConflict => "decision_conflict",
         }
     }
 }
@@ -135,11 +128,6 @@ fn looks_like_build_or_test_success(p: &str) -> bool {
     (p.contains("Finished `") && p.contains("profile")) || p.contains("test result: ok")
 }
 
-/// Attention score for a conflict: scaled detection confidence (0–1 → 0–100).
-fn conflict_severity(confidence: f64) -> u32 {
-    (confidence.clamp(0.0, 1.0) * 100.0).round() as u32
-}
-
 /// Map clustered recurring errors into insights.
 ///
 /// `errors` is `ProjectLessonsResult::recurring_errors` (already clustered and
@@ -177,48 +165,14 @@ pub fn recurring_error_insights(errors: &[RecurringError]) -> Vec<Insight> {
         .collect()
 }
 
-/// Map decision conflicts into insights.
-///
-/// Only *unresolved* conflicts are surfaced: a [`ConflictDetection::SupersedeChain`]
-/// is an already-resolved supersede (one decision explicitly replaced the other),
-/// so surfacing it would be noise. Registry / opposing-language pairs are the
-/// live contradictions worth attention.
-#[must_use]
-pub fn decision_conflict_insights(conflicts: &[ConflictPair]) -> Vec<Insight> {
-    conflicts
-        .iter()
-        .filter(|c| !matches!(c.detection, ConflictDetection::SupersedeChain))
-        .map(|c| {
-            let (a, b) = if c.earlier_session <= c.later_session {
-                (&c.earlier_session, &c.later_session)
-            } else {
-                (&c.later_session, &c.earlier_session)
-            };
-            Insight {
-                kind: InsightKind::DecisionConflict,
-                title: format!("Possible decision conflict on \"{}\"", clip(&c.topic, 60)),
-                evidence: format!(
-                    "{} ↔ {}",
-                    clip(&c.earlier_text, 90),
-                    clip(&c.later_text, 90)
-                ),
-                severity: conflict_severity(c.confidence),
-                fingerprint: format!("conflict:{}:{}|{}", c.topic, a, b),
-                recency: Some(c.later_time),
-            }
-        })
-        .collect()
-}
-
 /// Compose the existing analyzers over already-resolved inputs into the full
 /// insight set (unranked, un-cooled-down).
 ///
-/// Session resolution and the decision store are the caller's responsibility, so
-/// this composes cleanly behind both the CLI and the MCP surfaces.
+/// Session resolution is the caller's responsibility, so this composes cleanly
+/// behind both the CLI and the MCP surfaces.
 #[must_use]
 pub fn insights_from(
     sessions: &[Session],
-    store: &DecisionStore,
     params: &MonitorParams,
     max_file_size: Option<u64>,
 ) -> Vec<Insight> {
@@ -228,13 +182,7 @@ pub fn insights_from(
         min_occurrences: params.min_occurrences,
     };
     let lessons = aggregate_project_lessons(sessions, &lessons_params, max_file_size);
-    let mut insights = recurring_error_insights(&lessons.recurring_errors);
-
-    let mut conflicts = Vec::new();
-    detect_registry_conflicts(store, &None, &mut conflicts);
-    insights.extend(decision_conflict_insights(&conflicts));
-
-    insights
+    recurring_error_insights(&lessons.recurring_errors)
 }
 
 /// Rank insights by attention score (then recency, then fingerprint for a
@@ -255,10 +203,6 @@ pub fn rank(mut insights: Vec<Insight>, top_n: usize) -> Vec<Insight> {
 mod tests {
     use super::*;
 
-    fn ts(s: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
-    }
-
     fn err(tool: &str, pattern: &str, count: usize, sessions: usize) -> RecurringError {
         RecurringError {
             tool_name: tool.to_string(),
@@ -267,20 +211,6 @@ mod tests {
             sessions: (0..sessions).map(|i| format!("s{i}")).collect(),
             last_seen: Some("2026-06-01T10:00:00Z".to_string()),
             example_resolution: None,
-        }
-    }
-
-    fn conflict(detection: ConflictDetection, confidence: f64) -> ConflictPair {
-        ConflictPair {
-            earlier_time: ts("2026-06-01T10:00:00Z"),
-            earlier_session: "sB".to_string(),
-            earlier_text: "we will use trait Drop".to_string(),
-            later_time: ts("2026-06-02T10:00:00Z"),
-            later_session: "sA".to_string(),
-            later_text: "we will NOT use trait Drop".to_string(),
-            detection,
-            confidence,
-            topic: "drop-trait".to_string(),
         }
     }
 
@@ -342,41 +272,17 @@ mod tests {
     }
 
     #[test]
-    fn supersede_chain_conflicts_are_filtered_out() {
-        let insights =
-            decision_conflict_insights(&[conflict(ConflictDetection::SupersedeChain, 0.9)]);
-        assert!(
-            insights.is_empty(),
-            "resolved supersede chains must not surface"
-        );
-    }
-
-    #[test]
-    fn unresolved_conflict_maps_with_sorted_fingerprint() {
-        let insights = decision_conflict_insights(&[conflict(ConflictDetection::Registry, 0.7)]);
-        assert_eq!(insights.len(), 1);
-        let i = &insights[0];
-        assert_eq!(i.kind, InsightKind::DecisionConflict);
-        assert_eq!(i.severity, 70);
-        // sessions sorted (sA < sB) regardless of earlier/later
-        assert_eq!(i.fingerprint, "conflict:drop-trait:sA|sB");
-        assert!(i.evidence.contains("↔"));
-    }
-
-    #[test]
     fn rank_orders_by_severity_then_caps() {
-        let mut all = recurring_error_insights(&[
-            err("Bash", "tool:bash:a", 3, 1), // severity 50
-            err("Edit", "tool:edit:b", 5, 1), // severity 57
+        let all = recurring_error_insights(&[
+            err("Bash", "tool:bash:a", 3, 1),  // severity 50
+            err("Edit", "tool:edit:b", 48, 1), // higher severity
         ]);
-        all.extend(decision_conflict_insights(&[conflict(
-            ConflictDetection::Registry,
-            0.8,
-        )])); // severity 80
-        let ranked = rank(all, 2);
-        assert_eq!(ranked.len(), 2);
-        assert_eq!(ranked[0].severity, 80); // conflict highest
-        assert_eq!(ranked[1].severity, 57); // the 5× error beats the 3× error
+        let ranked = rank(all, 1);
+        assert_eq!(ranked.len(), 1, "capped to top_n");
+        assert!(
+            ranked[0].severity > 50,
+            "the higher-severity error ranks first"
+        );
     }
 
     #[test]

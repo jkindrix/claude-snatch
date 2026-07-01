@@ -14,12 +14,11 @@ use chrono::Utc;
 use crate::analysis::monitor::{insights_from, rank, Insight, MonitorParams};
 use crate::analysis::monitor_state::MonitorState;
 use crate::cli::{Cli, MonitorArgs, OutputFormat};
-use crate::decisions::{load_decisions, DecisionStore};
 use crate::error::Result;
 
 use super::helpers::{self, SessionCollectParams};
 
-/// Resolve the project directory (for the decision store + cooldown state).
+/// Resolve the project directory (for the cooldown state).
 fn find_project_dir(cli: &Cli, project_filter: &str) -> Result<Option<PathBuf>> {
     match helpers::resolve_single_project(cli, project_filter) {
         Ok(project) => Ok(Some(project.path().to_path_buf())),
@@ -46,15 +45,10 @@ pub fn run(cli: &Cli, args: &MonitorArgs) -> Result<()> {
         },
     )?;
 
-    let store = match &project_dir {
-        Some(dir) => load_decisions(dir)?,
-        None => DecisionStore::default(),
-    };
-
     let params = MonitorParams {
         min_occurrences: args.min_occurrences,
     };
-    let all = insights_from(&sessions, &store, &params, cli.max_file_size);
+    let all = insights_from(&sessions, &params, cli.max_file_size);
 
     let now = Utc::now();
     let mut state = project_dir
