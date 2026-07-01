@@ -892,14 +892,10 @@ pub enum ExportFormatArg {
     RawJsonl,
     /// CSV tabular format.
     Csv,
-    /// XML structured markup.
-    Xml,
     /// HTML formatted output.
     Html,
     /// SQLite database.
     Sqlite,
-    /// OpenTelemetry (OTLP JSON).
-    Otel,
 }
 
 /// Redaction level for sensitive data.
@@ -933,10 +929,8 @@ impl From<ExportFormatArg> for ExportFormat {
                 ExportFormat::Text
             }
             ExportFormatArg::Csv => ExportFormat::Csv,
-            ExportFormatArg::Xml => ExportFormat::Xml,
             ExportFormatArg::Html => ExportFormat::Html,
             ExportFormatArg::Sqlite => ExportFormat::Sqlite,
-            ExportFormatArg::Otel => ExportFormat::Otel,
         }
     }
 }

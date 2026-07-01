@@ -387,11 +387,7 @@ fn image_payloads_stripped_in_text_formats_preserved_in_json() {
     let opts = ExportOptions::default();
 
     // Human-readable formats strip both image payloads to the size marker.
-    for fmt in [
-        ExportFormat::Markdown,
-        ExportFormat::Text,
-        ExportFormat::Xml,
-    ] {
+    for fmt in [ExportFormat::Markdown, ExportFormat::Text] {
         let out = export_to_string(&conversation, fmt, &opts)
             .unwrap_or_else(|e| panic!("{fmt:?} export should succeed: {e}"));
         assert!(
@@ -487,11 +483,7 @@ fn no_thinking_flag_prunes_thinking_through_transform() {
     };
     // A phrase that appears only inside the thinking block.
     let thinking_marker = "break down this multiplication";
-    for fmt in [
-        ExportFormat::Markdown,
-        ExportFormat::Text,
-        ExportFormat::Xml,
-    ] {
+    for fmt in [ExportFormat::Markdown, ExportFormat::Text] {
         let with = export_to_string(&conversation, fmt, &default_opts)
             .unwrap_or_else(|e| panic!("{fmt:?}: {e}"));
         assert!(
@@ -589,7 +581,6 @@ fn only_prompts_keeps_user_text_role_aware() {
     for fmt in [
         ExportFormat::Markdown,
         ExportFormat::Text,
-        ExportFormat::Xml,
         ExportFormat::Json,
         ExportFormat::Html,
     ] {
@@ -706,7 +697,6 @@ fn no_images_prunes_image_blocks() {
     for fmt in [
         ExportFormat::Markdown,
         ExportFormat::Text,
-        ExportFormat::Xml,
         ExportFormat::Html,
     ] {
         let out = export_with(&entries, fmt, &without_opts);

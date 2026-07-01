@@ -49,7 +49,7 @@ use crate::discovery::{ClaudeDirectory, Session, SessionFilter};
 use crate::error::{Result, SnatchError};
 use crate::export::{
     CsvExporter, ExportOptions, Exporter, HtmlExporter, JsonExporter, MarkdownExporter,
-    TextExporter, XmlExporter,
+    TextExporter,
 };
 use crate::model::LogEntry;
 use crate::parser::JsonlParser;
@@ -79,8 +79,6 @@ pub enum ExportFormat {
     Text,
     /// CSV format (spreadsheet-compatible)
     Csv,
-    /// XML format
-    Xml,
 }
 
 /// Simplified project information.
@@ -288,10 +286,6 @@ impl SnatchClient {
                 let exporter = CsvExporter::new();
                 exporter.export_conversation(&conversation, &mut buffer, options)?;
             }
-            ExportFormat::Xml => {
-                let exporter = XmlExporter::new();
-                exporter.export_conversation(&conversation, &mut buffer, options)?;
-            }
         }
 
         String::from_utf8(buffer.into_inner())
@@ -416,9 +410,8 @@ mod tests {
             ExportFormat::Html,
             ExportFormat::Text,
             ExportFormat::Csv,
-            ExportFormat::Xml,
         ];
-        assert_eq!(formats.len(), 7);
+        assert_eq!(formats.len(), 6);
     }
 
     #[test]

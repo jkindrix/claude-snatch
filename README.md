@@ -8,7 +8,7 @@ High-performance CLI/TUI tool for extracting, analyzing, and exporting Claude Co
 ## Features
 
 - **Maximum Fidelity**: Extract all 77+ documented JSONL data elements
-- **Multiple Export Formats**: Markdown, JSON, HTML, CSV, XML, SQLite, OpenTelemetry, and more
+- **Multiple Export Formats**: Markdown, JSON, HTML, CSV, SQLite, JSONL, and more
 - **Rust Performance**: Native speed, 10-100x faster than Python/Node alternatives
 - **Lossless Round-Trip**: Preserve unknown fields for forward compatibility
 - **Dual Interface**: CLI (scriptable) and TUI (interactive) modes
@@ -237,28 +237,12 @@ snatch export <session-id> -f sqlite -o output.db
 snatch export --all -f sqlite -o archive.db  # Multi-session archive
 ```
 
-### XML
-
-Structured markup for data interchange.
-
-```bash
-snatch export <session-id> -f xml -o output.xml
-```
-
 ### JSONL
 
 Original format preservation for backup or re-import.
 
 ```bash
 snatch export <session-id> -f jsonl -o output.jsonl
-```
-
-### OpenTelemetry
-
-OTLP JSON format for observability pipelines.
-
-```bash
-snatch export <session-id> -f otel -o traces.json
 ```
 
 ## Export Options
@@ -336,7 +320,7 @@ claude-snatch/
 │   ├── config/        # Configuration management
 │   ├── decisions/     # Architectural decision tracking
 │   ├── discovery/     # Session and project discovery
-│   ├── export/        # Export formats (Markdown, JSON, HTML, CSV, XML, SQLite, OTEL)
+│   ├── export/        # Export formats (Markdown, JSON, HTML, CSV, SQLite, JSONL)
 │   ├── extraction/    # Beyond-JSONL extraction (settings, MCP configs, commands)
 │   ├── git/           # Git integration
 │   ├── goals/         # Goal management

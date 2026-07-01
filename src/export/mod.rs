@@ -34,25 +34,21 @@ mod csv;
 mod html;
 mod json;
 mod markdown;
-mod otel;
 pub mod schema;
 mod sqlite;
 mod text;
 mod tool_render;
-mod xml;
 
 pub use csv::*;
 pub use html::*;
 pub use json::*;
 pub use markdown::*;
-pub use otel::*;
 pub use schema::{
     entry_schema, entry_schema_string, export_schema, export_schema_string, validate_entries,
     validate_export, SchemaValidator, ValidationResult,
 };
 pub use sqlite::*;
 pub use text::*;
-pub use xml::*;
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -1126,11 +1122,8 @@ pub enum ExportFormat {
     /// CSV tabular data.
     Csv,
     /// XML structured markup.
-    Xml,
     /// SQLite database.
     Sqlite,
-    /// OpenTelemetry (OTLP JSON format).
-    Otel,
 }
 
 impl ExportFormat {
@@ -1143,9 +1136,7 @@ impl ExportFormat {
             Self::Text => "txt",
             Self::Html => "html",
             Self::Csv => "csv",
-            Self::Xml => "xml",
             Self::Sqlite => "db",
-            Self::Otel => "otlp.json",
         }
     }
 
@@ -1159,9 +1150,7 @@ impl ExportFormat {
             "text" | "txt" => Some(Self::Text),
             "html" => Some(Self::Html),
             "csv" => Some(Self::Csv),
-            "xml" => Some(Self::Xml),
             "sqlite" | "db" | "sql" => Some(Self::Sqlite),
-            "otel" | "otlp" | "opentelemetry" => Some(Self::Otel),
             _ => None,
         }
     }
@@ -1444,14 +1433,6 @@ pub fn export_to_file(
             let exporter = CsvExporter::new();
             exporter.export_conversation(conversation, &mut writer, options)?;
         }
-        ExportFormat::Xml => {
-            let exporter = XmlExporter::new();
-            exporter.export_conversation(conversation, &mut writer, options)?;
-        }
-        ExportFormat::Otel => {
-            let exporter = OtelExporter::new();
-            exporter.export_conversation(conversation, &mut writer, options)?;
-        }
         ExportFormat::Sqlite => {
             unreachable!("SQLite handled above");
         }
@@ -1515,14 +1496,6 @@ pub fn export_to_string(
         }
         ExportFormat::Csv => {
             let exporter = CsvExporter::new();
-            exporter.export_conversation(conversation, &mut buffer, options)?;
-        }
-        ExportFormat::Xml => {
-            let exporter = XmlExporter::new();
-            exporter.export_conversation(conversation, &mut buffer, options)?;
-        }
-        ExportFormat::Otel => {
-            let exporter = OtelExporter::new();
             exporter.export_conversation(conversation, &mut buffer, options)?;
         }
         ExportFormat::Sqlite => {

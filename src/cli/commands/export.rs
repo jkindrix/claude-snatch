@@ -17,8 +17,7 @@ use crate::discovery::{Session, SessionFilter};
 use crate::error::{Result, SnatchError};
 use crate::export::{
     conversation_to_jsonl, ChainExportMeta, ContentType, CsvExporter, ExportOptions, Exporter,
-    HtmlExporter, JsonExporter, MarkdownExporter, OtelExporter, SessionMeta, SqliteExporter,
-    TextExporter, XmlExporter,
+    HtmlExporter, JsonExporter, MarkdownExporter, SessionMeta, SqliteExporter, TextExporter,
 };
 use crate::model::{ContentBlock, LogEntry};
 use crate::reconstruction::Conversation;
@@ -635,16 +634,8 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
                 let exporter = CsvExporter::new();
                 exporter.export_conversation(&conversation, &mut output, &options)?;
             }
-            ExportFormatArg::Xml => {
-                let exporter = XmlExporter::new();
-                exporter.export_conversation(&conversation, &mut output, &options)?;
-            }
             ExportFormatArg::Sqlite => {
                 unreachable!("SQLite handled above");
-            }
-            ExportFormatArg::Otel => {
-                let exporter = OtelExporter::new();
-                exporter.export_conversation(&conversation, &mut output, &options)?;
             }
         }
 
@@ -696,18 +687,10 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
                 let exporter = CsvExporter::new();
                 exporter.export_conversation(&conversation, &mut output, &options)?;
             }
-            ExportFormatArg::Xml => {
-                let exporter = XmlExporter::new();
-                exporter.export_conversation(&conversation, &mut output, &options)?;
-            }
             ExportFormatArg::Sqlite => {
                 return Err(SnatchError::ConfigError {
                     message: "SQLite export requires an output file path".to_string(),
                 });
-            }
-            ExportFormatArg::Otel => {
-                let exporter = OtelExporter::new();
-                exporter.export_conversation(&conversation, &mut output, &options)?;
             }
         }
     }
@@ -1702,20 +1685,12 @@ fn export_session(
                 let exporter = CsvExporter::new();
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
-            ExportFormatArg::Xml => {
-                let exporter = XmlExporter::new();
-                exporter.export_conversation(&conversation, &mut writer, &options)?;
-            }
             ExportFormatArg::Html => {
                 let exporter = HtmlExporter::new().with_toc(args.toc).dark_theme(args.dark);
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
             ExportFormatArg::Sqlite => {
                 unreachable!("SQLite handled above");
-            }
-            ExportFormatArg::Otel => {
-                let exporter = OtelExporter::new();
-                exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
         }
 
@@ -1765,10 +1740,6 @@ fn export_session(
                 let exporter = CsvExporter::new();
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
-            ExportFormatArg::Xml => {
-                let exporter = XmlExporter::new();
-                exporter.export_conversation(&conversation, &mut writer, &options)?;
-            }
             ExportFormatArg::Html => {
                 let exporter = HtmlExporter::new().with_toc(args.toc).dark_theme(args.dark);
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
@@ -1777,10 +1748,6 @@ fn export_session(
                 return Err(SnatchError::export(
                     "SQLite export requires an output file (--output <path.db>)",
                 ));
-            }
-            ExportFormatArg::Otel => {
-                let exporter = OtelExporter::new();
-                exporter.export_conversation(&conversation, &mut writer, &options)?;
             }
         }
 
@@ -1798,10 +1765,8 @@ fn get_format_extension(format: ExportFormatArg) -> &'static str {
         ExportFormatArg::Text => "txt",
         ExportFormatArg::Jsonl | ExportFormatArg::RawJsonl => "jsonl",
         ExportFormatArg::Csv => "csv",
-        ExportFormatArg::Xml => "xml",
         ExportFormatArg::Html => "html",
         ExportFormatArg::Sqlite => "db",
-        ExportFormatArg::Otel => "otlp.json",
     }
 }
 
@@ -2026,20 +1991,12 @@ fn export_to_string(
             let exporter = CsvExporter::new();
             exporter.export_conversation(conversation, &mut buffer, options)?;
         }
-        ExportFormatArg::Xml => {
-            let exporter = XmlExporter::new();
-            exporter.export_conversation(conversation, &mut buffer, options)?;
-        }
         ExportFormatArg::Html => {
             let exporter = HtmlExporter::new().with_toc(toc).dark_theme(dark);
             exporter.export_conversation(conversation, &mut buffer, options)?;
         }
         ExportFormatArg::Sqlite => {
             unreachable!("SQLite cannot be exported to string");
-        }
-        ExportFormatArg::Otel => {
-            let exporter = OtelExporter::new();
-            exporter.export_conversation(conversation, &mut buffer, options)?;
         }
     }
 

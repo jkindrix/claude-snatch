@@ -12,11 +12,9 @@ snatch supports multiple export formats for conversation logs. Each format has s
 | HTML | `.html` | Web viewing, archiving |
 | Plain Text | `.txt` | Simple text, compatibility |
 | CSV | `.csv` | Spreadsheet analysis |
-| XML | `.xml` | Enterprise integration |
 | SQLite | `.db` | Database queries, analysis |
 | JSONL | `.jsonl` | Normalized line-by-line export (filterable, not byte-faithful) |
 | raw-jsonl | `.jsonl` | Byte-faithful archival passthrough of the original log |
-| OpenTelemetry | `.json` | Observability pipelines, distributed tracing |
 
 ## Command Line Usage
 
@@ -159,29 +157,6 @@ timestamp,type,content,tokens,model
 2025-01-15T10:30:18Z,assistant,"Of course! Let me analyze...",45,claude-3.5-sonnet
 ```
 
-### XML
-
-Enterprise-friendly structured format.
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<conversation>
-  <metadata>
-    <session_id>abc12345-def6-7890-abcd-ef1234567890</session_id>
-    <exported_at>2025-01-15T10:30:00Z</exported_at>
-    <total_messages>42</total_messages>
-  </metadata>
-  <messages>
-    <message type="user" timestamp="2025-01-15T10:30:15Z">
-      <content>Can you help me with this code?</content>
-    </message>
-    <message type="assistant" timestamp="2025-01-15T10:30:18Z">
-      <content>Of course! Let me analyze your code...</content>
-    </message>
-  </messages>
-</conversation>
-```
-
 ### SQLite
 
 Database format for complex queries and analysis.
@@ -237,27 +212,6 @@ Notes:
   byte-identical to the source).
 - Single-file by design: subagent transcripts (the `subagents/` directory) are
   **not** included; snatch warns when they exist so the omission isn't silent.
-
-### OpenTelemetry (OTLP)
-
-Export conversations as OpenTelemetry traces for observability platforms.
-
-```bash
-snatch export <session-id> --format otel --output traces.json
-```
-
-Creates OTLP JSON format compatible with:
-- Jaeger
-- Grafana Tempo
-- Honeycomb
-- Datadog APM
-- Any OTLP-compatible backend
-
-Each message becomes a span with:
-- Timestamps as span start/end times
-- Message content as span attributes
-- Tool calls as child spans
-- Token usage as metrics
 
 ## Export Options
 

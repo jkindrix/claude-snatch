@@ -13,7 +13,7 @@ use crate::discovery::{ClaudeDirectory, HierarchyBuilder, Project, Session};
 use crate::error::Result;
 use crate::export::{
     CsvExporter, ExportFormat, ExportOptions, Exporter, HtmlExporter, JsonExporter,
-    MarkdownExporter, OtelExporter, SqliteExporter, TextExporter, XmlExporter,
+    MarkdownExporter, SqliteExporter, TextExporter,
 };
 use crate::model::{ContentBlock, LogEntry};
 use crate::parser::JsonlParser;
@@ -566,9 +566,7 @@ impl ExportDialogState {
             ExportFormat::Html => "HTML",
             ExportFormat::Text => "Plain Text",
             ExportFormat::Csv => "CSV",
-            ExportFormat::Xml => "XML",
             ExportFormat::Sqlite => "SQLite",
-            ExportFormat::Otel => "OTLP",
         }
     }
 }
@@ -1935,16 +1933,8 @@ impl AppState {
                 let exporter = CsvExporter::new();
                 exporter.export_conversation(conversation, &mut writer, options)?;
             }
-            ExportFormat::Xml => {
-                let exporter = XmlExporter::new();
-                exporter.export_conversation(conversation, &mut writer, options)?;
-            }
             ExportFormat::Sqlite => {
                 unreachable!("SQLite handled above");
-            }
-            ExportFormat::Otel => {
-                let exporter = OtelExporter::new();
-                exporter.export_conversation(conversation, &mut writer, options)?;
             }
         }
 

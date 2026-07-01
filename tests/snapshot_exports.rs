@@ -7,7 +7,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 
 use claude_snatch::export::{
-    CsvExporter, ExportOptions, Exporter, JsonExporter, MarkdownExporter, TextExporter, XmlExporter,
+    CsvExporter, ExportOptions, Exporter, JsonExporter, MarkdownExporter, TextExporter,
 };
 use claude_snatch::model::LogEntry;
 use claude_snatch::parser::JsonlParser;
@@ -95,26 +95,6 @@ fn text_thinking() {
 fn csv_simple() {
     let entries = parse_fixture("simple_session.jsonl");
     let exporter = CsvExporter::new();
-    let output = export_to_string(&exporter, &entries);
-    assert_snapshot!(output);
-}
-
-// =============================================================================
-// XML Export Snapshots
-// =============================================================================
-
-#[test]
-fn xml_simple() {
-    let entries = parse_fixture("simple_session.jsonl");
-    let exporter = XmlExporter::new().pretty(true);
-    let output = export_to_string(&exporter, &entries);
-    assert_snapshot!(output);
-}
-
-#[test]
-fn xml_thinking() {
-    let entries = parse_fixture("thinking_session.jsonl");
-    let exporter = XmlExporter::new().pretty(true);
     let output = export_to_string(&exporter, &entries);
     assert_snapshot!(output);
 }
