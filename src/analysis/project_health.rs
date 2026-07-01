@@ -5,7 +5,7 @@
 //!
 //! Used by both CLI and MCP `get_project_health` tools.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::analysis::extraction::extract_tool_names;
 use crate::analysis::lessons::{extract_error_fix_pairs, LessonOptions};
@@ -77,6 +77,24 @@ pub struct ProjectHealthResult {
     pub total_tool_calls: usize,
 }
 
+/// Whether `path` is one of the project's own files, for scoping churn metrics.
+///
+/// Relative paths are resolved against the session's working directory (the
+/// project) and kept — except `.tmp/` scratch. Absolute paths are kept only
+/// when under one of the project roots; anything else (config under `~/.claude`,
+/// unrelated repositories) is cross-project noise.
+fn is_project_file(path: &str, project_roots: &HashSet<String>) -> bool {
+    if path.starts_with(".tmp/") || path.contains("/.tmp/") {
+        return false;
+    }
+    if !path.starts_with('/') {
+        return true;
+    }
+    project_roots
+        .iter()
+        .any(|root| path.starts_with(root.as_str()))
+}
+
 /// Analyze project health across sessions.
 pub fn analyze_project_health(
     sessions: &[Session],
@@ -87,9 +105,20 @@ pub fn analyze_project_health(
     // Build file index for edit/rework tracking
     let file_index = FileIndex::from_sessions(sessions, max_file_size);
 
+    // File-history snapshots can record files edited outside this project
+    // (config under ~/.claude, unrelated repos) and scratch files under .tmp/.
+    // Scope churn to the project's own files so hotspots/rework aren't polluted.
+    let project_roots: HashSet<String> = sessions
+        .iter()
+        .map(|s| s.project_path().to_string())
+        .collect();
+
     // Hotspot files: most edits across sessions
     let mut file_edits: HashMap<String, (usize, Vec<String>)> = HashMap::new();
     for (path, mods) in &file_index.entries {
+        if !is_project_file(path, &project_roots) {
+            continue;
+        }
         let mut session_ids: Vec<String> = mods.iter().map(|m| m.session_id.clone()).collect();
         session_ids.sort();
         session_ids.dedup();
