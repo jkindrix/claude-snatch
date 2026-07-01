@@ -20,6 +20,7 @@ pub mod extract;
 pub mod file_evolution;
 pub mod file_history;
 pub mod goals;
+pub mod grab;
 pub mod health;
 pub mod helpers;
 pub mod index;

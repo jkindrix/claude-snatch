@@ -339,6 +339,12 @@ pub enum Commands {
     #[command(alias = "x", display_order = 30)]
     Export(ExportArgs),
 
+    /// Grab one whole session — parent plus its subagents — as a single file
+    /// ready to hand to Claude. Readable markdown with full tool outputs by
+    /// default; `--raw` for a byte-faithful JSONL bundle.
+    #[command(display_order = 30)]
+    Grab(GrabArgs),
+
     /// Extract code blocks from sessions.
     #[command(display_order = 31)]
     Code(CodeArgs),
@@ -674,6 +680,23 @@ impl ContentFilter {
             Self::Code => "code blocks only",
         }
     }
+}
+
+/// Arguments for the `grab` command: a one-shot "give this whole session to
+/// Claude" export with sane defaults, so the common case needs no flag soup.
+#[derive(Debug, Parser)]
+pub struct GrabArgs {
+    /// Session ID to grab (supports short prefixes like "780893e4").
+    pub session: String,
+
+    /// Output file path. Writes to stdout when omitted.
+    #[arg(short = 'O', long = "out")]
+    pub output_file: Option<PathBuf>,
+
+    /// Emit a byte-faithful JSONL bundle (parent + subagent transcripts,
+    /// verbatim) instead of readable markdown.
+    #[arg(long)]
+    pub raw: bool,
 }
 
 /// Arguments for the export command.
@@ -2922,6 +2945,7 @@ pub fn run() -> Result<()> {
         }
         Some(Commands::List(args)) => commands::list::run(&cli, args),
         Some(Commands::Export(args)) => commands::export::run(&cli, args),
+        Some(Commands::Grab(args)) => commands::grab::run(&cli, args),
         Some(Commands::Search(args)) => commands::search::run(&cli, args),
         Some(Commands::Stats(args)) => commands::stats::run(&cli, args),
         Some(Commands::Info(args)) => commands::info::run(&cli, args),
