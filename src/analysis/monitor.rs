@@ -89,9 +89,6 @@ fn error_severity(count: usize) -> u32 {
     (50.0 + 14.0 * ratio.ln()).round().clamp(0.0, 100.0) as u32
 }
 
-/// Whether a recurring-error pattern is upstream extraction noise rather than a
-/// real project error worth surfacing.
-///
 /// Map clustered recurring errors into insights.
 ///
 /// `errors` is `ProjectLessonsResult::recurring_errors` (already clustered,
