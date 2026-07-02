@@ -481,6 +481,15 @@ fn output_session_stats(cli: &Cli, args: &StatsArgs, analytics: &SessionAnalytic
             if let Some(model) = analytics.primary_model() {
                 println!("Primary Model: {model}");
             }
+
+            // Per-model breakdown (--models / --all)
+            if args.models || args.all {
+                println!("Model Usage:");
+                for (model, count) in &analytics.models_used {
+                    let display_name = format_model_name(model);
+                    println!("  {display_name}: {} uses", format_number(*count as u64));
+                }
+            }
             println!();
 
             // Token usage
