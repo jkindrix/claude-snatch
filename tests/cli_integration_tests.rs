@@ -107,6 +107,58 @@ fn test_search_no_match_returns_empty() {
         .stdout(predicate::str::contains("aaaaaaaa").not());
 }
 
+/// Regression for #23: multi-pattern positional search routes through the batch
+/// path, which previously ignored `--model`. A bogus model must yield zero
+/// matches; the real model keeps the assistant-text matches.
+#[test]
+fn test_search_batch_applies_model_filter() {
+    let tmp = setup_fixture_dir();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "search",
+            "-m",
+            "definitely-not-a-model",
+            "directory",
+            "help",
+            "-o",
+            "json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"count\": 0"))
+        .stdout(predicate::str::contains("\"count\": 1").not());
+
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["search", "-m", "sonnet", "directory", "help", "-o", "json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"count\": 1"));
+}
+
+/// Regression for #23: the batch path also bypassed non-model filters. The
+/// fixture has no error entries, so `--errors` must reduce every count to zero
+/// (patterns otherwise match twice each).
+#[test]
+fn test_search_batch_applies_errors_filter() {
+    let tmp = setup_fixture_dir();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["search", "files", "directory", "-o", "json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"count\": 2"));
+
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["search", "--errors", "files", "directory", "-o", "json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"count\": 0"))
+        .stdout(predicate::str::contains("\"count\": 2").not());
+}
+
 // =============================================================================
 // export
 // =============================================================================
@@ -441,6 +493,26 @@ fn test_stats_json_contains_token_counts() {
         .stdout(predicate::str::contains("input_tokens"))
         .stdout(predicate::str::contains("75"))
         .stdout(predicate::str::contains("65"));
+}
+
+/// Regression for #25: `--models` must emit a per-model breakdown for a single
+/// session, and must not appear without the flag.
+#[test]
+fn test_stats_single_session_models_breakdown() {
+    let tmp = setup_fixture_dir();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["stats", SESSION_ID, "--models"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Model Usage:"));
+
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["stats", SESSION_ID])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Model Usage:").not());
 }
 
 // =============================================================================
