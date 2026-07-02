@@ -63,7 +63,12 @@ pub struct SnatchClient {
     claude_dir: ClaudeDirectory,
 }
 
-/// Available export formats.
+/// Export formats offered by [`SnatchClient`]'s string-returning API.
+///
+/// Deliberately a subset of [`crate::export::ExportFormat`]: only formats that
+/// render to a `String`. `Sqlite` (binary file), `jsonl`, and `raw-jsonl`
+/// (file/stream oriented) are reachable via the CLI or the lower-level exporter
+/// API, not here. See [`crate::export::ExportFormat`] for the full picture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
     /// Markdown format (human-readable)

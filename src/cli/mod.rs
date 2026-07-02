@@ -869,7 +869,12 @@ pub struct ExportArgs {
     pub list_templates: bool,
 }
 
-/// Export format argument.
+/// Export format argument — the full CLI-facing format surface.
+///
+/// The widest of the three format enums: it adds the `md` alias and the
+/// CLI-only file formats `jsonl`/`raw-jsonl` (handled specially in the export
+/// command) on top of the [`crate::export::ExportFormat`] exporter set. See
+/// that type for how the three relate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum ExportFormatArg {
     /// Markdown format.

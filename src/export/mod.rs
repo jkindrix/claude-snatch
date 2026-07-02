@@ -1106,7 +1106,16 @@ impl ExportOptions {
     }
 }
 
-/// Export format specification.
+/// Export format specification for the [`Exporter`] framework (Conversation →
+/// writer).
+///
+/// One of three deliberately-separate format enums, each encoding a different
+/// surface's capability set at the type level (not accidental duplication):
+/// - this one — the `Exporter`-framework formats;
+/// - [`crate::cli::ExportFormatArg`] — the full CLI surface (adds the `md` alias
+///   and the CLI-only file formats `jsonl`/`raw-jsonl`);
+/// - [`crate::api::ExportFormat`] — the `SnatchClient` string-returning subset
+///   (excludes `Sqlite`, which writes a binary file, not a string).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
     /// Markdown format.
