@@ -815,6 +815,24 @@ fn setup_dated_chain_dir(root_ts: &str, cont_ts: &str) -> TempDir {
     )
     .unwrap();
 
+    // Set each file's mtime to its embedded conversation timestamp. Real
+    // session files have mtime ≈ conversation time; leaving mtime at "now"
+    // (write time) while the embedded timestamps are historical made the
+    // date-filter code's mtime-vs-embedded ranking non-deterministic, which
+    // failed only in CI. Aligning them keeps every `--all` date-filter path
+    // (chain collapse and sqlite) deterministic.
+    let set_mtime = |name: &str, ts: &str| {
+        let t: std::time::SystemTime = chrono::DateTime::parse_from_rfc3339(ts).unwrap().into();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(project_dir.join(name))
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    };
+    set_mtime(&format!("{CHAIN_ROOT_ID}.jsonl"), root_ts);
+    set_mtime(&format!("{CHAIN_CONT_ID}.jsonl"), cont_ts);
+
     tmp
 }
 
