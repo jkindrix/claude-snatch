@@ -575,7 +575,27 @@ fn setup_chain_dir() -> TempDir {
     )
     .expect("write continuation");
 
+    // Set mtimes to the embedded timestamps. Sessions are sorted by mtime; with
+    // both files written ~simultaneously (equal mtimes), the stable sort falls
+    // back to readdir order, which differs by platform and made chain collapse
+    // non-deterministic (mac/Windows-only failures). Distinct mtimes fix the order.
+    set_file_mtime(&project_dir, CHAIN_ROOT_ID, "2025-01-15T10:00:00.000Z");
+    set_file_mtime(&project_dir, CHAIN_CONT_ID, "2025-01-15T11:00:00.000Z");
+
     tmp
+}
+
+/// Set a session file's mtime to an RFC3339 timestamp, so mtime-based ordering
+/// is deterministic across platforms (fixtures otherwise share a write-time
+/// mtime and fall back to readdir order).
+fn set_file_mtime(project_dir: &std::path::Path, file_id: &str, ts: &str) {
+    let t: std::time::SystemTime = chrono::DateTime::parse_from_rfc3339(ts).unwrap().into();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(project_dir.join(format!("{file_id}.jsonl")))
+        .unwrap()
+        .set_modified(t)
+        .unwrap();
 }
 
 #[test]
@@ -816,22 +836,12 @@ fn setup_dated_chain_dir(root_ts: &str, cont_ts: &str) -> TempDir {
     .unwrap();
 
     // Set each file's mtime to its embedded conversation timestamp. Real
-    // session files have mtime ≈ conversation time; leaving mtime at "now"
-    // (write time) while the embedded timestamps are historical made the
-    // date-filter code's mtime-vs-embedded ranking non-deterministic, which
-    // failed only in CI. Aligning them keeps every `--all` date-filter path
-    // (chain collapse and sqlite) deterministic.
-    let set_mtime = |name: &str, ts: &str| {
-        let t: std::time::SystemTime = chrono::DateTime::parse_from_rfc3339(ts).unwrap().into();
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(project_dir.join(name))
-            .unwrap()
-            .set_modified(t)
-            .unwrap();
-    };
-    set_mtime(&format!("{CHAIN_ROOT_ID}.jsonl"), root_ts);
-    set_mtime(&format!("{CHAIN_CONT_ID}.jsonl"), cont_ts);
+    // session files have mtime ≈ conversation time; leaving mtime at write-time
+    // while the embedded timestamps are historical made the date-filter code's
+    // ordering non-deterministic (readdir-order fallback on equal mtimes), which
+    // failed only in CI. Aligning them keeps every `--all` path deterministic.
+    set_file_mtime(&project_dir, CHAIN_ROOT_ID, root_ts);
+    set_file_mtime(&project_dir, CHAIN_CONT_ID, cont_ts);
 
     tmp
 }
