@@ -107,15 +107,41 @@ fn test_search_no_match_returns_empty() {
         .stdout(predicate::str::contains("aaaaaaaa").not());
 }
 
+/// Run a batch (`-o json`) search and return an exact pattern -> count map,
+/// so tests can assert per-pattern counts rather than a loose substring.
+fn batch_counts(tmp: &TempDir, args: &[&str]) -> std::collections::HashMap<String, i64> {
+    let out = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(args)
+        .output()
+        .expect("failed to run snatch search");
+    assert!(out.status.success(), "search failed: {out:?}");
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("batch output should be JSON");
+    json.as_array()
+        .expect("batch JSON is an array")
+        .iter()
+        .map(|row| {
+            (
+                row["pattern"].as_str().expect("pattern").to_string(),
+                row["count"].as_i64().expect("count"),
+            )
+        })
+        .collect()
+}
+
 /// Regression for #23: multi-pattern positional search routes through the batch
 /// path, which previously ignored `--model`. A bogus model must yield zero
-/// matches; the real model keeps the assistant-text matches.
+/// matches for every pattern; the real model keeps the assistant-text matches
+/// (each pattern appears once in assistant text — the user-text occurrence is
+/// excluded by the assistant-only model filter).
 #[test]
 fn test_search_batch_applies_model_filter() {
     let tmp = setup_fixture_dir();
-    snatch_cmd()
-        .env("SNATCH_CLAUDE_DIR", tmp.path())
-        .args([
+
+    let bogus = batch_counts(
+        &tmp,
+        &[
             "search",
             "-m",
             "definitely-not-a-model",
@@ -123,40 +149,36 @@ fn test_search_batch_applies_model_filter() {
             "help",
             "-o",
             "json",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("\"count\": 0"))
-        .stdout(predicate::str::contains("\"count\": 1").not());
+        ],
+    );
+    assert_eq!(bogus.get("directory"), Some(&0));
+    assert_eq!(bogus.get("help"), Some(&0));
 
-    snatch_cmd()
-        .env("SNATCH_CLAUDE_DIR", tmp.path())
-        .args(["search", "-m", "sonnet", "directory", "help", "-o", "json"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("\"count\": 1"));
+    let real = batch_counts(
+        &tmp,
+        &["search", "-m", "sonnet", "directory", "help", "-o", "json"],
+    );
+    assert_eq!(real.get("directory"), Some(&1));
+    assert_eq!(real.get("help"), Some(&1));
 }
 
-/// Regression for #23: the batch path also bypassed non-model filters. The
-/// fixture has no error entries, so `--errors` must reduce every count to zero
-/// (patterns otherwise match twice each).
+/// Regression for #23: the batch path also bypassed non-model filters. Both
+/// patterns match twice (user + assistant text); the fixture has no error
+/// entries, so `--errors` must reduce every count to exactly zero.
 #[test]
 fn test_search_batch_applies_errors_filter() {
     let tmp = setup_fixture_dir();
-    snatch_cmd()
-        .env("SNATCH_CLAUDE_DIR", tmp.path())
-        .args(["search", "files", "directory", "-o", "json"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("\"count\": 2"));
 
-    snatch_cmd()
-        .env("SNATCH_CLAUDE_DIR", tmp.path())
-        .args(["search", "--errors", "files", "directory", "-o", "json"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("\"count\": 0"))
-        .stdout(predicate::str::contains("\"count\": 2").not());
+    let all = batch_counts(&tmp, &["search", "files", "directory", "-o", "json"]);
+    assert_eq!(all.get("files"), Some(&2));
+    assert_eq!(all.get("directory"), Some(&2));
+
+    let errs = batch_counts(
+        &tmp,
+        &["search", "--errors", "files", "directory", "-o", "json"],
+    );
+    assert_eq!(errs.get("files"), Some(&0));
+    assert_eq!(errs.get("directory"), Some(&0));
 }
 
 // =============================================================================
