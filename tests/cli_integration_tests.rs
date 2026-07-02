@@ -989,7 +989,7 @@ fn test_list_tag_matches_continuation_member() {
 
     let output = snatch_cmd()
         .env("SNATCH_CLAUDE_DIR", tmp.path())
-        .env("XDG_CONFIG_HOME", cfg.path())
+        .env("SNATCH_CONFIG_DIR", cfg.path())
         .args([
             "list",
             "sessions",
@@ -1029,7 +1029,7 @@ fn test_list_by_name_matches_continuation_member() {
 
     let output = snatch_cmd()
         .env("SNATCH_CLAUDE_DIR", tmp.path())
-        .env("XDG_CONFIG_HOME", cfg.path())
+        .env("SNATCH_CONFIG_DIR", cfg.path())
         .args([
             "list",
             "sessions",

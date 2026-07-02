@@ -539,10 +539,18 @@ fn normalize_tag(tag: &str) -> String {
 }
 
 /// Get the default tags storage path.
+///
+/// `SNATCH_CONFIG_DIR` overrides the OS config directory. `dirs::config_dir()`
+/// honors `XDG_CONFIG_HOME` only on Linux (macOS/Windows use native locations),
+/// so a portable, explicit override is needed for tools and cross-platform
+/// tests — mirroring how `SNATCH_CLAUDE_DIR` overrides the data directory.
 pub fn default_tags_path() -> Result<PathBuf> {
-    let config_dir = dirs::config_dir().ok_or_else(|| SnatchError::Unsupported {
-        feature: "config directory discovery".to_string(),
-    })?;
+    let config_dir = match std::env::var_os("SNATCH_CONFIG_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => dirs::config_dir().ok_or_else(|| SnatchError::Unsupported {
+            feature: "config directory discovery".to_string(),
+        })?,
+    };
 
     Ok(config_dir.join("claude-snatch").join(TAGS_FILENAME))
 }
