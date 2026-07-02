@@ -26,7 +26,8 @@ use crate::model::content::ToolResultContent;
 use crate::model::message::LogEntry;
 
 use super::extraction::{
-    extract_assistant_summary, extract_tool_input_summary, extract_user_prompt_text, truncate_text,
+    extract_assistant_summary, extract_tool_input_summary, extract_user_prompt_text,
+    is_human_prompt, truncate_text,
 };
 
 /// Extract plain text from a ToolResultContent value.
@@ -379,6 +380,13 @@ pub fn extract_user_corrections(
                     extract_assistant_summary(entry, opts.resolution_summary_len);
             }
             LogEntry::User(_) => {
+                // Skip harness-injected/templated content (command echoes,
+                // local-command-stdout hook output, system-reminder blocks,
+                // tool-result turns, compaction summaries) so corrections reflect
+                // actual human pushback rather than boilerplate. See #26.
+                if !is_human_prompt(entry) {
+                    continue;
+                }
                 if let Some(text) = extract_user_prompt_text(entry) {
                     if correction_re.is_match(&text) && text.len() > 10 && !is_summary_text(&text) {
                         corrections.push(UserCorrectionEntry {
@@ -643,6 +651,32 @@ mod tests {
         assert_eq!(corrections.len(), 1);
         assert!(corrections[0].user_text.contains("don't delete"));
         assert!(corrections[0].prior_assistant_summary.is_some());
+    }
+
+    #[test]
+    fn test_correction_skips_harness_boilerplate() {
+        // #26: harness-injected/templated content that happens to contain
+        // correction words (command echoes, local-command-stdout hook output,
+        // system-reminder blocks) must not be extracted as user corrections,
+        // while a genuine correction in the same run still is.
+        let entries = [
+            assistant_text("Doing the thing."),
+            user_text("<local-command-stdout>goal: stop the wrong build</local-command-stdout>"),
+            user_text("<command-name>/goal</command-name>"),
+            user_text("<system-reminder>no, actually do X instead</system-reminder>"),
+            assistant_text("I'll delete the file."),
+            user_text("No, don't delete that, it is wrong."),
+        ];
+        let refs: Vec<&LogEntry> = entries.iter().collect();
+        let opts = LessonOptions::default();
+
+        let corrections = extract_user_corrections(&refs, &opts);
+        assert_eq!(
+            corrections.len(),
+            1,
+            "only the genuine correction should survive, got {corrections:?}"
+        );
+        assert!(corrections[0].user_text.contains("don't delete"));
     }
 
     #[test]
