@@ -200,9 +200,17 @@ fn decode_with_filesystem_check(encoded: &str) -> Option<String> {
         return Some("/".to_string());
     }
 
-    // First, try the smart decode that handles underscores and periods
-    if let Some(path) = decode_with_special_chars(content) {
-        return Some(path);
+    // Smart decode that handles underscores and periods. It can return a
+    // speculative path that does not exist on disk (single dashes are always
+    // treated as separators), so only let it win here when it resolves to a real
+    // directory; otherwise the filesystem-confirmed hyphen-preserving decode
+    // below must be allowed to outrank it (e.g. a real `rust-mssql-driver` dir
+    // that the speculative decode would render as `rust/mssql/driver`).
+    let special = decode_with_special_chars(content);
+    if let Some(ref path) = special {
+        if Path::new(path).exists() {
+            return Some(path.clone());
+        }
     }
 
     // Fall back to the original hyphen-preserving logic
@@ -247,11 +255,13 @@ fn decode_with_filesystem_check(encoded: &str) -> Option<String> {
         }
     }
 
-    // Only return if the path exists or we made meaningful progress
-    if Path::new(&current_path).exists() || current_path.contains('-') {
+    // Prefer a filesystem-confirmed hyphen-preserving decode; otherwise keep the
+    // speculative special-char decode (preserves prior behavior for paths that
+    // no longer exist on disk, e.g. deleted or moved project directories).
+    if Path::new(&current_path).exists() {
         Some(current_path)
     } else {
-        None
+        special
     }
 }
 
@@ -762,6 +772,44 @@ mod tests {
             std::fs::canonicalize(&temp_dir).ok(),
             "decoded {decoded:?} should resolve to the same directory as {temp_dir:?}"
         );
+    }
+
+    #[test]
+    fn test_decode_prefers_existing_dashed_dir() {
+        // Regression for #24: Claude Code's lossy encoding maps both `/` and a
+        // real `-` to `-`, so `.../rust-mssql-driver` and `.../rust/mssql/driver`
+        // share one encoded form. When the dashed directory actually exists, the
+        // decode must reconstruct it rather than the speculative slash form.
+        //
+        // Note: encode_project_path can't be used to build the input here — it
+        // percent-encodes hyphens (lossless), which hides the ambiguity. We
+        // synthesize Claude's encoding directly: replace `/` with `-`, leaving
+        // real hyphens intact (Claude does not escape them).
+        use std::fs;
+
+        let base = std::env::temp_dir().join("snatchdecodedash");
+        let dashed = base.join("rust-mssql-driver");
+        fs::create_dir_all(&dashed).unwrap();
+
+        let encoded = dashed.to_string_lossy().replace('/', "-");
+        let decoded = decode_project_path(&encoded);
+
+        assert_eq!(
+            fs::canonicalize(&decoded).ok(),
+            fs::canonicalize(&dashed).ok(),
+            "decoded {decoded:?} should resolve to the real dashed dir {dashed:?}"
+        );
+        assert!(
+            decoded.ends_with("rust-mssql-driver"),
+            "decoded path should preserve the dashed segment, got {decoded}"
+        );
+
+        fs::remove_dir_all(&base).ok();
+
+        // When nothing on disk confirms the dashed form, the speculative slash
+        // decode remains the expected fallback (e.g. a deleted/moved project).
+        let missing = decode_project_path("-snatchnope-rust-mssql-driver");
+        assert_eq!(missing, "/snatchnope/rust/mssql/driver");
     }
 
     #[test]
