@@ -247,7 +247,12 @@ fn matches_model(entry: &LogEntry, model_filter: &str) -> bool {
                 .to_lowercase()
                 .contains(&model_filter_lower)
         }
-        _ => true, // Non-assistant messages don't have model info, so don't filter them out
+        // Non-assistant entries carry no model, so they cannot match a model
+        // filter. Exclude them while a model filter is active (matches the TUI's
+        // semantics and keeps `--model` an entry-level assistant filter, so
+        // `--files-only` returns a session only if it has a matching assistant
+        // entry rather than any user text).
+        _ => false,
     }
 }
 
@@ -601,6 +606,22 @@ fn collect_sessions(cli: &Cli, args: &SearchArgs) -> Result<Vec<Session>> {
 fn run_batch(cli: &Cli, args: &SearchArgs, patterns: Vec<BatchPattern>) -> Result<()> {
     let sessions = collect_sessions(cli, args)?;
 
+    // Build exclude regex if specified, so batch honors --exclude like the
+    // single-pattern path does.
+    let exclude_regex = if let Some(ref exclude_pattern) = args.exclude {
+        Some(
+            RegexBuilder::new(exclude_pattern)
+                .case_insensitive(args.ignore_case)
+                .build()
+                .map_err(|e| SnatchError::InvalidArgument {
+                    name: "exclude".to_string(),
+                    reason: e.to_string(),
+                })?,
+        )
+    } else {
+        None
+    };
+
     let mut counts: Vec<usize> = vec![0; patterns.len()];
     // Per-pattern per-session breakdown (only allocated when --breakdown)
     let mut per_session: Vec<std::collections::HashMap<String, (usize, Option<SystemTime>)>> =
@@ -644,7 +665,24 @@ fn run_batch(cli: &Cli, args: &SearchArgs, patterns: Vec<BatchPattern>) -> Resul
         };
 
         for entry in &entries {
+            // Apply the general filter stack (model, tool-name, errors, token
+            // bounds, branch, message-type) at entry level, matching the
+            // single-pattern path. Previously batch skipped these entirely.
+            if !matches_filters(entry, args) {
+                continue;
+            }
+
             for (i, pattern) in patterns.iter().enumerate() {
+                // Apply --exclude per pattern using that pattern's own scope,
+                // skipping the entry's contribution to this pattern when the
+                // exclude regex matches its scoped text.
+                if let Some(ref excl) = exclude_regex {
+                    let texts = extract_text_for_scope(entry, &pattern.scope);
+                    if texts.iter().any(|t| excl.is_match(t)) {
+                        continue;
+                    }
+                }
+
                 let c = count_pattern_matches(entry, pattern);
                 counts[i] += c;
                 if args.breakdown {
@@ -2116,6 +2154,79 @@ mod tests {
 
         // Should not match when no branch is present
         assert!(!matches_git_branch(&entry, "main"));
+    }
+
+    #[test]
+    fn test_matches_model_semantics() {
+        // Regression for #23: --model is an entry-level assistant-message filter.
+        // Assistant entries match by substring; non-assistant entries never match
+        // while a model filter is active (they carry no model), so `--files-only`
+        // returns a session only via a matching assistant entry.
+        use crate::model::content::AssistantContent;
+        use crate::model::message::AssistantMessage;
+        use crate::model::{UserContent, UserMessage, UserSimpleContent};
+        use chrono::Utc;
+        use indexmap::IndexMap;
+
+        let assistant = LogEntry::Assistant(AssistantMessage {
+            uuid: "a".to_string(),
+            parent_uuid: None,
+            timestamp: Utc::now(),
+            session_id: "s".to_string(),
+            version: "2.0".to_string(),
+            cwd: None,
+            git_branch: None,
+            user_type: None,
+            is_sidechain: false,
+            is_teammate: None,
+            agent_id: None,
+            slug: None,
+            request_id: None,
+            is_api_error_message: None,
+            message: AssistantContent {
+                model: "claude-opus-4-8".to_string(),
+                ..Default::default()
+            },
+            extra: IndexMap::new(),
+        });
+
+        // Substring match, case-insensitive.
+        assert!(matches_model(&assistant, "opus"));
+        assert!(matches_model(&assistant, "claude-opus-4-8"));
+        assert!(matches_model(&assistant, "OPUS"));
+        // Non-matching model excludes the assistant entry (was the silent no-op).
+        assert!(!matches_model(&assistant, "fable"));
+        assert!(!matches_model(&assistant, "definitely-not-a-model"));
+
+        // Non-assistant entries never match while a model filter is active.
+        let user = LogEntry::User(UserMessage {
+            uuid: "u".to_string(),
+            parent_uuid: None,
+            timestamp: Utc::now(),
+            session_id: "s".to_string(),
+            version: "2.0".to_string(),
+            cwd: None,
+            git_branch: None,
+            user_type: None,
+            is_sidechain: false,
+            is_teammate: None,
+            agent_id: None,
+            slug: None,
+            is_meta: None,
+            is_compact_summary: None,
+            is_visible_in_transcript_only: None,
+            thinking_metadata: None,
+            todos: Vec::new(),
+            tool_use_result: None,
+            message: UserContent::Simple(UserSimpleContent {
+                role: "user".to_string(),
+                content: "the quick brown fox".to_string(),
+                extra: IndexMap::new(),
+            }),
+            extra: IndexMap::new(),
+        });
+        assert!(!matches_model(&user, "opus"));
+        assert!(!matches_model(&user, "claude-opus-4-8"));
     }
 
     #[test]
