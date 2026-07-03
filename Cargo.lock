@@ -2398,9 +2398,9 @@ dependencies = [
 
 [[package]]
 name = "mcpkit"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31fc977b6f879b84aa9d465e98ce544f5853198f256053ea335764b2586be4ce"
+checksum = "751d16064cb7aa5c7e06a4f108cb044238675dd14f4a043de0342c00785f471e"
 dependencies = [
  "mcpkit-client",
  "mcpkit-core",
@@ -2411,9 +2411,9 @@ dependencies = [
 
 [[package]]
 name = "mcpkit-client"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9fe494a18a13b807c44b7af19bab2387996aecfed5963be57ccb517a63044289"
+checksum = "8c42f006339db08c9926cdde146f37038e3e08b07c303a5f4cf1a0636d9a6fd3"
 dependencies = [
  "async-lock",
  "futures",
@@ -2428,9 +2428,9 @@ dependencies = [
 
 [[package]]
 name = "mcpkit-core"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03c7c91577aaf5c97f047755c6822dae75d81c99778256d1b162e0400f533e7a"
+checksum = "05e728d0b789d6d7e3464f1dfa1981902a16b96f606880cabec169e16efbab30"
 dependencies = [
  "base64",
  "chrono",
@@ -2449,9 +2449,9 @@ dependencies = [
 
 [[package]]
 name = "mcpkit-macros"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "339bc3bf348b08a18bb9df696a95d54119f12e506764482998bbaf7ff388c3b9"
+checksum = "24d29e0f21cc58d90a4e32ac2c9f3ab188ff1eca6e7984974d3fb8a56365d298"
 dependencies = [
  "darling 0.20.11",
  "proc-macro2",
@@ -2461,11 +2461,12 @@ dependencies = [
 
 [[package]]
 name = "mcpkit-server"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25b834b3744f6395ffb116bbb9cb1da3fc4337644bc2053d45767a99bbb84ba9"
+checksum = "78d4d8acfded1bb4d6fd19a4f1c1e4873fa456b3b5be4a75c72d3e3003185492"
 dependencies = [
  "chrono",
+ "event-listener",
  "futures",
  "mcpkit-core",
  "mcpkit-transport",
@@ -2478,16 +2479,18 @@ dependencies = [
 
 [[package]]
 name = "mcpkit-transport"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d28818e3ab1f8fdee60d5035f676ab68462da93b0ee72c6dc1e8e1291420f64"
+checksum = "51184baa6178d747fa12e68a890ab10b933611c6f9839c93f85c5c01187628aa"
 dependencies = [
  "async-lock",
+ "async-trait",
  "bytes",
  "event-listener",
  "futures",
  "mcpkit-core",
  "pin-project-lite",
+ "rand 0.8.6",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
