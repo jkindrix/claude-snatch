@@ -61,7 +61,7 @@ tantivy = "0.25"
 similar = "2.6"
 
 # JSON Schema
-jsonschema = { version = "0.45", default-features = false }
+jsonschema = { version = "0.46", default-features = false }
 
 # MCP Server (Model Context Protocol)
 mcpkit = { version = "0.5", optional = true }
@@ -76,7 +76,7 @@ indexmap = { version = "2.13", features = ["serde"] }
 uuid = { version = "1.22", features = ["serde", "v4"] }
 
 # Configuration
-toml = "0.9"
+toml = "1.1"
 config = "0.15"
 
 # Utilities
@@ -87,7 +87,7 @@ bytes = "1.11"
 base64 = "0.22"
 
 # Database
-rusqlite = { version = "0.38", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Memory-mapped files (for zero-copy parsing)
 memmap2 = { version = "0.9", optional = true }
