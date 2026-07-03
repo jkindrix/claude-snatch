@@ -470,7 +470,7 @@ impl SearchIndex {
                 })?;
 
         let top_docs = searcher
-            .search(&parsed_query, &TopDocs::with_limit(limit))
+            .search(&parsed_query, &TopDocs::with_limit(limit).order_by_score())
             .map_err(|e| SnatchError::IndexError(format!("Search failed: {}", e)))?;
 
         let mut results = Vec::new();
