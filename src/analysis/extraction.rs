@@ -44,9 +44,14 @@ pub fn truncate_text(text: &str, max_len: usize) -> String {
 ///
 /// Also returns `false` for compaction continuation summaries
 /// (`isCompactSummary: true`), which are harness-injected "This session is
-/// being continued from a previous conversation..." entries, not human input.
+/// being continued from a previous conversation..." entries, not human input,
+/// and for harness meta entries (`isMeta: true`).
 pub fn is_human_prompt(entry: &LogEntry) -> bool {
     if let LogEntry::User(user) = entry {
+        // Harness-injected meta entries (isMeta: true) are never human prompts.
+        if user.is_meta == Some(true) {
+            return false;
+        }
         if user.is_compact_summary == Some(true) {
             return false;
         }

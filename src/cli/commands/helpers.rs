@@ -217,10 +217,12 @@ pub fn group_into_logical(sessions: Vec<Session>) -> Vec<LogicalSession> {
     rows
 }
 
-/// A session's canonical logical `[start, end]` activity span: the embedded
-/// conversation timestamps, falling back to file mtime per field when metadata
-/// is unavailable. This is the single source used for both date-range filtering
-/// and chain "latest member" selection, so the two never disagree (issue #22).
+/// A session's canonical logical `[start, end]` activity span.
+///
+/// Uses the embedded conversation timestamps, falling back to file mtime per
+/// field when metadata is unavailable. This is the single source used for both
+/// date-range filtering and chain "latest member" selection, so the two never
+/// disagree (issue #22).
 pub fn session_logical_span(session: &Session) -> (DateTime<Utc>, DateTime<Utc>) {
     match session.quick_metadata_cached() {
         Ok(meta) => {

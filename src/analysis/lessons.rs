@@ -230,6 +230,35 @@ fn build_correction_regex() -> Option<regex::Regex> {
     .ok()
 }
 
+/// Score a correction candidate by how strongly it signals a real user
+/// correction. Counts distinct high-signal markers so the most significant
+/// corrections rank first and survive truncation, rather than whichever
+/// happened earliest (issue #26).
+fn correction_strength(text: &str) -> u32 {
+    let lower = text.to_lowercase();
+    const MARKERS: &[&str] = &[
+        "wrong",
+        "incorrect",
+        "stop",
+        "don't",
+        "dont",
+        "no,",
+        "no.",
+        "no!",
+        "not what",
+        "that's not",
+        "thats not",
+        "instead",
+        "should have",
+        "actually",
+        "i asked",
+        "i said",
+        "why did you",
+        "why are you",
+    ];
+    MARKERS.iter().filter(|m| lower.contains(**m)).count() as u32
+}
+
 /// Check if a user message is a compaction/continuation summary (false positive filter).
 fn is_summary_text(text: &str) -> bool {
     text.len() > 3000
@@ -370,7 +399,9 @@ pub fn extract_user_corrections(
         None => return Vec::new(),
     };
 
-    let mut corrections = Vec::new();
+    // Collect candidates with a correction-strength score so stronger
+    // corrections rank first and survive truncation (issue #26).
+    let mut scored: Vec<(u32, UserCorrectionEntry)> = Vec::new();
     let mut prev_assistant_summary: Option<String> = None;
 
     for entry in entries {
@@ -382,18 +413,22 @@ pub fn extract_user_corrections(
             LogEntry::User(_) => {
                 // Skip harness-injected/templated content (command echoes,
                 // local-command-stdout hook output, system-reminder blocks,
-                // tool-result turns, compaction summaries) so corrections reflect
-                // actual human pushback rather than boilerplate. See #26.
+                // tool-result turns, compaction summaries, isMeta entries) so
+                // corrections reflect actual human pushback rather than
+                // boilerplate. See #26.
                 if !is_human_prompt(entry) {
                     continue;
                 }
                 if let Some(text) = extract_user_prompt_text(entry) {
                     if correction_re.is_match(&text) && text.len() > 10 && !is_summary_text(&text) {
-                        corrections.push(UserCorrectionEntry {
-                            timestamp: entry.timestamp().map(|t| t.to_rfc3339()),
-                            user_text: truncate_text(&text, opts.correction_text_len),
-                            prior_assistant_summary: prev_assistant_summary.clone(),
-                        });
+                        scored.push((
+                            correction_strength(&text),
+                            UserCorrectionEntry {
+                                timestamp: entry.timestamp().map(|t| t.to_rfc3339()),
+                                user_text: truncate_text(&text, opts.correction_text_len),
+                                prior_assistant_summary: prev_assistant_summary.clone(),
+                            },
+                        ));
                     }
                 }
             }
@@ -401,7 +436,10 @@ pub fn extract_user_corrections(
         }
     }
 
-    corrections
+    // Stable sort by strength descending: stronger corrections first, with
+    // equal-strength candidates keeping their chronological order.
+    scored.sort_by_key(|(strength, _)| std::cmp::Reverse(*strength));
+    scored.into_iter().map(|(_, c)| c).collect()
 }
 
 /// Rank tools by error frequency.
@@ -651,6 +689,54 @@ mod tests {
         assert_eq!(corrections.len(), 1);
         assert!(corrections[0].user_text.contains("don't delete"));
         assert!(corrections[0].prior_assistant_summary.is_some());
+    }
+
+    fn user_meta(text: &str) -> LogEntry {
+        let json = format!(
+            r#"{{
+                "type": "user",
+                "uuid": "user-meta",
+                "isMeta": true,
+                "timestamp": "2025-01-01T00:00:04Z",
+                "sessionId": "test-session",
+                "version": "2.0.0",
+                "message": {{ "role": "user", "content": "{text}" }}
+            }}"#
+        );
+        serde_json::from_str(&json).expect("failed to parse user_meta JSON")
+    }
+
+    #[test]
+    fn test_corrections_rank_by_strength_and_skip_meta() {
+        let entries = [
+            assistant_text("Working on it."),
+            // Weak correction (single marker "again"), earliest.
+            user_text("Please run the tests again, thanks for the help here."),
+            assistant_text("Sure."),
+            // isMeta entry containing correction words must be excluded entirely.
+            user_meta("no, that is wrong, stop"),
+            assistant_text("OK."),
+            // Strong correction (several markers), latest.
+            user_text("No, that's wrong. Stop doing that, do it the other way instead."),
+        ];
+        let refs: Vec<&LogEntry> = entries.iter().collect();
+        let opts = LessonOptions::default();
+        let corrections = extract_user_corrections(&refs, &opts);
+
+        assert_eq!(
+            corrections.len(),
+            2,
+            "meta excluded, two real corrections survive: {corrections:?}"
+        );
+        // The stronger correction ranks first even though it occurs later.
+        assert!(corrections[0]
+            .user_text
+            .to_lowercase()
+            .contains("stop doing that"));
+        assert!(corrections[1]
+            .user_text
+            .to_lowercase()
+            .contains("run the tests again"));
     }
 
     #[test]
