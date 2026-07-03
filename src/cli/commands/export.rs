@@ -824,6 +824,8 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
 
     // Latest member activity per chain root, used for chain-aware date filtering
     // (a chain is included/excluded by its latest member, not its root file).
+    // Selected by embedded conversation end time (not file mtime) so the member
+    // chosen here and the range filtered below use the same metric (issue #22).
     let mut chain_latest: std::collections::HashMap<String, &Session> =
         std::collections::HashMap::new();
     if chain_aware {
@@ -832,7 +834,9 @@ fn export_all_sessions(cli: &Cli, args: &ExportArgs) -> Result<()> {
                 chain_latest
                     .entry(root.clone())
                     .and_modify(|cur| {
-                        if s.modified_time() > cur.modified_time() {
+                        if super::helpers::session_logical_end(s)
+                            > super::helpers::session_logical_end(cur)
+                        {
                             *cur = s;
                         }
                     })
@@ -1081,6 +1085,8 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
     };
 
     // Latest member activity per chain root, for chain-aware date filtering.
+    // Selected by embedded conversation end time (not file mtime) so selection
+    // and range filtering use the same metric (issue #22).
     let mut chain_latest: std::collections::HashMap<String, &Session> =
         std::collections::HashMap::new();
     if chain_aware {
@@ -1089,7 +1095,9 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
                 chain_latest
                     .entry(root.clone())
                     .and_modify(|cur| {
-                        if s.modified_time() > cur.modified_time() {
+                        if super::helpers::session_logical_end(s)
+                            > super::helpers::session_logical_end(cur)
+                        {
                             *cur = s;
                         }
                     })

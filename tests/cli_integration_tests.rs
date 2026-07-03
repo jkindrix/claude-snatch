@@ -1024,6 +1024,45 @@ fn test_export_all_since_includes_chain_by_latest_member() {
 }
 
 #[test]
+fn test_export_all_date_filter_uses_embedded_not_mtime() {
+    // #22: chain date filtering must follow embedded conversation timestamps,
+    // not file mtime. Here the root's conversation is Jan 1 but its file was
+    // touched last (mtime Jan 30), while the continuation's conversation is
+    // Jan 30 but its file mtime is Jan 1. Selecting the representative by mtime
+    // would pick the root (embedded Jan 1) and wrongly exclude the chain from
+    // `--since 2025-01-15`; selecting by embedded end keeps it (Jan 30).
+    let tmp = setup_dated_chain_dir("2025-01-01T00:00:00.000Z", "2025-01-30T00:00:00.000Z");
+    let encoded = encode_project_path(PROJECT_PATH);
+    let project_dir = tmp.path().join("projects").join(&encoded);
+    // Diverge mtime from embedded: root newest by mtime, continuation oldest.
+    set_file_mtime(&project_dir, CHAIN_ROOT_ID, "2025-01-30T00:00:00.000Z");
+    set_file_mtime(&project_dir, CHAIN_CONT_ID, "2025-01-01T00:00:00.000Z");
+
+    let out_dir = TempDir::new().unwrap();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "export",
+            "--all",
+            "--since",
+            "2025-01-15",
+            "-f",
+            "markdown",
+            "--out",
+            out_dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let names = md_names(out_dir.path());
+    assert_eq!(
+        names.len(),
+        1,
+        "chain kept by embedded latest activity (Jan 30), got: {names:?}"
+    );
+    assert!(names[0].contains(CHAIN_ROOT_ID));
+}
+
+#[test]
 fn test_export_all_sqlite_date_filter_once_per_chain() {
     let tmp = setup_dated_chain_dir("2025-01-10T10:00:00.000Z", "2025-01-20T10:00:00.000Z");
 

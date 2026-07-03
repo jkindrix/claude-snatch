@@ -120,10 +120,14 @@ impl LogicalSession {
     }
 
     /// The member with the latest activity (used for date-range comparison).
+    ///
+    /// Selected by embedded conversation end time (not file mtime) so it uses
+    /// the same metric the date filter compares against — see [`session_logical_end`]
+    /// and issue #22.
     pub fn latest_member(&self) -> &Session {
         self.members
             .iter()
-            .max_by_key(|s| s.modified_time())
+            .max_by_key(|s| session_logical_end(s))
             .expect("logical session always has at least one member")
     }
 
@@ -213,17 +217,12 @@ pub fn group_into_logical(sessions: Vec<Session>) -> Vec<LogicalSession> {
     rows
 }
 
-/// Whether a session's content time range overlaps `[since, until]`.
-///
-/// Uses content-based start/end timestamps (falling back to file mtime) so
-/// compacted sessions are placed by when the conversation happened, not when
-/// the file was rewritten.
-pub fn session_overlaps_date(
-    session: &Session,
-    since: Option<DateTime<Utc>>,
-    until: Option<DateTime<Utc>>,
-) -> bool {
-    let (start, end) = match session.quick_metadata_cached() {
+/// A session's canonical logical `[start, end]` activity span: the embedded
+/// conversation timestamps, falling back to file mtime per field when metadata
+/// is unavailable. This is the single source used for both date-range filtering
+/// and chain "latest member" selection, so the two never disagree (issue #22).
+pub fn session_logical_span(session: &Session) -> (DateTime<Utc>, DateTime<Utc>) {
+    match session.quick_metadata_cached() {
         Ok(meta) => {
             let start = meta
                 .start_time
@@ -237,7 +236,27 @@ pub fn session_overlaps_date(
             let mt = DateTime::from(session.modified_time());
             (mt, mt)
         }
-    };
+    }
+}
+
+/// A session's canonical logical end (latest activity) instant. Used to select a
+/// chain's representative member by the same metric the date filter compares
+/// against (issue #22).
+pub fn session_logical_end(session: &Session) -> DateTime<Utc> {
+    session_logical_span(session).1
+}
+
+/// Whether a session's content time range overlaps `[since, until]`.
+///
+/// Uses content-based start/end timestamps (falling back to file mtime) so
+/// compacted sessions are placed by when the conversation happened, not when
+/// the file was rewritten.
+pub fn session_overlaps_date(
+    session: &Session,
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+) -> bool {
+    let (start, end) = session_logical_span(session);
     if let Some(since) = since {
         if end < since {
             return false;
