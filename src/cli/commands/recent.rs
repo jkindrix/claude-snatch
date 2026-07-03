@@ -34,7 +34,7 @@ impl SessionInfo {
         let entry_count = session.quick_metadata_cached().ok().map(|m| m.entry_count);
         Self {
             id: id.clone(),
-            project: session.project_path().to_string(),
+            project: session.display_project_path(),
             modified: session.modified_datetime(),
             size_bytes: session.file_size(),
             entry_count,
@@ -102,7 +102,7 @@ pub fn run(cli: &Cli, args: &RecentArgs) -> Result<()> {
                     .and_then(|t| t.name.as_ref())
                     .map(|n| n.as_str())
                     .unwrap_or("");
-                let project = session.project_path();
+                let project = session.display_project_path();
                 let modified = session
                     .modified_datetime()
                     .with_timezone(&Local)
@@ -122,8 +122,8 @@ pub fn run(cli: &Cli, args: &RecentArgs) -> Result<()> {
             for session in &sessions {
                 let id = session.session_id();
                 let short_id = &id[..8.min(id.len())];
-                let project = session.project_path();
-                let display_project = truncate_path(project, 40);
+                let project = session.display_project_path();
+                let display_project = truncate_path(&project, 40);
                 println!("{} {}", short_id, display_project);
             }
         }
@@ -178,7 +178,7 @@ impl LogicalSessionInfo {
             latest_session_id: row.latest_session_id().to_string(),
             chain_member_count: row.member_count(),
             chain_members: row.member_ids(),
-            project: root.project_path().to_string(),
+            project: root.display_project_path(),
             modified: DateTime::<Utc>::from(row.latest_modified()),
             size_bytes: row.total_size(),
             entry_count,
@@ -223,7 +223,7 @@ fn run_collapsed(
                     .and_then(|t| t.name.as_ref())
                     .map(|n| n.as_str())
                     .unwrap_or("");
-                let project = row.root().project_path();
+                let project = row.root().display_project_path();
                 let modified = DateTime::<Utc>::from(row.latest_modified())
                     .with_timezone(&Local)
                     .format("%Y-%m-%d %H:%M")
@@ -244,8 +244,8 @@ fn run_collapsed(
             for row in &rows {
                 let id = &row.root_id;
                 let short_id = &id[..8.min(id.len())];
-                let project = row.root().project_path();
-                let display_project = truncate_path(project, 40);
+                let project = row.root().display_project_path();
+                let display_project = truncate_path(&project, 40);
                 if row.is_chain() {
                     println!(
                         "{} {} (chain: {}, latest {})",
@@ -292,7 +292,7 @@ fn print_logical_line(row: &super::helpers::LogicalSession, tag_store: &TagStore
 
     let name_or_project = tags
         .and_then(|t| t.name.clone())
-        .unwrap_or_else(|| root.project_path().to_string());
+        .unwrap_or_else(|| root.display_project_path());
     let display_name = truncate_path(&name_or_project, 45);
 
     let time_str = DateTime::<Utc>::from(row.latest_modified())
@@ -335,7 +335,7 @@ fn print_session_line(session: &Session, tag_store: &TagStore) -> Result<()> {
     // Session name or project
     let name_or_project = tags
         .and_then(|t| t.name.clone())
-        .unwrap_or_else(|| session.project_path().to_string());
+        .unwrap_or_else(|| session.display_project_path());
 
     // Truncate if too long (use consistent 45 char limit for text mode)
     let display_name = truncate_path(&name_or_project, 45);

@@ -318,7 +318,7 @@ impl SnatchClient {
     fn session_to_info(&self, session: &Session) -> SessionInfo {
         SessionInfo {
             id: session.session_id().to_string(),
-            project_path: session.project_path().to_string(),
+            project_path: session.display_project_path(),
             message_count: session.parse().map(|e| e.len()).unwrap_or(0),
             is_subagent: session.is_subagent(),
         }

@@ -181,6 +181,32 @@ fn test_search_batch_applies_errors_filter() {
     assert_eq!(errs.get("directory"), Some(&0));
 }
 
+/// Regression for #24: when the decoded directory name is ambiguous (a real
+/// dash vs a path separator) and the real dir isn't on disk, the displayed
+/// project path must come from the JSONL `cwd`, not the speculative slash-decode.
+#[test]
+fn test_list_sessions_prefers_cwd_for_ambiguous_path() {
+    let tmp = TempDir::new().expect("temp dir");
+    // Encoded dir decodes speculatively to /home/user/proj/alpha (not on disk);
+    // the session's cwd records the true dashed path /home/user/proj-alpha.
+    let encoded = "-home-user-proj-alpha";
+    let project_dir = tmp.path().join("projects").join(encoded);
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let sid = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+    let jsonl = format!(
+        r#"{{"type":"user","uuid":"d1111111-1111-1111-1111-111111111111","parentUuid":null,"timestamp":"2025-01-15T10:00:00.000Z","sessionId":"{sid}","version":"2.0.74","cwd":"/home/user/proj-alpha","message":{{"role":"user","content":"hi"}}}}"#
+    ) + "\n";
+    std::fs::write(project_dir.join(format!("{sid}.jsonl")), jsonl).unwrap();
+
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["list", "sessions", "-o", "json", "--full-ids"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/home/user/proj-alpha"))
+        .stdout(predicate::str::contains("/home/user/proj/alpha").not());
+}
+
 // =============================================================================
 // export
 // =============================================================================

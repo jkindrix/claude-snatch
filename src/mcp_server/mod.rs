@@ -156,7 +156,7 @@ impl SnatchServer {
                 SessionSummary {
                     session_id: s.session_id().to_string(),
                     slug,
-                    project_path: s.project_path().to_string(),
+                    project_path: s.display_project_path(),
                     is_subagent: s.is_subagent(),
                     parent_session_id: s.parent_session_id().map(String::from),
                     modified_time: Some(s.modified_datetime().to_rfc3339()),
@@ -259,7 +259,7 @@ impl SnatchServer {
             slug,
             chain_id,
             chain_members,
-            project_path: session.project_path().to_string(),
+            project_path: session.display_project_path(),
             is_subagent: session.is_subagent(),
             parent_session_id: session.parent_session_id().map(String::from),
             is_active: session.is_active().unwrap_or(false),

@@ -415,7 +415,7 @@ fn list_sessions_flat<W: Write>(
                         writer,
                         "{}\t{}\t{}\t{}\t{}\t{}\t{}",
                         id,
-                        session.project_path(),
+                        session.display_project_path(),
                         session.file_size(),
                         session.modified_datetime().format("%Y-%m-%d %H:%M:%S UTC"),
                         session.is_subagent(),
@@ -427,7 +427,7 @@ fn list_sessions_flat<W: Write>(
                         writer,
                         "{}\t{}\t{}\t{}\t{}\t{}",
                         id,
-                        session.project_path(),
+                        session.display_project_path(),
                         session.file_size(),
                         session.modified_datetime().format("%Y-%m-%d %H:%M:%S UTC"),
                         session.is_subagent(),
@@ -545,7 +545,7 @@ fn list_sessions_flat<W: Write>(
                 }
 
                 writeln!(writer)?;
-                writeln!(writer, "    Project: {}", session.project_path())?;
+                writeln!(writer, "    Project: {}", session.display_project_path())?;
                 writeln!(
                     writer,
                     "    Modified: {}",
@@ -901,7 +901,7 @@ fn list_sessions_collapsed<W: Write>(
                         writer,
                         "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                         id,
-                        root.project_path(),
+                        root.display_project_path(),
                         row.total_size(),
                         format_systemtime(row.latest_modified()),
                         root.is_subagent(),
@@ -915,7 +915,7 @@ fn list_sessions_collapsed<W: Write>(
                         writer,
                         "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                         id,
-                        root.project_path(),
+                        root.display_project_path(),
                         row.total_size(),
                         format_systemtime(row.latest_modified()),
                         root.is_subagent(),
@@ -1042,7 +1042,7 @@ fn list_sessions_collapsed<W: Write>(
                 }
 
                 writeln!(writer)?;
-                writeln!(writer, "    Project: {}", root.project_path())?;
+                writeln!(writer, "    Project: {}", root.display_project_path())?;
                 writeln!(
                     writer,
                     "    Modified: {}",
@@ -1210,7 +1210,7 @@ impl SessionInfo {
 
         Self {
             session_id: session.session_id().to_string(),
-            project_path: session.project_path().to_string(),
+            project_path: session.display_project_path(),
             is_subagent: session.is_subagent(),
             parent_session_id: session.parent_session_id().map(String::from),
             file_size: session.file_size(),
@@ -1292,7 +1292,7 @@ impl LogicalSessionInfo {
             chain_member_count: row.member_count(),
             chain_members: row.member_ids(),
             matched_member_ids,
-            project_path: root.project_path().to_string(),
+            project_path: root.display_project_path(),
             is_subagent: root.is_subagent(),
             parent_session_id: root.parent_session_id().map(String::from),
             file_size: row.total_size(),

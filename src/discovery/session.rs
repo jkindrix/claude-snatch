@@ -484,6 +484,19 @@ impl Session {
             .extracted_cwd
             .unwrap_or_else(|| self.project_path.clone()))
     }
+
+    /// The project path to display for this session.
+    ///
+    /// Prefers the authoritative JSONL `cwd` (via [`Self::authoritative_project_path`]),
+    /// which disambiguates hyphen-vs-slash directory names and survives
+    /// missing/moved directories, and falls back to the decoded directory path
+    /// (or the raw path on a metadata error). Use this for user-facing output
+    /// and serialization; do NOT use it for project lookup/grouping, which key
+    /// on the decoded directory path. See #24.
+    pub fn display_project_path(&self) -> String {
+        self.authoritative_project_path()
+            .unwrap_or_else(|_| self.project_path.clone())
+    }
 }
 
 /// A subagent spawned by a main session, linked from its sidecar metadata.
