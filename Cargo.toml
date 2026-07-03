@@ -19,7 +19,7 @@ clap_complete = "4.6"
 # TUI Framework (compiled only with the `tui` feature)
 ratatui = { version = "0.30", features = ["all-widgets"], optional = true }
 crossterm = { version = "0.29", features = ["event-stream"], optional = true }
-ratatui-image = { version = "10.0", default-features = false, features = ["image-defaults", "crossterm"], optional = true }
+ratatui-image = { version = "11.0", default-features = false, features = ["image-defaults", "crossterm"], optional = true }
 image = { version = "0.25", optional = true }
 
 # Async Runtime
