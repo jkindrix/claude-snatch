@@ -64,7 +64,7 @@ similar = "3.1"
 jsonschema = { version = "0.46", default-features = false }
 
 # MCP Server (Model Context Protocol)
-mcpkit = { version = "0.5", optional = true }
+mcpkit = { version = "0.6", optional = true }
 
 # Terminal utilities
 console = "0.16"
