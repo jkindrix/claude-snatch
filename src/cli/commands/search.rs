@@ -512,6 +512,41 @@ fn count_pattern_matches(entry: &LogEntry, pattern: &BatchPattern) -> usize {
     count
 }
 
+/// Whether `regex` matches any content a search in `scope` would inspect for
+/// this entry.
+///
+/// `--exclude` must be evaluated over the SAME content set the search/count
+/// paths scan. `extract_text_for_scope` alone omits tool-use/tool-result JSON
+/// (all scopes) and thinking blocks (under `--all`), so an exclude built on it
+/// silently fails to suppress matches inside that content. This mirrors the
+/// scope coverage of `count_pattern_matches` and `search_entry`.
+fn entry_matches_in_scope(entry: &LogEntry, regex: &Regex, scope: &BatchScope) -> bool {
+    if extract_text_for_scope(entry, scope)
+        .iter()
+        .any(|t| regex.is_match(t))
+    {
+        return true;
+    }
+
+    // Tool-use/tool-result content (owned strings, like count_tool_matches).
+    if (*scope == BatchScope::Tools || *scope == BatchScope::All)
+        && count_tool_matches(entry, regex) > 0
+    {
+        return true;
+    }
+
+    // Thinking under --all (other thinking scopes already include it above).
+    if *scope == BatchScope::All {
+        if let LogEntry::Assistant(assistant) = entry {
+            return assistant.message.content.iter().any(
+                |block| matches!(block, ContentBlock::Thinking(t) if regex.is_match(&t.thinking)),
+            );
+        }
+    }
+
+    false
+}
+
 /// Parse a TSV patterns file into batch patterns.
 fn parse_patterns_tsv(path: &std::path::Path) -> Result<Vec<BatchPattern>> {
     let content = std::fs::read_to_string(path)
@@ -675,10 +710,9 @@ fn run_batch(cli: &Cli, args: &SearchArgs, patterns: Vec<BatchPattern>) -> Resul
             for (i, pattern) in patterns.iter().enumerate() {
                 // Apply --exclude per pattern using that pattern's own scope,
                 // skipping the entry's contribution to this pattern when the
-                // exclude regex matches its scoped text.
+                // exclude regex matches any content that pattern would search.
                 if let Some(ref excl) = exclude_regex {
-                    let texts = extract_text_for_scope(entry, &pattern.scope);
-                    if texts.iter().any(|t| excl.is_match(t)) {
+                    if entry_matches_in_scope(entry, excl, &pattern.scope) {
                         continue;
                     }
                 }
@@ -1028,11 +1062,11 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
                 continue;
             }
 
-            // Apply --exclude: skip entries where exclude pattern matches
+            // Apply --exclude: skip entries where exclude pattern matches any
+            // content the search would inspect for this scope.
             if let Some(ref excl) = exclude_regex {
                 let scope = BatchScope::from_search_args(args);
-                let texts = extract_text_for_scope(entry, &scope);
-                if texts.iter().any(|t| excl.is_match(t)) {
+                if entry_matches_in_scope(entry, excl, &scope) {
                     continue;
                 }
             }
@@ -2227,6 +2261,93 @@ mod tests {
         });
         assert!(!matches_model(&user, "opus"));
         assert!(!matches_model(&user, "claude-opus-4-8"));
+    }
+
+    #[test]
+    fn test_exclude_sees_tool_and_thinking_content() {
+        // Regression for #27: --exclude must be evaluated over the same content
+        // a search inspects. Tool-use/tool-result JSON (Tools and All scopes) and
+        // thinking blocks (under --all) are searched/counted, but were invisible
+        // to extract_text_for_scope, so exclude could not suppress them. Both the
+        // single-pattern and batch exclude paths now route through
+        // entry_matches_in_scope, so exercising it covers both.
+        use crate::model::content::{
+            AssistantContent, TextBlock, ThinkingBlock, ToolResult, ToolResultContent, ToolUse,
+        };
+        use crate::model::message::AssistantMessage;
+        use chrono::Utc;
+        use indexmap::IndexMap;
+        use serde_json::json;
+
+        let entry = LogEntry::Assistant(AssistantMessage {
+            uuid: "a".to_string(),
+            parent_uuid: None,
+            timestamp: Utc::now(),
+            session_id: "s".to_string(),
+            version: "2.0".to_string(),
+            cwd: None,
+            git_branch: None,
+            user_type: None,
+            is_sidechain: false,
+            is_teammate: None,
+            agent_id: None,
+            slug: None,
+            request_id: None,
+            is_api_error_message: None,
+            message: AssistantContent {
+                model: "claude-opus-4-8".to_string(),
+                content: vec![
+                    ContentBlock::Text(TextBlock {
+                        text: "hello world".to_string(),
+                        extra: IndexMap::new(),
+                    }),
+                    ContentBlock::Thinking(ThinkingBlock {
+                        thinking: "let me reconsider the approach".to_string(),
+                        signature: String::new(),
+                        extra: IndexMap::new(),
+                    }),
+                    ContentBlock::ToolUse(ToolUse {
+                        id: "t1".to_string(),
+                        name: "Bash".to_string(),
+                        input: json!({ "command": "ls /tmp" }),
+                        extra: IndexMap::new(),
+                    }),
+                    ContentBlock::ToolResult(ToolResult {
+                        tool_use_id: "t1".to_string(),
+                        content: Some(ToolResultContent::String("file: README.md".to_string())),
+                        is_error: None,
+                        extra: IndexMap::new(),
+                    }),
+                ],
+                ..Default::default()
+            },
+            extra: IndexMap::new(),
+        });
+
+        let hits = |pat: &str, scope: BatchScope| {
+            entry_matches_in_scope(&entry, &Regex::new(pat).unwrap(), &scope)
+        };
+
+        // The bug: exclude can now see tool content (Tools and All) ...
+        assert!(hits("ls", BatchScope::Tools), "tool-use input, Tools scope");
+        assert!(
+            hits("README", BatchScope::Tools),
+            "tool-result, Tools scope"
+        );
+        assert!(hits("ls", BatchScope::All), "tool-use input, All scope");
+        // ... and thinking under --all (and the thinking scopes).
+        assert!(hits("reconsider", BatchScope::All), "thinking under --all");
+        assert!(hits("reconsider", BatchScope::Thinking), "thinking scope");
+        // Plain text still works under Default/All.
+        assert!(hits("hello", BatchScope::Default));
+        assert!(hits("hello", BatchScope::All));
+
+        // Scope is not over-broadened: Tools sees neither text nor thinking, and
+        // Default sees neither tool content nor thinking.
+        assert!(!hits("hello", BatchScope::Tools));
+        assert!(!hits("reconsider", BatchScope::Tools));
+        assert!(!hits("ls", BatchScope::Default));
+        assert!(!hits("reconsider", BatchScope::Default));
     }
 
     #[test]
