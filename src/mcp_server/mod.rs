@@ -2696,6 +2696,22 @@ impl SnatchServer {
     }
 }
 
+/// Runtime configuration for the MCP server.
+///
+/// `max_concurrent_requests` is pinned to 1 so the server processes requests
+/// sequentially. mcpkit 0.6 defaults to 100 concurrent requests, but the
+/// persistence tools (`manage_goals`/`manage_notes`/`manage_decisions`) do an
+/// unsynchronized load -> mutate -> save with `next_id` allocation and hold no
+/// lock across it; two concurrent mutations would race and lose an update or
+/// allocate duplicate IDs. Serializing restores mcpkit 0.5's sequential
+/// behavior, which this local single-client server relied on.
+fn serialized_runtime_config() -> mcpkit::server::RuntimeConfig {
+    mcpkit::server::RuntimeConfig {
+        max_concurrent_requests: 1,
+        ..mcpkit::server::RuntimeConfig::default()
+    }
+}
+
 /// Run the MCP server.
 pub async fn run_server(
     claude_dir: Option<PathBuf>,
@@ -2704,11 +2720,16 @@ pub async fn run_server(
     let server = SnatchServer::new(claude_dir, max_file_size);
     let transport = StdioTransport::new();
 
-    server.into_server().serve(transport).await.map_err(|e| {
-        crate::error::SnatchError::ExportError {
-            message: format!("MCP server error: {e}"),
-            source: None,
-        }
+    mcpkit::server::ServerRuntime::with_config(
+        server.into_server(),
+        transport,
+        serialized_runtime_config(),
+    )
+    .run()
+    .await
+    .map_err(|e| crate::error::SnatchError::ExportError {
+        message: format!("MCP server error: {e}"),
+        source: None,
     })
 }
 
@@ -2834,6 +2855,17 @@ mod tests {
     use tempfile::TempDir;
 
     const PROJECT_PATH: &str = "/home/user/test-project";
+
+    #[test]
+    fn serialized_runtime_config_processes_one_request_at_a_time() {
+        // Regression guard for the mcpkit 0.6 concurrency race: the persistence
+        // tools (manage_goals/notes/decisions) do an unsynchronized
+        // load -> mutate -> save with next_id allocation and hold no lock across
+        // it. The server must therefore process requests sequentially; if this
+        // is ever reverted to mcpkit's default of 100, concurrent mutations can
+        // lose updates or allocate duplicate IDs.
+        assert_eq!(serialized_runtime_config().max_concurrent_requests, 1);
+    }
 
     #[test]
     fn test_resolve_subagent_renders_description_fallback_and_ambiguity() {
