@@ -311,10 +311,7 @@ impl Session {
                     system_count += 1;
                     if matches!(
                         sys.subtype,
-                        Some(
-                            SystemSubtype::CompactBoundary
-                                | SystemSubtype::MicrocompactBoundary
-                        )
+                        Some(SystemSubtype::CompactBoundary | SystemSubtype::MicrocompactBoundary)
                     ) {
                         compaction_count += 1;
                     }
