@@ -119,10 +119,43 @@ pub fn platform_id() -> &'static str {
     }
 }
 
+/// Encode a project path using Claude Code's actual on-disk scheme.
+///
+/// Claude Code names a project directory by mapping every path-special
+/// character (`/`, `\`, `:`, `.`, `_`) to `-` and keeping everything else —
+/// including real hyphens — as-is, verified against real
+/// `~/.claude/projects` directory names on Windows and Linux (#31, #34):
+///
+/// - `/home/user/claude-snatch` → `-home-user-claude-snatch`
+/// - `C:\Users\first.last\my-app` → `C--Users-first-last-my-app`
+///
+/// The map is lossy, so it cannot be reversed by string manipulation alone
+/// ([`decode_project_path`] probes the filesystem for that), but the forward
+/// direction is deterministic — which is exactly what a directory-name lookup
+/// needs. Because every ambiguous character collapses back to `-`, re-encoding
+/// a decoded path reproduces the original directory name even when the decode
+/// had to guess (e.g. for a project whose directory was deleted).
+///
+/// Contrast with [`encode_project_path`], snatch's own lossless `%2D`
+/// encoding, which does not match Claude's directory names.
+#[must_use]
+pub fn claude_encode_project_path(path: &str) -> String {
+    path.chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '.' | '_' => '-',
+            other => other,
+        })
+        .collect()
+}
+
 /// Encode a project path for storage (replace / with -).
 ///
 /// Uses percent-encoding for hyphens to ensure roundtrip correctness.
 /// Example: `/home/user/my-project` → `-home-user-my%2Dproject`
+///
+/// Note: this is snatch's own lossless encoding, kept for round-trip
+/// guarantees and existing test fixtures. It does not reproduce Claude
+/// Code's real directory names; use [`claude_encode_project_path`] for that.
 #[must_use]
 pub fn encode_project_path(path: &str) -> String {
     // Normalize path separators
@@ -856,17 +889,45 @@ mod tests {
         );
     }
 
-    /// Synthesize Claude Code's lossy encoding of an absolute path: every
-    /// path-special character (`/`, `\`, `:`, `.`, `_`) becomes `-`, real
-    /// hyphens stay as-is (Claude does not escape them). Verified against
-    /// real `~/.claude/projects` directory names on Windows and Linux.
+    /// Synthesize Claude Code's lossy encoding of an absolute path, for
+    /// building decode-test inputs that match real `~/.claude/projects`
+    /// directory names.
     fn claude_encode(path: &str) -> String {
-        path.chars()
-            .map(|c| match c {
-                '/' | '\\' | ':' | '.' | '_' => '-',
-                other => other,
-            })
-            .collect()
+        claude_encode_project_path(path)
+    }
+
+    #[test]
+    fn test_claude_encode_project_path() {
+        // Unix: `/` becomes `-`, real hyphens are kept (regression for #34 —
+        // Claude never percent-encodes hyphens)
+        assert_eq!(
+            claude_encode_project_path("/home/user/claude-snatch"),
+            "-home-user-claude-snatch"
+        );
+        // Windows: `:`, `\`, and `.` all become `-`, name starts with the
+        // bare drive letter
+        assert_eq!(
+            claude_encode_project_path(r"C:\Users\first.last\my-app"),
+            "C--Users-first-last-my-app"
+        );
+        // Forward-slash Windows form (as produced by decode_project_path)
+        // encodes to the same name
+        assert_eq!(
+            claude_encode_project_path("C:/Users/first.last/my-app"),
+            "C--Users-first-last-my-app"
+        );
+        // Underscores collapse to `-` too
+        assert_eq!(claude_encode_project_path("/mnt/c/_dev"), "-mnt-c--dev");
+        // Re-encoding any decode guess reproduces the directory name, even a
+        // wrong guess for a deleted project (all ambiguity collapses to `-`)
+        assert_eq!(
+            claude_encode_project_path("C:/_dev/personal/rust/mssql/driver"),
+            "C---dev-personal-rust-mssql-driver"
+        );
+        assert_eq!(
+            claude_encode_project_path("C:/_dev/personal/rust-mssql-driver"),
+            "C---dev-personal-rust-mssql-driver"
+        );
     }
 
     #[test]
