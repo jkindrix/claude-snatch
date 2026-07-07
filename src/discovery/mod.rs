@@ -162,15 +162,21 @@ impl ClaudeDirectory {
     }
 
     /// Find a project by its decoded path.
+    ///
+    /// Tries the directory name Claude Code actually creates for the path
+    /// first, then snatch's own lossless `%2D` encoding as a fallback (for
+    /// directories created through [`encode_project_path`], e.g. fixtures).
     pub fn find_project(&self, decoded_path: &str) -> Result<Option<Project>> {
-        let encoded = encode_project_path(decoded_path);
-        let project_dir = self.projects_dir.join(&encoded);
-
-        if project_dir.exists() {
-            Ok(Some(Project::from_path(&project_dir)?))
-        } else {
-            Ok(None)
+        for encoded in [
+            claude_encode_project_path(decoded_path),
+            encode_project_path(decoded_path),
+        ] {
+            let project_dir = self.projects_dir.join(&encoded);
+            if project_dir.exists() {
+                return Ok(Some(Project::from_path(&project_dir)?));
+            }
         }
+        Ok(None)
     }
 
     /// Find a project by encoded directory name.
@@ -372,6 +378,61 @@ pub fn format_count(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a ClaudeDirectory over a temp root containing one project
+    /// directory with the given encoded name.
+    fn claude_dir_with_project(encoded_name: &str) -> (tempfile::TempDir, ClaudeDirectory) {
+        let tmp = tempfile::TempDir::new().expect("failed to create temp dir");
+        std::fs::create_dir_all(tmp.path().join(PROJECTS_DIR_NAME).join(encoded_name))
+            .expect("failed to create project dir");
+        let dir = ClaudeDirectory::from_path(tmp.path()).expect("failed to open claude dir");
+        (tmp, dir)
+    }
+
+    #[test]
+    fn test_find_project_claude_encoded_unix_hyphen() {
+        // Regression for #34: Claude stores /home/user/claude-snatch as
+        // -home-user-claude-snatch (hyphens kept, not %2D-escaped), so the
+        // lookup must match that name. Broken on every platform before the
+        // fix, not just Windows.
+        let (_tmp, dir) = claude_dir_with_project("-home-user-claude-snatch");
+
+        let found = dir.find_project("/home/user/claude-snatch").unwrap();
+        assert!(
+            found.is_some(),
+            "find_project should match Claude's real encoding of a hyphenated Unix path"
+        );
+
+        assert!(dir.find_project("/home/user/other").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_find_project_claude_encoded_windows_drive() {
+        // Regression for #34: C:\Users\first.last\my-app is stored as
+        // C--Users-first-last-my-app (drive letter first, `:` `\` `.` -> `-`).
+        let (_tmp, dir) = claude_dir_with_project("C--Users-first-last-my-app");
+
+        for target in ["C:/Users/first.last/my-app", r"C:\Users\first.last\my-app"] {
+            let found = dir.find_project(target).unwrap();
+            assert!(
+                found.is_some(),
+                "find_project should resolve the Windows drive-letter path {target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_find_project_legacy_percent_encoding_still_matches() {
+        // Directories created through snatch's own lossless encoding (test
+        // fixtures) must keep resolving via the fallback lookup.
+        let (_tmp, dir) = claude_dir_with_project("-home-user-my%2Dproject");
+
+        let found = dir.find_project("/home/user/my-project").unwrap();
+        assert!(
+            found.is_some(),
+            "find_project should still match the legacy %2D-encoded directory name"
+        );
+    }
 
     #[test]
     fn test_format_size() {
