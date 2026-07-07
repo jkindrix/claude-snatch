@@ -127,14 +127,6 @@ pub fn extract_user_prompt_text(entry: &LogEntry) -> Option<String> {
     }
 }
 
-/// Render a human-readable marker for an attachment log entry.
-///
-/// Every attachment yields a `[attachment: <type>]` marker so a reader knows
-/// injected context existed. Content-bearing kinds — injected files (`file`)
-/// and edited-file snippets (`edited_text_file`) — additionally surface their
-/// payload, truncated to `max_len`. Operational kinds (hook output, skill/tool
-/// listings, metadata) are marker-only to avoid flooding the transcript.
-/// Returns `None` if the entry is not an attachment.
 /// Extract the user-typed prompt from a `queued_command` attachment.
 ///
 /// Queued commands with `commandMode: "prompt"` (or an explicit human origin)
@@ -161,6 +153,15 @@ pub fn queued_human_prompt(entry: &LogEntry) -> Option<&str> {
     }
 }
 
+/// Render a human-readable marker for an attachment log entry.
+///
+/// Every attachment yields a `[attachment: <type>]` marker so a reader knows
+/// injected context existed. Content-bearing kinds — injected files (`file`),
+/// edited-file snippets (`edited_text_file`), and queued human prompts —
+/// additionally surface their payload, truncated to `max_len`. Operational
+/// kinds (hook output, skill/tool listings, metadata) are marker-only to
+/// avoid flooding the transcript. Returns `None` if the entry is not an
+/// attachment.
 pub fn render_attachment_content(entry: &LogEntry, max_len: usize) -> Option<String> {
     let LogEntry::Attachment(att) = entry else {
         return None;
