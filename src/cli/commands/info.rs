@@ -1178,6 +1178,7 @@ mod tests {
             lines_added: Some(100),
             lines_removed: Some(20),
             subagents: vec![],
+            pr_links: vec![],
         };
 
         let json = serde_json::to_string(&output).unwrap();
@@ -1278,6 +1279,7 @@ mod tests {
             lines_added: None,
             lines_removed: None,
             subagents: vec![],
+            pr_links: vec![],
         };
 
         let json = serde_json::to_string(&output).unwrap();
