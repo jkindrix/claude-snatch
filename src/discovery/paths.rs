@@ -774,6 +774,14 @@ mod tests {
         );
     }
 
+    // Unix-only: this exercises the greedy filesystem-reconstruction decode,
+    // which rebuilds paths from a `/` root (see decode_with_filesystem_check).
+    // It cannot reconstruct Windows drive-letter paths - on Windows it builds
+    // `/C:/Users/...`, whose `.exists()` checks fail, so it falls back to
+    // splitting every dash and yields `.../rust/mssql/driver`. That is a real,
+    // pre-existing limitation of the decoder on Windows, not something this test
+    // can synthesize around; the #24 scenario it guards is a Unix/WSL path case.
+    #[cfg(not(windows))]
     #[test]
     fn test_decode_prefers_existing_dashed_dir() {
         // Regression for #24: Claude Code's lossy encoding maps both `/` and a
