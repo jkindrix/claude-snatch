@@ -309,7 +309,13 @@ impl Session {
             match entry {
                 LogEntry::System(sys) => {
                     system_count += 1;
-                    if sys.subtype == Some(SystemSubtype::CompactBoundary) {
+                    if matches!(
+                        sys.subtype,
+                        Some(
+                            SystemSubtype::CompactBoundary
+                                | SystemSubtype::MicrocompactBoundary
+                        )
+                    ) {
                         compaction_count += 1;
                     }
                 }

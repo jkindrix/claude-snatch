@@ -1500,7 +1500,13 @@ impl PhaseContext {
 
             // Detect compaction boundaries
             if let LogEntry::System(sys) = entry {
-                if sys.subtype == Some(crate::model::SystemSubtype::CompactBoundary) {
+                if matches!(
+                    sys.subtype,
+                    Some(
+                        crate::model::SystemSubtype::CompactBoundary
+                            | crate::model::SystemSubtype::MicrocompactBoundary
+                    )
+                ) {
                     if let Some(ts) = entry.timestamp() {
                         compaction_times.push(ts);
                     }

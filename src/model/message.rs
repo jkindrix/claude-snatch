@@ -840,6 +840,9 @@ pub struct SystemMessage {
 pub enum SystemSubtype {
     /// Compaction boundary marker.
     CompactBoundary,
+    /// Microcompaction boundary marker (partial compaction; still a
+    /// compaction event for counting/filtering purposes).
+    MicrocompactBoundary,
     /// Hook execution summary.
     StopHookSummary,
     /// API error with retry info.
@@ -867,6 +870,7 @@ pub enum SystemSubtype {
 
 serde_string_enum!(SystemSubtype {
     CompactBoundary => "compact_boundary",
+    MicrocompactBoundary => "microcompact_boundary",
     StopHookSummary => "stop_hook_summary",
     ApiError => "api_error",
     LocalCommand => "local_command",

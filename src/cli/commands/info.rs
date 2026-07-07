@@ -63,7 +63,13 @@ fn compute_chain_summary(
         .iter()
         .filter(|e| {
             matches!(e, LogEntry::System(s)
-                if s.subtype == Some(crate::model::SystemSubtype::CompactBoundary))
+                if matches!(
+                    s.subtype,
+                    Some(
+                        crate::model::SystemSubtype::CompactBoundary
+                            | crate::model::SystemSubtype::MicrocompactBoundary
+                    )
+                ))
         })
         .count();
     let conversation = Conversation::from_entries(entries).ok()?;

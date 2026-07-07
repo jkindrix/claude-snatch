@@ -588,7 +588,10 @@ pub fn find_compaction_events(entries: &[&LogEntry]) -> Vec<(String, Option<Stri
     let mut events = Vec::new();
     for entry in entries {
         if let LogEntry::System(sys) = entry {
-            if sys.subtype == Some(SystemSubtype::CompactBoundary) {
+            if matches!(
+                sys.subtype,
+                Some(SystemSubtype::CompactBoundary | SystemSubtype::MicrocompactBoundary)
+            ) {
                 let ts = sys.timestamp.to_rfc3339();
                 let summary = sys.content.clone();
                 events.push((ts, summary));
@@ -631,6 +634,16 @@ mod tests {
     #[test]
     fn test_truncate_text_short() {
         assert_eq!(truncate_text("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_find_compaction_events_includes_microcompact() {
+        let full = r#"{"type":"system","subtype":"compact_boundary","uuid":"c1","timestamp":"2026-06-21T00:00:00Z","sessionId":"s","content":"full compact"}"#;
+        let micro = r#"{"type":"system","subtype":"microcompact_boundary","uuid":"c2","timestamp":"2026-06-21T01:00:00Z","sessionId":"s","content":"micro compact"}"#;
+        let full_entry: LogEntry = serde_json::from_str(full).unwrap();
+        let micro_entry: LogEntry = serde_json::from_str(micro).unwrap();
+        let refs: Vec<&LogEntry> = vec![&full_entry, &micro_entry];
+        assert_eq!(find_compaction_events(&refs).len(), 2);
     }
 
     #[test]
