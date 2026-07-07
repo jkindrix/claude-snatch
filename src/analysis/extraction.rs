@@ -135,6 +135,32 @@ pub fn extract_user_prompt_text(entry: &LogEntry) -> Option<String> {
 /// payload, truncated to `max_len`. Operational kinds (hook output, skill/tool
 /// listings, metadata) are marker-only to avoid flooding the transcript.
 /// Returns `None` if the entry is not an attachment.
+/// Extract the user-typed prompt from a `queued_command` attachment.
+///
+/// Queued commands with `commandMode: "prompt"` (or an explicit human origin)
+/// carry real user input that may never appear as a `user` entry; other modes
+/// (e.g. `task-notification`) are machine-generated and stay marker-only.
+pub fn queued_human_prompt(entry: &LogEntry) -> Option<&str> {
+    let LogEntry::Attachment(att) = entry else {
+        return None;
+    };
+    let payload = att.attachment.as_ref()?;
+    if payload.get("type").and_then(|v| v.as_str()) != Some("queued_command") {
+        return None;
+    }
+    let mode = payload.get("commandMode").and_then(|v| v.as_str());
+    let human_origin = payload
+        .get("origin")
+        .and_then(|o| o.get("kind"))
+        .and_then(|v| v.as_str())
+        == Some("human");
+    if mode == Some("prompt") || human_origin {
+        payload.get("prompt").and_then(|v| v.as_str())
+    } else {
+        None
+    }
+}
+
 pub fn render_attachment_content(entry: &LogEntry, max_len: usize) -> Option<String> {
     let LogEntry::Attachment(att) = entry else {
         return None;
@@ -160,6 +186,8 @@ pub fn render_attachment_content(entry: &LogEntry, max_len: usize) -> Option<Str
             let snippet = p.get("snippet").and_then(|v| v.as_str());
             render_path_and_body(path, snippet, max_len)
         }),
+        "queued_command" => queued_human_prompt(entry)
+            .map(|prompt| format!("(queued user input) {}", truncate_text(prompt, max_len))),
         _ => None,
     };
 
@@ -620,6 +648,29 @@ mod tests {
         let entry: LogEntry = serde_json::from_str(json).unwrap();
         let refs: Vec<&LogEntry> = vec![&entry];
         assert!(find_error_events(&refs).is_empty());
+    }
+
+    #[test]
+    fn test_queued_human_prompt_rendered() {
+        // commandMode "prompt" = real user input → body surfaced
+        let human = r#"{"uuid":"1","type":"attachment","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","attachment":{"type":"queued_command","commandMode":"prompt","origin":{"kind":"human"},"prompt":"remember to add an exclude option"}}"#;
+        let entry: LogEntry = serde_json::from_str(human).unwrap();
+        assert_eq!(
+            queued_human_prompt(&entry),
+            Some("remember to add an exclude option")
+        );
+        let rendered = render_attachment_content(&entry, 200).unwrap();
+        assert!(rendered.contains("queued user input"));
+        assert!(rendered.contains("exclude option"));
+
+        // task-notification = machine-generated → marker only
+        let notif = r#"{"uuid":"2","type":"attachment","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification>...</task-notification>"}}"#;
+        let entry: LogEntry = serde_json::from_str(notif).unwrap();
+        assert_eq!(queued_human_prompt(&entry), None);
+        assert_eq!(
+            render_attachment_content(&entry, 200).unwrap(),
+            "[attachment: queued_command]"
+        );
     }
 
     #[test]
