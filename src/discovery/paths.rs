@@ -158,6 +158,7 @@ pub fn encode_project_path(path: &str) -> String {
 /// Example: `-home-user-claude-snatch` → `/home/user/claude-snatch` (if path exists)
 /// Example: `-mnt-c--dev` → `/mnt/c/_dev` (if path exists with underscore)
 /// Example: `-mnt-c--dev-CMA-Central` → `/mnt/c/_dev/CMA.Central` (if path exists)
+/// Example: `C--Users-foo-my-app` → `C:/Users/foo/my-app` (Windows, if path exists)
 #[must_use]
 pub fn decode_project_path(encoded: &str) -> String {
     // First handle percent-encoded hyphens (from our own encoding or future Claude versions)
@@ -168,14 +169,40 @@ pub fn decode_project_path(encoded: &str) -> String {
         return best.replace("\x00HYPHEN\x00", "-");
     }
 
-    // Fallback: naive decode (all hyphens to slashes)
-    let path = if working.starts_with('-') {
-        working.replacen('-', "/", 1).replace('-', "/")
+    // Fallback: naive decode (all hyphens to slashes), anchored at the drive
+    // root for Windows-encoded names
+    let (root, rest) = match split_drive_prefix(&working) {
+        Some((drive, rest)) => (drive, rest),
+        None => (String::new(), working.as_str()),
+    };
+    let path = if rest.starts_with('-') {
+        format!("{root}{}", rest.replacen('-', "/", 1).replace('-', "/"))
     } else {
-        working.replace('-', "/")
+        format!("{root}{}", rest.replace('-', "/"))
     };
 
     path.replace("\x00HYPHEN\x00", "-")
+}
+
+/// Split a Windows drive-letter prefix from an encoded project name.
+///
+/// Claude Code's encoding maps every path-special character (`\`, `/`, `:`,
+/// `.`, `_`) to `-`, so a Windows path like `C:\Users\foo` is stored as
+/// `C--Users-foo`: the name starts with the bare drive letter rather than the
+/// leading `-` a Unix absolute path produces. Returns the drive root (e.g.
+/// `"C:"`) and the remainder, which keeps the leading `-` that stands for the
+/// root backslash — the same shape as a Unix-encoded name.
+fn split_drive_prefix(encoded: &str) -> Option<(String, &str)> {
+    let mut chars = encoded.chars();
+    let drive = chars.next()?;
+    if !drive.is_ascii_alphabetic() || chars.next() != Some('-') {
+        return None;
+    }
+    let rest = &encoded[2..];
+    if !rest.is_empty() && !rest.starts_with('-') {
+        return None;
+    }
+    Some((format!("{drive}:"), rest))
 }
 
 /// Try to decode by checking which paths exist on the filesystem.
@@ -194,10 +221,17 @@ pub fn decode_project_path(encoded: &str) -> String {
 fn decode_with_filesystem_check(encoded: &str) -> Option<String> {
     use std::path::Path;
 
+    // Windows drive-letter encodings ("C--Users-...") rebuild from "C:/";
+    // everything else keeps the Unix root "/"
+    let (root, remainder) = match split_drive_prefix(encoded) {
+        Some((drive, rest)) => (format!("{drive}/"), rest),
+        None => ("/".to_string(), encoded),
+    };
+
     // Remove leading hyphen and get content
-    let content = encoded.strip_prefix('-').unwrap_or(encoded);
+    let content = remainder.strip_prefix('-').unwrap_or(remainder);
     if content.is_empty() {
-        return Some("/".to_string());
+        return Some(root);
     }
 
     // Smart decode that handles underscores and periods. It can return a
@@ -206,7 +240,7 @@ fn decode_with_filesystem_check(encoded: &str) -> Option<String> {
     // directory; otherwise the filesystem-confirmed hyphen-preserving decode
     // below must be allowed to outrank it (e.g. a real `rust-mssql-driver` dir
     // that the speculative decode would render as `rust/mssql/driver`).
-    let special = decode_with_special_chars(content);
+    let special = decode_with_special_chars(content, &root);
     if let Some(ref path) = special {
         if Path::new(path).exists() {
             return Some(path.clone());
@@ -216,11 +250,11 @@ fn decode_with_filesystem_check(encoded: &str) -> Option<String> {
     // Fall back to the original hyphen-preserving logic
     let segments: Vec<&str> = content.split('-').collect();
     if segments.is_empty() {
-        return Some("/".to_string());
+        return Some(root);
     }
 
     // Build the path greedily, checking filesystem at each step
-    let mut current_path = String::from("/");
+    let mut current_path = root;
     let mut i = 0;
 
     while i < segments.len() {
@@ -271,21 +305,36 @@ fn decode_with_filesystem_check(encoded: &str) -> Option<String> {
 /// - `/_` becomes `--` (slash followed by underscore)
 /// - `/.` becomes `--` (slash followed by period, less common)
 /// - `.` in path names becomes `-`
-fn decode_with_special_chars(content: &str) -> Option<String> {
+///
+/// `root` is the reconstruction anchor: `/` for Unix paths, `C:/` (etc.) for
+/// Windows drive-letter paths.
+fn decode_with_special_chars(content: &str, root: &str) -> Option<String> {
     use std::path::Path;
 
     // Split on single dash, but track where double-dashes occur
     // Double-dash indicates underscore or period after a slash
-    let mut result = String::from("/");
+    let mut result = String::from(root);
     let mut chars = content.chars().peekable();
     let mut current_segment = String::new();
 
     while let Some(c) = chars.next() {
         if c == '-' {
+            // A dash right after a drive root plays the same role as the
+            // second dash of a mid-path double-dash: the caller stripped the
+            // root separator, so `C---dev` arrives here as `-dev` and encodes
+            // `C:\_dev` (or `C:\.dev`). Restricted to drive roots to keep the
+            // Unix decode unchanged.
+            let leading_special = root.len() > 1
+                && result == root
+                && current_segment.is_empty()
+                && chars.peek() != Some(&'-');
+
             // Check for double-dash
-            if chars.peek() == Some(&'-') {
-                // Consume the second dash
-                chars.next();
+            if chars.peek() == Some(&'-') || leading_special {
+                // Consume the second dash of a double-dash
+                if !leading_special {
+                    chars.next();
+                }
 
                 // Double-dash: this is either /_ or /. or //
                 // First, complete the current segment if any
@@ -345,7 +394,7 @@ fn decode_with_special_chars(content: &str) -> Option<String> {
     }
 
     // Clean up any trailing slashes (except for root)
-    while result.len() > 1 && result.ends_with('/') {
+    while result.len() > root.len() && result.ends_with('/') {
         result.pop();
     }
 
@@ -389,14 +438,16 @@ fn path_prefix_exists(prefix: &str) -> bool {
     false
 }
 
-/// Try to improve a decoded path by combining adjacent segments with periods.
+/// Try to improve a decoded path by combining adjacent segments.
 ///
-/// Claude Code encodes periods as dashes, which means a directory name like
-/// `CMA.Central` becomes `CMA-Central` and gets decoded as `CMA/Central`.
-/// This function tries to combine adjacent segments with periods to find
-/// the correct path.
+/// Claude Code encodes periods and hyphens as dashes, which means a directory
+/// name like `CMA.Central` becomes `CMA-Central` and gets decoded as
+/// `CMA/Central`, and `my-app` gets decoded as `my/app`. This function tries
+/// to combine adjacent segments with periods or hyphens to find the correct
+/// path.
 ///
 /// Example: `/mnt/c/_dev/CMA/Central` might actually be `/mnt/c/_dev/CMA.Central`
+/// Example: `C:/Users/foo/my/app` might actually be `C:/Users/foo/my-app`
 fn improve_path_with_periods(path: &str) -> String {
     use std::path::Path;
 
@@ -405,8 +456,16 @@ fn improve_path_with_periods(path: &str) -> String {
         return path.to_string();
     }
 
-    // Try to find the best path by combining adjacent segments with periods
-    let result = try_combine_segments_with_periods(&parts, 0, String::new());
+    // A Windows drive root ("C:") is a fixed anchor, not a combinable
+    // segment, so seed the search past it
+    let (start, seed) = if is_drive_root(parts[0]) {
+        (1, format!("{}/", parts[0]))
+    } else {
+        (0, String::new())
+    };
+
+    // Try to find the best path by combining adjacent segments
+    let result = try_combine_segments(&parts, start, seed);
 
     if let Some(best_path) = result {
         if Path::new(&best_path).exists() {
@@ -418,12 +477,21 @@ fn improve_path_with_periods(path: &str) -> String {
     path.to_string()
 }
 
-/// Recursively try combining segments with periods to find valid paths.
-fn try_combine_segments_with_periods(
-    parts: &[&str],
-    start: usize,
-    prefix: String,
-) -> Option<String> {
+/// Check if a path component is a bare Windows drive root like `C:`.
+fn is_drive_root(component: &str) -> bool {
+    let mut chars = component.chars();
+    matches!(
+        (chars.next(), chars.next(), chars.next()),
+        (Some(drive), Some(':'), None) if drive.is_ascii_alphabetic()
+    )
+}
+
+/// Recursively try combining segments with periods or hyphens to find valid paths.
+///
+/// Periods are tried before hyphens at each position (preserving the
+/// historical preference); mixed separators within one combined segment are
+/// not attempted.
+fn try_combine_segments(parts: &[&str], start: usize, prefix: String) -> Option<String> {
     use std::path::Path;
 
     if start >= parts.len() {
@@ -437,39 +505,49 @@ fn try_combine_segments_with_periods(
         } else {
             format!("{}/", prefix)
         };
-        return try_combine_segments_with_periods(parts, start + 1, new_prefix);
+        return try_combine_segments(parts, start + 1, new_prefix);
     }
 
     let mut best_result: Option<String> = None;
 
-    // Try combining consecutive segments with periods (greedy - try longest first)
+    // Try combining consecutive segments (greedy - try longest first)
     for end in (start + 1..=parts.len()).rev() {
-        // Build the combined segment
-        let combined = parts[start..end].join(".");
-
-        // Build the test path
-        let test_path = if prefix.is_empty() || prefix == "/" {
-            format!("/{}", combined)
-        } else if prefix.ends_with('/') {
-            format!("{}{}", prefix, combined)
+        // With a single segment there is nothing to join, so the separators
+        // would produce the same candidate twice
+        let separators: &[&str] = if end - start == 1 {
+            &["."]
         } else {
-            format!("{}/{}", prefix, combined)
+            &[".", "-"]
         };
 
-        // Check if this path (or prefix) exists
-        let path_exists = Path::new(&test_path).exists();
-        let could_be_prefix = !path_exists && has_matching_prefix(&test_path);
+        for separator in separators {
+            // Build the combined segment
+            let combined = parts[start..end].join(separator);
 
-        if path_exists || could_be_prefix {
-            // Recursively try the rest
-            if let Some(result) = try_combine_segments_with_periods(parts, end, test_path.clone()) {
-                // Verify the full result exists
-                if Path::new(&result).exists() {
-                    return Some(result);
-                }
-                // Keep as potential best if no better found
-                if best_result.is_none() {
-                    best_result = Some(result);
+            // Build the test path
+            let test_path = if prefix.is_empty() || prefix == "/" {
+                format!("/{}", combined)
+            } else if prefix.ends_with('/') {
+                format!("{}{}", prefix, combined)
+            } else {
+                format!("{}/{}", prefix, combined)
+            };
+
+            // Check if this path (or prefix) exists
+            let path_exists = Path::new(&test_path).exists();
+            let could_be_prefix = !path_exists && has_matching_prefix(&test_path);
+
+            if path_exists || could_be_prefix {
+                // Recursively try the rest
+                if let Some(result) = try_combine_segments(parts, end, test_path.clone()) {
+                    // Verify the full result exists
+                    if Path::new(&result).exists() {
+                        return Some(result);
+                    }
+                    // Keep as potential best if no better found
+                    if best_result.is_none() {
+                        best_result = Some(result);
+                    }
                 }
             }
         }
@@ -485,7 +563,7 @@ fn try_combine_segments_with_periods(
         format!("{}/{}", prefix, single)
     };
 
-    if let Some(result) = try_combine_segments_with_periods(parts, start + 1, test_path) {
+    if let Some(result) = try_combine_segments(parts, start + 1, test_path) {
         if best_result.is_none() || Path::new(&result).exists() {
             return Some(result);
         }
@@ -751,8 +829,12 @@ mod tests {
         }
     }
 
-    // The filesystem-probing decode reconstructs Unix-style absolute paths
-    // (it builds up from `/`), so this round-trip is only meaningful on Unix.
+    // Unix-only because this round-trips through encode_project_path, which
+    // does not produce Claude's Windows drive-letter form (it leaves `:` and
+    // `.` unencoded, yielding `-C:-Users-...` instead of `C--Users-...`).
+    // The decoder itself handles drive-letter encodings; see
+    // test_decode_prefers_existing_dashed_dir and
+    // test_decode_reconstructs_period_and_dash_mix.
     #[cfg(unix)]
     #[test]
     fn test_decode_with_filesystem_check_existing_path() {
@@ -774,32 +856,37 @@ mod tests {
         );
     }
 
-    // Unix-only: this exercises the greedy filesystem-reconstruction decode,
-    // which rebuilds paths from a `/` root (see decode_with_filesystem_check).
-    // It cannot reconstruct Windows drive-letter paths - on Windows it builds
-    // `/C:/Users/...`, whose `.exists()` checks fail, so it falls back to
-    // splitting every dash and yields `.../rust/mssql/driver`. That is a real,
-    // pre-existing limitation of the decoder on Windows, not something this test
-    // can synthesize around; the #24 scenario it guards is a Unix/WSL path case.
-    #[cfg(not(windows))]
+    /// Synthesize Claude Code's lossy encoding of an absolute path: every
+    /// path-special character (`/`, `\`, `:`, `.`, `_`) becomes `-`, real
+    /// hyphens stay as-is (Claude does not escape them). Verified against
+    /// real `~/.claude/projects` directory names on Windows and Linux.
+    fn claude_encode(path: &str) -> String {
+        path.chars()
+            .map(|c| match c {
+                '/' | '\\' | ':' | '.' | '_' => '-',
+                other => other,
+            })
+            .collect()
+    }
+
     #[test]
     fn test_decode_prefers_existing_dashed_dir() {
-        // Regression for #24: Claude Code's lossy encoding maps both `/` and a
-        // real `-` to `-`, so `.../rust-mssql-driver` and `.../rust/mssql/driver`
-        // share one encoded form. When the dashed directory actually exists, the
-        // decode must reconstruct it rather than the speculative slash form.
+        // Regression for #24/#31: Claude Code's lossy encoding maps both `/`
+        // (or `\`) and a real `-` to `-`, so `.../rust-mssql-driver` and
+        // `.../rust/mssql/driver` share one encoded form. When the dashed
+        // directory actually exists, the decode must reconstruct it rather
+        // than the speculative slash form — including on Windows, where the
+        // encoded name starts with the drive letter (`C--Users-...`).
         //
         // Note: encode_project_path can't be used to build the input here — it
-        // percent-encodes hyphens (lossless), which hides the ambiguity. We
-        // synthesize Claude's encoding directly: replace `/` with `-`, leaving
-        // real hyphens intact (Claude does not escape them).
+        // percent-encodes hyphens (lossless), which hides the ambiguity.
         use std::fs;
 
         let base = std::env::temp_dir().join("snatchdecodedash");
         let dashed = base.join("rust-mssql-driver");
         fs::create_dir_all(&dashed).unwrap();
 
-        let encoded = dashed.to_string_lossy().replace('/', "-");
+        let encoded = claude_encode(&dashed.to_string_lossy());
         let decoded = decode_project_path(&encoded);
 
         assert_eq!(
@@ -818,6 +905,80 @@ mod tests {
         // decode remains the expected fallback (e.g. a deleted/moved project).
         let missing = decode_project_path("-snatchnope-rust-mssql-driver");
         assert_eq!(missing, "/snatchnope/rust/mssql/driver");
+    }
+
+    #[test]
+    fn test_split_drive_prefix() {
+        // Windows-encoded names start with the drive letter: C:\Users\foo
+        // encodes to C--Users-foo
+        assert_eq!(
+            split_drive_prefix("C--Users-foo"),
+            Some(("C:".to_string(), "-Users-foo"))
+        );
+        assert_eq!(
+            split_drive_prefix("d--projects-app"),
+            Some(("d:".to_string(), "-projects-app"))
+        );
+        // Bare drive root: C:\ encodes to C--
+        assert_eq!(split_drive_prefix("C--"), Some(("C:".to_string(), "-")));
+
+        // Unix-encoded names always start with '-' and must not match
+        assert_eq!(split_drive_prefix("-home-user"), None);
+        assert_eq!(split_drive_prefix("-mnt-c--dev"), None);
+        // Not a drive shape: no dash pair after the letter
+        assert_eq!(split_drive_prefix("abc-def"), None);
+        assert_eq!(split_drive_prefix(""), None);
+    }
+
+    #[test]
+    fn test_decode_windows_drive_speculative() {
+        // A drive-letter encoding whose path no longer exists on disk must
+        // still decode anchored at the drive root, not "/" (regression for
+        // the stray leading slash from #31).
+        assert_eq!(
+            decode_project_path("Q--snatchnope-rust-mssql-driver"),
+            "Q:/snatchnope/rust/mssql/driver"
+        );
+        assert_eq!(decode_project_path("Q--"), "Q:/");
+
+        // Unix-encoded names are unaffected by drive handling
+        assert_eq!(
+            decode_project_path("-snatchnope-a-b-c"),
+            "/snatchnope/a/b/c"
+        );
+
+        // A root-level underscore directory (C:\_dev) encodes to C---dev:
+        // drive, root backslash, and underscore each become '-'. The decode
+        // must not collapse it to a double slash.
+        assert_eq!(
+            decode_project_path("Q---dev-snatchnope-app"),
+            "Q:/_dev/snatchnope/app"
+        );
+    }
+
+    #[test]
+    fn test_decode_reconstructs_period_and_dash_mix() {
+        // Real Windows layouts commonly mix a period directory (e.g. a
+        // `first.last` user profile, or the 8.3 short form of %TEMP%) with a
+        // hyphenated project name. Both characters encode to `-`, so the
+        // decode must recover each kind from the filesystem. The same shape
+        // occurs on Unix (e.g. /home/first.last/my-proj).
+        use std::fs;
+
+        let base = std::env::temp_dir().join("snatchdecodemix");
+        let target = base.join("depth.one").join("my-proj");
+        fs::create_dir_all(&target).unwrap();
+
+        let encoded = claude_encode(&target.to_string_lossy());
+        let decoded = decode_project_path(&encoded);
+
+        assert_eq!(
+            fs::canonicalize(&decoded).ok(),
+            fs::canonicalize(&target).ok(),
+            "decoded {decoded:?} should resolve to the real mixed dir {target:?}"
+        );
+
+        fs::remove_dir_all(&base).ok();
     }
 
     #[test]
@@ -936,7 +1097,7 @@ mod tests {
         // When no path exists, it should still not produce double slashes
 
         // Simulated encoding of /mnt/c/_dev
-        let result = decode_with_special_chars("mnt-c--dev");
+        let result = decode_with_special_chars("mnt-c--dev", "/");
         assert!(result.is_some());
         let path = result.unwrap();
         // Should decode to /mnt/c/_dev (with underscore), not /mnt/c//dev
