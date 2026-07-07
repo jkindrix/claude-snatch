@@ -363,6 +363,31 @@ impl ModelPricing {
         }
     }
 
+    /// Create pricing for Claude Fable 5 (and Claude Mythos 5 — same rates).
+    #[must_use]
+    pub fn claude_fable_5() -> Self {
+        Self {
+            model: "claude-fable-5".to_string(),
+            input_per_million: 10.0,       // $10/M input
+            output_per_million: 50.0,      // $50/M output
+            cache_write_per_million: 12.5, // 1.25x input
+            cache_read_per_million: 1.0,   // 0.1x input
+        }
+    }
+
+    /// Create pricing for Claude Sonnet 5 (sticker price; intro discount
+    /// through 2026-08-31 not modeled).
+    #[must_use]
+    pub fn claude_sonnet_5() -> Self {
+        Self {
+            model: "claude-sonnet-5".to_string(),
+            input_per_million: 3.0,        // $3/M input
+            output_per_million: 15.0,      // $15/M output
+            cache_write_per_million: 3.75, // 1.25x input
+            cache_read_per_million: 0.3,   // 0.1x input
+        }
+    }
+
     /// Create pricing for Claude Haiku 4.5.
     ///
     /// Rates as published 2026-06: $1/M input, $5/M output.
@@ -409,10 +434,12 @@ impl ModelPricing {
     #[must_use]
     pub fn for_model(model: &str) -> Option<Self> {
         match normalize_model_id(model) {
+            "claude-fable-5" | "claude-mythos-5" => Some(Self::claude_fable_5()),
             "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6" => {
                 Some(Self::claude_opus_4_8())
             }
             "claude-opus-4-5" => Some(Self::claude_opus_4_5()),
+            "claude-sonnet-5" => Some(Self::claude_sonnet_5()),
             "claude-sonnet-4-6" | "claude-sonnet-4-5" | "claude-sonnet-4" => {
                 Some(Self::claude_sonnet_4())
             }
@@ -786,6 +813,22 @@ mod tests {
 
     #[test]
     fn test_for_model_prices_by_exact_id() {
+        // Fable 5 (and Mythos 5) price at their own tier above Opus.
+        let fable = ModelPricing::for_model("claude-fable-5").unwrap();
+        assert_eq!(fable.input_per_million, 10.0);
+        assert_eq!(fable.output_per_million, 50.0);
+        assert_eq!(
+            ModelPricing::for_model("claude-mythos-5")
+                .unwrap()
+                .input_per_million,
+            10.0
+        );
+
+        // Sonnet 5 prices at the Sonnet sticker rate.
+        let sonnet5 = ModelPricing::for_model("claude-sonnet-5").unwrap();
+        assert_eq!(sonnet5.input_per_million, 3.0);
+        assert_eq!(sonnet5.output_per_million, 15.0);
+
         // Current Opus tier prices at its own rate, not the older 4.5 tier.
         let opus48 = ModelPricing::for_model("claude-opus-4-8").unwrap();
         assert_eq!(opus48.input_per_million, 5.0);
