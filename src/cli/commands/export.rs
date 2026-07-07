@@ -447,6 +447,8 @@ fn export_session_to_gist(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
         opts.redaction = redaction;
         opts.redaction_preview = args.redact_preview;
         opts.only = only_filter;
+        opts.subagent_transcript_count = sidecar_count;
+        opts.subagent_transcript_stats = sidecar_stats;
         opts
     } else {
         ExportOptions {
@@ -582,6 +584,8 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
         opts.redaction = redaction;
         opts.redaction_preview = args.redact_preview;
         opts.only = only_filter;
+        opts.subagent_transcript_count = sidecar_count;
+        opts.subagent_transcript_stats = sidecar_stats;
         opts
     } else {
         ExportOptions {
@@ -1595,6 +1599,8 @@ fn export_session(
         opts.redaction = redaction;
         opts.redaction_preview = args.redact_preview;
         opts.only = only_filter;
+        opts.subagent_transcript_count = sidecar_count;
+        opts.subagent_transcript_stats = sidecar_stats;
         opts
     } else {
         ExportOptions {
