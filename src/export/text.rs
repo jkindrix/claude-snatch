@@ -334,7 +334,14 @@ impl TextExporter {
     }
 
     /// Write a thinking block.
+    ///
+    /// Recent Claude Code versions persist thinking blocks with empty text
+    /// (only the encrypted signature) — skip those instead of rendering an
+    /// empty section.
     fn write_thinking<W: Write>(&self, writer: &mut W, thinking: &ThinkingBlock) -> Result<()> {
+        if thinking.thinking.is_empty() {
+            return Ok(());
+        }
         writeln!(writer, "  [THINKING]")?;
         for line in thinking.thinking.lines() {
             writeln!(writer, "  | {}", self.wrap_text(line).trim())?;

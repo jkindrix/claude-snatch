@@ -384,7 +384,14 @@ impl MarkdownExporter {
     }
 
     /// Write a thinking block.
+    ///
+    /// Recent Claude Code versions persist thinking blocks with empty text
+    /// (only the encrypted signature) — skip those instead of rendering an
+    /// empty section.
     fn write_thinking<W: Write>(&self, writer: &mut W, thinking: &ThinkingBlock) -> Result<()> {
+        if thinking.thinking.is_empty() {
+            return Ok(());
+        }
         if self.plain_text {
             writeln!(writer, "[THINKING]")?;
             writeln!(writer, "{}", thinking.thinking)?;
@@ -1100,6 +1107,24 @@ mod tests {
         assert!(long_result.contains("<details>"));
         assert!(long_result.contains("<summary>💭 Thinking"));
         assert!(long_result.contains("</details>"));
+    }
+
+    #[test]
+    fn test_empty_thinking_skipped() {
+        let exporter = MarkdownExporter::new();
+        let mut output = Vec::new();
+
+        // Empty thinking (signature-only, as recent Claude Code persists it)
+        // - should render nothing
+        let empty_thinking = ThinkingBlock {
+            thinking: String::new(),
+            signature: "sig".to_string(),
+            extra: indexmap::IndexMap::new(),
+        };
+        exporter
+            .write_thinking(&mut output, &empty_thinking)
+            .unwrap();
+        assert!(output.is_empty());
     }
 
     #[test]

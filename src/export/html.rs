@@ -874,7 +874,14 @@ document.querySelectorAll('.tool-header, .thinking-header').forEach(header => {{
     }
 
     /// Write a thinking block.
+    ///
+    /// Recent Claude Code versions persist thinking blocks with empty text
+    /// (only the encrypted signature) — skip those instead of rendering an
+    /// empty section.
     fn write_thinking<W: Write>(&self, writer: &mut W, thinking: &ThinkingBlock) -> Result<()> {
+        if thinking.thinking.is_empty() {
+            return Ok(());
+        }
         let collapsed_class = if self.collapse_thinking {
             " collapsed"
         } else {
