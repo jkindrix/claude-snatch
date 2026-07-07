@@ -952,6 +952,48 @@ mod tests {
     }
 
     #[test]
+    fn search_matches_indexed_content_ordered_by_score() {
+        // Regression guard for the tantivy 0.26 bump: search() moved to
+        // `TopDocs::with_limit(..).order_by_score()`. Index a real session and
+        // confirm a query matches its content (with a positive score) while an
+        // unrelated term does not - exercising the score-ordered collector end
+        // to end, which the other index tests (all empty-index) never did.
+        let dir = tempdir().unwrap();
+
+        // Session::from_path requires a UUID-shaped filename.
+        let session_id = "abcdef01-2345-6789-abcd-ef0123456789";
+        let jsonl_path = dir.path().join(format!("{session_id}.jsonl"));
+        let line = format!(
+            r#"{{"uuid":"u1","parentUuid":null,"type":"user","timestamp":"2025-12-23T00:00:00Z","sessionId":"{session_id}","version":"2.0.74","isSidechain":false,"message":{{"role":"user","content":"the peregrine falcon dives fast"}}}}"#
+        );
+        std::fs::write(&jsonl_path, format!("{line}\n")).unwrap();
+
+        let session = crate::discovery::Session::from_path(&jsonl_path, "/home/user/proj").unwrap();
+
+        let index_path = dir.path().join("test-index");
+        let index = SearchIndex::open(&index_path).unwrap();
+        index.index_session(&session).unwrap();
+        index.commit().unwrap();
+        // Drop to release the writer lock, then reopen so the reader loads the
+        // just-committed segments deterministically. The live reader uses
+        // ReloadPolicy::OnCommitWithDelay, whose reload is asynchronous, so a
+        // search on the same instance can race the commit.
+        drop(index);
+        let index = SearchIndex::open(&index_path).unwrap();
+
+        let hits = index.search("peregrine", 10).unwrap();
+        assert_eq!(hits.len(), 1, "the indexed message should match the query");
+        assert_eq!(hits[0].session_id, session_id);
+        assert!(
+            hits[0].score > 0.0,
+            "order_by_score should yield a positive score"
+        );
+
+        // A term absent from the corpus must not match.
+        assert!(index.search("marmot", 10).unwrap().is_empty());
+    }
+
+    #[test]
     fn test_list_tool_names_empty() {
         let dir = tempdir().unwrap();
         let index = SearchIndex::open(dir.path().join("test-index")).unwrap();
