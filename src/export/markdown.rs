@@ -990,9 +990,7 @@ impl MarkdownExporter {
                 // conversation content that may never appear as a user entry;
                 // all other attachments are sidecar metadata and are skipped.
                 if options.should_include_user() {
-                    if let Some(prompt) =
-                        crate::analysis::extraction::queued_human_prompt(entry)
-                    {
+                    if let Some(prompt) = crate::analysis::extraction::queued_human_prompt(entry) {
                         if self.plain_text {
                             writeln!(writer, "USER (queued):")?;
                         } else {
@@ -1275,7 +1273,9 @@ mod tests {
 
         let human = r#"{"uuid":"1","type":"attachment","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","attachment":{"type":"queued_command","commandMode":"prompt","origin":{"kind":"human"},"prompt":"remember the exclude option"}}"#;
         let entry: LogEntry = serde_json::from_str(human).unwrap();
-        exporter.export_entry(&mut output, &entry, &options).unwrap();
+        exporter
+            .export_entry(&mut output, &entry, &options)
+            .unwrap();
         let result = String::from_utf8(output).unwrap();
         assert!(result.contains("## 👤 User (queued)"));
         assert!(result.contains("remember the exclude option"));
@@ -1284,7 +1284,9 @@ mod tests {
         let notif = r#"{"uuid":"2","type":"attachment","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification>x</task-notification>"}}"#;
         let entry: LogEntry = serde_json::from_str(notif).unwrap();
         let mut output = Vec::new();
-        exporter.export_entry(&mut output, &entry, &options).unwrap();
+        exporter
+            .export_entry(&mut output, &entry, &options)
+            .unwrap();
         assert!(output.is_empty());
     }
 

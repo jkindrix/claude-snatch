@@ -56,7 +56,10 @@ fn build_only_filter(filters: &[ContentFilter]) -> HashSet<ContentType> {
 /// metadata only), so the transcripts are the reliable source.
 fn subagent_transcript_stats(
     session: &Session,
-) -> (Option<usize>, Option<crate::export::SubagentTranscriptStats>) {
+) -> (
+    Option<usize>,
+    Option<crate::export::SubagentTranscriptStats>,
+) {
     let links = session.subagent_links();
     if links.is_empty() {
         return (None, None);
