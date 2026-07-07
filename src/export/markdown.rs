@@ -286,12 +286,32 @@ impl MarkdownExporter {
         assistant: &AssistantMessage,
         options: &ExportOptions,
     ) -> Result<()> {
+        self.write_assistant_group(writer, &[assistant], options)
+    }
+
+    /// Write one logical assistant message from its streaming chunks.
+    ///
+    /// A streamed API message lands as several consecutive JSONL entries
+    /// sharing one `message.id`; rendering each chunk with its own header and
+    /// token footer misreads as multiple messages with repeated usage. The
+    /// chunks render under a single header with one merged usage footer.
+    fn write_assistant_group<W: Write>(
+        &self,
+        writer: &mut W,
+        chunks: &[&AssistantMessage],
+        options: &ExportOptions,
+    ) -> Result<()> {
+        let Some(first) = chunks.first() else {
+            return Ok(());
+        };
         // Render the body first so an entry that yields no content (e.g. --only
         // code on a turn with no fenced code) is suppressed entirely instead of
         // leaving an empty header + token footer (issue 0005).
         let mut body = Vec::new();
-        for content in &assistant.message.content {
-            self.write_content_block(&mut body, content, options)?;
+        for assistant in chunks {
+            for content in &assistant.message.content {
+                self.write_content_block(&mut body, content, options)?;
+            }
         }
         if body.is_empty() {
             return Ok(());
@@ -302,7 +322,7 @@ impl MarkdownExporter {
         } else {
             write!(writer, "## 🤖 Assistant")?;
             if options.include_timestamps {
-                write!(writer, " *({})* ", format_timestamp(&assistant.timestamp))?;
+                write!(writer, " *({})* ", format_timestamp(&first.timestamp))?;
             }
             writeln!(writer)?;
         }
@@ -311,14 +331,29 @@ impl MarkdownExporter {
 
         // Stop reason and usage
         if options.include_metadata {
-            if let Some(stop_reason) = &assistant.message.stop_reason {
+            if let Some(stop_reason) = chunks
+                .iter()
+                .rev()
+                .find_map(|a| a.message.stop_reason.as_ref())
+            {
                 writeln!(writer)?;
                 writeln!(writer, "*Stop reason: {}*", format_stop_reason(stop_reason))?;
             }
         }
 
         if options.include_usage {
-            if let Some(usage) = &assistant.message.usage {
+            // Chunks repeat/extend the same usage snapshot; fold with
+            // merge_max so the footer reflects the message once.
+            let mut merged: Option<crate::model::Usage> = None;
+            for assistant in chunks {
+                if let Some(usage) = &assistant.message.usage {
+                    match &mut merged {
+                        Some(m) => m.merge_max(usage),
+                        None => merged = Some(usage.clone()),
+                    }
+                }
+            }
+            if let Some(usage) = merged {
                 writeln!(writer)?;
                 writeln!(
                     writer,
@@ -696,7 +731,19 @@ impl MarkdownExporter {
         writeln!(writer)?;
 
         let mut message_num = 0;
+        // Mirror export_entries_grouped: consecutive assistant streaming
+        // chunks render as one message, so list them once.
+        let mut prev_assistant_id: Option<&str> = None;
         for entry in entries {
+            if let LogEntry::Assistant(assistant) = entry {
+                let id = assistant.message.id.as_str();
+                if !id.is_empty() && prev_assistant_id == Some(id) {
+                    continue;
+                }
+                prev_assistant_id = Some(id);
+            } else {
+                prev_assistant_id = None;
+            }
             message_num += 1;
             let (icon, role, timestamp): (&str, &str, Option<&DateTime<Utc>>) = match entry {
                 LogEntry::User(user) => ("👤", "User", Some(&user.timestamp)),
@@ -801,10 +848,8 @@ impl Exporter for MarkdownExporter {
             writeln!(writer)?;
         }
 
-        // Write each entry
-        for entry in entries {
-            self.export_entry(writer, entry, options)?;
-        }
+        // Write each entry, merging consecutive assistant streaming chunks
+        self.export_entries_grouped(writer, &entries, options)?;
 
         // Write footer with branch info if applicable
         if options.include_branches && conversation.has_branches() {
@@ -836,14 +881,44 @@ impl Exporter for MarkdownExporter {
         writer: &mut W,
         options: &ExportOptions,
     ) -> Result<()> {
-        for entry in entries {
-            self.export_entry(writer, entry, options)?;
-        }
-        Ok(())
+        let refs: Vec<&LogEntry> = entries.iter().collect();
+        self.export_entries_grouped(writer, &refs, options)
     }
 }
 
 impl MarkdownExporter {
+    /// Export a sequence of entries, rendering consecutive assistant entries
+    /// that share one API `message.id` (streaming chunks of one logical
+    /// message) as a single message instead of one header per chunk.
+    fn export_entries_grouped<W: Write>(
+        &self,
+        writer: &mut W,
+        entries: &[&LogEntry],
+        options: &ExportOptions,
+    ) -> Result<()> {
+        let mut i = 0;
+        while i < entries.len() {
+            let run = assistant_chunk_run(entries, i);
+            if run > 1 {
+                if options.should_include_assistant() {
+                    let chunks: Vec<&AssistantMessage> = entries[i..i + run]
+                        .iter()
+                        .filter_map(|e| match e {
+                            LogEntry::Assistant(a) => Some(a),
+                            _ => None,
+                        })
+                        .collect();
+                    self.write_assistant_group(writer, &chunks, options)?;
+                }
+                i += run;
+            } else {
+                self.export_entry(writer, entries[i], options)?;
+                i += 1;
+            }
+        }
+        Ok(())
+    }
+
     /// Export a single entry.
     fn export_entry<W: Write>(
         &self,
@@ -942,6 +1017,26 @@ impl MarkdownExporter {
         }
         Ok(())
     }
+}
+
+/// Length of the run of consecutive assistant entries at `start` that belong
+/// to the same API message (same non-empty `message.id`) — i.e. streaming
+/// chunks of one logical message. Returns 1 for anything else.
+fn assistant_chunk_run(entries: &[&LogEntry], start: usize) -> usize {
+    let LogEntry::Assistant(first) = entries[start] else {
+        return 1;
+    };
+    if first.message.id.is_empty() {
+        return 1;
+    }
+    let mut run = 1;
+    while start + run < entries.len() {
+        match entries[start + run] {
+            LogEntry::Assistant(next) if next.message.id == first.message.id => run += 1,
+            _ => break,
+        }
+    }
+    run
 }
 
 /// Format a timestamp for display.
@@ -1138,6 +1233,38 @@ mod tests {
         assert!(long_result.contains("<details>"));
         assert!(long_result.contains("<summary>💭 Thinking"));
         assert!(long_result.contains("</details>"));
+    }
+
+    #[test]
+    fn test_streaming_chunks_merged_into_one_message() {
+        let exporter = MarkdownExporter::new();
+        let mut options = ExportOptions::default();
+        options.include_usage = true;
+
+        let chunk = |uuid: &str, msg_id: &str, text: &str| -> LogEntry {
+            serde_json::from_str(&format!(
+                r#"{{"type":"assistant","uuid":"{uuid}","parentUuid":null,"timestamp":"2026-07-01T00:00:00Z","sessionId":"s","isSidechain":false,"userType":"external","cwd":"/","version":"2.1.198","gitBranch":"main","message":{{"id":"{msg_id}","type":"message","role":"assistant","model":"m","content":[{{"type":"text","text":"{text}"}}],"usage":{{"input_tokens":10,"output_tokens":20}}}}}}"#
+            ))
+            .unwrap()
+        };
+
+        // Two chunks of one API message + one separate message
+        let entries = vec![
+            chunk("u1", "msg_A", "first chunk"),
+            chunk("u2", "msg_A", "second chunk"),
+            chunk("u3", "msg_B", "other message"),
+        ];
+        let mut output = Vec::new();
+        exporter
+            .export_entries(&entries, &mut output, &options)
+            .unwrap();
+        let result = String::from_utf8(output).unwrap();
+
+        assert_eq!(result.matches("## 🤖 Assistant").count(), 2);
+        assert_eq!(result.matches("*Tokens:").count(), 2);
+        assert!(result.contains("first chunk"));
+        assert!(result.contains("second chunk"));
+        assert!(result.contains("other message"));
     }
 
     #[test]
