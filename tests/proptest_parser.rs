@@ -25,6 +25,31 @@ proptest! {
         let _ = parser.parse_str(&content);
     }
 
+    /// Torn lines (arbitrary prefix fused with a valid entry) keep the stats
+    /// invariants: line accounting balances, the success rate stays bounded,
+    /// and salvaged entries are counted separately from entries_parsed.
+    #[test]
+    fn torn_line_salvage_preserves_stats_invariants(
+        prefix in "[^\n]{0,200}",
+        uuid in "[a-f0-9]{8}",
+    ) {
+        let entry = format!(
+            r#"{{"uuid":"{uuid}","parentUuid":null,"type":"user","timestamp":"2025-12-23T00:00:00Z","sessionId":"s","version":"2.0.74","isSidechain":false,"message":{{"role":"user","content":"x"}}}}"#
+        );
+        let torn = format!("{prefix}{entry}");
+        let mut parser = JsonlParser::new().with_lenient(true);
+        let entries = parser.parse_str(&torn).unwrap();
+
+        let stats = parser.stats();
+        prop_assert_eq!(
+            stats.lines_processed,
+            stats.entries_parsed + stats.lines_skipped + stats.empty_lines
+        );
+        let rate = stats.success_rate();
+        prop_assert!((0.0..=100.0).contains(&rate), "Rate out of bounds: {}", rate);
+        prop_assert_eq!(entries.len(), stats.entries_parsed + stats.entries_salvaged);
+    }
+
     /// Parser should handle multiple lines of arbitrary content.
     #[test]
     fn parser_handles_multiline_garbage(

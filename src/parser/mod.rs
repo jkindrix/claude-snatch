@@ -76,12 +76,17 @@ pub struct JsonlParser {
 pub struct ParseStats {
     /// Total lines processed.
     pub lines_processed: usize,
-    /// Successfully parsed entries.
+    /// Entries parsed from cleanly-parsed lines. Does NOT include salvaged
+    /// entries, so `lines_processed == entries_parsed + lines_skipped +
+    /// empty_lines` holds; total emitted entries are
+    /// `entries_parsed + entries_salvaged`.
     pub entries_parsed: usize,
     /// Malformed/skipped lines.
     pub lines_skipped: usize,
     /// Complete entries salvaged from torn lines (an interrupted write fusing
-    /// a truncated entry with complete trailing entries on one line).
+    /// a truncated entry with complete trailing entries on one line). Counted
+    /// separately from `entries_parsed`; the torn line itself still counts in
+    /// `lines_skipped`.
     pub entries_salvaged: usize,
     /// Empty lines.
     pub empty_lines: usize,
@@ -272,7 +277,9 @@ impl JsonlParser {
                         let salvaged = salvage_torn_line(trimmed);
                         let salvaged_count = salvaged.len();
                         for entry in salvaged {
-                            self.stats.entries_parsed += 1;
+                            // Counted in entries_salvaged only — the line still
+                            // counts as skipped, keeping the line-accounting
+                            // invariant (processed == parsed + skipped + empty).
                             self.stats.entries_salvaged += 1;
                             entries.push(entry);
                         }
@@ -539,6 +546,17 @@ mod tests {
         assert_eq!(parser.stats().entries_salvaged, 1);
         assert_eq!(parser.stats().lines_skipped, 1);
         assert!(parser.stats().errors[0].message.contains("salvaged 1"));
+
+        // Line accounting stays consistent: salvaged entries are counted
+        // separately, so processed == parsed + skipped + empty still holds
+        // and the success rate stays within [0, 100].
+        let stats = parser.stats();
+        assert_eq!(stats.entries_parsed, 0);
+        assert_eq!(
+            stats.lines_processed,
+            stats.entries_parsed + stats.lines_skipped + stats.empty_lines
+        );
+        assert!((0.0..=100.0).contains(&stats.success_rate()));
     }
 
     #[test]
