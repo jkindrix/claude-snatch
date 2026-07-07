@@ -49,7 +49,8 @@ use helpers::{
     extract_tool_input_summary, extract_tool_names, extract_user_prompt_text,
     find_compaction_events, get_claude_dir, get_model, has_thinking, is_human_prompt,
     main_thread_message_total, parse_timestamp_param, period_cutoff, render_attachment_content,
-    resolve_project, resolve_session, resolve_session_with_chain, search_entry_text, truncate_text,
+    resolve_project, resolve_session, resolve_session_with_chain, search_entry_text,
+    thinking_redaction_note, truncate_text,
 };
 use types::{
     ChangeEventEntry, CompactionEvent, ContextTurnEntry, DecisionChurnEntry, DecisionEntry,
@@ -436,6 +437,14 @@ impl SnatchServer {
 
         let mut entries: Vec<&LogEntry> = resolved.conversation.main_thread_entries();
 
+        // Surface the recent-Claude-Code redaction pattern (thinking blocks
+        // present but all empty) so include_thinking never fails silently.
+        let thinking_note = if include_thinking {
+            thinking_redaction_note(&entries)
+        } else {
+            None
+        };
+
         // Filter by message type
         match msg_type_filter {
             "user" => entries.retain(|e| is_human_prompt(e)),
@@ -798,6 +807,7 @@ impl SnatchServer {
             messages,
             unmatched_subagents,
             duplicate_notice,
+            thinking_note,
         };
 
         match ToolOutput::json(&response) {
@@ -1222,6 +1232,13 @@ impl SnatchServer {
 
         let mut results = Vec::new();
 
+        // Track thinking-block emptiness for scope="thinking" so zero matches
+        // on redaction-era sessions (thinking persisted as empty text) is
+        // explained rather than silent.
+        let track_thinking = scope == "thinking";
+        let mut thinking_blocks_seen = 0usize;
+        let mut nonempty_thinking_seen = 0usize;
+
         for session in &sessions {
             let entries = match session.parse_with_options(self.max_file_size) {
                 Ok(e) => e,
@@ -1239,6 +1256,16 @@ impl SnatchServer {
             // Search ALL entries (not just main thread) so branches,
             // sidechains, and agent sub-conversations are included.
             for entry in conversation.chronological_entries() {
+                if track_thinking {
+                    if let LogEntry::Assistant(assistant) = entry {
+                        for block in assistant.message.thinking_blocks() {
+                            thinking_blocks_seen += 1;
+                            if !block.thinking.trim().is_empty() {
+                                nonempty_thinking_seen += 1;
+                            }
+                        }
+                    }
+                }
                 let matches = search_entry_text(entry, &regex, scope, 100);
                 for (matched, context) in matches {
                     results.push(SearchMatch {
@@ -1257,11 +1284,18 @@ impl SnatchServer {
         let total = results.len();
         results.truncate(limit);
         let returned = results.len();
+        let note = (track_thinking && thinking_blocks_seen > 0 && nonempty_thinking_seen == 0)
+            .then(|| {
+                format!(
+                    "searched {thinking_blocks_seen} thinking block(s) but all are empty — recent Claude Code versions do not persist thinking text, so scope=\"thinking\" cannot match in these sessions"
+                )
+            });
         let response = SearchSessionsResponse {
             pattern: request.pattern,
             total_matches: total,
             returned,
             results,
+            note,
         };
 
         match ToolOutput::json(&response) {
@@ -1712,6 +1746,7 @@ impl SnatchServer {
             error_count: digest.error_count,
             compaction_count: digest.compaction_count,
             thinking_keywords: digest.thinking_keywords,
+            thinking_note: digest.thinking_note,
             formatted,
         };
 

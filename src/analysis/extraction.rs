@@ -434,6 +434,32 @@ pub fn extract_thinking_text(entry: &LogEntry, max_len: usize) -> Option<String>
     }
 }
 
+/// Detect the thinking-redaction pattern of recent Claude Code versions:
+/// thinking blocks present but every one has empty text (only the encrypted
+/// signature is persisted to the session log).
+///
+/// Returns a human-readable note when `entries` contain at least one thinking
+/// block and all of them are empty; `None` when there are no thinking blocks
+/// or at least one carries text.
+pub fn thinking_redaction_note(entries: &[&LogEntry]) -> Option<String> {
+    let mut total = 0usize;
+    for entry in entries {
+        if let LogEntry::Assistant(assistant) = entry {
+            for block in assistant.message.thinking_blocks() {
+                if !block.thinking.trim().is_empty() {
+                    return None;
+                }
+                total += 1;
+            }
+        }
+    }
+    (total > 0).then(|| {
+        format!(
+            "{total} thinking block(s) present but all empty — this session's Claude Code version does not persist thinking text, so thinking recovery is unavailable"
+        )
+    })
+}
+
 /// Check if any tool results in a set of entries had errors.
 pub fn has_tool_errors(entries: &[&LogEntry]) -> bool {
     for entry in entries {
@@ -594,6 +620,25 @@ mod tests {
         let entry: LogEntry = serde_json::from_str(json).unwrap();
         let refs: Vec<&LogEntry> = vec![&entry];
         assert!(find_error_events(&refs).is_empty());
+    }
+
+    #[test]
+    fn test_thinking_redaction_note() {
+        let empty = r#"{"type":"assistant","uuid":"a1","timestamp":"2026-07-01T00:00:00Z","sessionId":"s","parentUuid":null,"isSidechain":false,"userType":"external","cwd":"/","version":"2.1.198","gitBranch":"main","message":{"id":"m1","type":"message","role":"assistant","model":"claude-opus-4-8","content":[{"type":"thinking","thinking":"","signature":"sig"}]}}"#;
+        let full = r#"{"type":"assistant","uuid":"a2","timestamp":"2026-07-01T00:00:01Z","sessionId":"s","parentUuid":"a1","isSidechain":false,"userType":"external","cwd":"/","version":"2.1.42","gitBranch":"main","message":{"id":"m2","type":"message","role":"assistant","model":"claude-opus-4-8","content":[{"type":"thinking","thinking":"real reasoning","signature":"sig"}]}}"#;
+        let empty_entry: LogEntry = serde_json::from_str(empty).unwrap();
+        let full_entry: LogEntry = serde_json::from_str(full).unwrap();
+
+        // All-empty thinking → note
+        let note = thinking_redaction_note(&[&empty_entry]);
+        assert!(note.is_some());
+        assert!(note.unwrap().contains("1 thinking block"));
+
+        // Any non-empty thinking → no note
+        assert!(thinking_redaction_note(&[&empty_entry, &full_entry]).is_none());
+
+        // No thinking blocks at all → no note
+        assert!(thinking_redaction_note(&[]).is_none());
     }
 
     #[test]

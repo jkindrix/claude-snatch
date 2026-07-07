@@ -296,6 +296,11 @@ pub struct SessionMessagesResponse {
     /// the loss is never silent on this path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duplicate_notice: Option<String>,
+    /// Set when include_thinking was requested but every thinking block in the
+    /// session is empty (recent Claude Code versions persist only the encrypted
+    /// signature), so the absence of thinking output is never silent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_note: Option<String>,
 }
 
 /// A subagent present on disk but not joinable to a specific spawn call.
@@ -509,6 +514,11 @@ pub struct SearchSessionsResponse {
     pub total_matches: usize,
     pub returned: usize,
     pub results: Vec<SearchMatch>,
+    /// Set when scope="thinking" scanned only empty thinking blocks (recent
+    /// Claude Code versions persist only the encrypted signature), so a
+    /// zero-match result is explained rather than silent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 // ============================================================================
@@ -718,6 +728,11 @@ pub struct SessionDigestResponse {
     pub error_count: usize,
     pub compaction_count: usize,
     pub thinking_keywords: Vec<String>,
+    /// Set when thinking blocks exist but are all empty (recent Claude Code
+    /// versions persist only the encrypted signature), explaining why
+    /// `thinking_keywords` is empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_note: Option<String>,
     pub formatted: String,
 }
 

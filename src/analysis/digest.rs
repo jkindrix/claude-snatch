@@ -10,7 +10,8 @@ use crate::model::message::LogEntry;
 
 use super::extraction::{
     extract_files_from_tools, extract_thinking_text, extract_tool_names, extract_user_prompt_text,
-    find_compaction_events, has_tool_errors, is_human_prompt, truncate_text,
+    find_compaction_events, has_tool_errors, is_human_prompt, thinking_redaction_note,
+    truncate_text,
 };
 
 /// Options for building a session digest.
@@ -56,6 +57,11 @@ pub struct SessionDigest {
     pub compaction_count: usize,
     /// Decision-related keywords from thinking blocks.
     pub thinking_keywords: Vec<String>,
+    /// Set when thinking blocks exist but are all empty (recent Claude Code
+    /// versions persist only the encrypted signature), explaining why
+    /// `thinking_keywords` is empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_note: Option<String>,
 }
 
 /// Decision-signal regex patterns.
@@ -165,6 +171,7 @@ pub fn build_digest(entries: &[&LogEntry], opts: &DigestOptions) -> SessionDiges
         error_count,
         compaction_count,
         thinking_keywords,
+        thinking_note: thinking_redaction_note(entries),
     }
 }
 
@@ -224,6 +231,8 @@ pub fn format_digest(digest: &SessionDigest, max_chars: usize) -> String {
             "Decisions: {}",
             digest.thinking_keywords.join(", ")
         ));
+    } else if let Some(ref note) = digest.thinking_note {
+        lines.push(format!("Thinking: {note}"));
     }
 
     let mut result = lines.join("\n");
@@ -290,6 +299,7 @@ mod tests {
             error_count: 0,
             compaction_count: 0,
             thinking_keywords: vec![],
+            thinking_note: None,
         };
         let formatted = format_digest(&digest, 500);
         assert!(formatted.is_empty());
@@ -306,6 +316,7 @@ mod tests {
             error_count: 2,
             compaction_count: 1,
             thinking_keywords: vec!["decided".into(), "because".into()],
+            thinking_note: None,
         };
         let formatted = format_digest(&digest, 1000);
         // Recent prompts come first (most important for post-compaction)
@@ -336,6 +347,7 @@ mod tests {
             error_count: 0,
             compaction_count: 0,
             thinking_keywords: vec![],
+            thinking_note: None,
         };
         let formatted = format_digest(&digest, 1000);
         // When no recent prompts, key_prompts header includes total
@@ -362,6 +374,7 @@ mod tests {
             error_count: 0,
             compaction_count: 0,
             thinking_keywords: vec![],
+            thinking_note: None,
         };
         let formatted = format_digest(&digest, 50);
         assert!(formatted.len() <= 53); // 50 + "..."
