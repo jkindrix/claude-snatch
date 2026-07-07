@@ -94,6 +94,42 @@ fn compute_chain_summary(
     })
 }
 
+/// Collect PR links recorded in a session's `pr-link` entries (sidecar
+/// metadata with no `LogEntry` variant — preserved as `Unknown`), deduplicated
+/// by URL in first-seen order.
+fn collect_pr_links(
+    session: &crate::discovery::Session,
+    max_file_size: Option<u64>,
+) -> Vec<PrLinkOutput> {
+    let Ok(entries) = session.parse_with_options(max_file_size) else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::HashSet::new();
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let LogEntry::Unknown(value) = entry else {
+                return None;
+            };
+            if value.get("type").and_then(|t| t.as_str()) != Some("pr-link") {
+                return None;
+            }
+            let url = value.get("prUrl").and_then(|u| u.as_str())?.to_string();
+            if !seen.insert(url.clone()) {
+                return None;
+            }
+            Some(PrLinkOutput {
+                number: value.get("prNumber").and_then(serde_json::Value::as_u64),
+                url,
+                repository: value
+                    .get("prRepository")
+                    .and_then(|r| r.as_str())
+                    .map(String::from),
+            })
+        })
+        .collect()
+}
+
 /// Show session information.
 fn show_session_info(
     cli: &Cli,
@@ -122,6 +158,10 @@ fn show_session_info(
         })
         .collect();
     subagents.sort_by(|a, b| a.agent_session_id.cmp(&b.agent_session_id));
+
+    // PR links recorded during the session. `pr-link` entries have no
+    // LogEntry variant (preserved as Unknown), so scan the raw values.
+    let pr_links = collect_pr_links(session, cli.max_file_size);
 
     // Load tags/bookmarks for this session
     let tag_store = TagStore::load().unwrap_or_default();
@@ -260,6 +300,7 @@ fn show_session_info(
                     lines_added,
                     lines_removed,
                     subagents,
+                    pr_links,
                 })?
             );
         }
@@ -387,6 +428,17 @@ fn show_session_info(
                         .map(|n| format!(" ({n} msgs)"))
                         .unwrap_or_default();
                     println!("  {} [{}]{} {}", sa.agent_session_id, kind, msgs, desc);
+                }
+                println!();
+            }
+
+            if !pr_links.is_empty() {
+                println!("PRs ({}):", pr_links.len());
+                for pr in &pr_links {
+                    match pr.number {
+                        Some(n) => println!("  #{n} {}", pr.url),
+                        None => println!("  {}", pr.url),
+                    }
                 }
                 println!();
             }
@@ -1018,6 +1070,22 @@ struct SessionInfoOutput {
     /// Subagents spawned by this session (transcripts in separate files).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     subagents: Vec<SubagentInfoOutput>,
+    /// Pull requests recorded during this session (`pr-link` entries).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pr_links: Vec<PrLinkOutput>,
+}
+
+/// A pull request recorded in a session's `pr-link` entries.
+#[derive(Debug, Clone, serde::Serialize)]
+struct PrLinkOutput {
+    /// PR number, when recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    number: Option<u64>,
+    /// PR URL.
+    url: String,
+    /// Repository the PR belongs to (owner/name).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repository: Option<String>,
 }
 
 /// One spawned subagent, for session info JSON output.
