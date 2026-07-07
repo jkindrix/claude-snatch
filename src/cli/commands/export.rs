@@ -50,6 +50,42 @@ fn build_only_filter(filters: &[ContentFilter]) -> HashSet<ContentType> {
 /// parsing, filtering, redaction, transformation, or reordering is applied, so
 /// any such flag would be silently ignored. Reject the combination with a clear
 /// error instead.
+/// Compute aggregate token/tool stats from a session's on-disk subagent
+/// transcripts. Recent Claude Code Task results no longer carry
+/// `totalTokens`/`totalToolUseCount` (background Agent results are status
+/// metadata only), so the transcripts are the reliable source.
+fn subagent_transcript_stats(
+    session: &Session,
+) -> (Option<usize>, Option<crate::export::SubagentTranscriptStats>) {
+    let links = session.subagent_links();
+    if links.is_empty() {
+        return (None, None);
+    }
+    let mut tokens = 0u64;
+    let mut tool_uses = 0u64;
+    let mut parsed_any = false;
+    for link in &links {
+        let Ok(sidecar) = Session::from_path(&link.path, session.project_path()) else {
+            continue;
+        };
+        let Ok(entries) = sidecar.parse_with_options(None) else {
+            continue;
+        };
+        let Ok(conversation) = Conversation::from_entries(entries) else {
+            continue;
+        };
+        let summary =
+            crate::analytics::SessionAnalytics::from_conversation(&conversation).summary_report();
+        tokens += summary.total_tokens;
+        tool_uses += summary.tool_invocations as u64;
+        parsed_any = true;
+    }
+    (
+        Some(links.len()),
+        parsed_any.then_some(crate::export::SubagentTranscriptStats { tokens, tool_uses }),
+    )
+}
+
 fn validate_raw_jsonl_compat(args: &ExportArgs) -> Result<()> {
     if !matches!(args.format, ExportFormatArg::RawJsonl) {
         return Ok(());
@@ -402,6 +438,7 @@ fn export_session_to_gist(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
     // Build export options
     let redaction = args.redact.map(|level| level.into());
     let only_filter = build_only_filter(&args.only);
+    let (sidecar_count, sidecar_stats) = subagent_transcript_stats(&session);
     let options = if args.full {
         let mut opts = ExportOptions::full();
         opts.redaction = redaction;
@@ -427,10 +464,8 @@ fn export_session_to_gist(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
             redaction_preview: args.redact_preview,
             minimization: None,
             only: only_filter,
-            subagent_transcript_count: {
-                let n = session.subagent_links().len();
-                (n > 0).then_some(n)
-            },
+            subagent_transcript_count: sidecar_count,
+            subagent_transcript_stats: sidecar_stats,
         }
     };
 
@@ -538,6 +573,7 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
     // Build export options
     let redaction = args.redact.map(|level| level.into());
     let only_filter = build_only_filter(&args.only);
+    let (sidecar_count, sidecar_stats) = subagent_transcript_stats(&session);
     let options = if args.full {
         let mut opts = ExportOptions::full();
         opts.redaction = redaction;
@@ -563,10 +599,8 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
             redaction_preview: args.redact_preview,
             minimization: None,
             only: only_filter,
-            subagent_transcript_count: {
-                let n = session.subagent_links().len();
-                (n > 0).then_some(n)
-            },
+            subagent_transcript_count: sidecar_count,
+            subagent_transcript_stats: sidecar_stats,
         }
     };
 
@@ -1552,6 +1586,7 @@ fn export_session(
     // Build export options - full mode overrides individual settings
     let redaction = args.redact.map(|level| level.into());
     let only_filter = build_only_filter(&args.only);
+    let (sidecar_count, sidecar_stats) = subagent_transcript_stats(&session);
     let options = if args.full {
         let mut opts = ExportOptions::full();
         opts.redaction = redaction;
@@ -1577,10 +1612,8 @@ fn export_session(
             redaction_preview: args.redact_preview,
             minimization: None,
             only: only_filter,
-            subagent_transcript_count: {
-                let n = session.subagent_links().len();
-                (n > 0).then_some(n)
-            },
+            subagent_transcript_count: sidecar_count,
+            subagent_transcript_stats: sidecar_stats,
         }
     };
 

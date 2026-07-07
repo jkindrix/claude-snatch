@@ -149,6 +149,21 @@ pub struct ExportOptions {
     /// (issue 0011). The command sets this so the export can headline the true
     /// inventory; `None` falls back to the billed count.
     pub subagent_transcript_count: Option<usize>,
+    /// Token/tool totals derived from the on-disk subagent transcripts, when
+    /// computed. Preferred over the analytics figures mined from Task result
+    /// payloads, which recent Claude Code versions no longer populate
+    /// (background Agent results carry only status metadata).
+    pub subagent_transcript_stats: Option<SubagentTranscriptStats>,
+}
+
+/// Aggregate token/tool stats computed from on-disk subagent transcripts.
+#[derive(Debug, Clone, Copy)]
+pub struct SubagentTranscriptStats {
+    /// Work tokens (input + output, excluding re-served cache reads) summed
+    /// across transcripts.
+    pub tokens: u64,
+    /// Tool invocations summed across transcripts.
+    pub tool_uses: u64,
 }
 
 /// Configuration for data minimization in shared exports.
@@ -705,6 +720,7 @@ impl Default for ExportOptions {
             minimization: None,
             only: HashSet::new(),
             subagent_transcript_count: None,
+            subagent_transcript_stats: None,
         }
     }
 }
@@ -732,6 +748,7 @@ impl ExportOptions {
             minimization: None,
             only: HashSet::new(),
             subagent_transcript_count: None,
+            subagent_transcript_stats: None,
         }
     }
 
@@ -757,6 +774,7 @@ impl ExportOptions {
             minimization: None,
             only: HashSet::new(),
             subagent_transcript_count: None,
+            subagent_transcript_stats: None,
         }
     }
 
@@ -785,6 +803,7 @@ impl ExportOptions {
             minimization: Some(DataMinimizationConfig::for_sharing()),
             only: HashSet::new(),
             subagent_transcript_count: None,
+            subagent_transcript_stats: None,
         }
     }
 

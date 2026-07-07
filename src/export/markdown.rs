@@ -196,7 +196,16 @@ impl MarkdownExporter {
             let transcripts = options.subagent_transcript_count;
             if billed > 0 || transcripts.unwrap_or(0) > 0 {
                 let headline = transcripts.unwrap_or(billed);
-                if transcripts.is_some_and(|t| t != billed) {
+                // Prefer stats derived from the on-disk transcripts: recent
+                // Claude Code Task results no longer carry token/tool totals,
+                // so the mined analytics figures read as a misleading zero.
+                if let Some(stats) = options.subagent_transcript_stats {
+                    writeln!(
+                        writer,
+                        "- **Subagents:** {headline} ({} tokens, {} tool uses, from transcripts)",
+                        stats.tokens, stats.tool_uses
+                    )?;
+                } else if transcripts.is_some_and(|t| t != billed) {
                     writeln!(
                         writer,
                         "- **Subagents:** {headline} ({billed} billed, {} tokens, {} tool uses)",
