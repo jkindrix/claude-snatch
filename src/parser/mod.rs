@@ -80,6 +80,9 @@ pub struct ParseStats {
     pub entries_parsed: usize,
     /// Malformed/skipped lines.
     pub lines_skipped: usize,
+    /// Complete entries salvaged from torn lines (an interrupted write fusing
+    /// a truncated entry with complete trailing entries on one line).
+    pub entries_salvaged: usize,
     /// Empty lines.
     pub empty_lines: usize,
     /// Detected schema version.
@@ -263,13 +266,31 @@ impl JsonlParser {
                 }
                 Err(e) => {
                     if self.lenient {
+                        // Interrupted writes can fuse a truncated entry with
+                        // complete trailing entries on one line; salvage the
+                        // complete tail instead of dropping it with the line.
+                        let salvaged = salvage_torn_line(trimmed);
+                        let salvaged_count = salvaged.len();
+                        for entry in salvaged {
+                            self.stats.entries_parsed += 1;
+                            self.stats.entries_salvaged += 1;
+                            entries.push(entry);
+                        }
                         self.stats.lines_skipped += 1;
+                        let message = if salvaged_count > 0 {
+                            format!(
+                                "{e} (salvaged {salvaged_count} complete trailing {} from torn line)",
+                                if salvaged_count == 1 { "entry" } else { "entries" }
+                            )
+                        } else {
+                            e.to_string()
+                        };
                         self.stats.errors.push(ParseError {
                             line: line_num,
-                            message: e.to_string(),
+                            message,
                             raw_line: trimmed.to_string(),
                         });
-                        trace!(line = line_num, error = %e, "Parse error, skipping line");
+                        trace!(line = line_num, error = %e, salvaged = salvaged_count, "Parse error, skipping line");
                         continue;
                     }
                     return Err(e);
@@ -301,6 +322,53 @@ impl JsonlParser {
     pub fn parse_entry(json: &str) -> Result<LogEntry> {
         serde_json::from_str(json).map_err(|e| SnatchError::parse_with_source(0, e.to_string(), e))
     }
+}
+
+/// Salvage complete entries from a torn JSONL line.
+///
+/// An interrupted write can leave a line holding a truncated entry with one
+/// or more complete entries fused after it (observed in real logs). Try each
+/// embedded entry-shaped object start; accept a candidate only when the whole
+/// rest of the line parses as a clean sequence of entries, so a partial or
+/// garbage parse is never admitted.
+fn salvage_torn_line(line: &str) -> Vec<LogEntry> {
+    // Entry objects start with one of these keys. Inside a JSON string these
+    // bytes can't occur unescaped (quotes would be `\"`), so a raw match is
+    // either the fused entry we want or part of the already-lost prefix.
+    const ENTRY_STARTS: [&str; 3] = [r#"{"parentUuid""#, r#"{"type""#, r#"{"uuid""#];
+
+    let mut candidates: Vec<usize> = Vec::new();
+    for pattern in ENTRY_STARTS {
+        // Offset 0 already failed to parse as a whole; start past it.
+        let mut from = 1;
+        while let Some(pos) = line.get(from..).and_then(|s| s.find(pattern)) {
+            candidates.push(from + pos);
+            from += pos + 1;
+        }
+    }
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    for offset in candidates {
+        let tail = &line[offset..];
+        let mut stream = serde_json::Deserializer::from_str(tail).into_iter::<LogEntry>();
+        let mut parsed = Vec::new();
+        let mut clean = true;
+        for item in &mut stream {
+            match item {
+                Ok(entry) => parsed.push(entry),
+                Err(_) => {
+                    clean = false;
+                    break;
+                }
+            }
+        }
+        // Require full consumption: the tail must be nothing but valid entries.
+        if clean && !parsed.is_empty() && tail[stream.byte_offset()..].trim().is_empty() {
+            return parsed;
+        }
+    }
+    Vec::new()
 }
 
 impl Default for JsonlParser {
@@ -455,6 +523,53 @@ mod tests {
         let mut parser = JsonlParser::new();
         let entries = parser.parse_str("").unwrap();
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_salvage_torn_line_recovers_fused_entry() {
+        // A truncated entry with a complete entry fused onto the same line
+        // (interrupted write), as observed in real logs.
+        let complete = r#"{"uuid":"kept","parentUuid":null,"type":"user","timestamp":"2025-12-23T00:00:00Z","sessionId":"s","version":"2.0.74","isSidechain":false,"message":{"role":"user","content":"survived"}}"#;
+        let torn = format!(r#"{{"type":"attachment","uuid":"lost-1234{complete}"#);
+
+        let mut parser = JsonlParser::new();
+        let entries = parser.parse_str(&torn).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].uuid(), Some("kept"));
+        assert_eq!(parser.stats().entries_salvaged, 1);
+        assert_eq!(parser.stats().lines_skipped, 1);
+        assert!(parser.stats().errors[0].message.contains("salvaged 1"));
+    }
+
+    #[test]
+    fn test_salvage_torn_line_recovers_multiple_fused_entries() {
+        let a = r#"{"uuid":"a","parentUuid":null,"type":"user","timestamp":"2025-12-23T00:00:00Z","sessionId":"s","version":"2.0.74","isSidechain":false,"message":{"role":"user","content":"one"}}"#;
+        let b = r#"{"uuid":"b","parentUuid":"a","type":"user","timestamp":"2025-12-23T00:00:01Z","sessionId":"s","version":"2.0.74","isSidechain":false,"message":{"role":"user","content":"two"}}"#;
+        let torn = format!(r#"{{"type":"attachment","uuid":"trunc{a}{b}"#);
+
+        let mut parser = JsonlParser::new();
+        let entries = parser.parse_str(&torn).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(parser.stats().entries_salvaged, 2);
+    }
+
+    #[test]
+    fn test_salvage_rejects_garbage_lines() {
+        // No embedded entry start → skipped as before
+        let mut parser = JsonlParser::new();
+        let entries = parser.parse_str("not json at all").unwrap();
+        assert!(entries.is_empty());
+        assert_eq!(parser.stats().entries_salvaged, 0);
+        assert_eq!(parser.stats().lines_skipped, 1);
+
+        // Embedded entry start followed by trailing garbage → not salvaged
+        // (the tail must parse cleanly to end of line)
+        let complete = r#"{"uuid":"x","parentUuid":null,"type":"user","timestamp":"2025-12-23T00:00:00Z","sessionId":"s","version":"2.0.74","isSidechain":false,"message":{"role":"user","content":"hi"}}"#;
+        let torn = format!(r#"{{"type":"attachment","uuid":"trunc{complete}garbage-tail"#);
+        let mut parser = JsonlParser::new();
+        let entries = parser.parse_str(&torn).unwrap();
+        assert!(entries.is_empty());
+        assert_eq!(parser.stats().entries_salvaged, 0);
     }
 
     #[test]
