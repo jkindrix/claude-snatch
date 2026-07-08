@@ -1297,3 +1297,55 @@ fn test_messages_header_reports_unrenderable_entries() {
             "5 rendered, 1 with no content at this detail",
         ));
 }
+
+const ERROR_SESSION_ID: &str = "cccccccc-dddd-eeee-ffff-000000000000";
+
+/// Create a temp Claude dir with a session containing one failed tool call
+/// among successful ones.
+fn setup_error_fixture_dir() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let encoded = encode_project_path(PROJECT_PATH);
+    let project_dir = tmp.path().join("projects").join(&encoded);
+    std::fs::create_dir_all(&project_dir).expect("failed to create project dir");
+
+    let lines: &[&str] = &[
+        r#"{"type":"user","uuid":"11111111-1111-1111-1111-111111111111","parentUuid":null,"timestamp":"2025-01-15T10:00:00.000Z","sessionId":"SESSID","version":"2.0.74","message":{"role":"user","content":"Run the build"}}"#,
+        r#"{"type":"assistant","uuid":"22222222-2222-2222-2222-222222222222","parentUuid":"11111111-1111-1111-1111-111111111111","timestamp":"2025-01-15T10:00:01.000Z","sessionId":"SESSID","version":"2.0.74","message":{"id":"msg_001","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_bad","name":"Bash","input":{"command":"cargo buidl"}}],"model":"claude-sonnet-4-20250514","stop_reason":"tool_use","usage":{"input_tokens":10,"output_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
+        r#"{"type":"user","uuid":"33333333-3333-3333-3333-333333333333","parentUuid":"22222222-2222-2222-2222-222222222222","timestamp":"2025-01-15T10:00:02.000Z","sessionId":"SESSID","version":"2.0.74","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_bad","is_error":true,"content":"error: no such command: buidl"}]}}"#,
+        r#"{"type":"assistant","uuid":"44444444-4444-4444-4444-444444444444","parentUuid":"33333333-3333-3333-3333-333333333333","timestamp":"2025-01-15T10:00:03.000Z","sessionId":"SESSID","version":"2.0.74","message":{"id":"msg_002","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_ok","name":"Bash","input":{"command":"cargo build"}}],"model":"claude-sonnet-4-20250514","stop_reason":"tool_use","usage":{"input_tokens":20,"output_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
+        r#"{"type":"user","uuid":"55555555-5555-5555-5555-555555555555","parentUuid":"44444444-4444-4444-4444-444444444444","timestamp":"2025-01-15T10:00:04.000Z","sessionId":"SESSID","version":"2.0.74","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_ok","content":"Finished dev profile"}]}}"#,
+        r#"{"type":"assistant","uuid":"66666666-6666-6666-6666-666666666666","parentUuid":"55555555-5555-5555-5555-555555555555","timestamp":"2025-01-15T10:00:05.000Z","sessionId":"SESSID","version":"2.0.74","message":{"id":"msg_003","type":"message","role":"assistant","content":[{"type":"text","text":"Build succeeded after fixing the typo."}],"model":"claude-sonnet-4-20250514","stop_reason":"end_turn","usage":{"input_tokens":30,"output_tokens":15,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
+    ];
+    let jsonl = lines.join("\n").replace("SESSID", ERROR_SESSION_ID) + "\n";
+    std::fs::write(project_dir.join(format!("{ERROR_SESSION_ID}.jsonl")), jsonl)
+        .expect("failed to write fixture");
+    tmp
+}
+
+/// --errors-only keeps the failing call (the command) and its failed result,
+/// dropping the successful retry — and the chunks listing counts the error.
+#[test]
+fn test_errors_only_keeps_failing_call_and_chunks_counts_it() {
+    let tmp = setup_error_fixture_dir();
+    let output = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["messages", ERROR_SESSION_ID, "--errors-only", "-D", "full"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cargo buidl"))
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8_lossy(&output);
+    assert!(
+        !text.contains("cargo build\n"),
+        "successful retry must be filtered out"
+    );
+
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["chunks", ERROR_SESSION_ID])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("⚠1 errors"));
+}

@@ -220,6 +220,16 @@ pub struct GetSessionMessagesRequest {
     /// pick index → chunk retrieval composes. The response carries chunk_info
     /// describing the selection, including each chunk's prompt_source.
     pub chunk: Option<String>,
+
+    /// If true, only return entries carrying failed tool results. Pairs with
+    /// chunk + detail="standard"/"full" to drill into a chunk's errors
+    /// (overview/conversation levels filter these entries out).
+    pub errors_only: Option<bool>,
+
+    /// Override content truncation length in characters (default is set by
+    /// detail level: 200 overview, 500 conversation/standard, 1000 full).
+    /// Use small values to skim cheaply, large ones to read in full.
+    pub max_text_len: Option<usize>,
 }
 
 /// A message in the session messages response.
@@ -349,6 +359,9 @@ pub struct ChunkSummary {
     /// Off-main-thread members (late async results, progress leaves).
     pub attached: usize,
     pub tool_calls: usize,
+    /// Failed tool results (is_error) among member entries — where to aim
+    /// detail="full" drill-downs when auditing.
+    pub errors: usize,
     /// Abandoned branches (e.g. rewind forks) that forked from this chunk.
     /// Their entries are not in the message list; fetch by uuid if needed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -597,6 +610,11 @@ pub struct GetToolCallsRequest {
 
     /// Only include tool calls that resulted in errors.
     pub errors_only: Option<bool>,
+
+    /// Restrict to prompt-boundary chunk(s): "4" or "2-5" (same indices as
+    /// get_session_messages). Ground-truth view of what actually ran in a
+    /// chunk, without the narrative.
+    pub chunk: Option<String>,
 
     /// Maximum tool calls to return. Default: 100.
     pub limit: Option<usize>,

@@ -7,7 +7,8 @@ use std::collections::HashMap;
 
 use crate::analysis::chunking::{chunk_conversation, entries_for_chunk_range, parse_chunk_spec};
 use crate::analysis::extraction::{
-    boundary_prompt_text, is_prompt_boundary, queued_human_prompt, render_attachment_content,
+    boundary_prompt_text, failed_tool_use_ids, has_tool_errors, is_prompt_boundary,
+    queued_human_prompt, render_attachment_content,
 };
 use crate::analysis::extraction::{
     extract_assistant_summary, extract_thinking_text, extract_tool_input_summary,
@@ -203,11 +204,11 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
         _ => 2000,
     };
 
-    let truncate_len = match detail {
+    let truncate_len = args.max_text_len.unwrap_or(match detail {
         "overview" => 200,
         "conversation" | "standard" => 500,
         _ => 1000,
-    };
+    });
 
     // Match Agent/Task calls to spawned subagents (only "full" detail renders tool
     // details). Uses the unfiltered thread for spawn-order joining.
@@ -258,6 +259,18 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                 main_entries.len(),
             );
         }
+    }
+
+    // Error drill-down: keep failed tool results AND the assistant entries
+    // that issued the failing calls (the result carries the error text, the
+    // call carries the command — an audit needs both).
+    if args.errors_only {
+        let failed = failed_tool_use_ids(&main_entries);
+        main_entries.retain(|e| match e {
+            LogEntry::User(_) => has_tool_errors(std::slice::from_ref(e)),
+            LogEntry::Assistant(a) => a.message.tool_uses().iter().any(|t| failed.contains(&t.id)),
+            _ => false,
+        });
     }
 
     // Filter by message type

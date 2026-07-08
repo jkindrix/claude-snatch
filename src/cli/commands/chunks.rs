@@ -43,6 +43,8 @@ struct ChunkOutput {
     /// Off-main-thread members (late async results, progress leaves).
     attached: usize,
     tool_calls: usize,
+    /// Failed tool results (is_error) among member entries.
+    errors: usize,
     /// Abandoned branches (e.g. rewind forks) hanging off this chunk.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     branches: Vec<BranchOutput>,
@@ -54,6 +56,22 @@ struct BranchOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt: Option<String>,
     entries: usize,
+}
+
+/// Compact wall-clock span for the listing ("45s", "9m", "1h 12m").
+fn fmt_span(
+    start: Option<chrono::DateTime<chrono::Utc>>,
+    end: Option<chrono::DateTime<chrono::Utc>>,
+) -> String {
+    let (Some(s), Some(e)) = (start, end) else {
+        return "?".to_string();
+    };
+    let secs = (e - s).num_seconds().max(0);
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        _ => format!("{}h {}m", secs / 3600, (secs % 3600) / 60),
+    }
 }
 
 /// Run the chunks command.
@@ -114,6 +132,7 @@ pub fn run(cli: &Cli, args: &ChunksArgs) -> Result<()> {
                         entries: c.entry_count(),
                         attached: c.attached_uuids.len(),
                         tool_calls: c.tool_call_count,
+                        errors: c.error_count,
                         branches: c
                             .branches
                             .iter()
@@ -160,13 +179,19 @@ pub fn run(cli: &Cli, args: &ChunksArgs) -> Result<()> {
                 } else {
                     format!(" (+{} attached)", chunk.attached_uuids.len())
                 };
+                let errors = if chunk.error_count == 0 {
+                    String::new()
+                } else {
+                    format!(" ⚠{} errors", chunk.error_count)
+                };
                 let queued_marker = match chunk.prompt_source {
                     crate::analysis::chunking::PromptSource::Queued => "(queued) ",
                     crate::analysis::chunking::PromptSource::User => "",
                 };
                 println!(
-                    "[{:3}] {start}  {:4} entries  {:3} tools{attached}  {queued_marker}{}",
+                    "[{:3}] {start} {:>7}  {:4} entries  {:3} tools{errors}{attached}  {queued_marker}{}",
                     chunk.index,
+                    fmt_span(chunk.start_ts, chunk.end_ts),
                     chunk.entry_count(),
                     chunk.tool_call_count,
                     truncate_text(&chunk.prompt_text.replace('\n', " "), 80),

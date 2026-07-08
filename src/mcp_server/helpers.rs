@@ -18,9 +18,9 @@ pub use crate::analysis::extraction::{
     boundary_prompt_text, extract_assistant_summary, extract_error_preview,
     extract_files_from_tools, extract_image_placeholders, extract_result_preview,
     extract_thinking_text, extract_tool_input_summary, extract_tool_names,
-    extract_user_prompt_text, find_compaction_events, get_model, has_thinking, has_tool_errors,
-    is_human_prompt, is_prompt_boundary, queued_human_prompt, render_attachment_content,
-    thinking_redaction_note, truncate_text,
+    extract_user_prompt_text, failed_tool_use_ids, find_compaction_events, get_model, has_thinking,
+    has_tool_errors, is_human_prompt, is_prompt_boundary, queued_human_prompt,
+    render_attachment_content, thinking_redaction_note, truncate_text,
 };
 pub use crate::analysis::filters::{parse_period, period_cutoff};
 

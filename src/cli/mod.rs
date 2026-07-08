@@ -2505,6 +2505,16 @@ pub struct MessagesArgs {
     /// steering — plus everything it produced (list with `snatch chunks`).
     #[arg(long)]
     pub chunk: Option<String>,
+
+    /// Only show entries carrying failed tool results. Pairs with --chunk and
+    /// -D standard/full (overview/conversation filter these entries out).
+    #[arg(long)]
+    pub errors_only: bool,
+
+    /// Override content truncation length in characters (default set by
+    /// detail level: 200 overview, 500 conversation/standard, 1000 full).
+    #[arg(long)]
+    pub max_text_len: Option<usize>,
 }
 
 /// Arguments for the chunks command.

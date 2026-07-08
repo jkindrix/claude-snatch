@@ -95,6 +95,8 @@ pub struct SessionChunk {
     pub branches: Vec<ChunkBranch>,
     /// Number of tool_use blocks across the chunk's assistant entries.
     pub tool_call_count: usize,
+    /// Number of failed tool results (`is_error: true`) among member entries.
+    pub error_count: usize,
     /// How the opening prompt reached the conversation.
     pub prompt_source: PromptSource,
 }
@@ -167,6 +169,7 @@ pub fn chunk_conversation(conversation: &Conversation) -> ChunkingResult {
                 attached_uuids: Vec::new(),
                 branches: Vec::new(),
                 tool_call_count: 0,
+                error_count: 0,
                 prompt_source,
             });
         }
@@ -277,6 +280,7 @@ pub fn chunk_conversation(conversation: &Conversation) -> ChunkingResult {
         chunk.attached_uuids.sort_by_key(ts_of);
         chunk.branches.sort_by_key(|b| ts_of(&b.root_uuid));
         let mut tool_calls = 0;
+        let mut errors = 0;
         let mut start: Option<DateTime<Utc>> = None;
         let mut end: Option<DateTime<Utc>> = None;
         for uuid in chunk.main_uuids.iter().chain(&chunk.attached_uuids) {
@@ -287,13 +291,25 @@ pub fn chunk_conversation(conversation: &Conversation) -> ChunkingResult {
                 start = Some(start.map_or(ts, |s| s.min(ts)));
                 end = Some(end.map_or(ts, |e| e.max(ts)));
             }
-            if let LogEntry::Assistant(a) = &node.entry {
-                tool_calls += a.message.tool_uses().len();
+            match &node.entry {
+                LogEntry::Assistant(a) => {
+                    tool_calls += a.message.tool_uses().len();
+                }
+                LogEntry::User(u) => {
+                    errors += u
+                        .message
+                        .tool_results()
+                        .iter()
+                        .filter(|r| r.is_error == Some(true))
+                        .count();
+                }
+                _ => {}
             }
         }
         chunk.start_ts = start;
         chunk.end_ts = end;
         chunk.tool_call_count = tool_calls;
+        chunk.error_count = errors;
     }
 
     ChunkingResult {
@@ -380,6 +396,12 @@ mod tests {
     fn tool_result(uuid: &str, parent: &str, ts: &str) -> String {
         format!(
             r#"{{"uuid":"{uuid}","parentUuid":"{parent}","type":"user","timestamp":"{ts}","sessionId":"s","version":"2.0","isSidechain":false,"message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t1","content":"done"}}]}}}}"#
+        )
+    }
+
+    fn error_tool_result(uuid: &str, parent: &str, ts: &str) -> String {
+        format!(
+            r#"{{"uuid":"{uuid}","parentUuid":"{parent}","type":"user","timestamp":"{ts}","sessionId":"s","version":"2.0","isSidechain":false,"message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"command failed"}}]}}}}"#
         )
     }
 
@@ -577,6 +599,26 @@ mod tests {
             .filter_map(|e| e.uuid())
             .collect();
         assert_eq!(uuids, vec!["u2", "a2", "u3"]);
+    }
+
+    #[test]
+    fn test_error_count_per_chunk() {
+        // Failed tool results are counted per chunk (attached members too),
+        // so audits know where to aim full-detail drill-downs.
+        let c = conv(&[
+            user("u1", None, "2026-01-01T00:00:00Z", "task one"),
+            assistant("a1", "u1", "2026-01-01T00:00:01Z", "running"),
+            error_tool_result("e1", "a1", "2026-01-01T00:00:02Z"),
+            assistant("a2", "e1", "2026-01-01T00:00:03Z", "retrying"),
+            tool_result("ok1", "a2", "2026-01-01T00:00:04Z"),
+            assistant("a3", "ok1", "2026-01-01T00:00:05Z", "done"),
+            user("u2", Some("a3"), "2026-01-01T00:01:00Z", "task two"),
+            assistant("a4", "u2", "2026-01-01T00:01:01Z", "clean"),
+        ]);
+        let r = chunk_conversation(&c);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r.chunks[0].error_count, 1);
+        assert_eq!(r.chunks[1].error_count, 0);
     }
 
     #[test]

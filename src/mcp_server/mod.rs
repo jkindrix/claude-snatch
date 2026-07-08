@@ -47,11 +47,11 @@ use helpers::{
     boundary_prompt_text, extract_assistant_summary, extract_error_preview,
     extract_files_from_tools, extract_image_placeholders, extract_result_preview,
     extract_thinking_text, extract_tool_input_summary, extract_tool_names,
-    extract_user_prompt_text, find_compaction_events, get_claude_dir, get_model, has_thinking,
-    is_human_prompt, is_prompt_boundary, main_thread_message_total, parse_timestamp_param,
-    period_cutoff, queued_human_prompt, render_attachment_content, resolve_project,
-    resolve_session, resolve_session_with_chain, search_entry_text, thinking_redaction_note,
-    truncate_text,
+    extract_user_prompt_text, failed_tool_use_ids, find_compaction_events, get_claude_dir,
+    get_model, has_thinking, has_tool_errors, is_human_prompt, is_prompt_boundary,
+    main_thread_message_total, parse_timestamp_param, period_cutoff, queued_human_prompt,
+    render_attachment_content, resolve_project, resolve_session, resolve_session_with_chain,
+    search_entry_text, thinking_redaction_note, truncate_text,
 };
 use types::{
     ChangeEventEntry, ChunkBranchSummary, ChunkInfo, ChunkSummary, CompactionEvent,
@@ -393,7 +393,7 @@ impl SnatchServer {
     /// Use detail="overview" for prompt boundaries only, "standard" for user+assistant
     /// text with tool names, or "full" for tool call details.
     #[tool(
-        description = "Read conversation messages from a session. Use detail='overview' for prompt boundaries only (typed user prompts plus queued mid-turn steering prompts), 'conversation' for user+assistant text (skipping tool-only turns), 'standard' for user+assistant text, 'full' for tool details. At detail='full', Agent/Task calls are linked to the subagent they spawned (subagent_session_id) with a result preview; set include_subagent_transcripts=true to inline each subagent's full transcript. Subagents present on disk but not joinable to a specific call are surfaced in unmatched_subagents rather than dropped. Set include_thinking=true to include reasoning blocks — note this recovers rationale only for sessions from old Claude Code (~2.1.4x and earlier); recent versions persist thinking as empty text, and the response carries a thinking_note when that is the case. Set chunk='4' or chunk='2-5' to retrieve prompt-boundary chunk(s): one prompt (typed, or queued mid-turn steering — see chunk_info.prompt_source) plus everything it produced, including late async results (detail='overview' lists the prompts at the same indices, so overview then chunk composes). Supports pagination with offset/limit."
+        description = "Read conversation messages from a session. Use detail='overview' for prompt boundaries only (typed user prompts plus queued mid-turn steering prompts), 'conversation' for user+assistant text (skipping tool-only turns), 'standard' for user+assistant text, 'full' for tool details. At detail='full', Agent/Task calls are linked to the subagent they spawned (subagent_session_id) with a result preview; set include_subagent_transcripts=true to inline each subagent's full transcript. Subagents present on disk but not joinable to a specific call are surfaced in unmatched_subagents rather than dropped. Set include_thinking=true to include reasoning blocks — note this recovers rationale only for sessions from old Claude Code (~2.1.4x and earlier); recent versions persist thinking as empty text, and the response carries a thinking_note when that is the case. Set chunk='4' or chunk='2-5' to retrieve prompt-boundary chunk(s): one prompt (typed, or queued mid-turn steering — see chunk_info.prompt_source) plus everything it produced, including late async results (detail='overview' lists the prompts at the same indices, so overview then chunk composes). Set errors_only=true to keep only entries with failed tool results (error drill-down; use with detail='standard'/'full'), and max_text_len to override content truncation (skim small, read large). Supports pagination with offset/limit."
     )]
     async fn get_session_messages(&self, request: GetSessionMessagesRequest) -> ToolOutput {
         let chain_aware = request.chain_aware.unwrap_or(true);
@@ -467,6 +467,7 @@ impl SnatchServer {
                         entries: c.entry_count(),
                         attached: c.attached_uuids.len(),
                         tool_calls: c.tool_call_count,
+                        errors: c.error_count,
                         branches: c
                             .branches
                             .iter()
@@ -482,6 +483,20 @@ impl SnatchServer {
         } else {
             None
         };
+
+        // Error drill-down: keep failed tool results AND the assistant
+        // entries that issued the failing calls (the result carries the
+        // error text, the call carries the command — an audit needs both).
+        if request.errors_only.unwrap_or(false) {
+            let failed = failed_tool_use_ids(&entries);
+            entries.retain(|e| match e {
+                LogEntry::User(_) => has_tool_errors(std::slice::from_ref(e)),
+                LogEntry::Assistant(a) => {
+                    a.message.tool_uses().iter().any(|t| failed.contains(&t.id))
+                }
+                _ => false,
+            });
+        }
 
         // Surface the recent-Claude-Code redaction pattern (thinking blocks
         // present but all empty) so include_thinking never fails silently.
@@ -613,12 +628,12 @@ impl SnatchServer {
             HashMap::new()
         };
 
-        let truncate_len = match detail {
+        let truncate_len = request.max_text_len.unwrap_or(match detail {
             "overview" => 200,
             "conversation" => 500,
             "standard" => 500,
             _ => 1000,
-        };
+        });
 
         let messages: Vec<MessageEntry> = paginated
             .iter()
@@ -1362,7 +1377,7 @@ impl SnatchServer {
 
     /// Extract tool invocations from a session with input summaries and error states.
     #[tool(
-        description = "Extract tool invocations from a session. Filter by tool name or errors. Returns tool names, input summaries (file paths, commands), and error states. Use to understand what was built or changed."
+        description = "Extract tool invocations from a session. Filter by tool name or errors, or scope to prompt-boundary chunk(s) with chunk='4' / chunk='2-5' (same indices as get_session_messages) for a ground-truth view of what actually ran in a chunk. Returns tool names, input summaries (file paths, commands), and error states. Use to understand what was built or changed, or to audit a chunk's claims against its real commands."
     )]
     async fn get_tool_calls(&self, request: GetToolCallsRequest) -> ToolOutput {
         let resolved = match resolve_session(self, &request.session_id) {
@@ -1378,7 +1393,22 @@ impl SnatchServer {
             .tool_filter
             .map(|f| f.split(',').map(|s| s.trim().to_string()).collect());
 
-        let main_entries = resolved.conversation.main_thread_entries();
+        // Optionally scope to prompt-boundary chunk(s) — the ground-truth
+        // view of what actually ran in a chunk (attached async results
+        // included via tree-based membership).
+        let main_entries = if let Some(ref spec) = request.chunk {
+            use crate::analysis::chunking::{
+                chunk_conversation, entries_for_chunk_range, parse_chunk_spec,
+            };
+            let chunking = chunk_conversation(&resolved.conversation);
+            let (start, end) = match parse_chunk_spec(spec, chunking.len()) {
+                Ok(range) => range,
+                Err(message) => return ToolOutput::error(format!("Invalid chunk: {message}")),
+            };
+            entries_for_chunk_range(&resolved.conversation, &chunking, start, end)
+        } else {
+            resolved.conversation.main_thread_entries()
+        };
 
         // Build list of tool calls with their results
         struct ToolCallWithResult {
@@ -3334,6 +3364,8 @@ mod tests {
                     before_timestamp: None,
                     include_subagent_transcripts: None,
                     chunk: None,
+                    errors_only: None,
+                    max_text_len: None,
                 })
                 .await,
         );
@@ -3369,6 +3401,7 @@ mod tests {
                     session_id: sid.to_string(),
                     tool_filter: None,
                     errors_only: None,
+                    chunk: None,
                     limit: None,
                     offset: None,
                 })
@@ -3424,6 +3457,8 @@ mod tests {
                     before_timestamp: None,
                     include_subagent_transcripts: None,
                     chunk: None,
+                    errors_only: None,
+                    max_text_len: None,
                 })
                 .await,
         );
@@ -3470,6 +3505,8 @@ mod tests {
                     before_timestamp: None,
                     include_subagent_transcripts: None,
                     chunk: None,
+                    errors_only: None,
+                    max_text_len: None,
                 })
                 .await,
         );
@@ -3493,6 +3530,7 @@ mod tests {
                     session_id: sid.to_string(),
                     tool_filter: None,
                     errors_only: None,
+                    chunk: None,
                     limit: None,
                     offset: None,
                 })
@@ -3531,6 +3569,8 @@ mod tests {
                     before_timestamp: None,
                     include_subagent_transcripts: None,
                     chunk: None,
+                    errors_only: None,
+                    max_text_len: None,
                 })
                 .await,
         );
@@ -3598,6 +3638,8 @@ mod tests {
                     before_timestamp: None,
                     include_subagent_transcripts: None,
                     chunk: None,
+                    errors_only: None,
+                    max_text_len: None,
                 })
                 .await,
         );

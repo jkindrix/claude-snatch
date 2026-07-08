@@ -61,10 +61,18 @@ A *chunk* is one prompt boundary — a typed user prompt or a queued mid-turn
 steering prompt — plus everything it produced, up to the next prompt boundary.
 Pass `chunk="4"` (single) or `chunk="2-5"` (inclusive range) to
 `get_session_messages`; the response carries `chunk_info` (per-chunk prompt,
-time range, entry/tool counts, abandoned branches). Discovery composes with
-`detail="overview"`: its prompt list uses the same zero-based indices.
+time range, entry/tool/error counts, abandoned branches). Discovery composes
+with `detail="overview"`: its prompt list uses the same zero-based indices.
 CLI equivalents: `snatch chunks <session>` (list), `snatch messages <session>
 --chunk <N|A-B>` (retrieve).
+
+Audit filters: `errors_only=true` (CLI `--errors-only`) keeps only failed tool
+results plus the assistant calls that issued them — use with
+`detail="standard"/"full"` to drill into a chunk's `⚠N errors`. `max_text_len`
+(CLI `--max-text-len`) overrides per-detail truncation to trade tokens for
+completeness. `get_tool_calls` also accepts `chunk="N"|"A-B"` for the
+ground-truth view (commands, file paths, error states — no narrative) when
+auditing a chunk's claims against what actually ran.
 
 Boundary/membership policies: harness-initiated turns (task notifications) are
 absorbed into the preceding chunk; mid-turn steering prompts start a new chunk

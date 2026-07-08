@@ -154,6 +154,25 @@ pub fn queued_human_prompt(entry: &LogEntry) -> Option<&str> {
     }
 }
 
+/// Ids of `tool_use` calls whose results failed (`is_error`), across entries.
+///
+/// Error-only filtering keeps both sides of a failure: the user entry
+/// carrying the failed result (the error text) and the assistant entry that
+/// issued the call (the command). This collects the ids linking them.
+pub fn failed_tool_use_ids(entries: &[&LogEntry]) -> std::collections::HashSet<String> {
+    let mut ids = std::collections::HashSet::new();
+    for entry in entries {
+        if let LogEntry::User(user) = entry {
+            for result in user.message.tool_results() {
+                if result.is_error == Some(true) {
+                    ids.insert(result.tool_use_id.clone());
+                }
+            }
+        }
+    }
+    ids
+}
+
 /// Check whether an entry opens a prompt-boundary chunk.
 ///
 /// True for human prompts delivered as `user` entries ([`is_human_prompt`])
