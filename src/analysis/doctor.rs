@@ -19,10 +19,11 @@ use crate::model::message::LogEntry;
 use crate::model::{ContentBlock, ModelPricing, SystemSubtype, UserContent};
 use crate::parser::ParseStats;
 
-/// Attachment kinds whose payload is rendered in conversation outputs; every
-/// other kind is marker-only. Keep in sync with
+/// Attachment kinds whose payload is always rendered in conversation outputs.
+/// `queued_command` renders conditionally (human prompts only) and is handled
+/// per entry; every other kind is marker-only. Keep in sync with
 /// `analysis::extraction::render_attachment_content`.
-const RENDERED_ATTACHMENT_KINDS: [&str; 3] = ["file", "edited_text_file", "queued_command"];
+const RENDERED_ATTACHMENT_KINDS: [&str; 2] = ["file", "edited_text_file"];
 
 /// One unmodeled thing observed in the corpus.
 #[derive(Debug, Clone, Serialize)]
@@ -42,8 +43,10 @@ pub struct DriftSighting {
 /// An attachment kind observed in the corpus.
 #[derive(Debug, Clone, Serialize)]
 pub struct AttachmentSighting {
-    /// Whether conversation outputs render its payload (vs marker-only).
-    pub rendered: bool,
+    /// Occurrences whose payload conversation outputs would render; the rest
+    /// are marker-only. Rendering can be conditional per entry (e.g.
+    /// `queued_command` renders human prompts but not task notifications).
+    pub rendered_count: usize,
     /// Occurrence counts and recency.
     #[serde(flatten)]
     pub sighting: DriftSighting,
@@ -130,6 +133,7 @@ pub struct Diagnoser {
     other_system_subtypes: IndexMap<String, SightingBuilder>,
     unknown_content_blocks: IndexMap<String, SightingBuilder>,
     attachment_kinds: IndexMap<String, SightingBuilder>,
+    attachment_rendered_counts: IndexMap<String, usize>,
     unpriced_models: IndexMap<String, SightingBuilder>,
     thinking_blocks: usize,
     thinking_blocks_empty: usize,
@@ -187,13 +191,23 @@ impl Diagnoser {
                         .entry(kind.to_string())
                         .or_default()
                         .record(session_id, ts);
+                    let rendered = RENDERED_ATTACHMENT_KINDS.contains(&kind)
+                        || crate::analysis::extraction::queued_human_prompt(entry).is_some();
+                    if rendered {
+                        *self
+                            .attachment_rendered_counts
+                            .entry(kind.to_string())
+                            .or_default() += 1;
+                    }
                 }
                 LogEntry::Assistant(assistant) => {
                     // "<synthetic>" is Claude Code's placeholder on synthetic
-                    // (client-generated) messages, not a priceable model.
+                    // (client-generated) messages, not a priceable model. Only
+                    // usage-bearing messages affect cost estimates.
                     if ModelPricing::for_model(&assistant.message.model).is_none()
                         && !assistant.message.model.is_empty()
                         && assistant.message.model != "<synthetic>"
+                        && assistant.message.usage.is_some()
                     {
                         self.unpriced_models
                             .entry(assistant.message.model.clone())
@@ -247,11 +261,18 @@ impl Diagnoser {
             out.into_iter().collect()
         }
 
+        let rendered_counts = self.attachment_rendered_counts;
         let attachment_kinds = finalize(self.attachment_kinds)
             .into_iter()
             .map(|(kind, sighting)| {
-                let rendered = RENDERED_ATTACHMENT_KINDS.contains(&kind.as_str());
-                (kind, AttachmentSighting { rendered, sighting })
+                let rendered_count = rendered_counts.get(&kind).copied().unwrap_or(0);
+                (
+                    kind,
+                    AttachmentSighting {
+                        rendered_count,
+                        sighting,
+                    },
+                )
             })
             .collect();
 
@@ -292,10 +313,18 @@ mod tests {
             r#"{"type":"system","subtype":"away_summary","uuid":"y1","timestamp":"2026-07-02T00:00:00Z","sessionId":"s","content":"away"}"#,
             "\n",
             // Assistant with empty thinking + unpriced model
-            r#"{"type":"assistant","uuid":"a1","parentUuid":null,"timestamp":"2026-07-03T00:00:00Z","sessionId":"s","isSidechain":false,"userType":"external","cwd":"/","version":"2.1.198","gitBranch":"main","message":{"id":"m1","type":"message","role":"assistant","model":"claude-future-9","content":[{"type":"thinking","thinking":"","signature":"sig"},{"type":"mystery_block","payload":1}]}}"#,
+            r#"{"type":"assistant","uuid":"a1","parentUuid":null,"timestamp":"2026-07-03T00:00:00Z","sessionId":"s","isSidechain":false,"userType":"external","cwd":"/","version":"2.1.198","gitBranch":"main","message":{"id":"m1","type":"message","role":"assistant","model":"claude-future-9","content":[{"type":"thinking","thinking":"","signature":"sig"},{"type":"mystery_block","payload":1}],"usage":{"input_tokens":10,"output_tokens":5}}}"#,
             "\n",
-            // Attachment kind
+            // Unknown model WITHOUT usage — must not count as unpriced
+            r#"{"type":"assistant","uuid":"a2","parentUuid":"a1","timestamp":"2026-07-03T00:00:01Z","sessionId":"s","isSidechain":false,"userType":"external","cwd":"/","version":"2.1.198","gitBranch":"main","message":{"id":"m2","type":"message","role":"assistant","model":"claude-usage-less","content":[{"type":"text","text":"x"}]}}"#,
+            "\n",
+            // Attachment kind (marker-only)
             r#"{"uuid":"t1","type":"attachment","timestamp":"2026-07-04T00:00:00Z","sessionId":"s","attachment":{"type":"total_tokens_reminder","text":"x"}}"#,
+            "\n",
+            // queued_command: one human prompt (renders), one notification (marker-only)
+            r#"{"uuid":"q1","type":"attachment","timestamp":"2026-07-04T01:00:00Z","sessionId":"s","attachment":{"type":"queued_command","commandMode":"prompt","prompt":"note this"}}"#,
+            "\n",
+            r#"{"uuid":"q2","type":"attachment","timestamp":"2026-07-04T02:00:00Z","sessionId":"s","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification>x</task-notification>"}}"#,
         );
         let (entries, stats) = parse(lines);
         let mut diagnoser = Diagnoser::new();
@@ -308,7 +337,17 @@ mod tests {
         assert_eq!(report.other_system_subtypes["away_summary"].count, 1);
         assert_eq!(report.unknown_content_blocks["mystery_block"].count, 1);
         assert_eq!(report.unpriced_models["claude-future-9"].count, 1);
-        assert!(!report.attachment_kinds["total_tokens_reminder"].rendered);
+        // No usage → does not affect cost estimates → not reported.
+        assert!(!report.unpriced_models.contains_key("claude-usage-less"));
+        assert_eq!(
+            report.attachment_kinds["total_tokens_reminder"].rendered_count,
+            0
+        );
+        // queued_command renders conditionally: the human prompt counts, the
+        // task notification does not.
+        let queued = &report.attachment_kinds["queued_command"];
+        assert_eq!(queued.sighting.count, 2);
+        assert_eq!(queued.rendered_count, 1);
         assert_eq!(report.thinking_blocks, 1);
         assert_eq!(report.thinking_blocks_empty, 1);
         assert!((report.thinking_empty_pct() - 100.0).abs() < f64::EPSILON);

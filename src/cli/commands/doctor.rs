@@ -142,7 +142,13 @@ fn print_human(report: &DoctorReport, failed: usize, since: Option<&str>) {
         println!("  (none)");
     } else {
         for (name, a) in &report.attachment_kinds {
-            let tag = if a.rendered { " [rendered]" } else { "" };
+            let tag = if a.rendered_count == a.sighting.count {
+                " [rendered]".to_string()
+            } else if a.rendered_count > 0 {
+                format!(" [renders {}/{}]", a.rendered_count, a.sighting.count)
+            } else {
+                String::new()
+            };
             println!("{}{tag}", fmt_sighting(name, &a.sighting));
         }
     }
