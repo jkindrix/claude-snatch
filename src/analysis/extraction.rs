@@ -159,9 +159,9 @@ pub fn queued_human_prompt(entry: &LogEntry) -> Option<&str> {
 /// True for human prompts delivered as `user` entries ([`is_human_prompt`])
 /// and for mid-turn steering prompts, which exist only as `queued_command`
 /// attachments ([`queued_human_prompt`]) — corpus scans found queued human
-/// prompts do not recur as `user` entries. Chunking and `detail=overview`
-/// share this predicate so chunk indices and overview prompt listings never
-/// drift.
+/// prompts that may never recur as `user` entries. Chunking and
+/// `detail=overview` share this predicate so chunk indices and overview
+/// prompt listings never drift.
 pub fn is_prompt_boundary(entry: &LogEntry) -> bool {
     is_human_prompt(entry) || queued_human_prompt(entry).is_some()
 }

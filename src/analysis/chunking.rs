@@ -1,7 +1,8 @@
 //! Prompt-boundary chunking of a conversation.
 //!
-//! A *chunk* is everything a human prompt produced: the prompt itself and all
-//! entries up to (not including) the next human prompt on the main thread.
+//! A *chunk* is everything a prompt boundary produced — a typed user prompt
+//! or a queued mid-turn steering prompt, plus all entries up to (not
+//! including) the next prompt boundary on the main thread.
 //! Chunks are the retrieval unit for "give me turn N of this session" — one
 //! prompt, the agentic work it triggered, and the response.
 //!
@@ -73,8 +74,8 @@ pub struct ChunkBranch {
 /// One prompt-boundary chunk of a conversation.
 #[derive(Debug, Clone)]
 pub struct SessionChunk {
-    /// Zero-based chunk index. Matches the ordering of human prompts on the
-    /// main thread (the same prompts `detail=overview` lists).
+    /// Zero-based chunk index. Matches the ordering of prompt boundaries on
+    /// the main thread (the same prompts `detail=overview` lists).
     pub index: usize,
     /// UUID of the human prompt that opens the chunk.
     pub prompt_uuid: String,
@@ -487,8 +488,8 @@ mod tests {
     #[test]
     fn test_queued_steering_prompt_starts_chunk() {
         // A mid-turn steering prompt exists only as a queued_command
-        // attachment (these do not recur as user entries); it must
-        // open a chunk, marked as Queued.
+        // attachment (corpus scans found queued prompts that never recur
+        // as user entries); it must open a chunk, marked as Queued.
         let c = conv(&[
             user("u1", None, "2026-01-01T00:00:00Z", "start the work"),
             assistant("a1", "u1", "2026-01-01T00:00:01Z", "working"),

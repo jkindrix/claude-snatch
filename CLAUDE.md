@@ -57,8 +57,9 @@ This project provides an MCP server (`snatch serve-mcp`) that exposes 21 tools f
 
 ### Chunk Retrieval (prompt-boundary chunks)
 
-A *chunk* is one human prompt plus everything it produced, up to the next human
-prompt. Pass `chunk="4"` (single) or `chunk="2-5"` (inclusive range) to
+A *chunk* is one prompt boundary — a typed user prompt or a queued mid-turn
+steering prompt — plus everything it produced, up to the next prompt boundary.
+Pass `chunk="4"` (single) or `chunk="2-5"` (inclusive range) to
 `get_session_messages`; the response carries `chunk_info` (per-chunk prompt,
 time range, entry/tool counts, abandoned branches). Discovery composes with
 `detail="overview"`: its prompt list uses the same zero-based indices.
@@ -68,7 +69,8 @@ CLI equivalents: `snatch chunks <session>` (list), `snatch messages <session>
 Boundary/membership policies: harness-initiated turns (task notifications) are
 absorbed into the preceding chunk; mid-turn steering prompts start a new chunk
 — including queued prompts that exist only as `queued_command` attachments
-(these do not recur as `user` entries); abandoned rewind branches attach
+(corpus scans found queued prompts that may never recur as `user` entries);
+abandoned rewind branches attach
 to the chunk they forked from (metadata only); late async results belong to
 the chunk that spawned them (tree-based membership, appended after main-thread
 members). Each chunk carries `prompt_source`: "user" (typed at a turn
