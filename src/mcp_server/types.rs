@@ -188,8 +188,9 @@ pub struct GetSessionMessagesRequest {
     pub reverse: Option<bool>,
 
     /// If true, include thinking/reasoning block content in assistant messages.
-    /// Thinking blocks contain decision rationale and evidence chains that
-    /// compaction always drops. Default: false.
+    /// Thinking text is present only in sessions from old Claude Code
+    /// (~2.1.4x and earlier); recent versions persist it empty, and the
+    /// response carries a thinking_note when that is the case. Default: false.
     pub include_thinking: Option<bool>,
 
     /// If the session is part of a resume chain, return messages across all

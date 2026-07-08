@@ -4,6 +4,17 @@
 
 This document records the systematic analysis of Claude Code's auto-compaction behavior and its impact on session continuity. The research was conducted using `snatch` MCP tools to analyze real session data across multiple projects.
 
+> **Update (2026-07-08): thinking text is no longer persisted by current Claude Code.**
+> The thinking-block recoverability claims below hold only for sessions written
+> by old Claude Code (observed intact through ~2.1.42). Since at least 2.1.193,
+> thinking blocks are written with an **empty** `thinking` string (only the
+> encrypted `signature` survives), so `include_thinking`, `scope="thinking"`,
+> and digest thinking keywords return nothing for recent sessions — the F1/F3
+> thinking-recovery paths are dead for new data. snatch surfaces this as an
+> explicit `thinking_note` on those tools, and `snatch doctor` reports the
+> empty-thinking ratio. Recovery paths based on tool I/O, message text, and
+> error→fix extraction (F2/F4/F5) are unaffected.
+
 ## Failure Mode Taxonomy
 
 Six distinct failure modes were identified from analyzing 157 compaction events across 24 sessions, with 7 detailed compaction boundary analyses.
@@ -15,7 +26,7 @@ Six distinct failure modes were identified from analyzing 157 compaction events 
 
 **Example:** Original: "rsi=0x0 at offset 0x4a2, parse_block constructs `{i32, {i64,i64,i32,i32}}` but lower_block reads `{ptr,i64,i64}`" → After compaction: "struct field ordering bug in parse_block"
 
-**Recoverability:** Partially recoverable. Thinking blocks (100% lost in compaction) ARE stored in JSONL and contain reasoning chains. Tool I/O (also lost) contains the raw evidence.
+**Recoverability:** Partially recoverable. Thinking blocks (100% lost in compaction) are stored in JSONL with their reasoning chains **only for old-Claude-Code sessions** (see the update note above; recent versions persist empty thinking text). Tool I/O (also lost from context) is still stored and contains the raw evidence regardless of version.
 
 ### F2: Negative Result Amnesia (Critical)
 
@@ -33,7 +44,7 @@ Six distinct failure modes were identified from analyzing 157 compaction events 
 
 **Example:** 90K chars of architectural reasoning (reviewer feedback, author response, convergence document) compressed to "decided to use approach X" in the cartograph session. The first compaction boundary had 9.5x compression.
 
-**Recoverability:** Recoverable via thinking block retrieval and search for decision-related language.
+**Recoverability:** Recoverable via thinking block retrieval **for old-Claude-Code sessions only** (see the update note above); on recent sessions fall back to searching message text for decision-related language.
 
 ### F4: Operational Gotcha Amnesia (High)
 

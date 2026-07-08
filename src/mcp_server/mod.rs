@@ -391,7 +391,7 @@ impl SnatchServer {
     /// Use detail="overview" for user prompts only, "standard" for user+assistant
     /// text with tool names, or "full" for tool call details.
     #[tool(
-        description = "Read conversation messages from a session. Use detail='overview' for prompts only, 'conversation' for user+assistant text (skipping tool-only turns), 'standard' for user+assistant text, 'full' for tool details. At detail='full', Agent/Task calls are linked to the subagent they spawned (subagent_session_id) with a result preview; set include_subagent_transcripts=true to inline each subagent's full transcript. Subagents present on disk but not joinable to a specific call are surfaced in unmatched_subagents rather than dropped. Set include_thinking=true to recover reasoning/decision rationale (always lost in compaction). Supports pagination with offset/limit."
+        description = "Read conversation messages from a session. Use detail='overview' for prompts only, 'conversation' for user+assistant text (skipping tool-only turns), 'standard' for user+assistant text, 'full' for tool details. At detail='full', Agent/Task calls are linked to the subagent they spawned (subagent_session_id) with a result preview; set include_subagent_transcripts=true to inline each subagent's full transcript. Subagents present on disk but not joinable to a specific call are surfaced in unmatched_subagents rather than dropped. Set include_thinking=true to include reasoning blocks — note this recovers rationale only for sessions from old Claude Code (~2.1.4x and earlier); recent versions persist thinking as empty text, and the response carries a thinking_note when that is the case. Supports pagination with offset/limit."
     )]
     async fn get_session_messages(&self, request: GetSessionMessagesRequest) -> ToolOutput {
         let chain_aware = request.chain_aware.unwrap_or(true);
@@ -1140,7 +1140,7 @@ impl SnatchServer {
 
     /// Search across sessions for text patterns using regex.
     #[tool(
-        description = "Search across sessions for text patterns (regex). Filter by project, session, scope (text/tools/thinking/all). Use scope='thinking' to search reasoning blocks (decision rationale, evidence chains). Returns matching text with context."
+        description = "Search across sessions for text patterns (regex). Filter by project, session, scope (text/tools/thinking/all). scope='thinking' searches reasoning blocks, but matches only sessions from old Claude Code (~2.1.4x and earlier) — recent versions persist thinking as empty text, and the response notes when only empty blocks were scanned. Returns matching text with context."
     )]
     async fn search_sessions(&self, request: SearchSessionsRequest) -> ToolOutput {
         let claude_dir = match get_claude_dir(self) {
@@ -1713,7 +1713,7 @@ impl SnatchServer {
 
     /// Get a compact summary of a session's key topics, files, tools, and decisions.
     #[tool(
-        description = "Get a compact digest of a session: key prompts, files touched, top tools, errors, compaction events, and decision keywords from thinking blocks."
+        description = "Get a compact digest of a session: key prompts, files touched, top tools, errors, compaction events, and decision keywords from thinking blocks (keywords are empty for recent sessions — thinking text is not persisted; a thinking_note explains)."
     )]
     async fn get_session_digest(&self, request: GetSessionDigestRequest) -> ToolOutput {
         use crate::analysis::digest::{build_digest, format_digest, DigestOptions};
@@ -2188,7 +2188,7 @@ impl SnatchServer {
     /// Cross-session topic threading: search for a pattern across sessions and
     /// return chronologically-ordered exchanges with conversation context.
     #[tool(
-        description = "Cross-session topic threading. Searches all sessions for a regex pattern and returns chronologically-ordered exchanges with surrounding user/assistant context. Use to trace how a topic evolved across sessions — 'show me every time we discussed X'. Set decisions_only=true to filter to decision points. Set include_thinking=true to search reasoning blocks."
+        description = "Cross-session topic threading. Searches all sessions for a regex pattern and returns chronologically-ordered exchanges with surrounding user/assistant context. Use to trace how a topic evolved across sessions — 'show me every time we discussed X'. Set decisions_only=true to filter to decision points. Set include_thinking=true to search reasoning blocks (text present only in sessions from old Claude Code, ~2.1.4x and earlier)."
     )]
     async fn thread_topic(&self, request: ThreadTopicRequest) -> ToolOutput {
         use crate::analysis::threading::{thread_topic, ThreadParams};

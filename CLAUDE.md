@@ -27,10 +27,10 @@ This project provides an MCP server (`snatch serve-mcp`) that exposes 21 tools f
 | What happened in a session? | `get_session_timeline` | session_id="abc123" |
 | Quick session overview | `get_session_digest` | session_id="abc123" |
 | Read specific messages | `get_session_messages` | session_id="abc123", detail="standard" |
-| Recover decision rationale | `get_session_messages` | session_id="abc123", include_thinking=true |
+| Recover decision rationale (old sessions only) | `get_session_messages` | session_id="abc123", include_thinking=true |
 | Messages around a timestamp | `get_session_messages` | session_id="abc123", after_timestamp="2h", before_timestamp="1h" |
 | Find where X was discussed | `search_sessions` | pattern="authentication", project="myproject" |
-| Search reasoning/decisions | `search_sessions` | pattern="decided|because", scope="thinking" |
+| Search reasoning/decisions (old sessions only) | `search_sessions` | pattern="decided|because", scope="thinking" |
 | What went wrong & how fixed? | `get_session_lessons` | session_id="abc123" |
 | Project health dashboard | `get_project_health` | project="snatch", period="7d" |
 | What files were changed? | `get_tool_calls` | session_id="abc123", tool_filter="Write,Edit" |
@@ -54,12 +54,14 @@ This project provides an MCP server (`snatch serve-mcp`) that exposes 21 tools f
 - **standard**: User + assistant text, tool names listed. Good balance.
 - **full**: Includes tool call details (file paths, commands). For deep investigation.
 
-### Thinking Block Recovery
+### Thinking Block Recovery (old sessions only)
 
-Compaction **always** drops thinking/reasoning blocks (100% loss rate). These contain decision rationale, evidence chains, and alternative evaluation. Two ways to recover them:
+Compaction **always** drops thinking/reasoning blocks from context. Recovery from the JSONL works **only for sessions written by old Claude Code (~2.1.4x and earlier)**: since at least CC 2.1.193, thinking is persisted as an empty string (only the encrypted signature survives), so there is nothing to recover for recent sessions. Both tools return an explicit `thinking_note` when all thinking in scope is empty; `snatch doctor` reports the corpus-wide empty ratio.
 
-- `get_session_messages` with `include_thinking=true` — returns thinking text alongside messages
-- `search_sessions` with `scope="thinking"` — search through reasoning blocks
+- `get_session_messages` with `include_thinking=true` — returns thinking text alongside messages (when present)
+- `search_sessions` with `scope="thinking"` — search through reasoning blocks (when present)
+
+For recent sessions, recover rationale from message text, tool I/O, and `get_session_lessons` instead.
 
 ### Goal Persistence
 
@@ -107,7 +109,7 @@ Storage: `~/.claude/projects/<project>/memory/notes.json`
 - Files touched (basenames from Write/Edit/Read)
 - Top tools by frequency
 - Error count and compaction count
-- Decision keywords from thinking blocks
+- Decision keywords from thinking blocks (empty for recent sessions — thinking text is not persisted; a `thinking_note` says so)
 
 The digest is auto-injected after compaction via the SessionStart hook.
 
@@ -155,7 +157,7 @@ Notes are lightweight and disposable. Don't overthink them — just write what f
 - Use `detail="conversation"` for reading the human-AI dialogue without tool noise
 - Use `detail="overview"` for quick orientation on what was asked
 - Always filter by project when possible to reduce noise
-- The `search_sessions` tool supports regex patterns and scope="thinking" for reasoning
+- The `search_sessions` tool supports regex patterns and scope="thinking" for reasoning (old sessions only — recent thinking text is empty)
 - Timeline collapses consecutive tool-only turns automatically for cleaner output
 - Timeline is the best tool for understanding "what happened in order"
 - All tools see content across compaction boundaries (pre/post-compact messages are both visible)
