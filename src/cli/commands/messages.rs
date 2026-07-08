@@ -11,9 +11,9 @@ use crate::analysis::extraction::{
     queued_human_prompt, render_attachment_content,
 };
 use crate::analysis::extraction::{
-    extract_assistant_summary, extract_thinking_text, extract_tool_input_summary,
-    extract_tool_names, extract_user_prompt_text, get_model, has_thinking, is_human_prompt,
-    truncate_text,
+    extract_assistant_summary, extract_error_preview, extract_result_preview,
+    extract_thinking_text, extract_tool_input_summary, extract_tool_names,
+    extract_user_prompt_text, get_model, has_thinking, is_human_prompt, truncate_text,
 };
 use crate::analysis::subagents::{match_subagents, SubagentMatch, SubagentMatches};
 use crate::cli::{Cli, MessagesArgs, OutputFormat};
@@ -101,6 +101,16 @@ struct ToolDetailOutput {
     /// Full subagent transcript, present only with --subagent-transcripts.
     #[serde(skip_serializing_if = "Option::is_none")]
     subagent_transcript: Option<Vec<MessageOutput>>,
+    /// Whether the matched tool result was an error (absent when success).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    had_error: Option<bool>,
+    /// Truncated preview of a failed tool result's error text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_preview: Option<String>,
+    /// Truncated preview of a successful tool result's output (absent on
+    /// error; for Agent/Task calls subagent_result_preview is used instead).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_preview: Option<String>,
 }
 
 /// Whether thinking blocks should be rendered for a given detail level.
@@ -336,6 +346,29 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
 
     let total_messages = main_entries.len();
 
+    // Join tool results onto their calls at full detail (parity with the MCP
+    // server): had_error plus error/result previews per tool_use id. Scans
+    // every node — not just the main thread — so late async results join too.
+    let tool_result_previews: HashMap<String, (bool, Option<String>)> = if detail == "full" {
+        let mut map = HashMap::new();
+        for node in conversation.nodes().values() {
+            if let LogEntry::User(user) = &node.entry {
+                for result in user.message.tool_results() {
+                    let is_err = result.is_error == Some(true);
+                    let preview = if is_err {
+                        extract_error_preview(result, 300)
+                    } else {
+                        extract_result_preview(result, 500)
+                    };
+                    map.insert(result.tool_use_id.clone(), (is_err, preview));
+                }
+            }
+        }
+        map
+    } else {
+        HashMap::new()
+    };
+
     // Build indexed pairs
     let mut indexed: Vec<(usize, &LogEntry)> = main_entries.into_iter().enumerate().collect();
 
@@ -361,6 +394,7 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                         &subagent_matches.matched,
                         args.subagent_transcripts,
                         cli.max_file_size,
+                        &tool_result_previews,
                     )
                 })
                 .collect();
@@ -548,6 +582,12 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                                 summary.iter().map(|(k, v)| format!("{k}={v}")).collect();
                             println!("    > {} {}", t.name, detail_str.join(" "));
 
+                            // Surface the error text with its failing call so
+                            // an error audit sees command + error together.
+                            if let Some((true, Some(err))) = tool_result_previews.get(&t.id) {
+                                println!("      ✗ {err}");
+                            }
+
                             // Attach the spawned subagent's work to its Agent/Task call.
                             if let Some(m) = subagent_matches.matched.get(&t.id) {
                                 let msgs = m
@@ -671,6 +711,7 @@ fn build_message_output(
     subagent_matches: &HashMap<String, SubagentMatch>,
     include_subagent_transcripts: bool,
     max_file_size: Option<u64>,
+    tool_result_previews: &HashMap<String, (bool, Option<String>)>,
 ) -> Option<MessageOutput> {
     let msg_type = entry.message_type().to_string();
     let timestamp = entry.timestamp().map(|t| t.to_rfc3339());
@@ -780,6 +821,10 @@ fn build_message_output(
                     .map(|t| {
                         let summary = extract_tool_input_summary(&t.name, &t.input);
                         let matched = subagent_matches.get(&t.id);
+                        let (had_error, preview) = tool_result_previews
+                            .get(&t.id)
+                            .cloned()
+                            .unwrap_or((false, None));
                         ToolDetailOutput {
                             tool_name: t.name.clone(),
                             file_path: summary.get("file_path").cloned(),
@@ -799,6 +844,15 @@ fn build_message_output(
                                         max_file_size,
                                     )
                                 }),
+                            had_error: if had_error { Some(true) } else { None },
+                            error_preview: if had_error { preview.clone() } else { None },
+                            // Agent/Task calls carry the richer subagent
+                            // preview instead.
+                            result_preview: if had_error || matched.is_some() {
+                                None
+                            } else {
+                                preview
+                            },
                         }
                     })
                     .collect()

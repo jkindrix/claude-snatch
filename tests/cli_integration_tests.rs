@@ -1333,6 +1333,7 @@ fn test_errors_only_keeps_failing_call_and_chunks_counts_it() {
         .assert()
         .success()
         .stdout(predicate::str::contains("cargo buidl"))
+        .stdout(predicate::str::contains("no such command: buidl"))
         .get_output()
         .stdout
         .clone();
