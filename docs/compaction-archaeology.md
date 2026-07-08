@@ -164,7 +164,7 @@ get_session_messages(session_id="<id>", detail="full", limit=50, offset=<boundar
 Look for:
 - What was the conversation about at the boundary?
 - What specific information appears in pre-compaction messages that doesn't appear in post-compaction context?
-- Are there thinking blocks with decision rationale?
+- Are there thinking blocks with decision rationale? (old-Claude-Code sessions only — recent versions persist thinking empty)
 - Are there error→fix sequences?
 
 ### Step 5: Search for relearning patterns
@@ -185,7 +185,7 @@ Count how many times the same concept appears across compaction boundaries.
 ### Step 6: Measure compression ratios
 
 For each compaction boundary:
-- Count chars of original user text, assistant text, thinking blocks
+- Count chars of original user text, assistant text, thinking blocks (thinking is non-empty only in old-Claude-Code sessions)
 - Count chars of the compaction summary
 - Calculate ratio and categorize the session type
 

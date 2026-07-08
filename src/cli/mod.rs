@@ -963,12 +963,15 @@ pub struct SearchArgs {
     pub ignore_case: bool,
 
     /// Also search in thinking blocks (additive: user + assistant + thinking).
+    /// Thinking text exists only in old-Claude-Code sessions (~2.1.4x and
+    /// earlier); recent versions persist it empty.
     #[arg(long)]
     pub thinking: bool,
 
     /// Search ONLY thinking blocks (exclusive: no user/assistant text).
     /// Use this instead of --thinking when you want to measure internal
-    /// reasoning without output text contamination.
+    /// reasoning without output text contamination. Matches nothing on
+    /// recent sessions (thinking text is persisted empty).
     #[arg(long, conflicts_with = "thinking")]
     pub thinking_only: bool,
 
@@ -2177,7 +2180,8 @@ pub struct ThreadArgs {
     #[arg(short = 'i', long)]
     pub ignore_case: bool,
 
-    /// Include thinking blocks in search and output.
+    /// Include thinking blocks in search and output (old sessions only —
+    /// recent Claude Code persists thinking as empty text).
     #[arg(long)]
     pub thinking: bool,
 
@@ -2308,7 +2312,8 @@ pub struct FileEvolutionArgs {
     #[arg(short, long, default_value = "30")]
     pub limit: usize,
 
-    /// Include thinking blocks (decision rationale).
+    /// Include thinking blocks (decision rationale; text present only in
+    /// old-Claude-Code sessions — recent versions persist it empty).
     #[arg(long, default_value = "true")]
     pub include_thinking: bool,
 
@@ -2467,7 +2472,8 @@ pub struct MessagesArgs {
     #[arg(short = 'r', long)]
     pub reverse: bool,
 
-    /// Include thinking/reasoning blocks.
+    /// Include thinking/reasoning blocks (text present only in
+    /// old-Claude-Code sessions — recent versions persist it empty).
     #[arg(long)]
     pub include_thinking: bool,
 

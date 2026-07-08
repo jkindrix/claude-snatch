@@ -899,7 +899,8 @@ pub struct ThreadTopicRequest {
     /// Filter by specific session ID.
     pub session_id: Option<String>,
 
-    /// Include thinking/reasoning blocks in search and output. Default: false.
+    /// Include thinking/reasoning blocks in search and output (text present
+    /// only in old-Claude-Code sessions, ~2.1.4x and earlier). Default: false.
     pub include_thinking: Option<bool>,
 
     /// Exclude subagent sessions. Default: true.
@@ -1182,7 +1183,8 @@ pub struct ExplainFileEvolutionRequest {
     /// Maximum change events to return per file. Default: 30.
     pub limit: Option<usize>,
 
-    /// Include thinking blocks (decision rationale). Default: true.
+    /// Include thinking blocks (decision rationale; text present only in
+    /// old-Claude-Code sessions, ~2.1.4x and earlier). Default: true.
     pub include_thinking: Option<bool>,
 
     /// Context window (turns before/after each modification). Default: 1.
