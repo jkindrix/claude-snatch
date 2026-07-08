@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use crate::analysis::chunking::{chunk_conversation, entries_for_chunk_range, parse_chunk_spec};
 use crate::analysis::extraction::{
     extract_assistant_summary, extract_thinking_text, extract_tool_input_summary,
     extract_tool_names, extract_user_prompt_text, get_model, has_thinking, is_human_prompt,
@@ -180,6 +181,37 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
     };
 
     let mut main_entries: Vec<&LogEntry> = conversation.main_thread_entries();
+
+    // Restrict to prompt-boundary chunk(s) when --chunk is given. Chunk
+    // membership is tree-based, so late async results belong to the chunk
+    // that spawned them (appended after its main-thread members).
+    if let Some(ref spec) = args.chunk {
+        let chunking = chunk_conversation(&conversation);
+        let (start, end) = parse_chunk_spec(spec, chunking.len())
+            .map_err(|message| SnatchError::ConfigError { message })?;
+        main_entries = entries_for_chunk_range(&conversation, &chunking, start, end);
+        if !cli.quiet {
+            let branches: usize = chunking.chunks[start..=end]
+                .iter()
+                .map(|c| c.branches.len())
+                .sum();
+            let range = if start == end {
+                format!("chunk {start}")
+            } else {
+                format!("chunks {start}-{end}")
+            };
+            let branch_note = if branches > 0 {
+                format!(" ({branches} abandoned branch(es) not shown — see `snatch chunks`)")
+            } else {
+                String::new()
+            };
+            eprintln!(
+                "ℹ Showing {range} of {} ({} entries){branch_note}",
+                chunking.len(),
+                main_entries.len(),
+            );
+        }
+    }
 
     // Filter by message type
     match msg_type_filter {

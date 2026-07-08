@@ -5,6 +5,7 @@
 
 pub mod cache;
 pub mod chain;
+pub mod chunks;
 pub mod cleanup;
 pub mod code;
 pub mod completions;

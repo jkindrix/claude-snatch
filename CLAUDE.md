@@ -29,6 +29,7 @@ This project provides an MCP server (`snatch serve-mcp`) that exposes 21 tools f
 | Read specific messages | `get_session_messages` | session_id="abc123", detail="standard" |
 | Recover decision rationale (old sessions only) | `get_session_messages` | session_id="abc123", include_thinking=true |
 | Messages around a timestamp | `get_session_messages` | session_id="abc123", after_timestamp="2h", before_timestamp="1h" |
+| One prompt + everything it produced | `get_session_messages` | session_id="abc123", chunk="4" (or chunk="2-5"; indices match detail="overview") |
 | Find where X was discussed | `search_sessions` | pattern="authentication", project="myproject" |
 | Search reasoning/decisions (old sessions only) | `search_sessions` | pattern="decided|because", scope="thinking" |
 | What went wrong & how fixed? | `get_session_lessons` | session_id="abc123" |
@@ -53,6 +54,22 @@ This project provides an MCP server (`snatch serve-mcp`) that exposes 21 tools f
 - **conversation**: User prompts + assistant text responses, skipping tool-only turns. Best for understanding the dialogue.
 - **standard**: User + assistant text, tool names listed. Good balance.
 - **full**: Includes tool call details (file paths, commands). For deep investigation.
+
+### Chunk Retrieval (prompt-boundary chunks)
+
+A *chunk* is one human prompt plus everything it produced, up to the next human
+prompt. Pass `chunk="4"` (single) or `chunk="2-5"` (inclusive range) to
+`get_session_messages`; the response carries `chunk_info` (per-chunk prompt,
+time range, entry/tool counts, abandoned branches). Discovery composes with
+`detail="overview"`: its prompt list uses the same zero-based indices.
+CLI equivalents: `snatch chunks <session>` (list), `snatch messages <session>
+--chunk <N|A-B>` (retrieve).
+
+Boundary/membership policies: harness-initiated turns (task notifications) are
+absorbed into the preceding chunk; mid-turn steering prompts start a new chunk;
+abandoned rewind branches attach to the chunk they forked from (metadata only);
+late async results belong to the chunk that spawned them (tree-based
+membership, appended after main-thread members).
 
 ### Thinking Block Recovery (old sessions only)
 

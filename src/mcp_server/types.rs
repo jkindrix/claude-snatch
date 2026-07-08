@@ -210,6 +210,14 @@ pub struct GetSessionMessagesRequest {
     /// plus a result preview is attached instead, and the transcript is fetched on
     /// demand by querying the subagent id.
     pub include_subagent_transcripts: Option<bool>,
+
+    /// Restrict to prompt-boundary chunk(s): a zero-based index like "4" or an
+    /// inclusive range like "2-5". Chunk N is human prompt N plus everything it
+    /// produced (tool traffic, responses, late async results), up to the next
+    /// human prompt. The prompts listed by detail="overview" use the same
+    /// indices, so overview → pick index → chunk retrieval composes. The
+    /// response carries chunk_info describing the selection.
+    pub chunk: Option<String>,
 }
 
 /// A message in the session messages response.
@@ -302,6 +310,52 @@ pub struct SessionMessagesResponse {
     /// signature), so the absence of thinking output is never silent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_note: Option<String>,
+    /// Describes the chunk selection when the chunk parameter was used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_info: Option<ChunkInfo>,
+}
+
+/// Chunk-selection metadata for get_session_messages.
+#[derive(Debug, Serialize)]
+pub struct ChunkInfo {
+    /// Total prompt-boundary chunks in the session.
+    pub total_chunks: usize,
+    /// First selected chunk index (zero-based, inclusive).
+    pub start: usize,
+    /// Last selected chunk index (zero-based, inclusive).
+    pub end: usize,
+    /// The selected chunks.
+    pub chunks: Vec<ChunkSummary>,
+}
+
+/// Summary of one selected chunk.
+#[derive(Debug, Serialize)]
+pub struct ChunkSummary {
+    pub index: usize,
+    /// Opening human prompt, truncated.
+    pub prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_ts: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_ts: Option<String>,
+    /// Member entries (main-thread + attached; branch entries excluded).
+    pub entries: usize,
+    /// Off-main-thread members (late async results, progress leaves).
+    pub attached: usize,
+    pub tool_calls: usize,
+    /// Abandoned branches (e.g. rewind forks) that forked from this chunk.
+    /// Their entries are not in the message list; fetch by uuid if needed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub branches: Vec<ChunkBranchSummary>,
+}
+
+/// An abandoned branch attached to a chunk.
+#[derive(Debug, Serialize)]
+pub struct ChunkBranchSummary {
+    pub root_uuid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    pub entries: usize,
 }
 
 /// A subagent present on disk but not joinable to a specific spawn call.

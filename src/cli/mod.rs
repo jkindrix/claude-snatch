@@ -304,6 +304,10 @@ pub enum Commands {
     #[command(alias = "msgs", display_order = 26)]
     Messages(MessagesArgs),
 
+    /// List prompt-boundary chunks (one human prompt + everything it produced).
+    #[command(display_order = 26)]
+    Chunks(ChunksArgs),
+
     /// Manage persistent goals for a project.
     #[command(display_order = 27)]
     Goals(GoalsArgs),
@@ -2495,6 +2499,25 @@ pub struct MessagesArgs {
     /// of its chained files.
     #[arg(long)]
     pub no_chain: bool,
+
+    /// Restrict to prompt-boundary chunk(s): a zero-based index like "4" or an
+    /// inclusive range like "2-5". Chunk N is human prompt N plus everything it
+    /// produced (list chunks with `snatch chunks <session>`).
+    #[arg(long)]
+    pub chunk: Option<String>,
+}
+
+/// Arguments for the chunks command.
+#[derive(Debug, Parser)]
+pub struct ChunksArgs {
+    /// Session ID (full UUID or short prefix).
+    pub session_id: String,
+
+    /// Restrict to the single resolved file instead of reconstructing the full
+    /// resume chain. By default, a resumed/continued session is shown across all
+    /// of its chained files.
+    #[arg(long)]
+    pub no_chain: bool,
 }
 
 /// Arguments for the pick command.
@@ -2800,6 +2823,7 @@ pub fn run() -> Result<()> {
         Some(Commands::Context(args)) => commands::context::run(&cli, args),
         Some(Commands::Timeline(args)) => commands::timeline::run(&cli, args),
         Some(Commands::Messages(args)) => commands::messages::run(&cli, args),
+        Some(Commands::Chunks(args)) => commands::chunks::run(&cli, args),
         Some(Commands::Pick(args)) => commands::pick::run(&cli, args),
         Some(Commands::Chain(args)) => commands::chain::run(&cli, args),
         Some(Commands::FileHistory(args)) => commands::file_history::run(&cli, args),

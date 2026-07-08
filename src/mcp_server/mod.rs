@@ -53,8 +53,9 @@ use helpers::{
     thinking_redaction_note, truncate_text,
 };
 use types::{
-    ChangeEventEntry, CompactionEvent, ContextTurnEntry, DecisionChurnEntry, DecisionEntry,
-    ErrorFixLesson, ExplainFileEvolutionRequest, ExplainFileEvolutionResponse, FileEvolutionEntry,
+    ChangeEventEntry, ChunkBranchSummary, ChunkInfo, ChunkSummary, CompactionEvent,
+    ContextTurnEntry, DecisionChurnEntry, DecisionEntry, ErrorFixLesson,
+    ExplainFileEvolutionRequest, ExplainFileEvolutionResponse, FileEvolutionEntry,
     FileModificationEntry, GetEventContextRequest, GetEventContextResponse, GetFileHistoryRequest,
     GetFileHistoryResponse, GetProjectHealthRequest, GetProjectHealthResponse,
     GetProjectHistoryRequest, GetSessionDigestRequest, GetSessionInfoRequest,
@@ -391,7 +392,7 @@ impl SnatchServer {
     /// Use detail="overview" for user prompts only, "standard" for user+assistant
     /// text with tool names, or "full" for tool call details.
     #[tool(
-        description = "Read conversation messages from a session. Use detail='overview' for prompts only, 'conversation' for user+assistant text (skipping tool-only turns), 'standard' for user+assistant text, 'full' for tool details. At detail='full', Agent/Task calls are linked to the subagent they spawned (subagent_session_id) with a result preview; set include_subagent_transcripts=true to inline each subagent's full transcript. Subagents present on disk but not joinable to a specific call are surfaced in unmatched_subagents rather than dropped. Set include_thinking=true to include reasoning blocks — note this recovers rationale only for sessions from old Claude Code (~2.1.4x and earlier); recent versions persist thinking as empty text, and the response carries a thinking_note when that is the case. Supports pagination with offset/limit."
+        description = "Read conversation messages from a session. Use detail='overview' for prompts only, 'conversation' for user+assistant text (skipping tool-only turns), 'standard' for user+assistant text, 'full' for tool details. At detail='full', Agent/Task calls are linked to the subagent they spawned (subagent_session_id) with a result preview; set include_subagent_transcripts=true to inline each subagent's full transcript. Subagents present on disk but not joinable to a specific call are surfaced in unmatched_subagents rather than dropped. Set include_thinking=true to include reasoning blocks — note this recovers rationale only for sessions from old Claude Code (~2.1.4x and earlier); recent versions persist thinking as empty text, and the response carries a thinking_note when that is the case. Set chunk='4' or chunk='2-5' to retrieve prompt-boundary chunk(s): one human prompt plus everything it produced, including late async results (detail='overview' lists the prompts at the same indices, so overview then chunk composes). Supports pagination with offset/limit."
     )]
     async fn get_session_messages(&self, request: GetSessionMessagesRequest) -> ToolOutput {
         let chain_aware = request.chain_aware.unwrap_or(true);
@@ -436,6 +437,49 @@ impl SnatchServer {
         let unmatched_subagents = resolved_subagents.unmatched;
 
         let mut entries: Vec<&LogEntry> = resolved.conversation.main_thread_entries();
+
+        // Restrict to prompt-boundary chunk(s) when requested. Membership is
+        // tree-based, so late async results belong to the chunk that spawned
+        // them (appended after its main-thread members).
+        let chunk_info: Option<ChunkInfo> = if let Some(ref spec) = request.chunk {
+            use crate::analysis::chunking::{
+                chunk_conversation, entries_for_chunk_range, parse_chunk_spec,
+            };
+            let chunking = chunk_conversation(&resolved.conversation);
+            let (start, end) = match parse_chunk_spec(spec, chunking.len()) {
+                Ok(range) => range,
+                Err(message) => return ToolOutput::error(format!("Invalid chunk: {message}")),
+            };
+            entries = entries_for_chunk_range(&resolved.conversation, &chunking, start, end);
+            Some(ChunkInfo {
+                total_chunks: chunking.len(),
+                start,
+                end,
+                chunks: chunking.chunks[start..=end]
+                    .iter()
+                    .map(|c| ChunkSummary {
+                        index: c.index,
+                        prompt: truncate_text(&c.prompt_text, 200),
+                        start_ts: c.start_ts.map(|t| t.to_rfc3339()),
+                        end_ts: c.end_ts.map(|t| t.to_rfc3339()),
+                        entries: c.entry_count(),
+                        attached: c.attached_uuids.len(),
+                        tool_calls: c.tool_call_count,
+                        branches: c
+                            .branches
+                            .iter()
+                            .map(|b| ChunkBranchSummary {
+                                root_uuid: b.root_uuid.clone(),
+                                prompt: b.prompt_text.as_deref().map(|p| truncate_text(p, 100)),
+                                entries: b.uuids.len(),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            })
+        } else {
+            None
+        };
 
         // Surface the recent-Claude-Code redaction pattern (thinking blocks
         // present but all empty) so include_thinking never fails silently.
@@ -808,6 +852,7 @@ impl SnatchServer {
             unmatched_subagents,
             duplicate_notice,
             thinking_note,
+            chunk_info,
         };
 
         match ToolOutput::json(&response) {
