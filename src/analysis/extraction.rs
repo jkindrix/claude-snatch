@@ -78,6 +78,7 @@ pub fn is_noise_text(text: &str) -> bool {
             "<local-command-stderr>",
             "<command-name>",
             "<system-reminder>",
+            "<task-notification>",
         ];
         if noise_tags.iter().any(|tag| trimmed.starts_with(tag)) {
             return true;
@@ -844,6 +845,15 @@ mod tests {
     fn test_is_noise_text_interrupt() {
         assert!(is_noise_text("[Request interrupted by user]"));
         assert!(is_noise_text("[Request interrupted by user for tool use]"));
+    }
+
+    #[test]
+    fn test_task_notification_is_not_human_prompt() {
+        // A background-task completion notification is harness-initiated
+        // (isMeta is absent on these entries), not human input.
+        let line = r#"{"uuid":"1","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","version":"2.0","isSidechain":false,"message":{"role":"user","content":"<task-notification>\n<task-id>b4t2cw2zp</task-id>\n<status>completed</status>\n</task-notification>"}}"#;
+        let entry: LogEntry = serde_json::from_str(line).unwrap();
+        assert!(!is_human_prompt(&entry));
     }
 
     #[test]
