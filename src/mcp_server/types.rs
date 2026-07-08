@@ -166,7 +166,8 @@ pub struct GetSessionMessagesRequest {
     /// Session ID (full or prefix).
     pub session_id: String,
 
-    /// Detail level: "overview" (user prompts only, truncated),
+    /// Detail level: "overview" (prompt boundaries only — typed user prompts
+    /// plus queued mid-turn steering prompts — truncated),
     /// "conversation" (user prompts + assistant text, skips tool-only turns),
     /// "standard" (user + assistant text, tool names only),
     /// "full" (includes tool call details).
@@ -212,11 +213,12 @@ pub struct GetSessionMessagesRequest {
     pub include_subagent_transcripts: Option<bool>,
 
     /// Restrict to prompt-boundary chunk(s): a zero-based index like "4" or an
-    /// inclusive range like "2-5". Chunk N is human prompt N plus everything it
-    /// produced (tool traffic, responses, late async results), up to the next
-    /// human prompt. The prompts listed by detail="overview" use the same
-    /// indices, so overview → pick index → chunk retrieval composes. The
-    /// response carries chunk_info describing the selection.
+    /// inclusive range like "2-5". Chunk N is prompt N — a typed user prompt or
+    /// a queued mid-turn steering prompt — plus everything it produced (tool
+    /// traffic, responses, late async results), up to the next prompt. The
+    /// prompts listed by detail="overview" use the same indices, so overview →
+    /// pick index → chunk retrieval composes. The response carries chunk_info
+    /// describing the selection, including each chunk's prompt_source.
     pub chunk: Option<String>,
 }
 

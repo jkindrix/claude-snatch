@@ -1230,3 +1230,70 @@ fn test_monitor_no_insights_is_clean() {
         .success()
         .stdout(predicate::str::contains("No monitor insights"));
 }
+
+// =============================================================================
+// chunks / prompt-boundary retrieval
+// =============================================================================
+
+const QUEUED_SESSION_ID: &str = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
+
+/// Create a temp Claude dir with a session containing a queued steering
+/// prompt: user -> assistant -> queued_command attachment (human) -> assistant.
+fn setup_queued_fixture_dir() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let encoded = encode_project_path(PROJECT_PATH);
+    let project_dir = tmp.path().join("projects").join(&encoded);
+    std::fs::create_dir_all(&project_dir).expect("failed to create project dir");
+
+    let lines: &[&str] = &[
+        r#"{"type":"user","uuid":"11111111-1111-1111-1111-111111111111","parentUuid":null,"timestamp":"2025-01-15T10:00:00.000Z","sessionId":"SESSID","version":"2.0.74","message":{"role":"user","content":"Start the refactor"}}"#,
+        r#"{"type":"assistant","uuid":"22222222-2222-2222-2222-222222222222","parentUuid":"11111111-1111-1111-1111-111111111111","timestamp":"2025-01-15T10:00:01.000Z","sessionId":"SESSID","version":"2.0.74","message":{"id":"msg_001","type":"message","role":"assistant","content":[{"type":"text","text":"Working on it."}],"model":"claude-sonnet-4-20250514","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":15,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
+        r#"{"type":"attachment","uuid":"33333333-3333-3333-3333-333333333333","parentUuid":"22222222-2222-2222-2222-222222222222","timestamp":"2025-01-15T10:00:30.000Z","sessionId":"SESSID","isSidechain":false,"attachment":{"type":"queued_command","commandMode":"prompt","origin":{"kind":"human"},"prompt":"actually use the builder pattern instead"}}"#,
+        r#"{"type":"assistant","uuid":"44444444-4444-4444-4444-444444444444","parentUuid":"33333333-3333-3333-3333-333333333333","timestamp":"2025-01-15T10:00:31.000Z","sessionId":"SESSID","version":"2.0.74","message":{"id":"msg_002","type":"message","role":"assistant","content":[{"type":"text","text":"Switching to the builder pattern."}],"model":"claude-sonnet-4-20250514","stop_reason":"end_turn","usage":{"input_tokens":20,"output_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
+    ];
+    let jsonl = lines.join("\n").replace("SESSID", QUEUED_SESSION_ID) + "\n";
+    let session_file = project_dir.join(format!("{QUEUED_SESSION_ID}.jsonl"));
+    std::fs::write(&session_file, jsonl).expect("failed to write fixture");
+    tmp
+}
+
+/// A queued steering prompt is a chunk boundary, and `chunks -o json` exposes
+/// it via the public `prompt_source` field (regression guard for the API).
+#[test]
+fn test_chunks_json_marks_queued_prompt_source() {
+    let tmp = setup_queued_fixture_dir();
+    let output = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["chunks", QUEUED_SESSION_ID, "-o", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["total_chunks"], 2);
+    let chunks = json["chunks"].as_array().unwrap();
+    assert_eq!(chunks[0]["prompt_source"], "user");
+    assert_eq!(chunks[1]["prompt_source"], "queued");
+    assert_eq!(
+        chunks[1]["prompt"],
+        "actually use the builder pattern instead"
+    );
+}
+
+/// Text-mode pagination header stays honest when some paginated entries have
+/// nothing to render at the chosen detail level (here: the bare tool_result
+/// user entry at full detail). Regression guard for the "showing 1-5 but only
+/// 3 rows" bug.
+#[test]
+fn test_messages_header_reports_unrenderable_entries() {
+    let tmp = setup_fixture_dir();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["messages", SESSION_ID, "-D", "full", "-l", "6"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "5 rendered, 1 with no content at this detail",
+        ));
+}

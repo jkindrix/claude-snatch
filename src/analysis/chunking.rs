@@ -487,7 +487,7 @@ mod tests {
     #[test]
     fn test_queued_steering_prompt_starts_chunk() {
         // A mid-turn steering prompt exists only as a queued_command
-        // attachment (86% of them never appear as a user entry); it must
+        // attachment (these do not recur as user entries); it must
         // open a chunk, marked as Queued.
         let c = conv(&[
             user("u1", None, "2026-01-01T00:00:00Z", "start the work"),

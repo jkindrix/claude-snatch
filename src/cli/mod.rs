@@ -304,7 +304,7 @@ pub enum Commands {
     #[command(alias = "msgs", display_order = 26)]
     Messages(MessagesArgs),
 
-    /// List prompt-boundary chunks (one human prompt + everything it produced).
+    /// List prompt-boundary chunks (one prompt — typed or queued steering — + everything it produced).
     #[command(display_order = 26)]
     Chunks(ChunksArgs),
 
@@ -2399,7 +2399,7 @@ pub struct TimelineArgs {
 /// Detail level for messages output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum MessageDetail {
-    /// User prompts only, truncated.
+    /// Prompt boundaries only (typed user prompts + queued steering prompts), truncated.
     Overview,
     /// User prompts + assistant text, skipping tool-only turns.
     Conversation,
@@ -2501,8 +2501,8 @@ pub struct MessagesArgs {
     pub no_chain: bool,
 
     /// Restrict to prompt-boundary chunk(s): a zero-based index like "4" or an
-    /// inclusive range like "2-5". Chunk N is human prompt N plus everything it
-    /// produced (list chunks with `snatch chunks <session>`).
+    /// inclusive range like "2-5". Chunk N is prompt N — typed or queued
+    /// steering — plus everything it produced (list with `snatch chunks`).
     #[arg(long)]
     pub chunk: Option<String>,
 }

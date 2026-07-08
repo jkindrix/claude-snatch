@@ -50,7 +50,7 @@ This project provides an MCP server (`snatch serve-mcp`) that exposes 21 tools f
 
 ### Detail Levels for get_session_messages
 
-- **overview**: User prompts only, truncated. Fast orientation.
+- **overview**: Prompt boundaries only (typed user prompts + queued steering prompts), truncated. Fast orientation.
 - **conversation**: User prompts + assistant text responses, skipping tool-only turns. Best for understanding the dialogue.
 - **standard**: User + assistant text, tool names listed. Good balance.
 - **full**: Includes tool call details (file paths, commands). For deep investigation.
@@ -68,7 +68,7 @@ CLI equivalents: `snatch chunks <session>` (list), `snatch messages <session>
 Boundary/membership policies: harness-initiated turns (task notifications) are
 absorbed into the preceding chunk; mid-turn steering prompts start a new chunk
 — including queued prompts that exist only as `queued_command` attachments
-(86% of them never appear as a `user` entry); abandoned rewind branches attach
+(these do not recur as `user` entries); abandoned rewind branches attach
 to the chunk they forked from (metadata only); late async results belong to
 the chunk that spawned them (tree-based membership, appended after main-thread
 members). Each chunk carries `prompt_source`: "user" (typed at a turn
