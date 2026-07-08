@@ -202,7 +202,13 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
 
     let detail = args.detail.as_str();
     let msg_type_filter = args.message_type.as_str();
-    let limit = args.limit;
+    // 0 means unlimited, matching `list -n 0` (a literal take(0) returned
+    // nothing — the worst possible reading of "no limit").
+    let limit = if args.limit == 0 {
+        usize::MAX
+    } else {
+        args.limit
+    };
     let offset = args.offset;
     // "full" means full: it implies thinking regardless of the --include-thinking
     // flag. Other detail levels stay gated by the flag.

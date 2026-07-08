@@ -404,7 +404,11 @@ impl SnatchServer {
 
         let detail = request.detail.as_deref().unwrap_or("standard");
         let msg_type_filter = request.message_type.as_deref().unwrap_or("all");
-        let limit = request.limit.unwrap_or(50);
+        // 0 means unlimited, matching the CLI (`messages -l 0`).
+        let limit = match request.limit.unwrap_or(50) {
+            0 => usize::MAX,
+            n => n,
+        };
         let offset = request.offset.unwrap_or(0);
         let reverse = request.reverse.unwrap_or(false);
         let include_thinking = request.include_thinking.unwrap_or(false);

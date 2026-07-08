@@ -1350,3 +1350,15 @@ fn test_errors_only_keeps_failing_call_and_chunks_counts_it() {
         .success()
         .stdout(predicate::str::contains("⚠1 errors"));
 }
+
+/// `-l 0` means unlimited (matching `list -n 0`), not "take zero".
+#[test]
+fn test_messages_limit_zero_is_unlimited() {
+    let tmp = setup_fixture_dir();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["messages", SESSION_ID, "-l", "0", "-D", "full"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("showing 1-6"));
+}
