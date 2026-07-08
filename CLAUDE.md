@@ -66,10 +66,13 @@ CLI equivalents: `snatch chunks <session>` (list), `snatch messages <session>
 --chunk <N|A-B>` (retrieve).
 
 Boundary/membership policies: harness-initiated turns (task notifications) are
-absorbed into the preceding chunk; mid-turn steering prompts start a new chunk;
-abandoned rewind branches attach to the chunk they forked from (metadata only);
-late async results belong to the chunk that spawned them (tree-based
-membership, appended after main-thread members).
+absorbed into the preceding chunk; mid-turn steering prompts start a new chunk
+— including queued prompts that exist only as `queued_command` attachments
+(86% of them never appear as a `user` entry); abandoned rewind branches attach
+to the chunk they forked from (metadata only); late async results belong to
+the chunk that spawned them (tree-based membership, appended after main-thread
+members). Each chunk carries `prompt_source`: "user" (typed at a turn
+boundary) or "queued" (mid-turn steering).
 
 ### Thinking Block Recovery (old sessions only)
 

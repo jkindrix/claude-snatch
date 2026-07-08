@@ -31,7 +31,31 @@ use chrono::{DateTime, Utc};
 use crate::model::message::LogEntry;
 use crate::reconstruction::Conversation;
 
-use super::extraction::{extract_user_prompt_text, is_human_prompt};
+use super::extraction::{
+    boundary_prompt_text, extract_user_prompt_text, is_human_prompt, is_prompt_boundary,
+    queued_human_prompt,
+};
+
+/// How a chunk's opening prompt reached the conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptSource {
+    /// A prompt delivered as a `user` entry (typed at a turn boundary).
+    User,
+    /// A mid-turn steering prompt, present only as a `queued_command`
+    /// attachment (it usually never appears as a `user` entry).
+    Queued,
+}
+
+impl PromptSource {
+    /// Stable string form used by JSON output surfaces.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Queued => "queued",
+        }
+    }
+}
 
 /// An abandoned branch (e.g. a rewind fork) attached to the chunk it forked
 /// from.
@@ -70,6 +94,8 @@ pub struct SessionChunk {
     pub branches: Vec<ChunkBranch>,
     /// Number of tool_use blocks across the chunk's assistant entries.
     pub tool_call_count: usize,
+    /// How the opening prompt reached the conversation.
+    pub prompt_source: PromptSource,
 }
 
 impl SessionChunk {
@@ -124,17 +150,23 @@ pub fn chunk_conversation(conversation: &Conversation) -> ChunkingResult {
         let Some(node) = conversation.get_node(uuid) else {
             continue;
         };
-        if is_human_prompt(&node.entry) {
+        if is_prompt_boundary(&node.entry) {
+            let prompt_source = if queued_human_prompt(&node.entry).is_some() {
+                PromptSource::Queued
+            } else {
+                PromptSource::User
+            };
             chunks.push(SessionChunk {
                 index: chunks.len(),
                 prompt_uuid: uuid.clone(),
-                prompt_text: extract_user_prompt_text(&node.entry).unwrap_or_default(),
+                prompt_text: boundary_prompt_text(&node.entry).unwrap_or_default(),
                 start_ts: None,
                 end_ts: None,
                 main_uuids: Vec::new(),
                 attached_uuids: Vec::new(),
                 branches: Vec::new(),
                 tool_call_count: 0,
+                prompt_source,
             });
         }
         let idx = chunks.len().checked_sub(1);
@@ -356,6 +388,14 @@ mod tests {
         )
     }
 
+    fn queued_attachment(uuid: &str, parent: &str, ts: &str, prompt: &str, mode: &str) -> String {
+        format!(
+            r#"{{"uuid":"{uuid}","parentUuid":"{parent}","type":"attachment","timestamp":"{ts}","sessionId":"s","isSidechain":false,"attachment":{{"type":"queued_command","commandMode":"{mode}","origin":{{"kind":"{}"}},"prompt":{}}}}}"#,
+            if mode == "prompt" { "human" } else { "harness" },
+            serde_json::to_string(prompt).unwrap()
+        )
+    }
+
     fn conv(lines: &[String]) -> Conversation {
         let entries = lines
             .iter()
@@ -445,6 +485,51 @@ mod tests {
     }
 
     #[test]
+    fn test_queued_steering_prompt_starts_chunk() {
+        // A mid-turn steering prompt exists only as a queued_command
+        // attachment (86% of them never appear as a user entry); it must
+        // open a chunk, marked as Queued.
+        let c = conv(&[
+            user("u1", None, "2026-01-01T00:00:00Z", "start the work"),
+            assistant("a1", "u1", "2026-01-01T00:00:01Z", "working"),
+            queued_attachment(
+                "q1",
+                "a1",
+                "2026-01-01T00:00:30Z",
+                "wait, use the other approach",
+                "prompt",
+            ),
+            assistant("a2", "q1", "2026-01-01T00:00:31Z", "switching approach"),
+        ]);
+        let r = chunk_conversation(&c);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r.chunks[0].prompt_source, PromptSource::User);
+        assert_eq!(r.chunks[1].prompt_source, PromptSource::Queued);
+        assert_eq!(r.chunks[1].prompt_text, "wait, use the other approach");
+        assert_eq!(r.chunks[1].main_uuids, vec!["q1", "a2"]);
+    }
+
+    #[test]
+    fn test_machine_queued_command_is_not_a_boundary() {
+        // task-notification queued_commands are machine traffic — absorbed.
+        let c = conv(&[
+            user("u1", None, "2026-01-01T00:00:00Z", "start the work"),
+            assistant("a1", "u1", "2026-01-01T00:00:01Z", "working"),
+            queued_attachment(
+                "q1",
+                "a1",
+                "2026-01-01T00:00:30Z",
+                "<task-notification>done</task-notification>",
+                "task-notification",
+            ),
+            assistant("a2", "q1", "2026-01-01T00:00:31Z", "noted"),
+        ]);
+        let r = chunk_conversation(&c);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r.chunks[0].main_uuids, vec!["u1", "a1", "q1", "a2"]);
+    }
+
+    #[test]
     fn test_preamble_before_first_prompt() {
         let c = conv(&[
             user(
@@ -491,6 +576,29 @@ mod tests {
             .filter_map(|e| e.uuid())
             .collect();
         assert_eq!(uuids, vec!["u2", "a2", "u3"]);
+    }
+
+    #[test]
+    fn test_overview_predicate_matches_chunk_boundaries() {
+        // detail=overview retains main-thread entries via is_prompt_boundary;
+        // chunk indices must always line up with that listing.
+        let c = conv(&[
+            user("u1", None, "2026-01-01T00:00:00Z", "one"),
+            assistant("a1", "u1", "2026-01-01T00:00:01Z", "r1"),
+            queued_attachment("q1", "a1", "2026-01-01T00:00:30Z", "steer!", "prompt"),
+            assistant("a2", "q1", "2026-01-01T00:00:31Z", "r2"),
+            user("u2", Some("a2"), "2026-01-01T00:01:00Z", "two"),
+        ]);
+        let r = chunk_conversation(&c);
+        let overview_uuids: Vec<&str> = c
+            .main_thread_entries()
+            .iter()
+            .filter(|e| is_prompt_boundary(e))
+            .filter_map(|e| e.uuid())
+            .collect();
+        let chunk_uuids: Vec<&str> = r.chunks.iter().map(|c| c.prompt_uuid.as_str()).collect();
+        assert_eq!(overview_uuids, chunk_uuids);
+        assert_eq!(chunk_uuids, vec!["u1", "q1", "u2"]);
     }
 
     #[test]

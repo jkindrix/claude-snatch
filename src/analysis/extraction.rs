@@ -154,6 +154,26 @@ pub fn queued_human_prompt(entry: &LogEntry) -> Option<&str> {
     }
 }
 
+/// Check whether an entry opens a prompt-boundary chunk.
+///
+/// True for human prompts delivered as `user` entries ([`is_human_prompt`])
+/// and for mid-turn steering prompts, which exist only as `queued_command`
+/// attachments ([`queued_human_prompt`]) — 86% of queued human prompts never
+/// appear as a `user` entry. Chunking and `detail=overview` share this
+/// predicate so chunk indices and overview prompt listings never drift.
+pub fn is_prompt_boundary(entry: &LogEntry) -> bool {
+    is_human_prompt(entry) || queued_human_prompt(entry).is_some()
+}
+
+/// The prompt text of a boundary entry (typed prompt or queued steering
+/// prompt). `None` for entries that are not prompt boundaries.
+pub fn boundary_prompt_text(entry: &LogEntry) -> Option<String> {
+    if is_human_prompt(entry) {
+        return extract_user_prompt_text(entry);
+    }
+    queued_human_prompt(entry).map(str::to_string)
+}
+
 /// Render a human-readable marker for an attachment log entry.
 ///
 /// Every attachment yields a `[attachment: <type>]` marker so a reader knows

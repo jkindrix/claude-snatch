@@ -7,6 +7,9 @@ use std::collections::HashMap;
 
 use crate::analysis::chunking::{chunk_conversation, entries_for_chunk_range, parse_chunk_spec};
 use crate::analysis::extraction::{
+    boundary_prompt_text, is_prompt_boundary, queued_human_prompt, render_attachment_content,
+};
+use crate::analysis::extraction::{
     extract_assistant_summary, extract_thinking_text, extract_tool_input_summary,
     extract_tool_names, extract_user_prompt_text, get_model, has_thinking, is_human_prompt,
     truncate_text,
@@ -105,6 +108,50 @@ struct ToolDetailOutput {
 /// at that level. Other levels stay gated by the `--include-thinking` flag.
 fn effective_include_thinking(flag: bool, detail: &str) -> bool {
     flag || detail == "full"
+}
+
+/// Whether an entry produces any output in text mode at the given detail
+/// level. Mirrors the skip rules of the render arms in `run` below — keep the
+/// two in sync, or the "showing X-Y" header lies about the rows that follow.
+fn renders_at_detail(
+    entry: &LogEntry,
+    detail: &str,
+    include_thinking: bool,
+    thinking_max_len: usize,
+    truncate_len: usize,
+) -> bool {
+    let thinking_renders =
+        || include_thinking && extract_thinking_text(entry, thinking_max_len).is_some();
+    match detail {
+        "overview" => boundary_prompt_text(entry).is_some(),
+        "conversation" => {
+            let has_content = match entry {
+                LogEntry::User(_) => extract_user_prompt_text(entry).is_some(),
+                LogEntry::Assistant(_) => extract_assistant_summary(entry, truncate_len).is_some(),
+                LogEntry::Attachment(_) => queued_human_prompt(entry).is_some(),
+                _ => false,
+            };
+            has_content || thinking_renders()
+        }
+        _ => {
+            // "standard" / "full"
+            let has_content = match entry {
+                LogEntry::User(_) => extract_user_prompt_text(entry).is_some(),
+                LogEntry::Assistant(_) => extract_assistant_summary(entry, truncate_len).is_some(),
+                LogEntry::System(sys) => sys.content.is_some(),
+                LogEntry::Attachment(_) => render_attachment_content(entry, truncate_len).is_some(),
+                _ => false,
+            };
+            let has_tools = if detail == "standard" {
+                !extract_tool_names(entry).is_empty()
+            } else if let LogEntry::Assistant(a) = entry {
+                !a.message.tool_uses().is_empty()
+            } else {
+                false
+            };
+            has_content || has_tools || thinking_renders()
+        }
+    }
 }
 
 /// Run the messages command.
@@ -255,15 +302,19 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
         });
     }
 
-    // Pre-filter by detail level
+    // Pre-filter by detail level. Overview uses the chunker's boundary
+    // predicate (typed prompts + queued steering prompts) so its indices
+    // always match chunk indices.
     match detail {
         "overview" => {
-            main_entries.retain(|e| is_human_prompt(e));
+            main_entries.retain(|e| is_prompt_boundary(e));
         }
         "conversation" => {
             main_entries.retain(|e| match e {
                 LogEntry::User(_) => is_human_prompt(e),
                 LogEntry::Assistant(_) => extract_assistant_summary(e, 1).is_some(),
+                // Queued steering prompts are dialogue, not tool noise.
+                LogEntry::Attachment(_) => queued_human_prompt(e).is_some(),
                 _ => false,
             });
         }
@@ -330,8 +381,24 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                 return Ok(());
             }
 
+            // Honest header: pagination slices raw entries, but some entries
+            // produce no output at this detail level (bare tool results,
+            // metadata). Count the renderable ones up front so "showing X-Y"
+            // never overstates what follows.
+            let rendered_count = paginated
+                .iter()
+                .filter(|(_, e)| {
+                    renders_at_detail(e, detail, include_thinking, thinking_max_len, truncate_len)
+                })
+                .count();
+            let skipped = paginated.len() - rendered_count;
+            let skip_note = if skipped > 0 {
+                format!("; {rendered_count} rendered, {skipped} with no content at this detail")
+            } else {
+                String::new()
+            };
             println!(
-                "Session {} ({} messages, showing {}-{})\n",
+                "Session {} ({} messages, showing {}-{}{skip_note})\n",
                 &args.session_id[..8.min(args.session_id.len())],
                 total_messages,
                 offset + 1,
@@ -353,9 +420,14 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
 
                 match detail {
                     "overview" => {
-                        if let Some(text) = extract_user_prompt_text(entry) {
+                        if let Some(text) = boundary_prompt_text(entry) {
+                            let marker = if matches!(entry, LogEntry::Attachment(_)) {
+                                "user (queued)"
+                            } else {
+                                "user"
+                            };
                             println!(
-                                "[{orig_idx}] {timestamp} user: {}",
+                                "[{orig_idx}] {timestamp} {marker}: {}",
                                 truncate_text(&text, truncate_len)
                             );
                         }
@@ -367,6 +439,8 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                             LogEntry::Assistant(_) => {
                                 extract_assistant_summary(entry, truncate_len)
                             }
+                            LogEntry::Attachment(_) => queued_human_prompt(entry)
+                                .map(|t| format!("(queued) {}", truncate_text(t, truncate_len))),
                             _ => None,
                         };
                         if let Some(text) = content {
@@ -386,6 +460,9 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                                 extract_assistant_summary(entry, truncate_len)
                             }
                             LogEntry::System(sys) => sys.content.clone(),
+                            LogEntry::Attachment(_) => {
+                                render_attachment_content(entry, truncate_len)
+                            }
                             _ => None,
                         };
                         let tools = extract_tool_names(entry);
@@ -424,6 +501,9 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                                 extract_assistant_summary(entry, truncate_len)
                             }
                             LogEntry::System(sys) => sys.content.clone(),
+                            LogEntry::Attachment(_) => {
+                                render_attachment_content(entry, truncate_len)
+                            }
                             _ => None,
                         };
                         let tool_uses: Vec<_> = if let LogEntry::Assistant(a) = entry {
@@ -585,7 +665,7 @@ fn build_message_output(
 
     match detail {
         "overview" => {
-            let content = extract_user_prompt_text(entry).map(|t| truncate_text(&t, truncate_len));
+            let content = boundary_prompt_text(entry).map(|t| truncate_text(&t, truncate_len));
             Some(MessageOutput {
                 index,
                 msg_type,
@@ -605,6 +685,8 @@ fn build_message_output(
                     extract_user_prompt_text(entry).map(|t| truncate_text(&t, truncate_len))
                 }
                 LogEntry::Assistant(_) => extract_assistant_summary(entry, truncate_len),
+                LogEntry::Attachment(_) => queued_human_prompt(entry)
+                    .map(|t| format!("(queued) {}", truncate_text(t, truncate_len))),
                 _ => None,
             };
             let thinking = if include_thinking {
@@ -636,6 +718,7 @@ fn build_message_output(
                 }
                 LogEntry::Assistant(_) => extract_assistant_summary(entry, truncate_len),
                 LogEntry::System(sys) => sys.content.clone(),
+                LogEntry::Attachment(_) => render_attachment_content(entry, truncate_len),
                 _ => None,
             };
             let tool_names = extract_tool_names(entry);
@@ -673,6 +756,7 @@ fn build_message_output(
                 }
                 LogEntry::Assistant(_) => extract_assistant_summary(entry, truncate_len),
                 LogEntry::System(sys) => sys.content.clone(),
+                LogEntry::Attachment(_) => render_attachment_content(entry, truncate_len),
                 _ => None,
             };
             let tool_names = extract_tool_names(entry);

@@ -334,6 +334,10 @@ pub struct ChunkSummary {
     pub index: usize,
     /// Opening human prompt, truncated.
     pub prompt: String,
+    /// How the prompt reached the conversation: "user" (typed at a turn
+    /// boundary) or "queued" (mid-turn steering via a queued_command
+    /// attachment).
+    pub prompt_source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_ts: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

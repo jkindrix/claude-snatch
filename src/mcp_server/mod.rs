@@ -44,13 +44,14 @@ use crate::model::message::LogEntry;
 use crate::reconstruction::Conversation;
 
 use helpers::{
-    extract_assistant_summary, extract_error_preview, extract_files_from_tools,
-    extract_image_placeholders, extract_result_preview, extract_thinking_text,
-    extract_tool_input_summary, extract_tool_names, extract_user_prompt_text,
-    find_compaction_events, get_claude_dir, get_model, has_thinking, is_human_prompt,
-    main_thread_message_total, parse_timestamp_param, period_cutoff, render_attachment_content,
-    resolve_project, resolve_session, resolve_session_with_chain, search_entry_text,
-    thinking_redaction_note, truncate_text,
+    boundary_prompt_text, extract_assistant_summary, extract_error_preview,
+    extract_files_from_tools, extract_image_placeholders, extract_result_preview,
+    extract_thinking_text, extract_tool_input_summary, extract_tool_names,
+    extract_user_prompt_text, find_compaction_events, get_claude_dir, get_model, has_thinking,
+    is_human_prompt, is_prompt_boundary, main_thread_message_total, parse_timestamp_param,
+    period_cutoff, queued_human_prompt, render_attachment_content, resolve_project,
+    resolve_session, resolve_session_with_chain, search_entry_text, thinking_redaction_note,
+    truncate_text,
 };
 use types::{
     ChangeEventEntry, ChunkBranchSummary, ChunkInfo, ChunkSummary, CompactionEvent,
@@ -460,6 +461,7 @@ impl SnatchServer {
                     .map(|c| ChunkSummary {
                         index: c.index,
                         prompt: truncate_text(&c.prompt_text, 200),
+                        prompt_source: c.prompt_source.as_str().to_string(),
                         start_ts: c.start_ts.map(|t| t.to_rfc3339()),
                         end_ts: c.end_ts.map(|t| t.to_rfc3339()),
                         entries: c.entry_count(),
@@ -535,11 +537,12 @@ impl SnatchServer {
             });
         }
 
-        // Pre-filter entries based on detail level
+        // Pre-filter entries based on detail level. Overview uses the
+        // chunker's boundary predicate (typed prompts + queued steering
+        // prompts) so its indices always match chunk indices.
         match detail {
             "overview" => {
-                // Only human-authored prompts (excludes system noise)
-                entries.retain(|e| is_human_prompt(e));
+                entries.retain(|e| is_prompt_boundary(e));
             }
             "conversation" => {
                 // Human prompts + assistant messages with text content
@@ -547,6 +550,8 @@ impl SnatchServer {
                 entries.retain(|e| match e {
                     LogEntry::User(_) => is_human_prompt(e),
                     LogEntry::Assistant(_) => extract_assistant_summary(e, 1).is_some(),
+                    // Queued steering prompts are dialogue, not tool noise.
+                    LogEntry::Attachment(_) => queued_human_prompt(e).is_some(),
                     _ => false,
                 });
             }
@@ -624,8 +629,8 @@ impl SnatchServer {
 
                 match detail {
                     "overview" => {
-                        let content = extract_user_prompt_text(entry)
-                            .map(|t| truncate_text(&t, truncate_len));
+                        let content =
+                            boundary_prompt_text(entry).map(|t| truncate_text(&t, truncate_len));
                         MessageEntry {
                             index: *orig_idx,
                             msg_type,
@@ -647,6 +652,8 @@ impl SnatchServer {
                             LogEntry::Assistant(_) => {
                                 extract_assistant_summary(entry, truncate_len)
                             }
+                            LogEntry::Attachment(_) => queued_human_prompt(entry)
+                                .map(|t| format!("(queued) {}", truncate_text(t, truncate_len))),
                             _ => None,
                         };
                         let thinking = if include_thinking {

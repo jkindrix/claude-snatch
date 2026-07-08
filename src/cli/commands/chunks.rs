@@ -31,6 +31,8 @@ struct ChunksOutput {
 struct ChunkOutput {
     index: usize,
     prompt: String,
+    /// "user" (typed at a turn boundary) or "queued" (mid-turn steering).
+    prompt_source: &'static str,
     prompt_uuid: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     start_ts: Option<String>,
@@ -105,6 +107,7 @@ pub fn run(cli: &Cli, args: &ChunksArgs) -> Result<()> {
                     .map(|c| ChunkOutput {
                         index: c.index,
                         prompt: truncate_text(&c.prompt_text, 200),
+                        prompt_source: c.prompt_source.as_str(),
                         prompt_uuid: c.prompt_uuid.clone(),
                         start_ts: c.start_ts.map(|t| t.to_rfc3339()),
                         end_ts: c.end_ts.map(|t| t.to_rfc3339()),
@@ -157,8 +160,12 @@ pub fn run(cli: &Cli, args: &ChunksArgs) -> Result<()> {
                 } else {
                     format!(" (+{} attached)", chunk.attached_uuids.len())
                 };
+                let queued_marker = match chunk.prompt_source {
+                    crate::analysis::chunking::PromptSource::Queued => "(queued) ",
+                    crate::analysis::chunking::PromptSource::User => "",
+                };
                 println!(
-                    "[{:3}] {start}  {:4} entries  {:3} tools{attached}  {}",
+                    "[{:3}] {start}  {:4} entries  {:3} tools{attached}  {queued_marker}{}",
                     chunk.index,
                     chunk.entry_count(),
                     chunk.tool_call_count,
