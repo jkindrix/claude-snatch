@@ -288,6 +288,10 @@ pub enum Commands {
     #[command(display_order = 24)]
     Monitor(MonitorArgs),
 
+    /// Diagnose schema drift: unmodeled entry types, degraded features.
+    #[command(display_order = 24)]
+    Doctor(DoctorArgs),
+
     /// Contextual zoom around a specific event in a session.
     #[command(display_order = 24)]
     Context(ContextArgs),
@@ -2249,6 +2253,25 @@ pub struct MonitorArgs {
     pub top: usize,
 }
 
+/// Arguments for the doctor command.
+#[derive(Debug, Parser)]
+pub struct DoctorArgs {
+    /// Project path filter (substring match). Default: all projects.
+    pub project: Option<String>,
+
+    /// Only scan sessions since this date (default: 30d).
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Scan the entire corpus (no date bound). Slower.
+    #[arg(long, conflicts_with = "since")]
+    pub all: bool,
+
+    /// Include subagent transcripts in the scan.
+    #[arg(long)]
+    pub subagents: bool,
+}
+
 /// Arguments for the health command.
 #[derive(Debug, Parser)]
 pub struct HealthArgs {
@@ -2764,6 +2787,7 @@ pub fn run() -> Result<()> {
         Some(Commands::Decisions(args)) => commands::decisions::run(&cli, args),
         Some(Commands::Thread(args)) => commands::thread::run(&cli, args),
         Some(Commands::Monitor(args)) => commands::monitor::run(&cli, args),
+        Some(Commands::Doctor(args)) => commands::doctor::run(&cli, args),
         Some(Commands::Health(args)) => commands::health::run(&cli, args),
         Some(Commands::FileEvolution(args)) => commands::file_evolution::run(&cli, args),
         Some(Commands::Priorities(args)) => commands::priorities::run(&cli, args),

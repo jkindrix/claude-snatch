@@ -13,6 +13,7 @@
 //! - [`timeline`]: Turn-by-turn narrative building with tool-only collapse
 
 pub mod digest;
+pub mod doctor;
 pub mod event_context;
 pub mod extraction;
 pub mod file_evolution;
