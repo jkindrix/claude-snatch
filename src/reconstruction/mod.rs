@@ -350,8 +350,21 @@ impl Conversation {
         // continuation at a fork, so the walk follows the progress chain and
         // dead-ends — silently dropping the rest of the conversation.
         // Weighting progress nodes as 0 keeps the walk on the conversation.
+        //
+        // Tool-result-only user entries are demoted for the same reason: a
+        // background tool result that lands *after* the conversation moved on
+        // forks off its spawning assistant message with the latest timestamp
+        // in the file. Counting it as conversational lets that leaf outrank
+        // the real continuation at the fork (visible when the async result is
+        // the session's last event: the walk dead-ends on it and drops the
+        // final prompt + response). A user entry carrying tool_result blocks
+        // is machine traffic even when a synthetic text ack rides along.
         fn is_conversational(entry: &LogEntry) -> bool {
-            !matches!(entry, LogEntry::Progress(_))
+            match entry {
+                LogEntry::Progress(_) => false,
+                LogEntry::User(user) => !user.message.has_tool_results(),
+                _ => true,
+            }
         }
         // Iterative post-order traversal (children before parent). A recursive
         // walk recurses once per child and so reaches a depth equal to the
@@ -885,6 +898,46 @@ mod tests {
         assert_eq!(conv.roots().len(), 1);
         assert_eq!(conv.main_thread().len(), 3);
         assert!(!conv.has_branches());
+    }
+
+    #[test]
+    fn test_trailing_async_tool_result_does_not_steal_main_thread_tail() {
+        // A background tool result that is the session's LAST event forks off
+        // its spawning assistant message with the latest timestamp in the
+        // file. It must not outrank the real continuation: the main thread
+        // has to keep the final prompt + response, leaving the async result
+        // off-thread.
+        let mk = |json: &str| -> LogEntry { serde_json::from_str(json).unwrap() };
+        let entries = vec![
+            mk(
+                r#"{"uuid":"u1","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","version":"2.0","isSidechain":false,"message":{"role":"user","content":"run it in background"}}"#,
+            ),
+            mk(
+                r#"{"uuid":"a1","parentUuid":"u1","type":"assistant","timestamp":"2026-01-01T00:00:01Z","sessionId":"s","version":"2.0","isSidechain":false,"message":{"id":"m1","type":"message","role":"assistant","model":"claude","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}"#,
+            ),
+            mk(
+                r#"{"uuid":"a2","parentUuid":"a1","type":"assistant","timestamp":"2026-01-01T00:00:02Z","sessionId":"s","version":"2.0","isSidechain":false,"message":{"id":"m2","type":"message","role":"assistant","model":"claude","content":[{"type":"text","text":"moving on"}]}}"#,
+            ),
+            mk(
+                r#"{"uuid":"u2","parentUuid":"a2","type":"user","timestamp":"2026-01-01T00:01:00Z","sessionId":"s","version":"2.0","isSidechain":false,"message":{"role":"user","content":"final question"}}"#,
+            ),
+            mk(
+                r#"{"uuid":"a3","parentUuid":"u2","type":"assistant","timestamp":"2026-01-01T00:01:01Z","sessionId":"s","version":"2.0","isSidechain":false,"message":{"id":"m3","type":"message","role":"assistant","model":"claude","content":[{"type":"text","text":"final answer"}]}}"#,
+            ),
+            // Latest timestamp in the file, hanging off a1 as a leaf.
+            mk(
+                r#"{"uuid":"tr1","parentUuid":"a1","type":"user","timestamp":"2026-01-01T00:06:00Z","sessionId":"s","version":"2.0","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"done"}]}}"#,
+            ),
+        ];
+
+        let conv = Conversation::from_entries(entries).unwrap();
+
+        assert_eq!(
+            conv.main_thread(),
+            &["u1", "a1", "a2", "u2", "a3"],
+            "main thread must follow the conversation, not the async leaf"
+        );
+        assert!(!conv.get_node("tr1").unwrap().is_main_thread);
     }
 
     #[test]

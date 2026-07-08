@@ -3326,6 +3326,7 @@ mod tests {
                     after_timestamp: None,
                     before_timestamp: None,
                     include_subagent_transcripts: None,
+                    chunk: None,
                 })
                 .await,
         );
@@ -3415,6 +3416,7 @@ mod tests {
                     after_timestamp: None,
                     before_timestamp: None,
                     include_subagent_transcripts: None,
+                    chunk: None,
                 })
                 .await,
         );
@@ -3460,6 +3462,7 @@ mod tests {
                     after_timestamp: None,
                     before_timestamp: None,
                     include_subagent_transcripts: None,
+                    chunk: None,
                 })
                 .await,
         );
@@ -3520,6 +3523,7 @@ mod tests {
                     after_timestamp: None,
                     before_timestamp: None,
                     include_subagent_transcripts: None,
+                    chunk: None,
                 })
                 .await,
         );
@@ -3586,6 +3590,7 @@ mod tests {
                     after_timestamp: None,
                     before_timestamp: None,
                     include_subagent_transcripts: None,
+                    chunk: None,
                 })
                 .await,
         );

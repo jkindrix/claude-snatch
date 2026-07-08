@@ -304,9 +304,11 @@ pub fn parse_chunk_spec(spec: &str, total: usize) -> Result<(usize, usize), Stri
     Ok((start, end))
 }
 
-/// Collect the entries of chunks `start..=end` for rendering: each chunk's
-/// main-thread members in main-thread order, then its attached entries in
-/// timestamp order. Branch entries are excluded (surfaced as metadata only).
+/// Collect the entries of chunks `start..=end` for rendering.
+///
+/// Each chunk contributes its main-thread members in main-thread order, then
+/// its attached entries in timestamp order. Branch entries are excluded
+/// (surfaced as metadata only).
 #[must_use]
 pub fn entries_for_chunk_range<'a>(
     conversation: &'a Conversation,
@@ -428,10 +430,11 @@ mod tests {
             assistant("a1", "u1", "2026-01-01T00:00:01Z", "running"),
             assistant("a2", "a1", "2026-01-01T00:00:02Z", "moving on"),
             user("u2", Some("a2"), "2026-01-01T00:01:00Z", "next task"),
+            assistant("a3", "u2", "2026-01-01T00:01:01Z", "ok"),
+            // The async result is the session's LAST event — the hardest
+            // shape: reconstruction must not let it steal the main-thread
+            // tail, and chunking must attach it to the spawning chunk.
             tool_result("tr1", "a1", "2026-01-01T00:06:00Z"),
-            // The live conversation continues after the async result lands;
-            // its later activity keeps the main thread on the real chain.
-            assistant("a3", "u2", "2026-01-01T00:07:00Z", "ok"),
         ]);
         let r = chunk_conversation(&c);
         assert_eq!(r.len(), 2);
