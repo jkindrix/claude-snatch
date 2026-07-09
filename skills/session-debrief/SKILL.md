@@ -41,8 +41,11 @@ directives, make or approve irreversible decisions, or repeat earlier
 instructions — these calm chunks carry no distress markers and are exactly
 where quiet-but-durable knowledge lives. Then add the distress-marked chunks
 (`⚠ errors`, `(queued)`, abandoned branches, unusually long spans); distress
-decides where the expensive `-D` reads of agent output go. Report skipped
-chunks by their prompt line, not count alone, so prefilter recall is
+decides where the expensive `-D` reads of agent output go. A prompt line
+ending in `...` was truncated — re-pull it in full (larger `--max-text-len`)
+before that chunk is eligible to be skipped: constraints-in-passing live in
+the back half of long prompts, exactly the region truncation removes. Report
+skipped chunks by their prompt line, not count alone, so prefilter recall is
 spot-checkable.
 
 **3. Read** — `snatch messages <id> --chunk <N> -D conversation`; escalate to
@@ -56,8 +59,11 @@ passing, durable "always/never" directives, discoveries contradicting docs.
 **4. Gate — all three must hold, in order:**
 
 - **Signal fired.** Surprise (expectation violated, root cause found, the user
-  corrected the agent's model), irreversibility, blast radius, or friction
-  (re-litigation, repeated instruction). Observably present in the chunk text.
+  corrected the agent's model), irreversibility, blast radius, friction
+  (re-litigation, repeated instruction), or an explicit durable directive —
+  the user declaring an always/never rule pre-paid the detection cost, so a
+  calm first-time directive fires this gate. Observably present in the chunk
+  text.
 - **Non-derivable — verified, not asserted.** Check the artifacts before
   claiming it: the chunk's touched files (`-D full` shows paths), `git log`
   for the session's window, existing docs/CLAUDE.md. Name what you checked.
@@ -83,7 +89,10 @@ that disagree.
 **6. Sweep.** While the registries are open: retire notes/decisions whose
 `expires_when` has passed or that current artifacts now contradict; when
 this session re-confirmed an existing item, record the confirmation on it
-(repetition is the promotion signal — recommend escalating its home one rung).
+(repetition is the promotion signal — recommend escalating its home one
+rung). Report the active-entry count against any numeric thresholds declared
+in registry items' `resurface_when` — the sweep is the only watcher those
+triggers have.
 
 **7. Report.** Items filed (statement → home → resurface trigger), items
 rejected per gate (one line each), registry ops performed, and skipped
