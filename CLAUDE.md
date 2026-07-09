@@ -27,8 +27,13 @@ whose job was to warn about this. This file is the out-of-blast-radius guard:
 if registries or logs are unexpectedly missing, that event happened. The real
 mitigation is the backup/consolidation feature (claude-snatch note #1, if it
 still exists; otherwise: rsync ~/.claude/projects to a central store was the
-plan). Until built, periodic manual backup of ~/.claude/projects is the only
-protection.
+plan). Interim protection EXISTS: `~/snatch-memory-backups/` is a local git
+repo mirroring every project's memory dir (registries + auto-memory),
+refreshed by the SessionStart hook on every session start (backup.sh, rsync
+without --delete, so upstream wipes cannot propagate; git history keeps all
+prior states). Recovery = copy the project dir back. NOT covered: the session
+JSONL logs themselves (multi-GB — that is the consolidation feature's job)
+and machine loss (add a private remote to the backup repo for that).
 
 ## Session History Recall (snatch MCP)
 
