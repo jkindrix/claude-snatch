@@ -22,6 +22,10 @@ struct NoteOutput {
     created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resurface_when: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_when: Option<String>,
 }
 
 /// JSON output for note mutations.
@@ -60,6 +64,8 @@ pub fn run(cli: &Cli, args: &NotesArgs) -> Result<()> {
                                 text: n.text.clone(),
                                 created_at: n.created_at.to_rfc3339(),
                                 session_id: n.session_id.clone(),
+                                resurface_when: n.resurface_when.clone(),
+                                expires_when: n.expires_when.clone(),
                             })
                             .collect(),
                     };
@@ -95,6 +101,9 @@ pub fn run(cli: &Cli, args: &NotesArgs) -> Result<()> {
 
             let mut store = load_notes(project_dir)?;
             let id = store.add_note(text.to_string(), args.session_id.clone());
+            if args.resurface_when.is_some() || args.expires_when.is_some() {
+                store.set_note_schedule(id, args.resurface_when.clone(), args.expires_when.clone());
+            }
             save_notes(project_dir, &store)?;
 
             match cli.effective_output() {
@@ -109,6 +118,8 @@ pub fn run(cli: &Cli, args: &NotesArgs) -> Result<()> {
                             text: note.text.clone(),
                             created_at: note.created_at.to_rfc3339(),
                             session_id: note.session_id.clone(),
+                            resurface_when: note.resurface_when.clone(),
+                            expires_when: note.expires_when.clone(),
                         }),
                     };
                     println!("{}", serde_json::to_string_pretty(&output)?);

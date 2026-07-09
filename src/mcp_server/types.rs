@@ -836,6 +836,13 @@ pub struct ManageNotesRequest {
 
     /// Note ID (required for "remove").
     pub id: Option<u64>,
+
+    /// Concrete future moment this note must precede (optional, for "add").
+    /// Structured join key for debrief sweeps and resurfacing.
+    pub resurface_when: Option<String>,
+
+    /// Condition/version after which this note is stale (optional, for "add").
+    pub expires_when: Option<String>,
 }
 
 /// A note entry in responses.
@@ -846,6 +853,10 @@ pub struct NoteEntry {
     pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resurface_when: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_when: Option<String>,
 }
 
 /// Response for manage_notes.
@@ -897,6 +908,13 @@ pub struct ManageDecisionsRequest {
 
     /// Session ID where the decision was made.
     pub session_id: Option<String>,
+
+    /// Concrete future moment this decision must precede (for "add"/"update").
+    /// Structured join key for debrief sweeps and resurfacing.
+    pub resurface_when: Option<String>,
+
+    /// Condition/version after which this decision is stale (for "add"/"update").
+    pub expires_when: Option<String>,
 }
 
 /// A decision entry in responses.
@@ -918,6 +936,10 @@ pub struct DecisionEntry {
     pub tags: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub references: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resurface_when: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_when: Option<String>,
 }
 
 /// Response for manage_decisions.

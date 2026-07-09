@@ -1873,6 +1873,8 @@ impl SnatchServer {
                         text: n.text.clone(),
                         created_at: n.created_at.to_rfc3339(),
                         session_id: n.session_id.clone(),
+                        resurface_when: n.resurface_when.clone(),
+                        expires_when: n.expires_when.clone(),
                     })
                     .collect();
 
@@ -1897,6 +1899,9 @@ impl SnatchServer {
                 };
 
                 let id = store.add_note(text.clone(), request.session_id);
+                if request.resurface_when.is_some() || request.expires_when.is_some() {
+                    store.set_note_schedule(id, request.resurface_when, request.expires_when);
+                }
 
                 if let Err(e) = save_notes(&resolved.project_dir, &store) {
                     return ToolOutput::error(format!("Failed to save notes: {e}"));
@@ -1913,6 +1918,8 @@ impl SnatchServer {
                         text: note.text.clone(),
                         created_at: note.created_at.to_rfc3339(),
                         session_id: note.session_id.clone(),
+                        resurface_when: note.resurface_when.clone(),
+                        expires_when: note.expires_when.clone(),
                     }),
                 };
 
@@ -2006,6 +2013,8 @@ impl SnatchServer {
                 superseded_by: d.superseded_by,
                 tags: d.tags.clone(),
                 references: d.references.clone(),
+                resurface_when: d.resurface_when.clone(),
+                expires_when: d.expires_when.clone(),
             }
         }
 
@@ -2068,6 +2077,9 @@ impl SnatchServer {
                         store.update_decision(id, Some(status), None, None, None);
                     }
                 }
+                if request.resurface_when.is_some() || request.expires_when.is_some() {
+                    store.set_decision_schedule(id, request.resurface_when, request.expires_when);
+                }
 
                 if let Err(e) = save_decisions(&resolved.project_dir, &store) {
                     return ToolOutput::error(format!("Failed to save decisions: {e}"));
@@ -2106,6 +2118,9 @@ impl SnatchServer {
 
                 if !store.update_decision(id, status, request.description, request.confidence, tags) {
                     return ToolOutput::error(format!("Decision #{id} not found"));
+                }
+                if request.resurface_when.is_some() || request.expires_when.is_some() {
+                    store.set_decision_schedule(id, request.resurface_when, request.expires_when);
                 }
 
                 if let Err(e) = save_decisions(&resolved.project_dir, &store) {

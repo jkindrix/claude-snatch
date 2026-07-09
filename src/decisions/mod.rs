@@ -87,6 +87,15 @@ pub struct Decision {
     /// References to related session IDs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub references: Vec<String>,
+    /// The concrete future moment this decision must precede (e.g. "before
+    /// changing the session schema"). Structured join key for debrief sweeps
+    /// and resurfacing, not prose inside the description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resurface_when: Option<String>,
+    /// Condition, version, or milestone after which this decision is stale
+    /// and should be retired by the next sweep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_when: Option<String>,
 }
 
 fn default_confidence() -> f64 {
@@ -136,8 +145,32 @@ impl DecisionStore {
             superseded_by: None,
             tags,
             references: Vec::new(),
+            resurface_when: None,
+            expires_when: None,
         });
         id
+    }
+
+    /// Set the resurface/expiry join keys on a decision. `None` leaves a
+    /// field unchanged. Returns true if the decision was found.
+    pub fn set_decision_schedule(
+        &mut self,
+        id: u64,
+        resurface_when: Option<String>,
+        expires_when: Option<String>,
+    ) -> bool {
+        if let Some(decision) = self.decisions.iter_mut().find(|d| d.id == id) {
+            if resurface_when.is_some() {
+                decision.resurface_when = resurface_when;
+            }
+            if expires_when.is_some() {
+                decision.expires_when = expires_when;
+            }
+            decision.updated_at = Utc::now();
+            true
+        } else {
+            false
+        }
     }
 
     /// Update an existing decision. Returns true if found.
@@ -219,9 +252,14 @@ impl DecisionStore {
             } else {
                 format!(" [{}]", d.tags.join(", "))
             };
+            let resurface = d
+                .resurface_when
+                .as_deref()
+                .map(|r| format!(" (resurface: {r})"))
+                .unwrap_or_default();
             lines.push(format!(
-                "- [{}] #{}: {}{}{}",
-                d.status, d.id, d.title, conf, tags
+                "- [{}] #{}: {}{}{}{}",
+                d.status, d.id, d.title, conf, tags, resurface
             ));
         }
         Some(lines.join("\n"))
@@ -341,6 +379,31 @@ mod tests {
         assert_eq!(store.decisions[0].tags, vec!["memory"]);
         assert_eq!(store.decisions[1].confidence, 0.9);
         assert_eq!(store.decisions[1].session_id.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn test_decision_schedule_fields() {
+        let mut store = DecisionStore::default();
+        store.add_decision("Resurfacing hook".into(), None, None, None, vec![]);
+        assert!(store.set_decision_schedule(
+            1,
+            Some("before changing the session schema".into()),
+            Some("v1.0".into()),
+        ));
+        let d = &store.decisions[0];
+        assert_eq!(
+            d.resurface_when.as_deref(),
+            Some("before changing the session schema")
+        );
+        assert_eq!(d.expires_when.as_deref(), Some("v1.0"));
+        // None leaves fields unchanged.
+        assert!(store.set_decision_schedule(1, None, None));
+        assert!(store.decisions[0].resurface_when.is_some());
+        // Missing id is reported.
+        assert!(!store.set_decision_schedule(99, Some("x".into()), None));
+        // Injection carries the resurface cue.
+        let injection = store.format_decisions_for_injection().unwrap();
+        assert!(injection.contains("(resurface: before changing the session schema)"));
     }
 
     #[test]

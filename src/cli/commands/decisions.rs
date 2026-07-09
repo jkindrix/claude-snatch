@@ -48,6 +48,10 @@ struct DecisionOutput {
     tags: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     references: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resurface_when: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_when: Option<String>,
 }
 
 fn to_output(d: &crate::decisions::Decision) -> DecisionOutput {
@@ -63,6 +67,8 @@ fn to_output(d: &crate::decisions::Decision) -> DecisionOutput {
         superseded_by: d.superseded_by,
         tags: d.tags.clone(),
         references: d.references.clone(),
+        resurface_when: d.resurface_when.clone(),
+        expires_when: d.expires_when.clone(),
     }
 }
 
@@ -228,6 +234,13 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
             if let Some(s) = status {
                 store.update_decision(id, Some(s), None, None, None);
             }
+            if args.resurface_when.is_some() || args.expires_when.is_some() {
+                store.set_decision_schedule(
+                    id,
+                    args.resurface_when.clone(),
+                    args.expires_when.clone(),
+                );
+            }
 
             // Set related session references
             if !args.related_sessions.is_empty() {
@@ -292,10 +305,12 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                 && args.confidence.is_none()
                 && tags.is_none()
                 && !has_related
+                && args.resurface_when.is_none()
+                && args.expires_when.is_none()
             {
                 return Err(SnatchError::InvalidArgument {
                     name: "update".into(),
-                    reason: "At least one of --status, --description, --confidence, --tag, or --related-session is required".into(),
+                    reason: "At least one of --status, --description, --confidence, --tag, --related-session, --resurface-when, or --expires-when is required".into(),
                 });
             }
 
@@ -305,6 +320,13 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                     name: "id".into(),
                     reason: format!("Decision #{id} not found"),
                 });
+            }
+            if args.resurface_when.is_some() || args.expires_when.is_some() {
+                store.set_decision_schedule(
+                    id,
+                    args.resurface_when.clone(),
+                    args.expires_when.clone(),
+                );
             }
 
             // Update related session references

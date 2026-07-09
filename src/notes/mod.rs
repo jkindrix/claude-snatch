@@ -26,6 +26,14 @@ pub struct Note {
     pub session_id: Option<String>,
     /// When the note was created.
     pub created_at: DateTime<Utc>,
+    /// The concrete future moment this note must precede. Structured join
+    /// key for debrief sweeps and resurfacing, not prose inside the text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resurface_when: Option<String>,
+    /// Condition, version, or milestone after which this note is stale and
+    /// should be retired by the next sweep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_when: Option<String>,
 }
 
 /// Persistent note store.
@@ -56,8 +64,31 @@ impl NoteStore {
             text,
             session_id,
             created_at: Utc::now(),
+            resurface_when: None,
+            expires_when: None,
         });
         id
+    }
+
+    /// Set the resurface/expiry join keys on a note. `None` leaves a field
+    /// unchanged. Returns true if the note was found.
+    pub fn set_note_schedule(
+        &mut self,
+        id: u64,
+        resurface_when: Option<String>,
+        expires_when: Option<String>,
+    ) -> bool {
+        if let Some(note) = self.notes.iter_mut().find(|n| n.id == id) {
+            if resurface_when.is_some() {
+                note.resurface_when = resurface_when;
+            }
+            if expires_when.is_some() {
+                note.expires_when = expires_when;
+            }
+            true
+        } else {
+            false
+        }
     }
 
     /// Clear all notes. Returns the number removed.
@@ -86,7 +117,12 @@ impl NoteStore {
 
         let mut lines = vec!["### Tactical Notes".to_string()];
         for note in &self.notes {
-            lines.push(format!("- #{}: {}", note.id, note.text));
+            let resurface = note
+                .resurface_when
+                .as_deref()
+                .map(|r| format!(" (resurface: {r})"))
+                .unwrap_or_default();
+            lines.push(format!("- #{}: {}{}", note.id, note.text, resurface));
         }
         Some(lines.join("\n"))
     }
@@ -137,6 +173,24 @@ pub fn save_notes(project_dir: &Path, store: &NoteStore) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_note_schedule_fields() {
+        let mut store = NoteStore::default();
+        store.add_note("crossbeam pin".into(), None);
+        assert!(store.set_note_schedule(
+            1,
+            Some("when adding any crypto dependency".into()),
+            Some("next audit".into()),
+        ));
+        assert_eq!(
+            store.notes[0].resurface_when.as_deref(),
+            Some("when adding any crypto dependency")
+        );
+        assert!(!store.set_note_schedule(99, Some("x".into()), None));
+        let injection = store.format_notes_for_injection().unwrap();
+        assert!(injection.contains("(resurface: when adding any crypto dependency)"));
+    }
 
     #[test]
     fn test_add_note() {

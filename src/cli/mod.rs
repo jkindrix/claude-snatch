@@ -2113,6 +2113,14 @@ pub struct NotesArgs {
     /// Session ID to tag the note with.
     #[arg(long)]
     pub session_id: Option<String>,
+
+    /// Concrete future moment this note must precede (for add or update-by-id).
+    #[arg(long)]
+    pub resurface_when: Option<String>,
+
+    /// Condition/version after which this note is stale (for add or update-by-id).
+    #[arg(long)]
+    pub expires_when: Option<String>,
 }
 
 /// Arguments for the decisions command.
@@ -2160,6 +2168,14 @@ pub struct DecisionsArgs {
     /// Session ID where this decision was made.
     #[arg(long, alias = "session")]
     pub session_id: Option<String>,
+
+    /// Concrete future moment this decision must precede (for add/update).
+    #[arg(long)]
+    pub resurface_when: Option<String>,
+
+    /// Condition/version after which this decision is stale (for add/update).
+    #[arg(long)]
+    pub expires_when: Option<String>,
 
     /// Related session IDs (for decisions that span multiple sessions).
     #[arg(long = "related-session", num_args = 1..)]
