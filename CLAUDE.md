@@ -17,6 +17,19 @@ test-locked doc-check`). It is stricter than GitHub CI — it runs
 which plain `cargo test`/`clippy --features mcp` do not cover. Push only when
 `just ci` is green.
 
+## Registry Blast Radius (read if registries seem missing)
+
+All snatch registries (goals/notes/decisions.json), Claude Code's auto-memory,
+AND the session JSONL logs live under `~/.claude/projects/` — one directory
+Claude Code owns with no compatibility contract. A CC change that prunes or
+reorganizes it destroys all three at once, including every registry entry
+whose job was to warn about this. This file is the out-of-blast-radius guard:
+if registries or logs are unexpectedly missing, that event happened. The real
+mitigation is the backup/consolidation feature (claude-snatch note #1, if it
+still exists; otherwise: rsync ~/.claude/projects to a central store was the
+plan). Until built, periodic manual backup of ~/.claude/projects is the only
+protection.
+
 ## Session History Recall (snatch MCP)
 
 This project provides an MCP server (`snatch serve-mcp`) that exposes 21 tools for querying Claude Code session history. When you need to recall what happened in previous sessions or understand the narrative of past work, use these tools:
