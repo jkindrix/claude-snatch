@@ -173,6 +173,29 @@ The `src/analysis/` module powers session intelligence features across both CLI 
 
 All four capabilities are also available to AI agents as MCP tools (`get_session_digest`, `get_session_lessons`, `get_session_timeline`, `search_sessions`).
 
+## Claude Code Skills
+
+The `skills/` directory ships two Claude Code skills built on snatch's
+prompt-boundary chunk retrieval:
+
+- **session-audit** — walk a past session chunk-by-chunk: map where time, tool
+  calls, and errors concentrated, read the narrative, verify claims against
+  the commands that actually ran.
+- **session-debrief** — extract durable, non-derivable knowledge (corrected
+  assumptions, rejected alternatives, dead ends, standing instructions) and
+  file it into its strongest enforceable home.
+
+Install by symlinking into your user-level skills directory (a symlink keeps
+them current with `git pull`):
+
+```bash
+ln -s "$(pwd)/skills/session-audit" ~/.claude/skills/session-audit
+ln -s "$(pwd)/skills/session-debrief" ~/.claude/skills/session-debrief
+```
+
+Both require the `snatch` binary on PATH. Trigger them in any project with
+phrases like "audit that session" or "debrief this session".
+
 ## Global Options
 
 | Option | Short | Description |
