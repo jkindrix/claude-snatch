@@ -554,9 +554,9 @@ checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
 
 [[package]]
 name = "bytes"
-version = "1.12.0"
+version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
+checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cast"
@@ -2169,9 +2169,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.46.10"
+version = "0.47.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0a699d3e77675e6aa4bfffe3b907c8b5f7ed3241f9965bffb25475ad4b08d05"
+checksum = "281c43ff06dcb331e9356d30e38853d559ce3d0a3f693e0b0e102667dec14fb1"
 dependencies = [
  "ahash",
  "bytecount",
@@ -2196,9 +2196,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema-regex"
-version = "0.46.10"
+version = "0.47.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6dbd1086b01b9349fd4ef9a07433965af64c8ce8159abe633a189e4ff817bd13"
+checksum = "ee0b351864e7ffbc5db9273daf7fa1b4d5177b0946713d667ca571b83c0b4045"
 dependencies = [
  "regex-syntax",
 ]
@@ -3729,14 +3729,14 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.46.10"
+version = "0.47.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fbf332a2f81899f6836f22c03da73dae8a664c32e3016b84692c23cddadc95d"
+checksum = "348e860aeb0b7bd035778fd11dd9cd5290d32e4aed3b8f2274a00287a9fd362b"
 dependencies = [
  "ahash",
  "fluent-uri",
  "getrandom 0.3.4",
- "hashbrown 0.16.1",
+ "hashbrown 0.17.1",
  "itoa",
  "micromap",
  "parking_lot",
@@ -3746,9 +3746,9 @@ dependencies = [
 
 [[package]]
 name = "regex"
-version = "1.12.4"
+version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1292b7759ae1cb9ec195452d1390a074f0cd8541ab7a5a8c31cd6db45d4a6ba"
+checksum = "2a0e75113e14dc5acb068cd0786884f214f1312650a3d36d269f5c4f3cdee8a2"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -3855,9 +3855,9 @@ dependencies = [
 
 [[package]]
 name = "rust-expect"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "548f1ad14d5e602de02baae27547916f3b9bb37c0b5968fb740e17d9eb112e38"
+checksum = "b330d04a46717072b103dd2465c76befc88785cdb0acb5cec23a34bd90d94614"
 dependencies = [
  "bytes",
  "futures",
@@ -3876,9 +3876,9 @@ dependencies = [
 
 [[package]]
 name = "rust-expect-macros"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71a1ca76e76419f3d9f901a6dbc787906f23648cb39270cdba7321b0665fd501"
+checksum = "1336016787835b25fb3b26ccc37847582226f264f8af25ff5ef233f0ebd50cdc"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3898,9 +3898,9 @@ dependencies = [
 
 [[package]]
 name = "rust-pty"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1ad8ec722d08898ff10cdb650395ae3d1d72e3ada19f5d6c7d3ccced700c570"
+checksum = "c0ad83265221314013dbe602194ecfd2d17c571c482cd38bc0675c6deb752149"
 dependencies = [
  "libc",
  "rustix 1.1.4",

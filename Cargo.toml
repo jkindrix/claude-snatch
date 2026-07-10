@@ -61,7 +61,7 @@ tantivy = "0.26"
 similar = "3.1"
 
 # JSON Schema
-jsonschema = { version = "0.46", default-features = false }
+jsonschema = { version = "0.47", default-features = false }
 
 # MCP Server (Model Context Protocol)
 mcpkit = { version = "0.6", optional = true }
@@ -95,7 +95,7 @@ memmap2 = { version = "0.9", optional = true }
 [dev-dependencies]
 # Testing
 pretty_assertions = "1.4"
-rust-expect = "0.4"
+rust-expect = "0.5"
 insta = { version = "1.46", features = ["json", "yaml", "filters"] }
 proptest = "1.10"
 criterion = { version = "0.8", features = ["async_tokio"] }
