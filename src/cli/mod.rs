@@ -2480,9 +2480,10 @@ pub struct MessagesArgs {
     #[arg(short = 't', long, default_value = "all")]
     pub message_type: MessageTypeFilter,
 
-    /// Maximum messages to return (0 = unlimited, matching `list -n 0`).
-    #[arg(short = 'l', long, default_value = "50")]
-    pub limit: usize,
+    /// Maximum messages to return (default: 50, or unlimited with --chunk;
+    /// 0 = unlimited, matching `list -n 0`).
+    #[arg(short = 'l', long)]
+    pub limit: Option<usize>,
 
     /// Skip first N messages.
     #[arg(long, default_value = "0")]

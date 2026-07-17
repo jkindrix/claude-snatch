@@ -393,7 +393,7 @@ impl SnatchServer {
     /// Use detail="overview" for prompt boundaries only, "standard" for user+assistant
     /// text with tool names, or "full" for tool call details.
     #[tool(
-        description = "Read conversation messages from a session. Use detail='overview' for prompt boundaries only (typed user prompts plus queued mid-turn steering prompts), 'conversation' for user+assistant text (skipping tool-only turns), 'standard' for user+assistant text, 'full' for tool details. At detail='full', Agent/Task calls are linked to the subagent they spawned (subagent_session_id) with a result preview; set include_subagent_transcripts=true to inline each subagent's full transcript. Subagents present on disk but not joinable to a specific call are surfaced in unmatched_subagents rather than dropped. Set include_thinking=true to include reasoning blocks — note this recovers rationale only for sessions from old Claude Code (~2.1.4x and earlier); recent versions persist thinking as empty text, and the response carries a thinking_note when that is the case. Set chunk='4' or chunk='2-5' to retrieve prompt-boundary chunk(s): one prompt (typed, or queued mid-turn steering — see chunk_info.prompt_source) plus everything it produced, including late async results (detail='overview' lists the prompts at the same indices, so overview then chunk composes). Set errors_only=true to keep only entries with failed tool results (error drill-down; use with detail='standard'/'full'), and max_text_len to override content truncation (skim small, read large). Supports pagination with offset/limit."
+        description = "Read conversation messages from a session. Use detail='overview' for prompt boundaries only (typed user prompts plus queued mid-turn steering prompts), 'conversation' for user+assistant text (skipping tool-only turns), 'standard' for user+assistant text, 'full' for tool details. At detail='full', Agent/Task calls are linked to the subagent they spawned (subagent_session_id) with a result preview; set include_subagent_transcripts=true to inline each subagent's full transcript. Subagents present on disk but not joinable to a specific call are surfaced in unmatched_subagents rather than dropped. Set include_thinking=true to include reasoning blocks — note this recovers rationale only for sessions from old Claude Code (~2.1.4x and earlier); recent versions persist thinking as empty text, and the response carries a thinking_note when that is the case. Set chunk='4' or chunk='2-5' to retrieve prompt-boundary chunk(s): one prompt (typed, or queued mid-turn steering — see chunk_info.prompt_source) plus everything it produced, including late async results (detail='overview' lists the prompts at the same indices, so overview then chunk composes). Set errors_only=true to keep only entries with failed tool results (error drill-down; use with detail='standard'/'full'), and max_text_len to override content truncation (skim small, read large). Supports pagination with offset/limit; chunk requests return the whole chunk unless an explicit limit is passed."
     )]
     async fn get_session_messages(&self, request: GetSessionMessagesRequest) -> ToolOutput {
         let chain_aware = request.chain_aware.unwrap_or(true);
@@ -404,8 +404,12 @@ impl SnatchServer {
 
         let detail = request.detail.as_deref().unwrap_or("standard");
         let msg_type_filter = request.message_type.as_deref().unwrap_or("all");
-        // 0 means unlimited, matching the CLI (`messages -l 0`).
-        let limit = match request.limit.unwrap_or(50) {
+        // 0 means unlimited, matching the CLI (`messages -l 0`). Chunk
+        // requests default to unlimited: a chunk is the retrieval unit, and
+        // silently cutting it at 50 betrays that; an explicit limit still
+        // paginates.
+        let default_limit = if request.chunk.is_some() { 0 } else { 50 };
+        let limit = match request.limit.unwrap_or(default_limit) {
             0 => usize::MAX,
             n => n,
         };

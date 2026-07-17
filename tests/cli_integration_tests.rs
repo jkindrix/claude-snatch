@@ -1351,6 +1351,75 @@ fn test_errors_only_keeps_failing_call_and_chunks_counts_it() {
         .stdout(predicate::str::contains("⚠1 errors"));
 }
 
+const BIG_CHUNK_SESSION_ID: &str = "dddddddd-eeee-ffff-0000-111111111111";
+
+/// Create a temp Claude dir with one prompt followed by 60 assistant
+/// entries — a single chunk larger than the default pagination limit.
+fn setup_big_chunk_fixture_dir() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let encoded = encode_project_path(PROJECT_PATH);
+    let project_dir = tmp.path().join("projects").join(&encoded);
+    std::fs::create_dir_all(&project_dir).expect("failed to create project dir");
+
+    let mut lines = vec![format!(
+        r#"{{"type":"user","uuid":"u0","parentUuid":null,"timestamp":"2025-01-15T10:00:00.000Z","sessionId":"{BIG_CHUNK_SESSION_ID}","version":"2.0.74","message":{{"role":"user","content":"Do a long thing"}}}}"#
+    )];
+    for i in 0..60 {
+        let parent = if i == 0 {
+            "u0".to_string()
+        } else {
+            format!("a{}", i - 1)
+        };
+        lines.push(format!(
+            r#"{{"type":"assistant","uuid":"a{i}","parentUuid":"{parent}","timestamp":"2025-01-15T10:00:{:02}.000Z","sessionId":"{BIG_CHUNK_SESSION_ID}","version":"2.0.74","message":{{"id":"m{i}","type":"message","role":"assistant","content":[{{"type":"text","text":"step {i}"}}],"model":"claude-sonnet-4-20250514","stop_reason":"end_turn","usage":{{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}}}}"#,
+            (i + 1).min(59)
+        ));
+    }
+    let jsonl = lines.join("\n") + "\n";
+    std::fs::write(
+        project_dir.join(format!("{BIG_CHUNK_SESSION_ID}.jsonl")),
+        jsonl,
+    )
+    .expect("failed to write fixture");
+    tmp
+}
+
+/// A chunk request returns the whole chunk by default — the generic limit of
+/// 50 must not silently truncate it. An explicit --limit still paginates.
+#[test]
+fn test_messages_chunk_defaults_to_unlimited() {
+    let tmp = setup_big_chunk_fixture_dir();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "messages",
+            BIG_CHUNK_SESSION_ID,
+            "--chunk",
+            "0",
+            "-D",
+            "full",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("showing 1-61"));
+
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "messages",
+            BIG_CHUNK_SESSION_ID,
+            "--chunk",
+            "0",
+            "-l",
+            "5",
+            "-D",
+            "full",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("showing 1-5"));
+}
+
 /// `-l 0` means unlimited (matching `list -n 0`), not "take zero".
 #[test]
 fn test_messages_limit_zero_is_unlimited() {

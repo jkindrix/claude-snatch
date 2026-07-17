@@ -203,11 +203,13 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
     let detail = args.detail.as_str();
     let msg_type_filter = args.message_type.as_str();
     // 0 means unlimited, matching `list -n 0` (a literal take(0) returned
-    // nothing — the worst possible reading of "no limit").
-    let limit = if args.limit == 0 {
-        usize::MAX
-    } else {
-        args.limit
+    // nothing — the worst possible reading of "no limit"). Chunk requests
+    // default to unlimited: a chunk is the retrieval unit, and silently
+    // cutting it at 50 betrays that; an explicit --limit still paginates.
+    let default_limit = if args.chunk.is_some() { 0 } else { 50 };
+    let limit = match args.limit.unwrap_or(default_limit) {
+        0 => usize::MAX,
+        n => n,
     };
     let offset = args.offset;
     // "full" means full: it implies thinking regardless of the --include-thinking

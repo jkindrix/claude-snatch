@@ -178,7 +178,9 @@ pub struct GetSessionMessagesRequest {
     /// Default: "all".
     pub message_type: Option<String>,
 
-    /// Maximum number of messages to return. Default: 50. 0 = unlimited.
+    /// Maximum number of messages to return. Default: 50, or unlimited when
+    /// `chunk` is set (a chunk is returned whole unless a limit is passed).
+    /// 0 = unlimited.
     pub limit: Option<usize>,
 
     /// Offset for pagination (skip first N messages). Default: 0.
