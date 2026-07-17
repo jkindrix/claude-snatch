@@ -1,16 +1,15 @@
-//! OpenAI Codex CLI as a [`SourceProvider`] (Phase B1: inventory & decoding).
+//! OpenAI Codex CLI as a [`SourceProvider`].
 //!
-//! Additive: nothing in the established pipeline calls this. B1 scope is
-//! discovery (plain + archived + `.zst` twins + active/truncated + legacy
-//! detection), envelope decoding, and native diagnostics. **Normalization is
-//! Phase B3** — envelope records are preserved as `LogEntry::Unknown` with
-//! `RecordOutcome::Unknown` dispositions (content-complete, honestly
-//! unmodeled). Legacy pre-envelope files (Codex ≤0.31.0, before 2025-09-10)
-//! are recognized, inventoried, and native/raw-exportable; `parse()` reports
-//! them unsupported-legacy until provenance-documented fixtures justify a
-//! parser.
+//! Discovery covers plain + archived + `.zst` twins, active/truncated files,
+//! and legacy detection. B3 normalization maps conversational content,
+//! tools, usage, prompt delivery, and fork-inherited history; envelope
+//! families not yet modeled remain content-complete `LogEntry::Unknown`
+//! entries with explicit dispositions. Legacy pre-envelope files (Codex
+//! ≤0.31.0, before 2025-09-10) are recognized, inventoried, and
+//! native/raw-exportable; `parse()` reports them unsupported-legacy until
+//! provenance-documented fixtures justify a parser.
 //!
-//! Layout (verified against codex-rs rust-v0.144.5 and a 222-file corpus):
+//! Layout (verified against codex-rs rust-v0.144.5 and the live corpus):
 //! `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<local-ts>-<uuid>.jsonl`, an
 //! `archived_sessions/` twin tree, cold copies as `.jsonl.zst` (plain wins
 //! when both exist), and per-line envelopes `{timestamp, type, payload}`.
@@ -24,10 +23,10 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use super::{
-    ArtifactForm, ArtifactId, ArtifactRevision, ArtifactSnapshot, IngestionDiagnostics,
-    LineageEdge, LineageEdgeKind, LogicalSessionKey, ParseDiagnostic, ParsedSession,
-    ProviderCapabilities, ProviderError, ProviderId, RecordDisposition, RecordOutcome, RecordRef,
-    SessionArtifact, SessionDescriptor, SessionNamespace, SourceProvider,
+    ActivityKind, ArtifactForm, ArtifactId, ArtifactRevision, ArtifactSnapshot,
+    IngestionDiagnostics, LineageEdge, LineageEdgeKind, LogicalSessionKey, ParseDiagnostic,
+    ParsedSession, ProviderCapabilities, ProviderError, ProviderId, RecordDisposition,
+    RecordOutcome, RecordRef, SessionArtifact, SessionDescriptor, SessionNamespace, SourceProvider,
 };
 
 /// Default cap on decompressed bytes per session (decompression-bomb guard).
@@ -242,6 +241,72 @@ pub enum FormatFamily {
     Undetermined,
 }
 
+/// A fork's copied-history interval inside the CHILD rollout. Ordinal zero
+/// is the child's own `session_meta`; copied parent records begin at one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CopiedHistoryRange {
+    first: u64,
+    last: u64,
+}
+
+impl CopiedHistoryRange {
+    fn contains(self, ordinal: u64) -> bool {
+        (self.first..=self.last).contains(&ordinal)
+    }
+}
+
+fn session_meta_payload(value: &serde_json::Value) -> Option<&serde_json::Value> {
+    (value.get("type").and_then(serde_json::Value::as_str) == Some("session_meta"))
+        .then(|| value.get("payload"))
+        .flatten()
+}
+
+fn valid_thread_id(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
+}
+
+/// Strict old-format fork heuristic, derived from all 16 observed forks:
+/// physical record zero is the child's metadata and record one is a copied
+/// metadata record whose different id names the parent. A later second meta,
+/// a same-id meta, or a first meta that disagrees with the filename is not a
+/// fork signal.
+fn embedded_fork_parent(
+    key: &LogicalSessionKey,
+    first: &serde_json::Value,
+    second: &serde_json::Value,
+) -> Option<String> {
+    let child = session_meta_payload(first)?;
+    let parent = session_meta_payload(second)?;
+    (child.get("id").and_then(serde_json::Value::as_str) == Some(&key.native_id)).then_some(())?;
+    let parent_id = parent.get("id").and_then(serde_json::Value::as_str)?;
+    (parent_id != key.native_id && valid_thread_id(parent_id)).then(|| parent_id.to_string())
+}
+
+/// Copied rollout envelopes retain every field except their outer write
+/// timestamp. Compare the complete remaining object, not just type/payload,
+/// so future envelope fields cannot be silently ignored by the proof.
+fn copied_record_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    let (Some(a), Some(b)) = (a.as_object(), b.as_object()) else {
+        return false;
+    };
+    if !a.get("timestamp").is_some_and(serde_json::Value::is_string)
+        || !b.get("timestamp").is_some_and(serde_json::Value::is_string)
+    {
+        return false;
+    }
+    let count_without_timestamp = |m: &serde_json::Map<String, serde_json::Value>| {
+        m.keys().filter(|k| k.as_str() != "timestamp").count()
+    };
+    count_without_timestamp(a) == count_without_timestamp(b)
+        && a.iter()
+            .filter(|(k, _)| k.as_str() != "timestamp")
+            .all(|(k, v)| b.get(k) == Some(v))
+}
+
 /// Security caps for drift-vocabulary maps (round-16/17): every key stored
 /// in the report's maps is an attacker-controlled string read from native
 /// files, so distinct-key cardinality and key length are capped DURING
@@ -366,9 +431,7 @@ impl CodexProvider {
             return None;
         }
         let uuid = &rest[rest.len() - 36..];
-        let ok = uuid.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
-            && uuid.chars().filter(|c| *c == '-').count() == 4;
-        ok.then_some(uuid)
+        valid_thread_id(uuid).then_some(uuid)
     }
 
     fn artifact_for(&self, path: &Path, archived: bool) -> SessionArtifact {
@@ -557,6 +620,101 @@ impl CodexProvider {
                 )));
             }
             Ok(Box::new(BufReader::new(file)))
+        }
+    }
+
+    /// Read the first `limit` PHYSICAL records. Lineage metadata is
+    /// position-sensitive, so blank or damaged lines stop the read instead
+    /// of being skipped and accidentally promoting a later record.
+    fn initial_records(&self, path: &Path, limit: usize) -> Vec<serde_json::Value> {
+        let Ok(mut reader) = self.open_records(path) else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(limit);
+        let mut line = Vec::new();
+        while out.len() < limit {
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => match serde_json::from_slice(&line) {
+                    Ok(value) => out.push(value),
+                    Err(_) => break,
+                },
+            }
+        }
+        out
+    }
+
+    /// Prove the maximal prefix copied from the fork parent. The old rollout
+    /// format rewrites outer envelope timestamps, so equality deliberately
+    /// ignores ONLY that field. Missing/corrupt parents yield no inherited
+    /// range: a dangling edge remains useful, but activity is never guessed.
+    fn copied_history_range(
+        &self,
+        key: &LogicalSessionKey,
+        child_records: &[(RecordRef, serde_json::Value)],
+    ) -> Option<CopiedHistoryRange> {
+        let [(first_ref, first), (second_ref, second), ..] = child_records else {
+            return None;
+        };
+        if first_ref.ordinal != 0 || second_ref.ordinal != 1 {
+            return None;
+        }
+        let parent_id = embedded_fork_parent(key, first, second)?;
+        let (_, parent_path) = self.resolve(&self.key_for(&parent_id)).ok()?;
+        let mut parent_reader = self.open_records(&parent_path).ok()?;
+        let mut parent_line = Vec::new();
+        let mut expected_child_ordinal = 1_u64;
+        let mut last = None;
+
+        for (child_ref, child) in child_records.iter().skip(1) {
+            if child_ref.ordinal != expected_child_ordinal {
+                break;
+            }
+            parent_line.clear();
+            match parent_reader.read_until(b'\n', &mut parent_line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            let Ok(parent) = serde_json::from_slice::<serde_json::Value>(&parent_line) else {
+                break;
+            };
+            if !copied_record_eq(&parent, child) {
+                break;
+            }
+            last = Some(child_ref.ordinal);
+            expected_child_ordinal = expected_child_ordinal.saturating_add(1);
+        }
+
+        last.map(|last| CopiedHistoryRange { first: 1, last })
+    }
+
+    /// Apply inherited-history semantics after normalization. An entry is
+    /// inherited only when ALL of its producing origins are inside the
+    /// independently proven copied prefix. This prevents a mixed-boundary
+    /// entry from hiding genuinely new activity.
+    fn mark_inherited_history(
+        range: CopiedHistoryRange,
+        artifact: &ArtifactId,
+        normalized: &mut super::codex_normalize::NormalizeOutput,
+    ) {
+        for entry in &normalized.entries {
+            let inherited = normalized
+                .entry_origins
+                .get(&entry.id)
+                .is_some_and(|origins| {
+                    !origins.is_empty()
+                        && origins
+                            .iter()
+                            .all(|r| r.artifact == *artifact && range.contains(r.ordinal))
+                });
+            if inherited {
+                normalized
+                    .semantics
+                    .entry(entry.id.clone())
+                    .or_default()
+                    .activity = ActivityKind::InheritedHistory;
+            }
         }
     }
 
@@ -950,12 +1108,37 @@ impl SourceProvider for CodexProvider {
     }
 
     fn parse_cache_token(&self, key: &LogicalSessionKey) -> Result<String, ProviderError> {
-        let (descriptor, _) = self.resolve(key)?;
+        let (descriptor, path) = self.resolve(key)?;
+        // Inherited-history classification depends on the embedded parent
+        // prefix. Include that parent's descriptor state in the CHILD token
+        // so a parent appearing, disappearing, or changing cannot serve a
+        // stale cached activity classification.
+        let initial = self.initial_records(&path, 2);
+        let parent_dependency = initial
+            .first()
+            .zip(initial.get(1))
+            .and_then(|(first, second)| embedded_fork_parent(key, first, second))
+            .map(|parent_id| {
+                let state = self
+                    .resolve(&self.key_for(&parent_id))
+                    .map(|(parent, _)| super::descriptor_state_token(&parent))
+                    .unwrap_or_else(|_| "missing".to_string());
+                format!(
+                    "id={}:{};state={}:{}",
+                    parent_id.len(),
+                    parent_id,
+                    state.len(),
+                    state
+                )
+            })
+            .unwrap_or_else(|| "none".to_string());
         Ok(format!(
-            "v1\x1ecodex\x1e{}\x1emax_c={}\x1emax_d={}\x1ewlog={WINDOW_LOG_MAX}",
+            "v2\x1ecodex\x1e{}\x1emax_c={}\x1emax_d={}\x1ewlog={WINDOW_LOG_MAX}\x1eparent={}:{}",
             super::descriptor_state_token(&descriptor),
             self.max_compressed,
-            self.max_decompressed
+            self.max_decompressed,
+            parent_dependency.len(),
+            parent_dependency
         ))
     }
 
@@ -1047,9 +1230,23 @@ impl SourceProvider for CodexProvider {
             }
         }
 
-        // Normalize the parsed stream (B3 slice 1) and merge with the
+        // Old-format forks copy a prefix of the parent's rollout after the
+        // child's own metadata. Prove that prefix against the available
+        // parent before normalizing: its end is also a semantic window
+        // boundary, preventing dedup/usage attribution from crossing from
+        // inherited history into new fork work.
+        let inherited_range = self.copied_history_range(key, &parsed_records);
+
+        // Normalize the parsed stream (B3) and merge with the
         // read-level dispositions (blank/torn/unreadable) collected above.
-        let normalized = super::codex_normalize::normalize(key, &parsed_records);
+        let mut normalized = super::codex_normalize::normalize(
+            key,
+            &parsed_records,
+            inherited_range.map(|r| (r.first, r.last)),
+        );
+        if let Some(range) = inherited_range {
+            Self::mark_inherited_history(range, &artifact_id, &mut normalized);
+        }
         record_dispositions.extend(normalized.record_dispositions);
         record_dispositions.sort_by_key(|d| d.record.ordinal);
         diagnostics.mapped += normalized.diagnostics.mapped;
@@ -1069,8 +1266,11 @@ impl SourceProvider for CodexProvider {
     }
 
     fn lineage(&self) -> Result<Vec<LineageEdge>, ProviderError> {
-        // Fork/spawn edges come from each file's first session_meta payload
-        // (forked_from_id / parent_thread_id). Dangling endpoints are kept.
+        // Modern fork/spawn edges live in the first session_meta. Older
+        // forks in the observed corpus predate `forked_from_id`: their child
+        // meta is followed immediately by a copied parent meta. Dangling
+        // endpoints are kept, but positional metadata is interpreted only
+        // under the strict embedded-fork heuristic above.
         let mut edges = Vec::new();
         let (descriptors, paths) = self.inventory()?;
         for descriptor in descriptors {
@@ -1080,35 +1280,68 @@ impl SourceProvider for CodexProvider {
             let Some(path) = paths.get(&preferred.snapshot.id) else {
                 continue;
             };
-            let mut reader = match self.open_records(path) {
-                Ok(r) => r,
-                Err(_) => continue,
+            let initial = self.initial_records(path, 2);
+            let Some(first) = initial.first() else {
+                continue;
             };
-            let mut line: Vec<u8> = Vec::new();
-            if reader.read_until(b'\n', &mut line).is_err()
-                || line.iter().all(|b| b.is_ascii_whitespace())
+            let Some(payload) = session_meta_payload(first) else {
+                continue;
+            };
+            if payload.get("id").and_then(serde_json::Value::as_str)
+                != Some(&descriptor.key.native_id)
             {
                 continue;
             }
-            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&line) else {
-                continue;
-            };
-            let payload = &value["payload"];
-            if let Some(from) = payload["forked_from_id"].as_str() {
+
+            let direct_fork = payload
+                .get("forked_from_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| valid_thread_id(id))
+                .map(str::to_string);
+            let embedded_fork = initial
+                .get(1)
+                .and_then(|second| embedded_fork_parent(&descriptor.key, first, second));
+            if let Some(from) = direct_fork.or(embedded_fork) {
                 edges.push(LineageEdge {
-                    from: self.key_for(from),
+                    from: self.key_for(&from),
                     to: descriptor.key.clone(),
                     kind: LineageEdgeKind::Fork,
                 });
             }
-            if let Some(parent) = payload["parent_thread_id"].as_str() {
+
+            // Current Codex stores spawn identity twice: a denormalized
+            // `parent_thread_id`, and the authoritative typed source shape
+            // `{subagent:{thread_spawn:{...}}}`. Support either without
+            // inventing a parent for non-linkable `review`/`compact` sources.
+            let spawn = payload.pointer("/source/subagent/thread_spawn");
+            let spawn_parent = payload
+                .get("parent_thread_id")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    spawn.and_then(|s| {
+                        s.get("parent_thread_id")
+                            .and_then(serde_json::Value::as_str)
+                    })
+                })
+                .filter(|id| valid_thread_id(id));
+            if let Some(parent) = spawn_parent {
+                let nested_string = |field: &str| {
+                    spawn
+                        .and_then(|s| s.get(field))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                };
                 edges.push(LineageEdge {
                     from: self.key_for(parent),
                     to: descriptor.key.clone(),
                     kind: LineageEdgeKind::Spawn {
-                        tool_use_id: None,
-                        agent_type: payload["agent_role"].as_str().map(String::from),
-                        description: None,
+                        tool_use_id: nested_string("tool_use_id"),
+                        agent_type: payload
+                            .get("agent_role")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                            .or_else(|| nested_string("agent_role")),
+                        description: nested_string("task_name"),
                     },
                 });
             }
@@ -1208,11 +1441,16 @@ impl SourceProvider for CodexProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::EntryId;
 
     const THREAD_A: &str = "019f6d4b-d408-7260-98b2-bf385f3a9763";
     const THREAD_B: &str = "019f6d11-3ce6-7662-8add-55d745876efe";
     const THREAD_LEGACY: &str = "574149a7-0712-4169-b789-67fb4742b8fc";
     const THREAD_FORK: &str = "019f7777-0000-7000-8000-000000000001";
+    const THREAD_LINEAGE_PARENT: &str = "019f7777-0000-7000-8000-000000000101";
+    const THREAD_EMBEDDED_FORK: &str = "019f7777-0000-7000-8000-000000000102";
+    const THREAD_SPAWN: &str = "019f7777-0000-7000-8000-000000000103";
+    const THREAD_NOT_A_FORK: &str = "019f7777-0000-7000-8000-000000000104";
 
     fn envelope_line(kind: &str, payload: serde_json::Value) -> String {
         serde_json::json!({
@@ -1312,6 +1550,116 @@ mod tests {
         }
     }
 
+    /// Deliberately awkward lineage fixture:
+    /// - an old-format fork whose copied parent records rewrite timestamps;
+    /// - usage pending at the copied-prefix boundary (must NOT attach to the
+    ///   fork's first new assistant);
+    /// - a current typed thread-spawn source; and
+    /// - a later second session_meta that must NOT be mistaken for a fork.
+    fn lineage_fixture() -> (tempfile::TempDir, CodexProvider) {
+        let tmp = tempfile::tempdir().unwrap();
+        let day = tmp.path().join("sessions/2026/07/17");
+        std::fs::create_dir_all(&day).unwrap();
+        let record = |kind: &str, payload: serde_json::Value| {
+            serde_json::from_str::<serde_json::Value>(&envelope_line(kind, payload)).unwrap()
+        };
+        let parent = vec![
+            record(
+                "session_meta",
+                serde_json::json!({"id": THREAD_LINEAGE_PARENT, "cwd": "/tmp/lineage"}),
+            ),
+            record(
+                "event_msg",
+                serde_json::json!({
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {"input_tokens": 5, "cached_input_tokens": 1, "output_tokens": 2},
+                        "total_token_usage": {"input_tokens": 5, "cached_input_tokens": 1, "output_tokens": 2}
+                    }
+                }),
+            ),
+        ];
+        let serialize = |records: &[serde_json::Value]| {
+            records
+                .iter()
+                .map(serde_json::Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n"
+        };
+        std::fs::write(
+            day.join(format!(
+                "rollout-2026-07-17T00-00-00-{THREAD_LINEAGE_PARENT}.jsonl"
+            )),
+            serialize(&parent),
+        )
+        .unwrap();
+
+        let mut copied = parent.clone();
+        for value in &mut copied {
+            value["timestamp"] = serde_json::json!("2026-07-17T01:00:00.000Z");
+        }
+        let mut child = vec![record(
+            "session_meta",
+            serde_json::json!({"id": THREAD_EMBEDDED_FORK, "cwd": "/tmp/lineage"}),
+        )];
+        child.extend(copied);
+        child.push(record(
+            "response_item",
+            serde_json::json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "new fork work"}]
+            }),
+        ));
+        std::fs::write(
+            day.join(format!(
+                "rollout-2026-07-17T01-00-00-{THREAD_EMBEDDED_FORK}.jsonl"
+            )),
+            serialize(&child),
+        )
+        .unwrap();
+
+        std::fs::write(
+            day.join(format!("rollout-2026-07-17T02-00-00-{THREAD_SPAWN}.jsonl")),
+            envelope_line(
+                "session_meta",
+                serde_json::json!({
+                    "id": THREAD_SPAWN,
+                    "source": {"subagent": {"thread_spawn": {
+                        "parent_thread_id": THREAD_LINEAGE_PARENT,
+                        "depth": 1,
+                        "agent_role": "explore"
+                    }}}
+                }),
+            ) + "\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            day.join(format!(
+                "rollout-2026-07-17T03-00-00-{THREAD_NOT_A_FORK}.jsonl"
+            )),
+            [
+                envelope_line("session_meta", serde_json::json!({"id": THREAD_NOT_A_FORK})),
+                envelope_line(
+                    "response_item",
+                    serde_json::json!({"type": "message", "role": "assistant", "content": []}),
+                ),
+                envelope_line(
+                    "session_meta",
+                    serde_json::json!({"id": THREAD_LINEAGE_PARENT}),
+                ),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let provider = CodexProvider::new(tmp.path());
+        (tmp, provider)
+    }
+
     /// Opt-in real-corpus conformance check (never in public CI): run with
     /// `cargo test --features codex -- --ignored codex_real_corpus`.
     /// Emits AGGREGATE results only — no transcript content.
@@ -1330,6 +1678,9 @@ mod tests {
         let (mut parsed_ok, mut legacy, mut errors, mut violations) = (0u32, 0u32, 0u32, 0u32);
         let (mut count_mismatches, mut raced) = (0u32, 0u32);
         let (mut human_boundaries, mut human_midturn) = (0usize, 0usize);
+        let mut expected_lineage: std::collections::BTreeSet<LineageEdge> =
+            std::collections::BTreeSet::new();
+        let mut inherited_sessions = 0usize;
         for d in &sessions {
             assert!(d.validate().is_empty(), "invalid descriptor");
             match p.parse(&d.key) {
@@ -1368,6 +1719,64 @@ mod tests {
                     };
                     let raw_by_ordinal: std::collections::BTreeMap<u64, &serde_json::Value> =
                         raw_records.iter().map(|(o, v)| (*o, v)).collect();
+                    let copied = independent_copied_history(&p, &d.key, &raw_records);
+                    let inherited_range = copied.as_ref().map(|(_, range)| *range);
+                    let first_new_after_fork =
+                        inherited_range.map(|(_, last)| last.saturating_add(1));
+                    if inherited_range.is_some() {
+                        inherited_sessions += 1;
+                    }
+                    let activity_violations =
+                        audit_inherited_activity(&d.key, inherited_range, &session);
+                    assert!(
+                        activity_violations.is_empty(),
+                        "fork activity audit failed: {} violation(s)",
+                        activity_violations.len()
+                    );
+
+                    // Derive expected lineage directly from native metadata,
+                    // independently of SourceProvider::lineage().
+                    if let Some((zero, first)) = raw_records.first() {
+                        if *zero == 0
+                            && first["type"] == "session_meta"
+                            && first["payload"]["id"].as_str() == Some(&d.key.native_id)
+                        {
+                            let direct_fork = first["payload"]["forked_from_id"]
+                                .as_str()
+                                .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+                                .map(str::to_string);
+                            let embedded = independent_embedded_parent_id(&d.key, &raw_records);
+                            if let Some(parent) = direct_fork.or(embedded) {
+                                expected_lineage.insert(LineageEdge {
+                                    from: key(&parent),
+                                    to: d.key.clone(),
+                                    kind: LineageEdgeKind::Fork,
+                                });
+                            }
+                            let nested = first["payload"].pointer("/source/subagent/thread_spawn");
+                            let parent = first["payload"]["parent_thread_id"]
+                                .as_str()
+                                .or_else(|| nested.and_then(|n| n["parent_thread_id"].as_str()))
+                                .filter(|id| uuid::Uuid::parse_str(id).is_ok());
+                            if let Some(parent) = parent {
+                                let nested_string = |field: &str| {
+                                    nested.and_then(|n| n[field].as_str()).map(str::to_string)
+                                };
+                                expected_lineage.insert(LineageEdge {
+                                    from: key(parent),
+                                    to: d.key.clone(),
+                                    kind: LineageEdgeKind::Spawn {
+                                        tool_use_id: nested_string("tool_use_id"),
+                                        agent_type: first["payload"]["agent_role"]
+                                            .as_str()
+                                            .map(str::to_string)
+                                            .or_else(|| nested_string("agent_role")),
+                                        description: nested_string("task_name"),
+                                    },
+                                });
+                            }
+                        }
+                    }
                     let joined = |payload: &serde_json::Value| -> String {
                         payload["content"]
                             .as_array()
@@ -1456,7 +1865,12 @@ mod tests {
                     // ambiguity from the native stream alone — deliberately-
                     // altered negative-control tests prove it rejects broken
                     // output. Aggregate-only reporting (count, no ids).
-                    let usage_violations = audit_usage_allocation(&d.key, &raw_records, &session);
+                    let usage_violations = audit_usage_allocation(
+                        &d.key,
+                        &raw_records,
+                        &session,
+                        first_new_after_fork,
+                    );
                     assert!(
                         usage_violations.is_empty(),
                         "usage allocation audit failed: {} violation(s)",
@@ -1467,7 +1881,12 @@ mod tests {
                     // twins open turns; unique same-window user events are
                     // steering. The oracle is mutation-tested below and
                     // checks the exact set, not merely aggregate counts.
-                    let prompt_audit = audit_prompt_semantics(&d.key, &raw_records, &session);
+                    let prompt_audit = audit_prompt_semantics(
+                        &d.key,
+                        &raw_records,
+                        &session,
+                        first_new_after_fork,
+                    );
                     assert!(
                         prompt_audit.violations.is_empty(),
                         "prompt semantics audit failed: {} violation(s)",
@@ -1553,7 +1972,16 @@ mod tests {
                 Err(_) => errors += 1,
             }
         }
-        let edges = p.lineage().map(|e| e.len()).unwrap_or(0);
+        let actual_lineage: std::collections::BTreeSet<_> = p
+            .lineage()
+            .expect("lineage collection")
+            .into_iter()
+            .collect();
+        assert_eq!(
+            actual_lineage, expected_lineage,
+            "lineage must equal the independently derived native edge set"
+        );
+        let edges = actual_lineage.len();
         let drift = p.drift_report().unwrap_or_default();
         eprintln!(
             "codex drift: {} envelope types ({} unknown), {} response_item types ({} unknown), \
@@ -1589,7 +2017,8 @@ mod tests {
         );
         eprintln!(
             "codex corpus: {n} sessions, {parsed_ok} parsed, {legacy} legacy-refused, \
-             {errors} errors, {violations} provenance violations, {edges} lineage edges, \
+             {errors} errors, {violations} provenance violations, {edges} lineage edges \
+             ({inherited_sessions} copied-history sessions), \
              {raced} raced, human prompts: {human_boundaries} boundary + \
              {human_midturn} midturn, records: {totals:?}",
             n = sessions.len()
@@ -1758,6 +2187,211 @@ mod tests {
         assert!(edges.iter().any(|e| e.kind == LineageEdgeKind::Fork
             && e.from.native_id == THREAD_A
             && e.to.native_id == THREAD_FORK));
+    }
+
+    #[test]
+    fn copied_record_proof_ignores_only_the_outer_timestamp() {
+        let a: serde_json::Value = serde_json::from_str(&envelope_line(
+            "session_meta",
+            serde_json::json!({"id": THREAD_A, "cwd": "/tmp/a"}),
+        ))
+        .unwrap();
+        let mut rewritten = a.clone();
+        rewritten["timestamp"] = serde_json::json!("2026-07-17T04:00:00.000Z");
+        assert!(copied_record_eq(&a, &rewritten));
+
+        rewritten["payload"]["cwd"] = serde_json::json!("/tmp/different");
+        assert!(
+            !copied_record_eq(&a, &rewritten),
+            "payload drift must end the copied prefix"
+        );
+        let mut missing_timestamp = a.clone();
+        missing_timestamp
+            .as_object_mut()
+            .unwrap()
+            .remove("timestamp");
+        assert!(!copied_record_eq(&a, &missing_timestamp));
+    }
+
+    #[test]
+    fn embedded_fork_marks_only_the_proven_copy_as_inherited() {
+        let (_tmp, p) = lineage_fixture();
+        let parsed = p.parse(&key(THREAD_EMBEDDED_FORK)).unwrap();
+        assert!(parsed.validate_provenance().is_empty());
+
+        let activity = |ordinal: u64| {
+            parsed
+                .semantics
+                .get(&EntryId::deterministic(
+                    &key(THREAD_EMBEDDED_FORK),
+                    ordinal,
+                    0,
+                ))
+                .map_or(ActivityKind::New, |s| s.activity)
+        };
+        assert_eq!(activity(0), ActivityKind::New, "child metadata is new");
+        assert_eq!(activity(1), ActivityKind::InheritedHistory);
+        assert_eq!(activity(2), ActivityKind::InheritedHistory);
+        assert_eq!(activity(3), ActivityKind::New, "first fork work is new");
+
+        // The copied token_count was waiting for an assistant in the parent.
+        // The synthetic fork boundary must preserve it as inherited instead
+        // of attaching it to the child's first new assistant.
+        let copied_usage = parsed
+            .record_dispositions
+            .iter()
+            .find(|d| d.record.ordinal == 2)
+            .unwrap();
+        assert!(matches!(
+            copied_usage.outcome,
+            RecordOutcome::Unknown { .. }
+        ));
+        let new_assistant = EntryId::deterministic(&key(THREAD_EMBEDDED_FORK), 3, 0);
+        assert_eq!(
+            parsed.entry_origins[&new_assistant]
+                .iter()
+                .map(|r| r.ordinal)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+
+        let edges = p.lineage().unwrap();
+        assert!(edges.iter().any(|e| {
+            e.from.native_id == THREAD_LINEAGE_PARENT
+                && e.to.native_id == THREAD_EMBEDDED_FORK
+                && e.kind == LineageEdgeKind::Fork
+        }));
+    }
+
+    #[test]
+    fn fork_activity_oracle_rejects_both_partition_directions() {
+        let (_tmp, p) = lineage_fixture();
+        let child_key = key(THREAD_EMBEDDED_FORK);
+        let mut parsed = p.parse(&child_key).unwrap();
+        let (_, path) = p.resolve(&child_key).unwrap();
+        let mut reader = p.open_records(&path).unwrap();
+        let mut raw = Vec::new();
+        let mut ordinal = 0_u64;
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    raw.push((ordinal, serde_json::from_slice(&line).unwrap()));
+                    ordinal += 1;
+                }
+                Err(error) => panic!("fixture read: {error}"),
+            }
+        }
+        let (_, range) = independent_copied_history(&p, &child_key, &raw).unwrap();
+        assert!(audit_inherited_activity(&child_key, Some(range), &parsed).is_empty());
+
+        let inherited = EntryId::deterministic(&child_key, 1, 0);
+        parsed.semantics.get_mut(&inherited).unwrap().activity = ActivityKind::New;
+        assert!(audit_inherited_activity(&child_key, Some(range), &parsed)
+            .iter()
+            .any(|v| v.contains("expected InheritedHistory")));
+
+        parsed.semantics.get_mut(&inherited).unwrap().activity = ActivityKind::InheritedHistory;
+        let new_work = EntryId::deterministic(&child_key, 3, 0);
+        parsed.semantics.get_mut(&new_work).unwrap().activity = ActivityKind::InheritedHistory;
+        assert!(audit_inherited_activity(&child_key, Some(range), &parsed)
+            .iter()
+            .any(|v| v.contains("expected New")));
+    }
+
+    #[test]
+    fn typed_spawn_source_is_linked_but_a_late_meta_is_not_a_fork() {
+        let (_tmp, p) = lineage_fixture();
+        let edges = p.lineage().unwrap();
+        assert!(edges.iter().any(|e| {
+            e.from.native_id == THREAD_LINEAGE_PARENT
+                && e.to.native_id == THREAD_SPAWN
+                && matches!(
+                    &e.kind,
+                    LineageEdgeKind::Spawn {
+                        tool_use_id: None,
+                        agent_type: Some(role),
+                        description: None,
+                    } if role == "explore"
+                )
+        }));
+        assert!(
+            !edges.iter().any(|e| {
+                e.to.native_id == THREAD_NOT_A_FORK && e.kind == LineageEdgeKind::Fork
+            }),
+            "only physical record one may carry the embedded-parent heuristic"
+        );
+    }
+
+    #[test]
+    fn fork_parent_state_participates_in_the_child_cache_token() {
+        use crate::cache::CacheManager;
+        use crate::config::CacheConfig;
+        use crate::provider::registry::cached_parsed_session;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let day = tmp.path().join("sessions/2026/07/17");
+        std::fs::create_dir_all(&day).unwrap();
+        let parent_meta = envelope_line(
+            "session_meta",
+            serde_json::json!({"id": THREAD_LINEAGE_PARENT, "cwd": "/tmp/cache-parent"}),
+        );
+        let child = [
+            envelope_line(
+                "session_meta",
+                serde_json::json!({"id": THREAD_EMBEDDED_FORK, "cwd": "/tmp/cache-parent"}),
+            ),
+            parent_meta.clone(),
+        ]
+        .join("\n")
+            + "\n";
+        std::fs::write(
+            day.join(format!(
+                "rollout-2026-07-17T01-00-00-{THREAD_EMBEDDED_FORK}.jsonl"
+            )),
+            child,
+        )
+        .unwrap();
+        let p = CodexProvider::new(tmp.path());
+        let child_key = key(THREAD_EMBEDDED_FORK);
+        let missing_parent_token = p.parse_cache_token(&child_key).unwrap();
+        let cache = CacheManager::new(&CacheConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        let before = cached_parsed_session(&cache, &p, &child_key).unwrap();
+        assert!(before
+            .semantics
+            .values()
+            .all(|s| s.activity == ActivityKind::New));
+
+        std::fs::write(
+            day.join(format!(
+                "rollout-2026-07-17T00-00-00-{THREAD_LINEAGE_PARENT}.jsonl"
+            )),
+            parent_meta + "\n",
+        )
+        .unwrap();
+        let present_parent_token = p.parse_cache_token(&child_key).unwrap();
+        assert_ne!(
+            missing_parent_token, present_parent_token,
+            "a newly available parent changes inherited classification"
+        );
+        let after = cached_parsed_session(&cache, &p, &child_key).unwrap();
+        assert!(
+            !std::sync::Arc::ptr_eq(&before, &after),
+            "the production cache must reparse when the parent appears"
+        );
+        assert_eq!(
+            after
+                .semantics
+                .get(&EntryId::deterministic(&child_key, 1, 0))
+                .unwrap()
+                .activity,
+            ActivityKind::InheritedHistory
+        );
     }
 
     #[test]
@@ -2817,6 +3451,145 @@ mod tests {
             || (et == "event_msg" && pt == "task_started")
     }
 
+    fn is_audit_boundary(
+        ordinal: u64,
+        val: &serde_json::Value,
+        first_new_after_fork: Option<u64>,
+    ) -> bool {
+        is_window_boundary_raw(val) || first_new_after_fork == Some(ordinal)
+    }
+
+    /// Independently derive the old-format copied prefix. This intentionally
+    /// does not call `embedded_fork_parent`, `copied_record_eq`, or
+    /// `copied_history_range`: it is the source-side oracle for those
+    /// production rules.
+    fn independent_embedded_parent_id(
+        session_key: &LogicalSessionKey,
+        child: &[(u64, serde_json::Value)],
+    ) -> Option<String> {
+        let [(zero, first), (one, second), ..] = child else {
+            return None;
+        };
+        if *zero != 0
+            || *one != 1
+            || first["type"] != "session_meta"
+            || second["type"] != "session_meta"
+            || first["payload"]["id"].as_str() != Some(&session_key.native_id)
+        {
+            return None;
+        }
+        let parent_id = second["payload"]["id"].as_str()?;
+        (parent_id != session_key.native_id && uuid::Uuid::parse_str(parent_id).is_ok())
+            .then(|| parent_id.to_string())
+    }
+
+    fn independent_copied_history(
+        provider: &CodexProvider,
+        session_key: &LogicalSessionKey,
+        child: &[(u64, serde_json::Value)],
+    ) -> Option<(String, (u64, u64))> {
+        let parent_id = independent_embedded_parent_id(session_key, child)?;
+        let (_, parent_path) = provider.resolve(&key(&parent_id)).ok()?;
+        let mut reader = provider.open_records(&parent_path).ok()?;
+        let mut line = Vec::new();
+        let mut last = None;
+        let mut expected_child = 1_u64;
+        for (child_ordinal, child_value) in child.iter().skip(1) {
+            if *child_ordinal != expected_child {
+                break;
+            }
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            let Ok(mut parent_value) = serde_json::from_slice::<serde_json::Value>(&line) else {
+                break;
+            };
+            let mut child_value = child_value.clone();
+            parent_value
+                .as_object_mut()
+                .expect("envelope object")
+                .remove("timestamp");
+            child_value
+                .as_object_mut()
+                .expect("envelope object")
+                .remove("timestamp");
+            if parent_value != child_value {
+                break;
+            }
+            last = Some(*child_ordinal);
+            expected_child = expected_child.saturating_add(1);
+        }
+        last.map(|last| (parent_id, (1, last)))
+    }
+
+    /// Verify the exact activity partition and that producing edges never
+    /// cross the fork boundary. Expectations come from entry ids and the
+    /// independently proven native prefix, not from emitted semantics.
+    fn audit_inherited_activity(
+        key: &LogicalSessionKey,
+        inherited: Option<(u64, u64)>,
+        session: &crate::provider::ParsedSession,
+    ) -> Vec<String> {
+        let in_range =
+            |ordinal: u64| inherited.is_some_and(|(first, last)| (first..=last).contains(&ordinal));
+        let mut violations = Vec::new();
+        for entry in &session.entries {
+            let expected = if in_range(entry.id.ordinal) {
+                ActivityKind::InheritedHistory
+            } else {
+                ActivityKind::New
+            };
+            let actual = session
+                .semantics
+                .get(&entry.id)
+                .map_or(ActivityKind::New, |s| s.activity);
+            if actual != expected {
+                violations.push(format!(
+                    "entry #{} activity is {actual:?}, expected {expected:?}",
+                    entry.id.ordinal
+                ));
+            }
+            if entry.id.session != *key {
+                violations.push(format!(
+                    "entry #{} belongs to another session",
+                    entry.id.ordinal
+                ));
+            }
+        }
+        for disposition in &session.record_dispositions {
+            let produced = match &disposition.outcome {
+                RecordOutcome::Mapped(ids)
+                | RecordOutcome::Unknown { entries: ids }
+                | RecordOutcome::Recovered { entries: ids, .. } => Some(ids),
+                RecordOutcome::Suppressed { .. } | RecordOutcome::Unparseable { .. } => None,
+            };
+            if let Some(ids) = produced {
+                for id in ids {
+                    if in_range(disposition.record.ordinal) != in_range(id.ordinal) {
+                        violations.push(format!(
+                            "record #{} crosses the inherited/new boundary to entry #{}",
+                            disposition.record.ordinal, id.ordinal
+                        ));
+                    }
+                }
+            }
+            if let RecordOutcome::Suppressed {
+                reason: super::super::SuppressionReason::DuplicateStream { twin },
+            } = &disposition.outcome
+            {
+                if in_range(disposition.record.ordinal) != in_range(twin.ordinal) {
+                    violations.push(format!(
+                        "duplicate record #{} crosses the inherited/new boundary to twin #{}",
+                        disposition.record.ordinal, twin.ordinal
+                    ));
+                }
+            }
+        }
+        violations
+    }
+
     /// Claim-once helper for independent twin matching.
     fn claim_first(pool: &mut [(String, bool)], text: &str) -> bool {
         if let Some(c) = pool.iter_mut().find(|(t, claimed)| !*claimed && t == text) {
@@ -2832,12 +3605,16 @@ mod tests {
     /// window-scoped identical-event dedup plus content-confirmed twin
     /// matching. Needed only to know which agent events are NOT assistant
     /// entries (and so cannot be usage owners).
-    fn independent_suppressed(raw: &[(u64, serde_json::Value)]) -> std::collections::BTreeSet<u64> {
+    fn independent_suppressed(
+        raw: &[(u64, serde_json::Value)],
+        first_new_after_fork: Option<u64>,
+    ) -> std::collections::BTreeSet<u64> {
         let mut suppressed = std::collections::BTreeSet::new();
         let mut start = 0usize;
         let mut i = 0usize;
         loop {
-            let at_boundary = i == raw.len() || is_window_boundary_raw(&raw[i].1);
+            let at_boundary =
+                i == raw.len() || is_audit_boundary(raw[i].0, &raw[i].1, first_new_after_fork);
             if at_boundary && i > start {
                 independent_suppress_window(&raw[start..i], &mut suppressed);
                 start = i;
@@ -2859,6 +3636,7 @@ mod tests {
     /// Exact duplicate native events are one emission and add no expectation.
     fn independent_prompt_expectations(
         raw: &[(u64, serde_json::Value)],
+        first_new_after_fork: Option<u64>,
     ) -> (
         std::collections::BTreeSet<u64>,
         std::collections::BTreeSet<u64>,
@@ -2868,7 +3646,8 @@ mod tests {
         let mut start = 0usize;
         let mut i = 0usize;
         loop {
-            let at_boundary = i == raw.len() || is_window_boundary_raw(&raw[i].1);
+            let at_boundary =
+                i == raw.len() || is_audit_boundary(raw[i].0, &raw[i].1, first_new_after_fork);
             if at_boundary && i > start {
                 let window = &raw[start..i];
                 let mut representatives: std::collections::HashSet<(String, String, String)> =
@@ -2934,10 +3713,11 @@ mod tests {
         key: &LogicalSessionKey,
         raw: &[(u64, serde_json::Value)],
         session: &crate::provider::ParsedSession,
+        first_new_after_fork: Option<u64>,
     ) -> PromptAudit {
         use crate::provider::{PromptAuthorship, PromptDelivery};
 
-        let (boundaries, midturn) = independent_prompt_expectations(raw);
+        let (boundaries, midturn) = independent_prompt_expectations(raw, first_new_after_fork);
         let mut expected: std::collections::BTreeMap<crate::provider::EntryId, PromptDelivery> =
             std::collections::BTreeMap::new();
         for ordinal in &boundaries {
@@ -3090,6 +3870,7 @@ mod tests {
         key: &LogicalSessionKey,
         raw: &[(u64, serde_json::Value)],
         session: &crate::provider::ParsedSession,
+        first_new_after_fork: Option<u64>,
     ) -> Vec<String> {
         use crate::provider::{RecordOutcome, UsageAggregation, UsageBasis, UsageScope};
         let mut v: Vec<String> = Vec::new();
@@ -3098,13 +3879,13 @@ mod tests {
         let mut window_of: std::collections::BTreeMap<u64, u64> = std::collections::BTreeMap::new();
         let mut w = 0u64;
         for (o, val) in raw {
-            if is_window_boundary_raw(val) {
+            if is_audit_boundary(*o, val, first_new_after_fork) {
                 w += 1;
             }
             window_of.insert(*o, w);
         }
 
-        let suppressed = independent_suppressed(raw);
+        let suppressed = independent_suppressed(raw, first_new_after_fork);
 
         // Assistant-EMISSION ordinals: native records that become an
         // assistant entry (a valid usage owner).
@@ -3518,7 +4299,7 @@ mod tests {
     #[test]
     fn allocation_audit_accepts_the_valid_fixture() {
         let (_t, parsed, raw) = parse_and_raw(&allocation_fixture());
-        let violations = audit_usage_allocation(&key(THREAD_A), &raw, &parsed);
+        let violations = audit_usage_allocation(&key(THREAD_A), &raw, &parsed, None);
         assert!(
             violations.is_empty(),
             "valid fixture rejected: {violations:?}"
@@ -3531,7 +4312,7 @@ mod tests {
         raw: &[(u64, serde_json::Value)],
         needle: &str,
     ) {
-        let violations = audit_usage_allocation(&key(THREAD_A), raw, parsed);
+        let violations = audit_usage_allocation(&key(THREAD_A), raw, parsed, None);
         assert!(
             violations.iter().any(|m| m.contains(needle)),
             "expected a violation containing {needle:?}, got {violations:?}"
@@ -4234,7 +5015,7 @@ mod tests {
     #[test]
     fn prompt_semantics_audit_accepts_native_boundary_and_steering() {
         let (_tmp, parsed, raw) = prompt_audit_fixture();
-        let audit = audit_prompt_semantics(&key(THREAD_A), &raw, &parsed);
+        let audit = audit_prompt_semantics(&key(THREAD_A), &raw, &parsed, None);
         assert!(audit.violations.is_empty(), "{:?}", audit.violations);
         assert_eq!(audit.boundary_count, 1);
         assert_eq!(audit.midturn_count, 1);
@@ -4248,7 +5029,7 @@ mod tests {
             authorship: crate::provider::PromptAuthorship::Human,
             delivery: crate::provider::PromptDelivery::TurnBoundary,
         });
-        let audit = audit_prompt_semantics(&key(THREAD_A), &raw, &parsed);
+        let audit = audit_prompt_semantics(&key(THREAD_A), &raw, &parsed, None);
         assert!(
             audit
                 .violations
@@ -4267,7 +5048,7 @@ mod tests {
             authorship: crate::provider::PromptAuthorship::Human,
             delivery: crate::provider::PromptDelivery::TurnBoundary,
         });
-        let audit = audit_prompt_semantics(&key(THREAD_A), &raw, &parsed);
+        let audit = audit_prompt_semantics(&key(THREAD_A), &raw, &parsed, None);
         assert!(
             audit
                 .violations

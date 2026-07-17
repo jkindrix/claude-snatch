@@ -24,11 +24,14 @@
 //!   if none ever arrives the record stays a preserved Unknown entry,
 //!   never lost.
 //!
-//! Everything outside the slice (session_meta, turn_context, world_state,
-//! ghost_snapshot, compacted, task events, ...) remains a preserved
-//! `Unknown` entry — consumed as normalization STATE where useful, with
-//! its disposition unchanged. Fork-inherited history, compaction, and
-//! spawn lineage are later B3 slices.
+//! Everything outside the mapped vocabulary (session_meta, turn_context,
+//! world_state, ghost_snapshot, compacted, task events, ...) remains a
+//! preserved `Unknown` entry — consumed as normalization STATE where useful,
+//! with its disposition unchanged. The provider supplies a proven copied-
+//! history interval for old-format forks; this module treats its end as a
+//! hard matching/usage window boundary before the provider annotates copied
+//! entries as inherited. Compaction and world-state semantics are later B3
+//! slices; spawn lineage is provider-level metadata rather than an entry.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -117,14 +120,14 @@ fn claim(pool: &mut [Candidate], text: &str) -> Option<u64> {
         })
 }
 
-fn plan_matches(records: &[(RecordRef, Value)]) -> MatchPlan {
+fn plan_matches(records: &[(RecordRef, Value)], first_new_after_fork: Option<u64>) -> MatchPlan {
     let mut plan = MatchPlan::default();
     let mut window_start = 0usize;
     let mut i = 0usize;
     loop {
         let at_boundary = i == records.len() || {
             let (et, _, pt) = envelope_parts(&records[i].1);
-            is_window_boundary(et, pt)
+            is_window_boundary(et, pt) || first_new_after_fork == Some(records[i].0.ordinal)
         };
         if at_boundary && i > window_start {
             plan_window(&records[window_start..i], &mut plan);
@@ -324,6 +327,7 @@ struct WalkState {
 pub(super) fn normalize(
     key: &LogicalSessionKey,
     records: &[(RecordRef, Value)],
+    inherited_range: Option<(u64, u64)>,
 ) -> NormalizeOutput {
     let mut out = NormalizeOutput {
         entries: Vec::new(),
@@ -332,7 +336,8 @@ pub(super) fn normalize(
         semantics: BTreeMap::new(),
         diagnostics: IngestionDiagnostics::default(),
     };
-    let plan = plan_matches(records);
+    let first_new_after_fork = inherited_range.map(|(_, last)| last.saturating_add(1));
+    let plan = plan_matches(records, first_new_after_fork);
 
     let mut state = WalkState {
         version: "unknown".into(),
@@ -354,7 +359,9 @@ pub(super) fn normalize(
             .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
             .map_or_else(|| DateTime::<Utc>::UNIX_EPOCH, |t| t.with_timezone(&Utc));
 
-        if is_window_boundary(envelope_type, payload_type) {
+        if is_window_boundary(envelope_type, payload_type)
+            || first_new_after_fork == Some(record.ordinal)
+        {
             state.window += 1;
             // Pending usage from the closed window flushes as PRESERVED,
             // unattributed records — it must never attach to a later

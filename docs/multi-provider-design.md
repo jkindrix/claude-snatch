@@ -1010,6 +1010,52 @@ fixture. Exclusion stated explicitly: no distinct native "queued" discriminator
 was observed; queued input is represented as its later ordinary turn-boundary
 prompt, consistent with the documented next-turn behavior.
 
+## B3 slice 3 — fork history and typed lineage (2026-07-17)
+
+The current Codex source makes the relationships explicit: `SessionMeta`
+has distinct `forked_from_id` and `parent_thread_id` fields, and a spawned
+thread's typed source is
+`{subagent:{thread_spawn:{parent_thread_id,depth,agent_role,...}}}`. Older
+fork construction instead derives `forked_from_id` from the copied initial
+history's first `SessionMeta`. Sources:
+[Codex protocol at rust-v0.144.5](https://github.com/openai/codex/blob/rust-v0.144.5/codex-rs/protocol/src/protocol.rs#L2497-L2521)
+and
+[current SessionMeta/SubAgentSource definitions](https://github.com/openai/codex/blob/rust-v0.144.5/codex-rs/protocol/src/protocol.rs#L2786-L2804).
+
+The independent corpus census found 16 two-meta rollouts among 226 preferred
+sessions. Every one has exactly the strict old-format shape: physical record
+zero is metadata for the filename thread, record one is metadata for a
+different existing thread, and the second metadata plus following records
+form an exact prefix of that parent's preferred rollout when ONLY the outer
+envelope timestamp is ignored. No current-corpus metadata carries
+`forked_from_id`, `parent_thread_id`, or a linkable `thread_spawn` source, so
+the 16 observed edges are forks; the modern spawn shape is pinned by an
+official-source-derived adversarial fixture rather than falsely claimed as
+corpus-observed.
+
+Implementation: `lineage()` emits typed `Fork` edges from the modern direct
+field or the strict physical-record-one heuristic, and typed `Spawn` edges
+from the direct/nested parent carrier with the recorded agent role. Later
+second metadata never qualifies. During parse, the provider proves the
+maximal copied prefix against the available parent using complete-envelope
+equality except for the rewritten outer timestamp. Its end is a hard
+dedup/usage window boundary, and every normalized entry whose producing
+records lie wholly inside the prefix is annotated
+`ActivityKind::InheritedHistory`; copied records stay present in the fork
+view but are excluded from new-work projections. A missing parent leaves a
+dangling edge but causes no guessed activity classification—there is then no
+available parent session with which to double-count.
+
+The child's parse-cache token includes the parent descriptor state, including
+the missing→present transition, because inherited classification depends on
+it. The real-corpus gate independently reconstructs both the complete lineage
+edge set and each copied prefix, then audits the exact inherited/new activity
+partition and forbids producing/dedup edges crossing the boundary. Mutation
+controls flip one inherited entry to new and one new entry to inherited; both
+must fail. A separate fixture leaves copied usage pending at the boundary and
+proves it is preserved as inherited rather than attached to the fork's first
+new assistant.
+
 ## Review round 26 (2026-07-17, same Codex agent — B3.1.3 audit: B3.1.4)
 
 Verdict: the preserve-all loophole is fixed and all ten controls are
@@ -1313,17 +1359,18 @@ Decisions taken in-implementation, FLAGGED FOR REVIEW:
       Queue has no observed native discriminator and remains an ordinary later
       turn boundary, matching Codex's documented next-turn semantics.
 - [ ] `world_state` / `ghost_snapshot` semantics — empirical.
-- [ ] Typed fork AND spawn lineage (phase-plan original wording, restored
+- [x] Typed fork AND spawn lineage (phase-plan original wording, restored
       round-17): fork reconstruction via the embedded-second-meta heuristic
       (this corpus's forks predate forked_from_id — B1a observation) AND
       typed `Spawn` edges from Codex subagent `parent_thread_id`/source
-      metadata — both as LineageEdge kinds, not fork alone.
+      metadata — both as LineageEdge kinds, not fork alone. Slice 3 also
+      proves copied parent prefixes and marks their entries InheritedHistory.
 - [ ] Compaction: `compacted` items with replacement_history not counted as
       new chronological activity (invariant #4); window-metadata carrier
       (deferred from A.0 round 5).
-- [~] Semantic sidecar emission: prompt axes, per-call tools, turn ids, and
-      valued usage observations ship; InheritedHistory for fork-copied
-      records remains in the lineage slice.
+- [x] Semantic sidecar emission: prompt axes, per-call tools, turn ids,
+      valued usage observations, and InheritedHistory for fork-copied
+      records ship. Later state families may add their own typed carriers.
 - [x] Pre-envelope legacy files: keep unsupported-legacy refusal unless
       provenance-documented fixtures justify a parser (round-6 posture).
 - [~] Milestone: messages and timeline work on real Codex sessions, including
