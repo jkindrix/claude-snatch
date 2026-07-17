@@ -20,11 +20,13 @@ pub fn run(cli: &Cli) -> Result<()> {
         });
         match &entry.provider {
             Err(reason) => {
-                report["diagnostic"] = serde_json::json!(reason);
+                report["unavailable_reason"] = serde_json::json!(reason);
             }
             Ok(provider) => match provider.sessions() {
                 Err(e) => {
-                    report["diagnostic"] = serde_json::json!(format!("session scan failed: {e}"));
+                    // Constructed but scan-failed: still AVAILABLE — text and
+                    // JSON must agree on that (round-18 consistency fix).
+                    report["session_scan_error"] = serde_json::json!(format!("{e}"));
                 }
                 Ok(descriptors) => {
                     let mut forms: BTreeMap<&str, usize> = BTreeMap::new();
@@ -62,8 +64,10 @@ pub fn run(cli: &Cli) -> Result<()> {
         if let Some(root) = report["root"].as_str() {
             println!("  root: {root}");
         }
-        if let Some(diag) = report["diagnostic"].as_str() {
-            println!("  status: unavailable — {diag}");
+        if let Some(reason) = report["unavailable_reason"].as_str() {
+            println!("  status: unavailable — {reason}");
+        } else if let Some(err) = report["session_scan_error"].as_str() {
+            println!("  status: available (session scan failed: {err})");
         } else {
             println!("  status: available");
             println!("  sessions: {}", report["sessions"]);

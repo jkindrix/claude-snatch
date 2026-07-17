@@ -1364,10 +1364,21 @@ fn list_provider_sessions(cli: &Cli, args: &ListArgs) -> Result<()> {
     })?;
     let registry = super::helpers::provider_registry(cli);
     let selected = registry.select(&selection)?;
+    // Runtime failures: atomic under an explicit selection, skipped-but-
+    // reported under `all` (round-18 blocker 2 — partial, never silent).
+    let atomic = matches!(selection, ProviderSelection::Explicit(_));
+    let mut skipped = selected.skipped.clone();
 
     let mut rows = Vec::new();
     for provider in &selected.providers {
-        let mut descriptors = provider.sessions()?;
+        let mut descriptors = match provider.sessions() {
+            Ok(d) => d,
+            Err(e) if atomic => return Err(e.into()),
+            Err(e) => {
+                skipped.push((provider.id(), format!("session scan failed: {e}")));
+                continue;
+            }
+        };
         // Deterministic cross-provider ordering: providers arrive in id
         // order; sessions sort by qualified key within each provider.
         descriptors.sort_by(|a, b| a.key.cmp(&b.key));
@@ -1405,8 +1416,7 @@ fn list_provider_sessions(cli: &Cli, args: &ListArgs) -> Result<()> {
         let out = serde_json::json!({
             "sessions": rows,
             "total": total,
-            "skipped_providers": selected
-                .skipped
+            "skipped_providers": skipped
                 .iter()
                 .map(|(id, reason)| serde_json::json!({"provider": id.to_string(), "reason": reason}))
                 .collect::<Vec<_>>(),
@@ -1427,7 +1437,7 @@ fn list_provider_sessions(cli: &Cli, args: &ListArgs) -> Result<()> {
     if rows.len() < total {
         println!("... and {} more (raise -n/--limit)", total - rows.len());
     }
-    for (id, reason) in &selected.skipped {
+    for (id, reason) in &skipped {
         eprintln!("warning: provider '{id}' skipped: {reason}");
     }
     Ok(())

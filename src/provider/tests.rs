@@ -815,6 +815,18 @@ fn matrix_registry() -> ProviderRegistry {
     r
 }
 
+fn healthy_registry() -> ProviderRegistry {
+    let mut r = ProviderRegistry::new();
+    r.register(fake_entry()).unwrap();
+    r.register(RegisteredProvider {
+        id: ProviderId("small".into()),
+        root: None,
+        provider: Ok(Box::new(SmallProvider)),
+    })
+    .unwrap();
+    r
+}
+
 fn flags(v: &[&str]) -> Vec<String> {
     v.iter().map(|s| s.to_string()).collect()
 }
@@ -917,7 +929,9 @@ fn qualified_id_naming_unavailable_or_unknown_provider_is_precise() {
     // A colon-bearing reference whose first segment names NO registered
     // provider is NOT a qualified id (unified predicate, round-18): it is
     // searched as a plain prefix and misses, with an explanatory hint.
-    let err = r
+    // (Healthy registry: with an unsearchable provider present the
+    // unsearched-refusal correctly fires first instead.)
+    let err = healthy_registry()
         .resolve_session(&ProviderSelection::All, "ghost:xyz")
         .err()
         .unwrap()
@@ -1029,7 +1043,7 @@ fn ambiguity_candidates_are_sorted_before_truncation() {
 
 #[test]
 fn unqualified_ambiguity_errors_with_qualified_candidates() {
-    let r = matrix_registry();
+    let r = healthy_registry();
     // "42" matches fake:install-a:42, fake:install-b:42 (both exact) and
     // small:421 — two exact matches cannot break the tie.
     let err = r
@@ -1048,7 +1062,7 @@ fn unqualified_ambiguity_errors_with_qualified_candidates() {
 
 #[test]
 fn unqualified_unique_prefix_resolves_across_providers() {
-    let r = matrix_registry();
+    let r = healthy_registry();
     let res = r.resolve_session(&ProviderSelection::All, "421").unwrap();
     assert_eq!(res.key, SmallProvider::key("421"));
     assert_eq!(res.provider.id().to_string(), "small");
@@ -1056,24 +1070,23 @@ fn unqualified_unique_prefix_resolves_across_providers() {
 
 #[test]
 fn one_exact_match_beats_longer_prefix_matches() {
-    let r = matrix_registry();
+    let r = healthy_registry();
     // "5" prefixes both small:5 and small:56, but is an exact id for one.
     let res = r.resolve_session(&ProviderSelection::All, "5").unwrap();
     assert_eq!(res.key, SmallProvider::key("5"));
 }
 
 #[test]
-fn not_found_under_all_names_unsearched_providers() {
-    let r = matrix_registry();
+fn not_found_with_all_providers_searched_is_a_plain_miss() {
+    // With every provider searchable, a miss is a miss (the
+    // unsearched-refusal path is covered separately).
+    let r = healthy_registry();
     let err = r
         .resolve_session(&ProviderSelection::All, "zzz")
         .err()
         .expect("not found")
         .to_string();
-    assert!(
-        err.contains("no session matching") && err.contains("broken"),
-        "skipped providers must be named so 'not found' is honest: {err}"
-    );
+    assert!(err.contains("no session matching"), "got: {err}");
 }
 
 #[test]
@@ -1165,4 +1178,123 @@ fn cached_parsed_session_preserves_bundle_across_miss_and_hit() {
     // The hit still builds a conversation with reachable semantics.
     let conversation = crate::reconstruction::Conversation::from_parsed_session(hit).unwrap();
     assert!(conversation.provider_bundle().is_some());
+}
+
+// ============================================================================
+// Runtime `all` semantics (B2.9, round-18 blocker 2)
+// ============================================================================
+
+/// Hostile provider: constructs fine, fails at runtime.
+struct FailingSessionsProvider;
+
+impl SourceProvider for FailingSessionsProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId("flaky".into())
+    }
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::default()
+    }
+    fn sessions(&self) -> Result<Vec<SessionDescriptor>, ProviderError> {
+        Err(ProviderError::Other("index database is locked".into()))
+    }
+    fn diagnostics(&self) -> Result<Option<serde_json::Value>, ProviderError> {
+        Err(ProviderError::Other("diagnostics scan failed".into()))
+    }
+    fn lineage(&self) -> Result<Vec<LineageEdge>, ProviderError> {
+        Ok(vec![])
+    }
+    fn parse(&self, key: &LogicalSessionKey) -> Result<ParsedSession, ProviderError> {
+        Err(ProviderError::NotFound(key.to_string()))
+    }
+    fn parse_cache_token(&self, key: &LogicalSessionKey) -> Result<String, ProviderError> {
+        Err(ProviderError::NotFound(key.to_string()))
+    }
+    fn write_archive(
+        &self,
+        key: &LogicalSessionKey,
+        _out: &mut dyn std::io::Write,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::NotFound(key.to_string()))
+    }
+    fn write_native(
+        &self,
+        _artifact: &ArtifactId,
+        _out: &mut dyn std::io::Write,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::Unsupported {
+            capability: "native export",
+        })
+    }
+    fn write_raw_jsonl(
+        &self,
+        _key: &LogicalSessionKey,
+        _out: &mut dyn std::io::Write,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::Unsupported {
+            capability: "raw-jsonl export",
+        })
+    }
+}
+
+fn registry_with_flaky() -> ProviderRegistry {
+    let mut r = ProviderRegistry::new();
+    r.register(RegisteredProvider {
+        id: ProviderId("small".into()),
+        root: None,
+        provider: Ok(Box::new(SmallProvider)),
+    })
+    .unwrap();
+    r.register(RegisteredProvider {
+        id: ProviderId("flaky".into()),
+        root: None,
+        provider: Ok(Box::new(FailingSessionsProvider)),
+    })
+    .unwrap();
+    r
+}
+
+#[test]
+fn unqualified_resolution_refuses_when_any_provider_was_unsearched() {
+    let r = registry_with_flaky();
+    // "421" is unique in `small` — but flaky was unsearchable, so under
+    // `all` one hit elsewhere proves nothing: refuse, do not guess.
+    let err = r
+        .resolve_session(&ProviderSelection::All, "421")
+        .err()
+        .expect("must refuse")
+        .to_string();
+    assert!(
+        err.contains("uniqueness is unprovable") && err.contains("flaky"),
+        "got: {err}"
+    );
+
+    // A construction-time-unavailable provider forces the same refusal.
+    let r2 = matrix_registry();
+    let err = r2
+        .resolve_session(&ProviderSelection::All, "421")
+        .err()
+        .expect("must refuse")
+        .to_string();
+    assert!(
+        err.contains("uniqueness is unprovable") && err.contains("broken"),
+        "got: {err}"
+    );
+
+    // A QUALIFIED reference pins its provider and still resolves.
+    let res = r
+        .resolve_session(&ProviderSelection::All, "small:421")
+        .unwrap();
+    assert_eq!(res.key, SmallProvider::key("421"));
+}
+
+#[test]
+fn runtime_sessions_failure_is_atomic_under_explicit_selection() {
+    let r = registry_with_flaky();
+    let sel = ProviderSelection::from_flags(&flags(&["flaky", "small"])).unwrap();
+    let err = r
+        .resolve_session(&sel, "421")
+        .err()
+        .expect("explicit selection must not soften runtime failures")
+        .to_string();
+    assert!(err.contains("index database is locked"), "got: {err}");
 }

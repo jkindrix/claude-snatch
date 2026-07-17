@@ -909,8 +909,9 @@ pub enum ExportFormatArg {
     /// model. Complete and structured, but not byte-for-byte (fields may be
     /// reordered; orphan entries are emitted first).
     Jsonl,
-    /// raw-jsonl: byte-faithful passthrough of the original Claude Code JSONL
-    /// (no parsing, filtering, redaction, or reordering). The archival mode.
+    /// raw-jsonl: byte-faithful passthrough of the session's original JSONL
+    /// record stream, any provider (no parsing, filtering, redaction, or
+    /// reordering). The archival mode.
     RawJsonl,
     /// CSV tabular format.
     Csv,

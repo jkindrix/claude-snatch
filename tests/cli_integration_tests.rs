@@ -1460,11 +1460,11 @@ fn test_providers_missing_codex_home_is_visible_not_dropped() {
     let codex = &reports[1];
     assert_eq!(codex["available"], false);
     assert!(
-        codex["diagnostic"]
+        codex["unavailable_reason"]
             .as_str()
-            .expect("unavailable provider carries a diagnostic")
+            .expect("unavailable provider carries a reason")
             .contains("not found"),
-        "diagnostic should say the home was not found: {codex}"
+        "reason should say the home was not found: {codex}"
     );
 }
 
@@ -1864,4 +1864,51 @@ fn qualification_predicate_is_unified_at_command_level() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("invalid escape"));
+}
+
+#[cfg(feature = "codex")]
+#[test]
+fn doctor_withholds_unavailability_details() {
+    // Doctor promises no filesystem paths in its output; unavailability
+    // detail lives in `snatch providers` instead (round-18).
+    let claude = setup_fixture_dir();
+    let missing = claude.path().join("definitely-no-codex-here");
+    let out = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", claude.path())
+        .env("CODEX_HOME", &missing)
+        .args(["doctor", "--provider", "all"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("details withheld"), "got: {stdout}");
+    assert!(
+        !stdout.contains("definitely-no-codex-here"),
+        "doctor leaked a filesystem path: {stdout}"
+    );
+}
+
+#[test]
+fn provider_export_preflight_never_creates_the_output_file() {
+    // Round-18: a refused/unstartable export must not create or truncate
+    // the destination.
+    let tmp = setup_fixture_dir();
+    let out_path = tmp.path().join("never-created.md");
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "export",
+            &format!("claude-code:{SESSION_ID}"),
+            "-f",
+            "markdown",
+            "-O",
+        ])
+        .arg(&out_path)
+        .assert()
+        .failure();
+    assert!(
+        !out_path.exists(),
+        "preflight must reject before the file is created"
+    );
 }

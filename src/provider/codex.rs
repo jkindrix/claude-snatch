@@ -252,18 +252,25 @@ const MAX_VOCAB_KEYS: usize = 64;
 const MAX_VOCAB_KEY_LEN: usize = 120;
 
 fn sanitize_vocab_key(raw: &str, truncated: &mut u64) -> String {
+    // The cap applies to the ESCAPED representation: escape_debug expands a
+    // control character up to ~10 chars, so counting raw characters would
+    // let hostile keys blow far past the promised bound (round-18).
     let mut out = String::new();
-    for (i, c) in raw.chars().enumerate() {
-        if i >= MAX_VOCAB_KEY_LEN {
+    let mut len = 0usize;
+    for c in raw.chars() {
+        let piece: String = if c.is_control() {
+            c.escape_debug().collect()
+        } else {
+            c.to_string()
+        };
+        let piece_len = piece.chars().count();
+        if len + piece_len > MAX_VOCAB_KEY_LEN {
             out.push('…');
             *truncated += 1;
             break;
         }
-        if c.is_control() {
-            out.extend(c.escape_debug());
-        } else {
-            out.push(c);
-        }
+        out.push_str(&piece);
+        len += piece_len;
     }
     out
 }
@@ -2415,6 +2422,23 @@ mod tests {
             "escaped control character not found: {:?}",
             report.unknown_field_paths.keys().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn vocab_key_length_cap_applies_to_escaped_representation() {
+        // Round-18: escape_debug expands control characters, so the cap
+        // must bound the ESCAPED output — 300 raw control chars would
+        // otherwise store ~1800 chars.
+        let mut truncated = 0u64;
+        let hostile: String = "\u{1}".repeat(300);
+        let out = sanitize_vocab_key(&hostile, &mut truncated);
+        assert!(
+            out.chars().count() <= MAX_VOCAB_KEY_LEN + 1,
+            "escaped key exceeds cap: {} chars",
+            out.chars().count()
+        );
+        assert_eq!(truncated, 1);
+        assert!(!out.chars().any(char::is_control));
     }
 
     #[test]

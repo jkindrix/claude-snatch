@@ -767,6 +767,15 @@ breath as any completion claim).
 - [x] `--provider all` availability semantics defined explicitly (round-17):
       whether one unavailable provider yields partial results (with a
       diagnostic) or fails atomically — pick one and test it.
+      ROUND-18 STRENGTHENING (B2.9): the rule covers RUNTIME failures too —
+      constructed providers whose `sessions()`/`diagnostics()` fail at call
+      time are atomic under explicit selections and skipped-but-reported
+      under `all` (listing/diagnostics), and UNQUALIFIED resolution under
+      `all` refuses to choose while ANY provider (construction-skipped or
+      runtime-failed) went unsearched — one hit elsewhere cannot prove
+      uniqueness; qualified references pin their provider and are exempt.
+      Tested with a hostile provider that constructs fine and fails at
+      runtime.
 - [x] Deterministic cross-provider ordering for any merged listing/output
       (round-17).
 - [x] `snatch providers` command: discovered roots, session counts, format
@@ -817,6 +826,42 @@ breath as any completion claim).
 - [x] Milestone (phase-plan original wording, restored round-17): list/info
       + native/raw export work on REAL Codex sessions — a real-session
       demonstration, not fixtures only.
+
+## Review round 18 (2026-07-17, same Codex agent — B2 exit review: NOT ready)
+
+Verdict: proceed with B2 HARDENING, not B3. Five blockers, all accepted and
+fixed in three units:
+
+- **B2.7 (parsed-session propagation was illusory)**: the cache retained
+  only `Vec<LogEntry>` and `from_parsed_session` stripped the bundle — the
+  checked-off propagation claim was the requirement-evaporation pattern
+  again. Fixed: `Arc<ParsedSession>` cached complete
+  (`cached_parsed_session`), `Conversation` retains the bundle with a
+  defined survival rule (authoritative bundle, node-tree view, keep-first
+  uuid→EntryId correlation) and semantics accessors; CLI/MCP info construct
+  through the bridge and surface disposition/semantics counts; tests prove
+  survival across cache miss and hit.
+- **B2.8 (option loss, limit loss, split predicates)**: one qualification
+  predicate (`looks_qualified`) used by every resolution path, with
+  command-level tests for Windows paths, ghost prefixes, malformed escapes,
+  and encoded-colon natives; ambiguity candidates sorted before truncation;
+  `RegistryConfig` threads `--max-file-size` into both providers (Codex
+  caps tightened, plain files now bounded by the same cap; limit changes
+  the cache token and refuses oversized parses); COMPLETE table-driven
+  option classification per provider route (list 21+targets, info 7,
+  doctor 3, export 35 incl. security flags and default-true toggles, MCP
+  scope args) with every unsupported argument individually refused and
+  individually tested.
+- **B2.9 (runtime `all`, diagnostics hardening, consistency, atomicity)**:
+  runtime-failure semantics above; vocabulary length cap applies to the
+  ESCAPED representation (300-control-char test); doctor withholds
+  unavailability/failure detail entirely (no filesystem paths — `snatch
+  providers` is the detail surface, and its available/scan-failed states
+  are now consistent between text and JSON); provider exports preflight
+  format+capability+artifact resolution BEFORE touching the destination
+  and stream through AtomicFile (temp + rename); MCP tool descriptions and
+  raw-jsonl CLI docs de-Claude-ified. Compatibility: flagless outputs
+  unchanged; MCP response additions remain additive (invariant #8).
 
 #### B2 status (2026-07-17, milestones 1-6 shipped)
 

@@ -2486,25 +2486,38 @@ fn export_via_provider(cli: &Cli, args: &ExportArgs) -> Result<()> {
     let provider = resolution.provider;
     let key = &resolution.key;
 
-    let mut sink: Box<dyn std::io::Write> = match &args.output_file {
-        Some(path) => {
-            if path.exists() && !args.overwrite {
+    // PREFLIGHT before touching the output file (round-18: never
+    // create/truncate the destination for an export that cannot start):
+    // format support, capability checks, and native-artifact resolution all
+    // happen first.
+    let capabilities = provider.capabilities();
+    enum Tier {
+        Raw,
+        Archive,
+        Native(crate::provider::ArtifactId),
+    }
+    let tier = match args.format {
+        ExportFormatArg::RawJsonl => {
+            if !capabilities.raw_jsonl {
                 return Err(SnatchError::ConfigError {
                     message: format!(
-                        "output file {} exists (use --overwrite to replace)",
-                        path.display()
+                        "provider '{}' does not support raw-jsonl export",
+                        provider.id()
                     ),
                 });
             }
-            Box::new(std::io::BufWriter::new(std::fs::File::create(path)?))
+            Tier::Raw
         }
-        None => Box::new(std::io::stdout().lock()),
-    };
-
-    match args.format {
-        ExportFormatArg::RawJsonl => provider.write_raw_jsonl(key, &mut sink)?,
-        ExportFormatArg::Archive => provider.write_archive(key, &mut sink)?,
+        ExportFormatArg::Archive => Tier::Archive,
         ExportFormatArg::Native => {
+            if !capabilities.native_export {
+                return Err(SnatchError::ConfigError {
+                    message: format!(
+                        "provider '{}' does not support native export",
+                        provider.id()
+                    ),
+                });
+            }
             let descriptor = provider
                 .sessions()?
                 .into_iter()
@@ -2512,15 +2525,16 @@ fn export_via_provider(cli: &Cli, args: &ExportArgs) -> Result<()> {
                 .ok_or_else(|| SnatchError::SessionNotFound {
                     session_id: key.to_string(),
                 })?;
-            let artifact = descriptor
-                .preferred_artifact()
-                .ok_or_else(|| SnatchError::ConfigError {
-                    message: format!("session {key} has no artifacts"),
-                })?
-                .snapshot
-                .id
-                .clone();
-            provider.write_native(&artifact, &mut sink)?;
+            Tier::Native(
+                descriptor
+                    .preferred_artifact()
+                    .ok_or_else(|| SnatchError::ConfigError {
+                        message: format!("session {key} has no artifacts"),
+                    })?
+                    .snapshot
+                    .id
+                    .clone(),
+            )
         }
         _ => {
             return Err(SnatchError::ConfigError {
@@ -2532,8 +2546,45 @@ fn export_via_provider(cli: &Cli, args: &ExportArgs) -> Result<()> {
                 ),
             });
         }
+    };
+
+    let stream = |sink: &mut dyn std::io::Write| -> Result<()> {
+        match &tier {
+            Tier::Raw => provider.write_raw_jsonl(key, sink)?,
+            Tier::Archive => provider.write_archive(key, sink)?,
+            Tier::Native(artifact) => provider.write_native(artifact, sink)?,
+        }
+        Ok(())
+    };
+
+    match &args.output_file {
+        Some(path) => {
+            if path.exists() && !args.overwrite {
+                return Err(SnatchError::ConfigError {
+                    message: format!(
+                        "output file {} exists (use --overwrite to replace)",
+                        path.display()
+                    ),
+                });
+            }
+            // Atomic: stream to a temporary file, rename on success — a
+            // mid-stream failure never leaves a truncated destination.
+            let mut atomic = AtomicFile::create(path)?;
+            {
+                let mut sink = std::io::BufWriter::new(atomic.writer());
+                stream(&mut sink)?;
+                use std::io::Write as _;
+                sink.flush()?;
+            }
+            atomic.finish()?;
+        }
+        None => {
+            let mut sink = std::io::stdout().lock();
+            stream(&mut sink)?;
+            use std::io::Write as _;
+            sink.flush()?;
+        }
     }
-    sink.flush()?;
 
     if !cli.quiet {
         if let Some(path) = &args.output_file {

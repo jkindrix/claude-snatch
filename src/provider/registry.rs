@@ -358,28 +358,54 @@ impl ProviderRegistry {
                 .map(|d| d.key)
                 .filter(|k| k.namespace == key.namespace && k.native_id.starts_with(&key.native_id))
                 .collect();
-            let key = pick_unique(reference, candidates, &key.native_id, &[])?;
+            let key = pick_unique(reference, candidates, &key.native_id)?;
             Ok(Resolution { provider, key })
         } else {
+            // Unqualified resolution proves uniqueness by searching EVERY
+            // selected provider. Under an explicit selection a runtime
+            // sessions() failure is atomic; under `all` it makes that
+            // provider UNSEARCHED — and one session found elsewhere proves
+            // nothing about an unsearched provider, so any unsearched
+            // provider (construction-skipped or runtime-failed) forces a
+            // refusal rather than a guess (round-18 blocker 2). Qualified
+            // references pin their provider and are unaffected.
+            let atomic = matches!(selection, ProviderSelection::Explicit(_));
+            let mut unsearched: Vec<(ProviderId, String)> = selected.skipped.clone();
             let mut candidates = Vec::new();
-            let mut per_provider: Vec<(&dyn SourceProvider, usize)> = Vec::new();
+            let mut searched: Vec<&dyn SourceProvider> = Vec::new();
             for provider in &selected.providers {
-                let before = candidates.len();
-                candidates.extend(
-                    provider
-                        .sessions()?
-                        .into_iter()
-                        .map(|d| d.key)
-                        .filter(|k| k.native_id.starts_with(reference)),
-                );
-                per_provider.push((*provider, candidates.len() - before));
+                match provider.sessions() {
+                    Ok(descriptors) => {
+                        candidates.extend(
+                            descriptors
+                                .into_iter()
+                                .map(|d| d.key)
+                                .filter(|k| k.native_id.starts_with(reference)),
+                        );
+                        searched.push(*provider);
+                    }
+                    Err(e) if atomic => return Err(e),
+                    Err(e) => unsearched.push((provider.id(), e.to_string())),
+                }
             }
-            let key = pick_unique(reference, candidates, reference, &selected.skipped)?;
-            let provider = per_provider
+            if !unsearched.is_empty() {
+                return Err(ProviderError::Other(format!(
+                    "cannot resolve unqualified reference '{reference}': uniqueness is \
+                     unprovable while providers were not searched ({}) — use a qualified \
+                     id (provider:...) to pin the provider",
+                    unsearched
+                        .iter()
+                        .map(|(id, reason)| format!("{id}: {reason}"))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )));
+            }
+            let key = pick_unique(reference, candidates, reference)?;
+            let provider = searched
                 .iter()
-                .find(|(p, _)| p.id() == key.provider)
-                .map(|(p, _)| *p)
-                .expect("winning key came from a selected provider");
+                .find(|p| p.id() == key.provider)
+                .copied()
+                .expect("winning key came from a searched provider");
             Ok(Resolution { provider, key })
         }
     }
@@ -447,7 +473,6 @@ fn pick_unique(
     reference: &str,
     candidates: Vec<LogicalSessionKey>,
     native_prefix: &str,
-    skipped: &[(ProviderId, String)],
 ) -> Result<LogicalSessionKey, ProviderError> {
     let exact: Vec<&LogicalSessionKey> = candidates
         .iter()
@@ -465,16 +490,6 @@ fn pick_unique(
                     " (colon-bearing references are treated as qualified ids only when \
                      the first segment names a registered provider)",
                 );
-            }
-            if !skipped.is_empty() {
-                msg.push_str(&format!(
-                    " (not searched — unavailable: {})",
-                    skipped
-                        .iter()
-                        .map(|(id, reason)| format!("{id}: {reason}"))
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                ));
             }
             Err(ProviderError::NotFound(msg))
         }

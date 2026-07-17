@@ -114,11 +114,19 @@ impl SnatchServer {
             Err(e) => return ToolOutput::error(e.to_string()),
         };
 
+        // Runtime failures: atomic under an explicit selection, skipped-
+        // but-reported under `all` (round-18 blocker 2).
+        let atomic = matches!(selection, ProviderSelection::Explicit(_));
+        let mut skipped = selected.skipped.clone();
         let mut rows = Vec::new();
         for provider in &selected.providers {
             let mut descriptors = match provider.sessions() {
                 Ok(d) => d,
-                Err(e) => return ToolOutput::error(format!("session scan failed: {e}")),
+                Err(e) if atomic => return ToolOutput::error(format!("session scan failed: {e}")),
+                Err(e) => {
+                    skipped.push((provider.id(), format!("session scan failed: {e}")));
+                    continue;
+                }
             };
             descriptors.sort_by(|a, b| a.key.cmp(&b.key));
             for d in descriptors {
@@ -137,8 +145,7 @@ impl SnatchServer {
         let out = serde_json::json!({
             "sessions": rows,
             "total": total,
-            "skipped_providers": selected
-                .skipped
+            "skipped_providers": skipped
                 .iter()
                 .map(|(id, reason)| serde_json::json!({"provider": id.to_string(), "reason": reason}))
                 .collect::<Vec<_>>(),
@@ -249,7 +256,9 @@ impl SnatchServer {
     // ========================================================================
 
     /// List Claude Code sessions with optional filtering.
-    #[tool(description = "List Claude Code sessions with optional filtering by project")]
+    #[tool(
+        description = "List agent sessions (Claude Code by default; other providers via the provider parameter) with optional filtering"
+    )]
     async fn list_sessions(&self, request: ListSessionsRequest) -> ToolOutput {
         if let Some(flags) = request.provider.as_ref().filter(|f| !f.is_empty()) {
             // Scope arguments the provider route does not implement are
@@ -337,7 +346,9 @@ impl SnatchServer {
     }
 
     /// Get detailed information about a specific Claude Code session.
-    #[tool(description = "Get detailed information about a specific Claude Code session")]
+    #[tool(
+        description = "Get detailed information about a session (Claude Code by default; provider-qualified ids and the provider parameter reach other providers)"
+    )]
     async fn get_session_info(&self, request: GetSessionInfoRequest) -> ToolOutput {
         let provider_flags = request.provider.clone().unwrap_or_default();
         if !provider_flags.is_empty() || request.session_id.contains(':') {

@@ -198,18 +198,32 @@ fn provider_diagnostics(cli: &Cli, args: &DoctorArgs) -> Result<()> {
     let registry = helpers::provider_registry(cli);
     let selected = registry.select(&selection)?;
 
+    // Runtime diagnostics failures: atomic under an explicit selection,
+    // reported per-provider under `all` (round-18 blocker 2). Unavailability
+    // and failure details are withheld here — doctor output promises no
+    // filesystem paths; `snatch providers` is the surface for those details.
+    let atomic = matches!(selection, ProviderSelection::Explicit(_));
     let mut reports = serde_json::Map::new();
     for provider in &selected.providers {
-        let value = match provider.diagnostics()? {
-            Some(v) => v,
-            None => serde_json::json!({
+        let value = match provider.diagnostics() {
+            Ok(Some(v)) => v,
+            Ok(None) => serde_json::json!({
                 "note": "no dedicated provider diagnostics; the classic `snatch doctor` scan covers this provider"
+            }),
+            Err(e) if atomic => return Err(e.into()),
+            Err(_) => serde_json::json!({
+                "error": "diagnostics failed (details withheld; run `snatch providers`)"
             }),
         };
         reports.insert(provider.id().to_string(), value);
     }
-    for (id, reason) in &selected.skipped {
-        reports.insert(id.to_string(), serde_json::json!({"unavailable": reason}));
+    for (id, _) in &selected.skipped {
+        reports.insert(
+            id.to_string(),
+            serde_json::json!({
+                "unavailable": "provider unavailable (details withheld; run `snatch providers`)"
+            }),
+        );
     }
 
     if cli.effective_output() == OutputFormat::Json {
@@ -224,6 +238,10 @@ fn provider_diagnostics(cli: &Cli, args: &DoctorArgs) -> Result<()> {
         println!("{id}");
         if let Some(reason) = value.get("unavailable").and_then(|v| v.as_str()) {
             println!("  unavailable: {reason}");
+            continue;
+        }
+        if let Some(err) = value.get("error").and_then(|v| v.as_str()) {
+            println!("  {err}");
             continue;
         }
         if let Some(note) = value.get("note").and_then(|v| v.as_str()) {
