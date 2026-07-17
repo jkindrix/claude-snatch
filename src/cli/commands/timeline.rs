@@ -163,9 +163,17 @@ struct TimelineContext<'a> {
 
 /// Group a provider conversation into turns using the semantics sidecar:
 /// a new turn starts when the entry's `turn_id` changes to a different
-/// known id, or at a HUMAN-authored prompt. Harness context preceding the
-/// first human prompt forms no turn of its own unless it produced
-/// assistant activity.
+/// known id, or at a Human/TurnBoundary prompt. A Human/MidTurn prompt
+/// (steering) stays inside the current turn and does NOT open a new one.
+/// Harness context preceding the first human prompt forms no turn of its
+/// own unless it produced assistant activity.
+///
+/// Presentation note (round-25): [`ConversationTurn`] carries a single
+/// `user_message`, so a MidTurn steering prompt does not split the turn but
+/// is also not rendered inside it. Full steering-prompt presentation is
+/// deferred to the steering slice (tracked in the design-doc forward
+/// checklist); the current guarantee is "does not split", not "fully
+/// represented".
 fn semantic_turns<'a>(
     conversation: &'a Conversation,
 ) -> Vec<crate::reconstruction::ConversationTurn<'a>> {

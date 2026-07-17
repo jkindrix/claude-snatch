@@ -863,6 +863,18 @@ complete:
    keyed on provider properties ships with a test that the OTHER
    provider's route is unchanged (the semantic-rendering flag silently
    regressed provider-routed Claude sessions).
+8. **Oracles are mutation-tested** (round-25, BINDING): a green corpus is
+   evidence about the implementation ONLY after the oracle itself has been
+   proven to reject representative broken outputs. Every semantic oracle
+   ships with deliberately-altered negative controls: start from a valid
+   parsed object, alter exactly ONE property, and assert the specific
+   violation. A source-derived oracle (rule 6) that is not mutation-tested
+   can still be silently self-confirming — see the usage-allocation audit
+   whose "attributed/preserved" partitions were both read from the
+   implementation's own output. Enforcement lives in executable tests
+   (`nc_*` in `src/provider/codex.rs`), not in this document. When claiming
+   a slice complete, report BOTH the positive evidence (valid passes) and
+   the negative-control evidence (each altered case fails for its reason).
 
 ## B3 slice 1 — normalization mapping (empirical, corpus of 224 real sessions)
 
@@ -966,6 +978,32 @@ Mapping (each mapped record keeps its B1 id `(ordinal, 0)` — constraint 1):
   and provider messages uses PromptSemantics for its human predicate — the
   Claude-shaped adjacent-pairing/is_human_prompt heuristics mislabeled
   harness context (a one-task real session reported 77 turns; now 1).
+
+## Review round 25 (2026-07-17, same Codex agent — B3.1.2 audit: B3.1.3)
+
+Verdict: production changes are materially correct, but the conformance
+oracle still derived the expected usage allocation from normalized OUTPUT
+(`attributed` from emitted observations, `preserved` from Unknown entries),
+so a broken impl that preserved every token_count and emitted no
+observations would pass. B3.1.3 (test-hardening only): the usage audit is
+extracted into a reusable helper (`audit_usage_allocation`) that derives
+the expected partition, owner, cardinality, values, basis, and ambiguity
+from the NATIVE record stream alone (independent window walk, independent
+event dedup for owner classification, source-backed includes-cached basis,
+independent cumulative-ambiguity recomputation). Ten deliberately-altered
+negative controls (`nc_*`) prove it rejects, each for its specific reason:
+all-preserved-no-observations, missing Call, missing Session, duplicate
+observations, swapped scope/aggregation, non-token_count source,
+wrong-assistant (same window), cross-window attribution, both-partitions,
+neither-partition. Cardinality uses Vec counts, not a set. Docs corrected:
+`UsageBasis` is now provider-neutral with Codex's source-backed policy
+documented separately and the retracted "excludes era" theory marked
+do-not-reintroduce; `semantic_turns` says Human/TurnBoundary; the steering
+test is renamed `midturn_steering_does_not_split_the_turn` and honestly
+scoped to "does not split" with the presentation obligation preserved in
+the B3 forward checklist. Slice-exit protocol gains BINDING rule 8
+(mutation-tested oracles). Corpus after B3.1.3: 225/225, independent
+allocation audit green on every session; negative controls all reject.
 
 ## Review round 24 (2026-07-17, same Codex agent — B3.1.1 audit: B3.1.2)
 
@@ -1217,7 +1255,12 @@ Decisions taken in-implementation, FLAGGED FOR REVIEW:
       response_item authoritative for content; event_msg for user-facing
       text/token counts) — settle empirically.
 - [ ] Steered/queued prompt persisted shape — empirical (inject.rs inference
-      unverified).
+      unverified). PRESENTATION OBLIGATION (round-25): the B3.1 timeline
+      already refuses to SPLIT a turn on a Human/MidTurn steering prompt,
+      but `ConversationTurn` carries a single user_message so the steering
+      prompt is not yet RENDERED inside its turn. This slice must display
+      steering prompts within the turn (multi-user-message turn shape or
+      equivalent), not merely avoid splitting.
 - [ ] `world_state` / `ghost_snapshot` semantics — empirical.
 - [ ] Typed fork AND spawn lineage (phase-plan original wording, restored
       round-17): fork reconstruction via the embedded-second-meta heuristic

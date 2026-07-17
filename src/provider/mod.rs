@@ -585,19 +585,30 @@ pub enum UsageAggregation {
 }
 
 /// How a provider's native input-token number relates to its cached-token
-/// number.
+/// number — a provider-neutral distinction.
 ///
-/// Era-dependent in the Codex corpus (round-23): some eras report
-/// `input_tokens` INCLUDING cached tokens, others EXCLUDING them —
-/// canonical fresh-input derivation is only meaningful once the basis is
-/// known.
+/// A provider may report `input_tokens` INCLUDING cached tokens or
+/// EXCLUDING them; canonical fresh-input derivation is only meaningful once
+/// the relationship is known. Each provider declares its own policy (see
+/// the Codex note below); the enum itself carries no provider assumption.
+///
+/// Codex policy (source-backed): Codex's own `TokenUsage` defines
+/// non-cached input as `input_tokens − cached_input_tokens`, verified
+/// across tags 0.31…0.144.5, and a census of 61,528 observations found no
+/// cumulative observation contradicting it. The Codex adapter therefore
+/// treats the basis as [`UsageBasis::InputIncludesCached`] and validates it
+/// PER OBSERVATION, marking an individual observation whose own numbers
+/// contradict it (cached > input) as [`UsageBasis::Unknown`]. (A round-23
+/// theory of an "excludes-cached era" was retracted in round 24 — see the
+/// design doc; do not reintroduce it.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageBasis {
     /// `input_tokens` includes cached tokens (fresh = input − cached).
     InputIncludesCached,
     /// `input_tokens` excludes cached tokens (fresh = input).
     InputExcludesCached,
-    /// The relationship could not be determined from the data.
+    /// The relationship could not be determined for this observation
+    /// (e.g. its cached count exceeds its input count).
     Unknown,
 }
 

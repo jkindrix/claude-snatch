@@ -2278,11 +2278,18 @@ mod codex_normalization_cli {
     }
 
     #[test]
-    fn steering_prompt_stays_inside_its_turn() {
+    fn midturn_steering_does_not_split_the_turn() {
         // Round-24 blocker 1: a MidTurn human prompt (unmatched user event
         // = steering) must NOT open a new timeline turn. Boundary prompt,
         // assistant output, steering prompt, second assistant output — one
         // turn_id, ONE turn.
+        //
+        // Scope (round-25): this asserts "does not split" only. The current
+        // ConversationTurn carries a single user_message, so the steering
+        // prompt itself is NOT displayed inside the rendered turn; full
+        // steering-prompt presentation is deferred to the steering slice
+        // (design-doc forward checklist). This test deliberately does not
+        // claim the steering text appears.
         let tmp = TempDir::new().unwrap();
         let day = tmp.path().join("sessions/2026/07/16");
         std::fs::create_dir_all(&day).unwrap();
