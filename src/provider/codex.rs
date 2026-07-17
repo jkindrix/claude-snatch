@@ -50,22 +50,142 @@ const WINDOW_LOG_MAX: u32 = 27;
 /// applied to their UTF-8 form.
 fn encode_locator(path: &Path) -> String {
     #[cfg(unix)]
-    let bytes: Vec<u8> = {
+    {
         use std::os::unix::ffi::OsStrExt;
-        path.as_os_str().as_bytes().to_vec()
-    };
-    #[cfg(not(unix))]
-    let bytes: Vec<u8> = path.to_string_lossy().into_owned().into_bytes();
-
-    let mut out = String::with_capacity(bytes.len());
-    for b in bytes {
-        match b {
-            b'%' => out.push_str("%25"),
-            0x20..=0x7e => out.push(b as char),
-            other => out.push_str(&format!("%{other:02X}")),
+        let bytes = path.as_os_str().as_bytes();
+        let mut out = String::with_capacity(bytes.len());
+        for &b in bytes {
+            match b {
+                b'%' => out.push_str("%25"),
+                0x20..=0x7e => out.push(b as char),
+                other => out.push_str(&format!("%{other:02X}")),
+            }
         }
+        out
     }
-    out
+    #[cfg(windows)]
+    {
+        // Windows paths are u16 units and may contain ill-formed UTF-16
+        // (unpaired surrogates); encode_wide round-trips them losslessly —
+        // to_string_lossy would collapse distinct surrogates into identical
+        // replacement characters.
+        use std::os::windows::ffi::OsStrExt;
+        let mut out = String::new();
+        for unit in path.as_os_str().encode_wide() {
+            match unit {
+                0x25 => out.push_str("%25"),
+                0x20..=0x7e => out.push(unit as u8 as char),
+                other => out.push_str(&format!("%u{other:04X}")),
+            }
+        }
+        out
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        // Fallback for exotic targets: escape the lossy form's bytes (still
+        // deterministic; injectivity is only guaranteed on unix/windows).
+        let mut out = String::new();
+        for b in path.to_string_lossy().bytes() {
+            match b {
+                b'%' => out.push_str("%25"),
+                0x20..=0x7e => out.push(b as char),
+                other => out.push_str(&format!("%{other:02X}")),
+            }
+        }
+        out
+    }
+}
+
+/// Known rollout vocabularies at rust-v0.144.5 — the drift baseline. These
+/// are NOT load-bearing for parsing (which is shape-based and preserves
+/// everything); they exist so [`CodexProvider::drift_report`] can tell
+/// "known vocabulary" from "schema drift".
+const KNOWN_ENVELOPE_TYPES: [&str; 8] = [
+    "session_meta",
+    "response_item",
+    "event_msg",
+    "turn_context",
+    "compacted",
+    "world_state",
+    "inter_agent_communication",
+    "inter_agent_communication_metadata",
+];
+const KNOWN_RESPONSE_ITEM_TYPES: [&str; 16] = [
+    "message",
+    "agent_message",
+    "reasoning",
+    "local_shell_call",
+    "function_call",
+    "function_call_output",
+    "custom_tool_call",
+    "custom_tool_call_output",
+    "tool_search_call",
+    "tool_search_output",
+    "web_search_call",
+    "image_generation_call",
+    "compaction",
+    "compaction_summary",
+    "context_compaction",
+    "ghost_snapshot",
+];
+const KNOWN_EVENT_MSG_TYPES: [&str; 23] = [
+    "token_count",
+    "user_message",
+    "agent_message",
+    "agent_reasoning",
+    "agent_reasoning_raw_content",
+    "turn_started",
+    "turn_complete",
+    "turn_aborted",
+    "thread_rolled_back",
+    "thread_goal_updated",
+    "thread_settings_applied",
+    "context_compacted",
+    "entered_review_mode",
+    "exited_review_mode",
+    "patch_apply_end",
+    "mcp_tool_call_end",
+    "web_search_end",
+    "image_generation_end",
+    "sub_agent_activity",
+    "exec_command_end",
+    "task_started",
+    "task_complete",
+    "item_completed",
+];
+
+/// Native-vocabulary drift report for a Codex corpus (the doctor surface).
+///
+/// Inspects the envelope/payload vocabulary DIRECTLY — it deliberately does
+/// not read `ParsedSession` diagnostics, whose `unknown` counts are the
+/// intentional B1 preserved-Unknown representation, not drift.
+#[derive(Debug, Clone, Default)]
+pub struct CodexDriftReport {
+    /// Envelope-era sessions scanned.
+    pub sessions: usize,
+    /// Legacy pre-envelope sessions (inventoried, not scanned).
+    pub legacy_sessions: usize,
+    /// Total records seen.
+    pub records: u64,
+    /// Records that failed to decode/parse.
+    pub unparseable: u64,
+    /// Envelope type counts.
+    pub envelope_types: BTreeMap<String, u64>,
+    /// Envelope types outside the rust-v0.144.5 vocabulary (drift).
+    pub unknown_envelope_types: BTreeMap<String, u64>,
+    /// response_item payload type counts.
+    pub response_item_types: BTreeMap<String, u64>,
+    /// response_item payload types outside the known vocabulary (drift).
+    pub unknown_response_item_types: BTreeMap<String, u64>,
+    /// event_msg payload type counts.
+    pub event_msg_types: BTreeMap<String, u64>,
+    /// event_msg payload types outside the known vocabulary (drift).
+    pub unknown_event_msg_types: BTreeMap<String, u64>,
+    /// reasoning response items seen.
+    pub reasoning_items: u64,
+    /// reasoning items carrying a non-empty plaintext summary (availability
+    /// collapsed to 0% in corpora from Apr 2026 on — this measures it).
+    pub reasoning_with_summary: u64,
 }
 
 /// OpenAI Codex CLI sessions behind the provider seam.
@@ -386,6 +506,103 @@ impl<R: Read> Read for LimitedReader<R> {
     }
 }
 
+impl CodexProvider {
+    /// Scan the corpus's native vocabulary for schema drift and
+    /// reasoning-summary availability. Streams every envelope-era session's
+    /// preferred artifact; legacy sessions are counted, not scanned.
+    pub fn drift_report(&self) -> Result<CodexDriftReport, ProviderError> {
+        let (descriptors, paths) = self.inventory()?;
+        let mut report = CodexDriftReport::default();
+        for descriptor in descriptors {
+            let Some(preferred) = descriptor.preferred_artifact() else {
+                continue;
+            };
+            let Some(path) = paths.get(&preferred.snapshot.id) else {
+                continue;
+            };
+            if self.sniff_format(path)? == FormatFamily::Legacy {
+                report.legacy_sessions += 1;
+                continue;
+            }
+            report.sessions += 1;
+            let mut reader = self.open_records(path)?;
+            let mut buf: Vec<u8> = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(_) => {
+                        report.unparseable += 1;
+                        break;
+                    }
+                }
+                if buf.iter().all(|b| b.is_ascii_whitespace()) {
+                    continue;
+                }
+                report.records += 1;
+                let Ok(value) = serde_json::from_slice::<serde_json::Value>(&buf) else {
+                    report.unparseable += 1;
+                    continue;
+                };
+                let Some(kind) = value.get("type").and_then(|t| t.as_str()) else {
+                    continue;
+                };
+                *report.envelope_types.entry(kind.to_string()).or_default() += 1;
+                if !KNOWN_ENVELOPE_TYPES.contains(&kind) {
+                    *report
+                        .unknown_envelope_types
+                        .entry(kind.to_string())
+                        .or_default() += 1;
+                }
+                let payload_type = value
+                    .get("payload")
+                    .and_then(|p| p.get("type"))
+                    .and_then(|t| t.as_str());
+                match (kind, payload_type) {
+                    ("response_item", Some(pt)) => {
+                        *report
+                            .response_item_types
+                            .entry(pt.to_string())
+                            .or_default() += 1;
+                        if !KNOWN_RESPONSE_ITEM_TYPES.contains(&pt) {
+                            *report
+                                .unknown_response_item_types
+                                .entry(pt.to_string())
+                                .or_default() += 1;
+                        }
+                        if pt == "reasoning" {
+                            report.reasoning_items += 1;
+                            let has_summary =
+                                value["payload"]["summary"].as_array().is_some_and(|s| {
+                                    s.iter().any(|item| {
+                                        item.get("text")
+                                            .and_then(|t| t.as_str())
+                                            .is_some_and(|t| !t.trim().is_empty())
+                                    })
+                                });
+                            if has_summary {
+                                report.reasoning_with_summary += 1;
+                            }
+                        }
+                    }
+                    ("event_msg", Some(pt)) => {
+                        *report.event_msg_types.entry(pt.to_string()).or_default() += 1;
+                        if !KNOWN_EVENT_MSG_TYPES.contains(&pt) {
+                            *report
+                                .unknown_event_msg_types
+                                .entry(pt.to_string())
+                                .or_default() += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(report)
+    }
+}
+
 impl SourceProvider for CodexProvider {
     fn id(&self) -> ProviderId {
         ProviderId::codex()
@@ -400,6 +617,16 @@ impl SourceProvider for CodexProvider {
 
     fn sessions(&self) -> Result<Vec<SessionDescriptor>, ProviderError> {
         self.descriptors()
+    }
+
+    fn parse_cache_token(&self, key: &LogicalSessionKey) -> Result<String, ProviderError> {
+        let (descriptor, _) = self.resolve(key)?;
+        Ok(format!(
+            "v1\x1ecodex\x1e{}\x1emax_c={}\x1emax_d={}\x1ewlog={WINDOW_LOG_MAX}",
+            super::descriptor_state_token(&descriptor),
+            self.max_compressed,
+            self.max_decompressed
+        ))
     }
 
     fn parse(&self, key: &LogicalSessionKey) -> Result<ParsedSession, ProviderError> {
@@ -831,6 +1058,19 @@ mod tests {
             }
         }
         let edges = p.lineage().map(|e| e.len()).unwrap_or(0);
+        let drift = p.drift_report().unwrap_or_default();
+        eprintln!(
+            "codex drift: {} envelope types ({} unknown), {} response_item types ({} unknown), \
+             {} event_msg types ({} unknown), reasoning summary {}/{}",
+            drift.envelope_types.len(),
+            drift.unknown_envelope_types.len(),
+            drift.response_item_types.len(),
+            drift.unknown_response_item_types.len(),
+            drift.event_msg_types.len(),
+            drift.unknown_event_msg_types.len(),
+            drift.reasoning_with_summary,
+            drift.reasoning_items
+        );
         eprintln!(
             "codex corpus: {n} sessions, {parsed_ok} parsed, {legacy} legacy-refused, \
              {errors} errors, {violations} provenance violations, {edges} lineage edges, \
@@ -1258,11 +1498,22 @@ mod tests {
         zst[last] ^= 0xFF;
         let (_t, p) = home_with(THREAD_A, &zst, true);
         let parsed = p.parse(&key(THREAD_A)).unwrap();
-        assert!(
-            parsed.diagnostics.unparseable >= 1,
-            "checksum failure must be recorded: {:?}",
-            parsed.diagnostics
-        );
+        // Observed libzstd behavior: for a frame smaller than the decode
+        // buffer, the checksum is verified before ANY output is yielded, so
+        // zero records emerge (incremental yield would give 8-then-error on
+        // multi-buffer frames). The essential property is that the rejection
+        // is checksum-specific and dispositioned.
+        assert_eq!(parsed.diagnostics.unknown, 0, "{:?}", parsed.diagnostics);
+        assert_eq!(parsed.diagnostics.unparseable, 1);
+        let msg = parsed
+            .record_dispositions
+            .iter()
+            .find_map(|d| match &d.outcome {
+                RecordOutcome::Unparseable { error } => Some(error.message.to_lowercase()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(msg.contains("checksum"), "not a checksum rejection: {msg}");
     }
 
     #[test]
@@ -1274,7 +1525,22 @@ mod tests {
         let (_t, p) = home_with(THREAD_A, &zst, true);
         let parsed = p.parse(&key(THREAD_A)).unwrap();
         assert_eq!(parsed.entries.len(), 0, "nothing may decode");
-        assert!(parsed.diagnostics.unparseable >= 1);
+        assert_eq!(parsed.diagnostics.unparseable, 1);
+        // The disposition must specifically be the window/memory refusal —
+        // decompressing 286 MiB and then failing on JSON would be a
+        // different (wrong) outcome.
+        let msg = parsed
+            .record_dispositions
+            .iter()
+            .find_map(|d| match &d.outcome {
+                RecordOutcome::Unparseable { error } => Some(error.message.to_lowercase()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            msg.contains("memory") || msg.contains("window"),
+            "not a window refusal: {msg}"
+        );
     }
 
     #[test]
@@ -1300,35 +1566,91 @@ mod tests {
         let d2 = base.join(OsStr::from_bytes(b"day-\xfe"));
         std::fs::create_dir_all(&d1).unwrap();
         std::fs::create_dir_all(&d2).unwrap();
-        // Their display strings collide (replacement characters)...
+        // Display strings collide (replacement characters)...
         assert_eq!(d1.display().to_string(), d2.display().to_string());
+        // ...and the FILENAMES are IDENTICAL, so the complete lossy path
+        // strings collide too — the pre-fix locators were equal. Divergent
+        // content proves both copies survive.
+        let file = format!("rollout-2026-07-16T01-00-00-{THREAD_A}.jsonl");
+        std::fs::write(d1.join(&file), session_a_content()).unwrap();
         std::fs::write(
-            d1.join(format!("rollout-2026-07-16T01-00-00-{THREAD_A}.jsonl")),
-            session_a_content(),
+            d2.join(&file),
+            format!(
+                "{}{}\n",
+                session_a_content(),
+                envelope_line("event_msg", serde_json::json!({"type": "divergent_extra"}))
+            ),
         )
         .unwrap();
+        // Plus a fork session under a non-UTF-8 dir: lineage must find its
+        // edge through the preserved path (the silently-empty lineage bug).
         std::fs::write(
-            d2.join(format!("rollout-2026-07-16T02-00-00-{THREAD_B}.jsonl")),
-            session_a_content(),
+            d1.join(format!("rollout-2026-07-16T03-00-00-{THREAD_FORK}.jsonl")),
+            envelope_line(
+                "session_meta",
+                serde_json::json!({"id": THREAD_FORK, "forked_from_id": THREAD_A}),
+            ) + "\n",
         )
         .unwrap();
+
         let p = CodexProvider::new(tmp.path());
         let sessions = p.sessions().unwrap();
-        assert_eq!(sessions.len(), 2, "both non-UTF-8 siblings discovered");
-        // ...but their encoded locators must NOT.
-        let locators: std::collections::BTreeSet<_> = sessions
+        // ONE logical session for THREAD_A with TWO distinct artifacts.
+        let a = sessions
             .iter()
-            .map(|d| d.preferred_artifact().unwrap().snapshot.id.locator.clone())
+            .find(|d| d.key.native_id == THREAD_A)
+            .unwrap();
+        assert_eq!(a.artifacts.len(), 2, "both colliding copies must survive");
+        let locators: std::collections::BTreeSet<_> = a
+            .artifacts
+            .iter()
+            .map(|art| art.snapshot.id.locator.clone())
             .collect();
         assert_eq!(locators.len(), 2, "locator encoding must stay injective");
-        // Parse, lineage, and archive all work through the preserved paths.
-        for d in &sessions {
-            assert!(p.parse(&d.key).unwrap().validate_provenance().is_empty());
-        }
-        p.lineage().unwrap();
+        assert!(p.parse(&a.key).unwrap().validate_provenance().is_empty());
+
+        // The exact fork edge, found through a non-UTF-8 path.
+        let edges = p.lineage().unwrap();
+        assert!(
+            edges.iter().any(|e| e.kind == LineageEdgeKind::Fork
+                && e.from.native_id == THREAD_A
+                && e.to.native_id == THREAD_FORK),
+            "fork edge lost under non-UTF-8 paths: {edges:?}"
+        );
+
+        // Divergent two-frame archive: both artifacts' exact bytes framed.
         let mut bundle = Vec::new();
         p.write_archive(&key(THREAD_A), &mut bundle).unwrap();
-        assert!(!bundle.is_empty());
+        let newline = bundle.iter().position(|b| *b == b'\n').unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&bundle[..newline]).unwrap();
+        let artifacts = manifest["manifest"]["artifacts"].as_array().unwrap();
+        assert_eq!(artifacts.len(), 2);
+        let mut offset = newline + 1;
+        let mut frames = Vec::new();
+        for art in artifacts {
+            let len = art["bytes"].as_u64().unwrap() as usize;
+            frames.push(bundle[offset..offset + len].to_vec());
+            offset += len;
+        }
+        assert_eq!(offset, bundle.len());
+        assert_ne!(frames[0], frames[1], "divergent copies must both be framed");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_unpaired_surrogates_stay_distinct() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+        // Two paths differing only in an unpaired surrogate: to_string_lossy
+        // collapses both to the replacement character.
+        let a = PathBuf::from(OsString::from_wide(&[0x64, 0xD800, 0x31]));
+        let b = PathBuf::from(OsString::from_wide(&[0x64, 0xD801, 0x31]));
+        assert_eq!(a.to_string_lossy(), b.to_string_lossy());
+        assert_ne!(
+            encode_locator(&a),
+            encode_locator(&b),
+            "u16-unit encoding must stay injective"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -1373,6 +1695,86 @@ mod tests {
 
     // Extend the non-UTF-8 round-trip with the archive tier (the design doc
     // claims it; make it true).
+    #[test]
+    fn drift_report_flags_unknown_vocabulary_not_b1_unknown_dispositions() {
+        let (_tmp, p) = fixture();
+        let report = p.drift_report().unwrap();
+        // Envelope sessions scanned; the legacy file counted separately.
+        assert!(report.sessions >= 3);
+        assert_eq!(report.legacy_sessions, 1);
+        // The fixture's future envelope type is drift; known types are not.
+        assert!(report
+            .unknown_envelope_types
+            .contains_key("brand_new_type_v99"));
+        assert!(report.envelope_types.contains_key("session_meta"));
+        assert!(!report.unknown_envelope_types.contains_key("session_meta"));
+        // Reasoning availability is measured (none in this fixture).
+        assert_eq!(report.reasoning_items, 0);
+    }
+
+    #[test]
+    fn drift_report_measures_reasoning_summary_availability() {
+        let content = [
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line("response_item", serde_json::json!({"type": "reasoning", "summary": [{"type": "summary_text", "text": "thinking headline"}], "encrypted_content": "xxx"})),
+            envelope_line("response_item", serde_json::json!({"type": "reasoning", "summary": [], "encrypted_content": "yyy"})),
+        ]
+        .join("\n")
+            + "\n";
+        let (_t, p) = home_with(THREAD_A, content.as_bytes(), false);
+        let report = p.drift_report().unwrap();
+        assert_eq!(report.reasoning_items, 2);
+        assert_eq!(report.reasoning_with_summary, 1);
+    }
+
+    #[test]
+    fn cache_token_covers_policy_and_descriptor_state() {
+        let (_tmp, p) = fixture();
+        let k = key(THREAD_B);
+        // Stable across calls.
+        let t1 = p.parse_cache_token(&k).unwrap();
+        let t2 = p.parse_cache_token(&k).unwrap();
+        assert_eq!(t1, t2);
+        // Policy inputs change the token even with identical artifacts —
+        // two configurations with different safety limits must never share
+        // a cached parse.
+        let (_tmp2, p2) = fixture();
+        let p2 = p2.with_max_decompressed(1234);
+        assert_ne!(t1, p2.parse_cache_token(&k).unwrap());
+    }
+
+    #[test]
+    fn descriptor_token_distinguishes_preferred_flip_with_identical_revisions() {
+        use super::super::descriptor_state_token;
+        let art = |instance: &str, locator: &str| SessionArtifact {
+            snapshot: ArtifactSnapshot {
+                id: ArtifactId {
+                    provider_instance: instance.into(),
+                    locator: locator.into(),
+                },
+                revision: ArtifactRevision("same-rev".into()),
+            },
+            form: ArtifactForm::PlainFile,
+            archived: false,
+        };
+        let both = SessionDescriptor {
+            key: key(THREAD_A),
+            artifacts: vec![art("r", "a.jsonl"), art("r", "b.jsonl")],
+        };
+        let only_b = SessionDescriptor {
+            key: key(THREAD_A),
+            artifacts: vec![art("r", "b.jsonl")],
+        };
+        // Identical revision TEXT everywhere, but the artifact set and the
+        // selected preferred artifact differ — the round-11 stale-hit
+        // scenario the plain revision string could not distinguish.
+        assert_ne!(
+            descriptor_state_token(&both),
+            descriptor_state_token(&only_b)
+        );
+        assert!(descriptor_state_token(&both).contains("pref="));
+    }
+
     #[test]
     fn archive_frames_all_artifacts() {
         let (_tmp, p) = fixture();

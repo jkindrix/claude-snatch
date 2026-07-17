@@ -137,6 +137,18 @@ impl SourceProvider for FakeProvider {
         ])
     }
 
+    fn parse_cache_token(&self, key: &LogicalSessionKey) -> Result<String, ProviderError> {
+        let descriptor = self
+            .sessions()?
+            .into_iter()
+            .find(|d| d.key == *key)
+            .ok_or_else(|| ProviderError::NotFound(key.to_string()))?;
+        Ok(format!(
+            "v1\x1efake\x1e{}",
+            super::descriptor_state_token(&descriptor)
+        ))
+    }
+
     fn parse(&self, key: &LogicalSessionKey) -> Result<ParsedSession, ProviderError> {
         if *key == colliding_key() {
             // Minimal one-record session so cross-namespace entry ids can be

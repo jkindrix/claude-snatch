@@ -249,6 +249,15 @@ impl SourceProvider for ClaudeCodeProvider {
         Ok(self.descriptors()?.into_iter().map(|(d, _)| d).collect())
     }
 
+    fn parse_cache_token(&self, key: &LogicalSessionKey) -> Result<String, ProviderError> {
+        let (descriptor, _) = self.resolve(key)?;
+        Ok(format!(
+            "v1\x1eclaude-code\x1e{}\x1emax_file={:?}",
+            super::descriptor_state_token(&descriptor),
+            self.max_file_size
+        ))
+    }
+
     fn parse(&self, key: &LogicalSessionKey) -> Result<ParsedSession, ProviderError> {
         let (descriptor, session) = self.resolve(key)?;
         if let Some(max) = self.max_file_size {

@@ -838,6 +838,43 @@ impl From<std::io::Error> for ProviderError {
     }
 }
 
+/// Build the descriptor-state half of a parse cache token.
+///
+/// Covers the FULL sorted artifact state (id, revision, form, archived)
+/// plus the selected preferred artifact id. Artifact-set changes, revision
+/// changes, and preferred-selection changes all change the token — even
+/// when two artifacts share identical revision text.
+pub fn descriptor_state_token(descriptor: &SessionDescriptor) -> String {
+    fn form_tag(form: &ArtifactForm) -> String {
+        match form {
+            ArtifactForm::PlainFile => "plain".into(),
+            ArtifactForm::CompressedFile => "zst".into(),
+            ArtifactForm::Database => "db".into(),
+            ArtifactForm::Other(s) => format!("other:{s}"),
+        }
+    }
+    let mut parts: Vec<String> = descriptor
+        .artifacts
+        .iter()
+        .map(|a| {
+            format!(
+                "{}\x1f{}\x1f{}\x1f{}\x1f{}",
+                a.snapshot.id.provider_instance,
+                a.snapshot.id.locator,
+                a.snapshot.revision.0,
+                form_tag(&a.form),
+                a.archived
+            )
+        })
+        .collect();
+    parts.sort();
+    let preferred = descriptor
+        .preferred_artifact()
+        .map(|a| a.snapshot.id.locator.clone())
+        .unwrap_or_default();
+    format!("{}\x1epref={preferred}", parts.join("\x1e"))
+}
+
 /// The discovery+parse seam: the dual of the existing `Exporter` trait.
 ///
 /// Phase A.0 pins the signatures; production implementations arrive in
@@ -864,6 +901,14 @@ pub trait SourceProvider {
     /// Parse one session into identified entries with full provenance and
     /// semantics.
     fn parse(&self, key: &LogicalSessionKey) -> Result<ParsedSession, ProviderError>;
+
+    /// Aggregate revision token for caching this session's parse (round-11
+    /// guardrail; round-14 scope): covers the full sorted descriptor state
+    /// (via [`descriptor_state_token`]) AND every parse-policy input (size
+    /// limits, decoder guards) plus a token schema version — two provider
+    /// configurations with different safety limits must never share a
+    /// cached parse.
+    fn parse_cache_token(&self, key: &LogicalSessionKey) -> Result<String, ProviderError>;
 
     /// Universal lossless tier: write a provider-defined bundle (with
     /// manifest) for the session. Must be lossless: the session's native

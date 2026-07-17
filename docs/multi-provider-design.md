@@ -621,6 +621,36 @@ per the round-11 policy (synthetic envelope + spec-synthesized legacy +
 two external-CLI zst fixtures). Corpus re-run: 224/224, 0 errors,
 0 violations, 0 count mismatches, 0 raced. 24 codex tests + conformance.
 
+## Review round 14 (2026-07-17, same Codex agent) + B1 closing unit
+
+Corrections: (1) the collision/lineage test was hollow (different thread
+ids and timestamps meant pre-fix locators already differed; lineage was
+called without asserting an edge) — reworked with IDENTICAL filenames under
+both non-UTF-8 dirs (one logical session, two distinct artifacts, divergent
+two-frame archive verified) and a non-UTF-8 fork fixture asserting the
+exact Fork edge; (2) Windows locators encode native u16 units via
+encode_wide (to_string_lossy collapsed distinct unpaired surrogates;
+windows-only injectivity test added, runs in the CI matrix); (3) fixture
+assertions tightened — the window-28 disposition must name the
+window/memory refusal (decompress-then-JSON-fail would not pass), the
+checksum rejection must name the checksum (observed: for sub-buffer frames
+libzstd verifies before yielding output, so zero records emerge — recorded
+in the manifest), and the manifest documents that the generated
+active-truncation unit fixture satisfies the round-11 requirement.
+
+B1 closing capabilities: (a) SourceProvider::parse_cache_token — the
+aggregate token (schema version + full sorted descriptor state via
+descriptor_state_token + every parse-policy input) implemented by all
+three providers; unit tests prove a preferred-artifact flip with identical
+revision text changes the token, and different safety limits never share a
+token. (b) CodexProvider::drift_report — inspects NATIVE envelope/payload
+vocabulary directly (B1's intentional Unknown dispositions are not drift):
+known-vocabulary baselines from rust-v0.144.5, unknown-type counts at all
+three levels, reasoning-summary availability measurement. Real-corpus run:
+0 unknown vocabulary anywhere (the research vocabulary is complete for
+this corpus) and reasoning summaries 24779/27765 (~89%), independently
+reproducing the design-round census. 58 provider tests total.
+
 ## Open questions (to settle in-phase)
 
 1. Two-stream dedup policy details (B3, empirical — under the emission-
