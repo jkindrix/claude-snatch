@@ -24,12 +24,11 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use super::{
-    ArtifactForm, ArtifactId, ArtifactRevision, ArtifactSnapshot, EntryId, IdentifiedEntry,
-    IngestionDiagnostics, LineageEdge, LineageEdgeKind, LogicalSessionKey, ParseDiagnostic,
-    ParsedSession, ProviderCapabilities, ProviderError, ProviderId, RecordDisposition,
-    RecordOutcome, RecordRef, SessionArtifact, SessionDescriptor, SessionNamespace, SourceProvider,
+    ArtifactForm, ArtifactId, ArtifactRevision, ArtifactSnapshot, IngestionDiagnostics,
+    LineageEdge, LineageEdgeKind, LogicalSessionKey, ParseDiagnostic, ParsedSession,
+    ProviderCapabilities, ProviderError, ProviderId, RecordDisposition, RecordOutcome, RecordRef,
+    SessionArtifact, SessionDescriptor, SessionNamespace, SourceProvider,
 };
-use crate::model::LogEntry;
 
 /// Default cap on decompressed bytes per session (decompression-bomb guard).
 const DEFAULT_MAX_DECOMPRESSED: u64 = 1 << 32; // 4 GiB
@@ -979,8 +978,7 @@ impl SourceProvider for CodexProvider {
             .id
             .clone();
         let mut reader = self.open_records(&path)?;
-        let mut entries = Vec::new();
-        let mut entry_origins = BTreeMap::new();
+        let mut parsed_records: Vec<(RecordRef, serde_json::Value)> = Vec::new();
         let mut record_dispositions = Vec::new();
         let mut diagnostics = IngestionDiagnostics::default();
 
@@ -1027,20 +1025,10 @@ impl SourceProvider for CodexProvider {
             }
             match serde_json::from_slice::<serde_json::Value>(&buf) {
                 Ok(value) => {
-                    // B1: envelope records are preserved, honestly unmodeled.
-                    // Normalization (B3) flips these to Mapped with the same
-                    // deterministic ids.
-                    let id = EntryId::deterministic(key, record.ordinal, 0);
-                    entries.push(IdentifiedEntry {
-                        id: id.clone(),
-                        entry: LogEntry::Unknown(value),
-                    });
-                    entry_origins.insert(id.clone(), vec![record.clone()]);
-                    diagnostics.unknown += 1;
-                    record_dispositions.push(RecordDisposition {
-                        record,
-                        outcome: RecordOutcome::Unknown { entries: vec![id] },
-                    });
+                    // B3: parsed records are collected and normalized after
+                    // the read loop (mapped records keep the B1 deterministic
+                    // ids `(ordinal, 0)` — round-21 constraint 1).
+                    parsed_records.push((record, value));
                 }
                 Err(e) => {
                     // Partial trailing line of an ACTIVE session is expected;
@@ -1058,12 +1046,23 @@ impl SourceProvider for CodexProvider {
             }
         }
 
+        // Normalize the parsed stream (B3 slice 1) and merge with the
+        // read-level dispositions (blank/torn/unreadable) collected above.
+        let normalized = super::codex_normalize::normalize(key, &parsed_records);
+        record_dispositions.extend(normalized.record_dispositions);
+        record_dispositions.sort_by_key(|d| d.record.ordinal);
+        diagnostics.mapped += normalized.diagnostics.mapped;
+        diagnostics.suppressed += normalized.diagnostics.suppressed;
+        diagnostics.unknown += normalized.diagnostics.unknown;
+        diagnostics.recovered += normalized.diagnostics.recovered;
+        diagnostics.unparseable += normalized.diagnostics.unparseable;
+
         Ok(ParsedSession {
             descriptor,
-            entries,
-            entry_origins,
+            entries: normalized.entries,
+            entry_origins: normalized.entry_origins,
             record_dispositions,
-            semantics: BTreeMap::new(),
+            semantics: normalized.semantics,
             diagnostics,
         })
     }
@@ -1480,26 +1479,40 @@ mod tests {
             "{:?}",
             parsed.validate_provenance()
         );
-        // 4 envelope records preserved as Unknown (incl. the unknown type),
-        // 1 truncated trailing line unparseable.
+        // B3 slice 1: the user message maps, the info-less token_count is
+        // suppressed (no attributable assistant emission), session_meta and
+        // the unknown type stay preserved Unknown, torn tail unparseable.
         assert_eq!(
             parsed.diagnostics,
             IngestionDiagnostics {
-                mapped: 0,
-                suppressed: 0,
-                unknown: 4,
+                mapped: 1,
+                suppressed: 1,
+                unknown: 2,
                 recovered: 0,
                 unparseable: 1
             }
         );
-        assert_eq!(parsed.entries.len(), 4);
+        assert_eq!(parsed.entries.len(), 3);
+        // Constraint 1 (round-21): the mapped record keeps the deterministic
+        // id its B1 Unknown entry had — ordinal 1, subindex 0.
+        let user_entry = parsed
+            .entries
+            .iter()
+            .find(|e| matches!(e.entry, crate::model::LogEntry::User(_)))
+            .expect("mapped user entry");
+        assert_eq!(
+            user_entry.id,
+            crate::provider::EntryId::deterministic(&key(THREAD_A), 1, 0)
+        );
     }
 
     #[test]
     fn zst_only_session_parses_via_streaming_decode() {
         let (_tmp, p) = fixture();
         let parsed = p.parse(&key(THREAD_B)).unwrap();
-        assert_eq!(parsed.diagnostics.unknown, 2);
+        // session_meta preserved Unknown; the assistant message maps.
+        assert_eq!(parsed.diagnostics.unknown, 1);
+        assert_eq!(parsed.diagnostics.mapped, 1);
         assert_eq!(parsed.diagnostics.unparseable, 0);
     }
 
@@ -1624,7 +1637,7 @@ mod tests {
         // Exactly the limit: parses completely.
         let p = CodexProvider::new(tmp.path()).with_max_decompressed(content.len() as u64);
         let parsed = p.parse(&key(THREAD_A)).unwrap();
-        assert_eq!(parsed.diagnostics.unknown, 4);
+        assert_eq!(parsed.record_dispositions.len(), 4);
         assert_eq!(parsed.diagnostics.unparseable, 0);
         // One byte short: the limit crossing is recorded, later data is cut.
         let p = CodexProvider::new(tmp.path()).with_max_decompressed(content.len() as u64 - 1);
@@ -1692,8 +1705,11 @@ mod tests {
             }
             let p = CodexProvider::new(tmp.path());
             let parsed = p.parse(&key(THREAD_A)).unwrap();
+            // session_meta stays Unknown; the token_count AFTER the corrupt
+            // line survives to a disposition (suppressed heartbeat).
             assert_eq!(
-                parsed.diagnostics.unknown, 2,
+                (parsed.diagnostics.unknown, parsed.diagnostics.suppressed),
+                (1, 1),
                 "the record AFTER the corrupt line must survive (compress={compress})"
             );
             assert_eq!(parsed.diagnostics.unparseable, 1);
@@ -1782,7 +1798,7 @@ mod tests {
         // Parse and native export work despite the lossy locator display —
         // resolution goes through the preserved PathBuf, never the string.
         let parsed = p.parse(&key(THREAD_A)).unwrap();
-        assert_eq!(parsed.diagnostics.unknown, 4);
+        assert_eq!(parsed.record_dispositions.len(), 4);
         // Every provenance reference names an artifact that actually exists
         // in the descriptor (against 48513e3 this failed: parse
         // reconstructed a lossy id that matched nothing).
@@ -1846,7 +1862,13 @@ mod tests {
         let (_t2, compressed) = home_with(THREAD_A, &zst_bytes, true);
         let a = plain.parse(&key(THREAD_A)).unwrap();
         let b = compressed.parse(&key(THREAD_A)).unwrap();
-        assert_eq!(a.entries.len(), 8);
+        // B3 slice 1 over the 8 fixture records: user msg + function_call +
+        // output + assistant msg mapped (token_count maps INTO the call
+        // entry), agent_message deduped, meta + turn_context preserved.
+        assert_eq!(a.entries.len(), 6);
+        assert_eq!(a.diagnostics.mapped, 5);
+        assert_eq!(a.diagnostics.suppressed, 1);
+        assert_eq!(a.diagnostics.unknown, 2);
         assert_eq!(a.entries.len(), b.entries.len());
         for (x, y) in a.entries.iter().zip(b.entries.iter()) {
             assert_eq!(x.id, y.id);
@@ -2535,11 +2557,11 @@ mod tests {
 
         let first = cached_parsed_session(&cache, &p, &key(THREAD_A)).unwrap();
         let n = first.entries.len();
-        assert!(n > 0);
+        assert_eq!(n, 3, "meta + brand-new preserved, user message mapped");
         assert_eq!(
             first.record_dispositions.len(),
-            n,
-            "B1 posture: one disposition per record, retained in the bundle"
+            4,
+            "one disposition per record, retained in the bundle"
         );
 
         // Unchanged revision: the same Arc comes back — a genuine cache hit.
@@ -2578,8 +2600,257 @@ mod tests {
         );
         assert_eq!(
             after.record_dispositions.len(),
-            n + 1,
+            5,
             "provenance tracks the reparse too"
+        );
+    }
+
+    // ========================================================================
+    // B3 slice 1: normalization
+    // ========================================================================
+
+    fn normalize_home(lines: &[String]) -> (tempfile::TempDir, CodexProvider) {
+        let content = lines.join("\n") + "\n";
+        home_with(THREAD_A, content.as_bytes(), false)
+    }
+
+    #[test]
+    fn dual_stream_dedup_marks_human_prompts_and_suppresses_event_twins() {
+        let (_tmp, p) = normalize_home(&[
+            envelope_line(
+                "session_meta",
+                serde_json::json!({"id": THREAD_A, "cwd": "/w", "cli_version": "0.9"}),
+            ),
+            // Harness-injected user context: NO user_message event pairs it.
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<environment_context>"}]}),
+            ),
+            // Genuine human prompt: response_item + its event twin.
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "fix the bug"}]}),
+            ),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "user_message", "message": "fix the bug", "kind": "plain"}),
+            ),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "agent_message", "message": "on it"}),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "on it"}]}),
+            ),
+        ]);
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        assert!(parsed.validate_provenance().is_empty());
+
+        // Both event twins suppressed as duplicate stream.
+        let dup = parsed
+            .record_dispositions
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.outcome,
+                    RecordOutcome::Suppressed {
+                        reason: super::super::SuppressionReason::DuplicateStream
+                    }
+                )
+            })
+            .count();
+        assert_eq!(dup, 2);
+
+        // Ordinal 1 (harness context) stays Harness; ordinal 2 (claimed by
+        // the event) is Human. (Records are zero-ordinal-based.)
+        let sem = |ordinal| {
+            parsed
+                .semantics
+                .get(&crate::provider::EntryId::deterministic(
+                    &key(THREAD_A),
+                    ordinal,
+                    0,
+                ))
+                .and_then(|s| s.prompt)
+        };
+        assert_eq!(
+            sem(1).map(|p| p.authorship),
+            Some(crate::provider::PromptAuthorship::Harness)
+        );
+        assert_eq!(
+            sem(2).map(|p| p.authorship),
+            Some(crate::provider::PromptAuthorship::Human)
+        );
+    }
+
+    #[test]
+    fn usage_deltas_accumulate_without_double_counting() {
+        // Two token_counts: cumulative 100 then 250 (deltas 100 and 150).
+        // Summing normalized entry usage must equal the FINAL cumulative
+        // total — the reviewer-required no-double-count proof.
+        let usage = |input: u64, cached: u64, output: u64| {
+            serde_json::json!({"input_tokens": input, "cached_input_tokens": cached,
+                               "output_tokens": output, "total_tokens": input + output})
+        };
+        let (_tmp, p) = normalize_home(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "a"}]}),
+            ),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "token_count", "info": {
+                "last_token_usage": usage(80, 30, 20), "total_token_usage": usage(80, 30, 20)}}),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "b"}]}),
+            ),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "token_count", "info": {
+                "last_token_usage": usage(120, 100, 30), "total_token_usage": usage(200, 130, 50)}}),
+            ),
+        ]);
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        assert!(parsed.validate_provenance().is_empty());
+
+        let mut fresh = 0u64;
+        let mut cached = 0u64;
+        let mut output = 0u64;
+        for e in &parsed.entries {
+            if let crate::model::LogEntry::Assistant(m) = &e.entry {
+                if let Some(u) = &m.message.usage {
+                    fresh += u.input_tokens;
+                    cached += u.cache_read_input_tokens.unwrap_or(0);
+                    output += u.output_tokens;
+                }
+            }
+        }
+        // Final cumulative: input 200 (130 cached => 70 fresh), output 50.
+        assert_eq!((fresh, cached, output), (70, 130, 50));
+
+        // Each token_count attached BOTH observations with their axes.
+        let first_assistant = crate::provider::EntryId::deterministic(&key(THREAD_A), 1, 0);
+        let sem = parsed.semantics.get(&first_assistant).unwrap();
+        assert_eq!(sem.usage.len(), 2);
+        assert!(matches!(
+            (sem.usage[0].scope, sem.usage[0].aggregation),
+            (
+                crate::provider::UsageScope::Call,
+                crate::provider::UsageAggregation::Delta
+            )
+        ));
+        assert!(matches!(
+            (sem.usage[1].scope, sem.usage[1].aggregation),
+            (
+                crate::provider::UsageScope::Session,
+                crate::provider::UsageAggregation::Cumulative
+            )
+        ));
+        // N:1 provenance: the token_count record joined the entry's origins.
+        assert_eq!(parsed.entry_origins[&first_assistant].len(), 2);
+    }
+
+    #[test]
+    fn turn_id_rides_the_semantics_sidecar() {
+        let (_tmp, p) = normalize_home(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "task_started", "turn_id": "turn-1"}),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}),
+            ),
+            envelope_line(
+                "turn_context",
+                serde_json::json!({"turn_id": "turn-2", "model": "gpt-x"}),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hello"}]}),
+            ),
+        ]);
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        let turn = |ordinal| {
+            parsed
+                .semantics
+                .get(&crate::provider::EntryId::deterministic(
+                    &key(THREAD_A),
+                    ordinal,
+                    0,
+                ))
+                .and_then(|s| s.turn_id.clone())
+        };
+        assert_eq!(turn(2).as_deref(), Some("turn-1"));
+        assert_eq!(turn(4).as_deref(), Some("turn-2"));
+        // Model from turn_context reached the assistant entry.
+        let m = parsed
+            .entries
+            .iter()
+            .find_map(|e| match &e.entry {
+                crate::model::LogEntry::Assistant(m) => Some(m),
+                _ => None,
+            })
+            .expect("assistant entry expected");
+        assert_eq!(m.message.model, "gpt-x");
+    }
+
+    #[test]
+    fn single_stream_sessions_map_event_content_directly() {
+        // No response_item records at all (hypothetical era — zero in the
+        // corpus): event content maps instead of being suppressed.
+        let (_tmp, p) = normalize_home(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "user_message", "message": "hello"}),
+            ),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "agent_reasoning", "text": "thinking"}),
+            ),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "agent_message", "message": "hi"}),
+            ),
+        ]);
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        assert!(parsed.validate_provenance().is_empty());
+        assert_eq!(parsed.diagnostics.mapped, 3);
+        assert_eq!(parsed.diagnostics.suppressed, 0);
+        let kinds: Vec<&str> = parsed
+            .entries
+            .iter()
+            .map(|e| match &e.entry {
+                crate::model::LogEntry::User(_) => "user",
+                crate::model::LogEntry::Assistant(_) => "assistant",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, ["other", "user", "assistant", "assistant"]);
+    }
+
+    #[test]
+    fn normalized_entries_thread_into_a_conversation_main_line() {
+        let plain_bytes = std::fs::read(fixture_path("envelope_session.jsonl")).unwrap();
+        let (_tmp, p) = home_with(THREAD_A, &plain_bytes, false);
+        let parsed = std::sync::Arc::new(p.parse(&key(THREAD_A)).unwrap());
+        let conversation =
+            crate::reconstruction::Conversation::from_parsed_session(parsed.clone()).unwrap();
+        // The 4 mapped emissions form one linear thread; Unknown entries
+        // (meta, turn_context) are uuid-less orphans by design.
+        assert_eq!(conversation.len(), 4);
+        assert_eq!(conversation.main_thread().len(), 4);
+        // Semantics reachable through the conversation for a mapped uuid.
+        let uuid = format!("{THREAD_A}:3");
+        assert!(
+            conversation.semantics_for_uuid(&uuid).is_some(),
+            "tool-call entry semantics reachable via conversation"
         );
     }
 

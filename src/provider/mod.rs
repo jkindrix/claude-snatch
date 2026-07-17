@@ -604,6 +604,11 @@ pub struct EntrySemantics {
     /// a Call/Delta and a Session/Cumulative side by side; each carries its
     /// own values so annotations stay paired with numbers).
     pub usage: Vec<UsageObservation>,
+    /// The provider's turn identifier for the entry, when the provider has
+    /// one (Codex `turn_id`). A separate carrier by contract — turn
+    /// identity must never be modeled by repurposing message identity
+    /// (round-21 constraint 2).
+    pub turn_id: Option<String>,
 }
 
 /// Typed session-lineage edge. Lineage is a graph with typed edges, not a
@@ -1057,6 +1062,8 @@ pub trait SourceProvider {
 pub mod claude_code;
 #[cfg(feature = "codex")]
 pub mod codex;
+#[cfg(feature = "codex")]
+mod codex_normalize;
 pub mod registry;
 
 #[cfg(test)]

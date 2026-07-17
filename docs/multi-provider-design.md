@@ -831,6 +831,63 @@ breath as any completion claim).
       + native/raw export work on REAL Codex sessions — a real-session
       demonstration, not fixtures only.
 
+## B3 slice 1 — normalization mapping (empirical, corpus of 224 real sessions)
+
+Corpus facts the mapping rests on (2026-07-17 census): 202 dual-stream
+sessions (response_item + event_msg content), 22 response_item-only, ZERO
+event-only; `turn_id` lives in `turn_context.payload` (newer era),
+`task_started`/`task_complete` events, and per-item
+`internal_chat_message_metadata_passthrough`; `token_count.info` carries
+`last_token_usage` (per-request delta) and `total_token_usage`
+(session-cumulative) side by side, `info: null` heartbeats exist;
+`event_msg user_message` fires only for GENUINE human prompts while
+harness-injected context arrives as response_item user/developer messages.
+
+Mapping (each mapped record keeps its B1 id `(ordinal, 0)` — constraint 1):
+
+- response_item message role=assistant → `LogEntry::Assistant`
+  (output_text → Text; unknown block types preserved as block-level
+  Unknown); model from last `turn_context.model` (else "unknown").
+- response_item message role=user/developer → `LogEntry::User` (input_text
+  → Text); PromptSemantics Harness/TurnBoundary, upgraded to
+  Human/TurnBoundary when claimed by a `user_message` event (nearest
+  preceding unclaimed user entry; a claim arriving first holds for the
+  next user entry).
+- response_item reasoning → `LogEntry::Assistant` with a ThinkingBlock
+  (summary + content texts; `encrypted_content` string → signature).
+- response_item function_call / custom_tool_call → `LogEntry::Assistant`
+  with ToolUse{id: call_id, name, input} (function_call `arguments` parsed
+  as JSON, else raw string; custom_tool_call `input` as string);
+  ToolSemantics{kind classified from name, native_name} keyed by call_id.
+- response_item function_call_output / custom_tool_call_output →
+  `LogEntry::User` with ToolResult{tool_use_id: call_id, output text};
+  PromptSemantics Tool/MidTurn.
+- event_msg user_message / agent_message / agent_reasoning /
+  agent_reasoning_raw_content → in dual-stream sessions
+  Suppressed{DuplicateStream} (emission identity: the response_item stream
+  is authoritative for content — constraint 3, never text equality); in a
+  hypothetical event-only session they map directly (fixture-tested; the
+  corpus has none).
+- event_msg token_count with info → Mapped INTO the most recent
+  assistant-authored entry (N:1 provenance): the entry's Usage accumulates
+  the DELTA (`last_token_usage`, fresh-input = input − cached, cached →
+  cache_read) so summing entry usage never double-counts, and TWO
+  UsageObservations attach (Call/Delta and Session/Cumulative, each with
+  its own numbers). `info: null` or no prior assistant emission →
+  Suppressed{Other} with reason.
+- session_meta, turn_context, world_state, ghost_snapshot, compacted,
+  task_started/complete and all other types → remain Unknown entries
+  (preserved verbatim; consumed as normalization STATE — version, cwd,
+  model, turn_id — without changing their disposition). Fork-inherited
+  history, compaction, and spawn/fork semantics are later B3 slices
+  (constraint 4 noted, not violated: nothing is mis-marked).
+- turn_id → `EntrySemantics.turn_id` (new sidecar field — separate carrier,
+  never message identity; constraint 2), from
+  turn_context/task_started/metadata passthrough.
+- Synthetic linear threading: mapped entries get deterministic
+  uuid `<native_id>:<ordinal>` with parent = previous mapped entry, giving
+  Conversation/messages/timeline a main thread without touching identity.
+
 ## Review round 21 (2026-07-17, same Codex agent — B2 SIGN-OFF)
 
 Verdict: "Yes—B2 is signed off. Proceed directly to B3." Reviewer

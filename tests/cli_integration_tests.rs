@@ -1573,10 +1573,10 @@ mod codex_provider_cli {
             .stdout(predicate::str::contains(format!("codex:{CODEX_THREAD}")))
             .stdout(predicate::str::contains("Provider: codex"))
             .stdout(predicate::str::contains("Entries: 2"))
-            // Provenance survives into the production consumer (round-18):
-            // B1 posture maps every codex record to an Unknown disposition.
+            // Provenance survives into the production consumer (round-18);
+            // B3 slice 1 maps the user message and preserves session_meta.
             .stdout(predicate::str::contains(
-                "Record dispositions: mapped 0, suppressed 0, unknown 2, recovered 0, unparseable 0",
+                "Record dispositions: mapped 1, suppressed 0, unknown 1, recovered 0, unparseable 0",
             ));
     }
 
