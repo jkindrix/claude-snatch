@@ -22,6 +22,9 @@ pub struct RegistryConfig {
     /// Explicit Claude root (the CLI's global `--claude-dir`); `None`
     /// discovers.
     pub claude_root: Option<PathBuf>,
+    /// Explicit Codex root for embedded/library callers; `None` discovers from
+    /// Codex's normal environment/default location.
+    pub codex_root: Option<PathBuf>,
     /// Global parse size limit (`--max-file-size`), in bytes.
     pub max_file_size: Option<u64>,
 }
@@ -110,7 +113,11 @@ impl ProviderRegistry {
 
         #[cfg(feature = "codex")]
         {
-            let (root, provider) = match super::codex::CodexProvider::discover() {
+            let discovered = match &config.codex_root {
+                Some(root) => Ok(super::codex::CodexProvider::new(root)),
+                None => super::codex::CodexProvider::discover(),
+            };
+            let (root, provider) = match discovered {
                 Ok(p) => {
                     let p = match max_file_size {
                         Some(limit) => p.tighten_limits(limit),

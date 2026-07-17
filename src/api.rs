@@ -42,7 +42,8 @@
 //! - Session comparison
 
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::analytics::{SessionAnalytics, SessionDiff};
 use crate::discovery::{ClaudeDirectory, Session, SessionFilter};
@@ -61,6 +62,7 @@ use crate::reconstruction::Conversation;
 #[derive(Debug)]
 pub struct SnatchClient {
     claude_dir: ClaudeDirectory,
+    codex_dir: Option<PathBuf>,
 }
 
 /// Export formats offered by [`SnatchClient`]'s string-returning API.
@@ -143,13 +145,35 @@ impl SnatchClient {
     /// Returns an error if the Claude Code data directory cannot be found.
     pub fn discover() -> Result<Self> {
         let claude_dir = ClaudeDirectory::discover()?;
-        Ok(Self { claude_dir })
+        Ok(Self {
+            claude_dir,
+            codex_dir: None,
+        })
     }
 
     /// Create a client with a specific Claude Code directory path.
     pub fn with_path(path: impl AsRef<Path>) -> Result<Self> {
         let claude_dir = ClaudeDirectory::from_path(path.as_ref())?;
-        Ok(Self { claude_dir })
+        Ok(Self {
+            claude_dir,
+            codex_dir: None,
+        })
+    }
+
+    /// Create a client with explicit Claude Code and Codex roots.
+    ///
+    /// Existing unqualified methods retain their Claude-only default;
+    /// provider-qualified references such as `codex:<thread-id>` route through
+    /// the provider registry and retain the complete parsed bundle.
+    pub fn with_provider_paths(
+        claude_path: impl AsRef<Path>,
+        codex_path: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let claude_dir = ClaudeDirectory::from_path(claude_path.as_ref())?;
+        Ok(Self {
+            claude_dir,
+            codex_dir: Some(codex_path.as_ref().to_path_buf()),
+        })
     }
 
     /// Get the path to the Claude Code data directory.
@@ -196,6 +220,30 @@ impl SnatchClient {
 
     /// Get a session by ID.
     pub fn get_session(&self, session_id: &str) -> Result<Option<SessionInfo>> {
+        let registry = self.provider_registry();
+        if registry.looks_qualified(session_id) {
+            let resolution = registry.resolve_with_default_policy(&[], session_id)?;
+            let parsed = crate::provider::registry::cached_parsed_session(
+                crate::cache::global_cache(),
+                resolution.provider,
+                &resolution.key,
+            )?;
+            let project_path = parsed
+                .entries
+                .iter()
+                .find_map(|entry| entry.entry.cwd().map(String::from))
+                .unwrap_or_default();
+            let is_subagent = resolution.provider.lineage()?.iter().any(|edge| {
+                edge.to == resolution.key
+                    && matches!(edge.kind, crate::provider::LineageEdgeKind::Spawn { .. })
+            });
+            return Ok(Some(SessionInfo {
+                id: resolution.key.to_string(),
+                project_path,
+                message_count: parsed.entries.len(),
+                is_subagent,
+            }));
+        }
         if let Some(session) = self.claude_dir.find_session(session_id)? {
             Ok(Some(self.session_to_info(&session)))
         } else {
@@ -205,6 +253,15 @@ impl SnatchClient {
 
     /// Parse a session and return the log entries.
     pub fn parse_session(&self, session_id: &str) -> Result<Vec<LogEntry>> {
+        let registry = self.provider_registry();
+        if registry.looks_qualified(session_id) {
+            let parsed = self.parse_provider_session(session_id)?;
+            return Ok(parsed
+                .entries
+                .iter()
+                .map(|entry| entry.entry.clone())
+                .collect());
+        }
         let session = self.claude_dir.find_session(session_id)?.ok_or_else(|| {
             SnatchError::SessionNotFound {
                 session_id: session_id.to_string(),
@@ -213,8 +270,33 @@ impl SnatchClient {
         session.parse()
     }
 
+    /// Parse a provider-qualified session and retain its complete identity,
+    /// provenance, dispositions, and semantic annotations.
+    pub fn parse_provider_session(
+        &self,
+        qualified_session_id: &str,
+    ) -> Result<Arc<crate::provider::ParsedSession>> {
+        let registry = self.provider_registry();
+        if !registry.looks_qualified(qualified_session_id) {
+            return Err(SnatchError::InvalidArgument {
+                name: "qualified_session_id".to_string(),
+                reason: "expected a provider-qualified id such as codex:<thread-id>".to_string(),
+            });
+        }
+        let resolution = registry.resolve_with_default_policy(&[], qualified_session_id)?;
+        crate::provider::registry::cached_parsed_session(
+            crate::cache::global_cache(),
+            resolution.provider,
+            &resolution.key,
+        )
+    }
+
     /// Build a conversation tree from a session.
     pub fn build_conversation(&self, session_id: &str) -> Result<Conversation> {
+        let registry = self.provider_registry();
+        if registry.looks_qualified(session_id) {
+            return Conversation::from_parsed_session(self.parse_provider_session(session_id)?);
+        }
         let entries = self.parse_session(session_id)?;
         Conversation::from_entries(entries)
     }
@@ -322,6 +404,16 @@ impl SnatchClient {
             message_count: session.parse().map(|e| e.len()).unwrap_or(0),
             is_subagent: session.is_subagent(),
         }
+    }
+
+    fn provider_registry(&self) -> crate::provider::registry::ProviderRegistry {
+        crate::provider::registry::ProviderRegistry::with_config(
+            &crate::provider::registry::RegistryConfig {
+                claude_root: Some(self.claude_dir.root().to_path_buf()),
+                codex_root: self.codex_dir.clone(),
+                max_file_size: None,
+            },
+        )
     }
 }
 
@@ -483,5 +575,48 @@ mod tests {
         assert_eq!(summary.total_messages, 20);
         assert_eq!(summary.total_tokens, 5000);
         assert_eq!(summary.estimated_cost, Some(0.05));
+    }
+
+    #[cfg(feature = "codex")]
+    #[test]
+    fn qualified_codex_sessions_retain_the_provider_bundle_through_the_api() {
+        let claude = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(claude.path().join("projects")).unwrap();
+        let codex = tempfile::tempdir().unwrap();
+        let day = codex.path().join("sessions/2026/07/17");
+        std::fs::create_dir_all(&day).unwrap();
+        let thread = "019f7000-0000-7000-8000-000000000099";
+        let rollout = day.join(format!("rollout-2026-07-17T00-00-00-{thread}.jsonl"));
+        std::fs::write(
+            rollout,
+            format!(
+                concat!(
+                    "{{\"timestamp\":\"2026-07-17T00:00:00Z\",\"type\":\"session_meta\",",
+                    "\"payload\":{{\"id\":\"{thread}\",\"cwd\":\"/tmp/api\"}}}}\n",
+                    "{{\"timestamp\":\"2026-07-17T00:00:01Z\",\"type\":\"response_item\",",
+                    "\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",",
+                    "\"content\":[{{\"type\":\"output_text\",\"text\":\"api codex\"}}]}}}}\n"
+                ),
+                thread = thread,
+            ),
+        )
+        .unwrap();
+
+        let client = SnatchClient::with_provider_paths(claude.path(), codex.path()).unwrap();
+        let qualified = format!("codex:{thread}");
+        let parsed = client.parse_provider_session(&qualified).unwrap();
+        assert!(parsed.validate_provenance().is_empty());
+        assert_eq!(parsed.descriptor.key.to_string(), qualified);
+
+        let conversation = client.build_conversation(&qualified).unwrap();
+        assert!(conversation.provider_bundle().is_some());
+        assert_eq!(conversation.source().unwrap().to_string(), qualified);
+        let markdown = client
+            .export_session(&qualified, ExportFormat::Markdown)
+            .unwrap();
+        assert!(markdown.contains("api codex"));
+        let info = client.get_session(&qualified).unwrap().unwrap();
+        assert_eq!(info.id, qualified);
+        assert_eq!(info.project_path, "/tmp/api");
     }
 }

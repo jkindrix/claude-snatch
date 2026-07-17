@@ -780,6 +780,7 @@ pub fn provider_registry(cli: &crate::cli::Cli) -> crate::provider::registry::Pr
     crate::provider::registry::ProviderRegistry::with_config(
         &crate::provider::registry::RegistryConfig {
             claude_root: cli.claude_dir.clone(),
+            codex_root: None,
             max_file_size: cli.max_file_size,
         },
     )

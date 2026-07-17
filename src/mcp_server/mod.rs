@@ -4,7 +4,7 @@
 //!
 //! # Tools Provided
 //!
-//! - `list_sessions` - List Claude Code sessions
+//! - `list_sessions` - List agent sessions (Claude Code by default)
 //! - `get_session_info` - Get detailed session information
 //! - `get_stats` - Get usage statistics
 //! - `get_session_messages` - Read conversation messages at different detail levels
@@ -82,6 +82,9 @@ use types::{
 pub struct SnatchServer {
     /// Claude directory path.
     claude_dir: Option<PathBuf>,
+    /// Optional explicit Codex directory (embedded/test callers); normal CLI
+    /// server startup leaves this unset and uses Codex discovery.
+    codex_dir: Option<PathBuf>,
     /// Maximum file size for parsing.
     max_file_size: Option<u64>,
 }
@@ -91,8 +94,16 @@ impl SnatchServer {
     pub fn new(claude_dir: Option<PathBuf>, max_file_size: Option<u64>) -> Self {
         Self {
             claude_dir,
+            codex_dir: None,
             max_file_size,
         }
+    }
+
+    /// Override the Codex data root for an embedded server.
+    #[must_use]
+    pub fn with_codex_dir(mut self, codex_dir: impl Into<PathBuf>) -> Self {
+        self.codex_dir = Some(codex_dir.into());
+        self
     }
 
     /// Get the Claude directory.
@@ -218,6 +229,43 @@ impl SnatchServer {
         }
     }
 
+    /// Resolve a provider-selected/qualified session into the same complete
+    /// bundle-backed shape used by the CLI. This is the MCP acquisition
+    /// chokepoint for provider-aware message/timeline consumers.
+    fn resolve_provider_session(
+        &self,
+        flags: &[String],
+        reference: &str,
+    ) -> Result<helpers::ResolvedSession, ToolOutput> {
+        let registry = self.provider_registry();
+        let resolution = registry
+            .resolve_with_default_policy(flags, reference)
+            .map_err(|e| ToolOutput::error(e.to_string()))?;
+        let parsed = crate::provider::registry::cached_parsed_session(
+            crate::cache::global_cache(),
+            resolution.provider,
+            &resolution.key,
+        )
+        .map_err(|e| ToolOutput::error(format!("Failed to parse session: {e}")))?;
+        let project_path = parsed
+            .entries
+            .iter()
+            .find_map(|entry| entry.entry.cwd().map(String::from))
+            .unwrap_or_else(|| "unknown".to_string());
+        let conversation = Conversation::from_parsed_session(parsed)
+            .map_err(|e| ToolOutput::error(format!("Failed to reconstruct conversation: {e}")))?;
+        let analytics = SessionAnalytics::from_conversation(&conversation);
+        Ok(helpers::ResolvedSession {
+            session_id: resolution.key.native_id.clone(),
+            project_path,
+            conversation,
+            analytics,
+            provider: resolution.key.provider.to_string(),
+            qualified_id: resolution.key.to_string(),
+            semantic_annotations: resolution.provider.capabilities().semantic_annotations,
+        })
+    }
+
     /// Build the provider registry from the server's global options — the
     /// ONE construction path for MCP surfaces (round-18 blocker 4: parsing
     /// limits must never be dropped).
@@ -225,6 +273,7 @@ impl SnatchServer {
         crate::provider::registry::ProviderRegistry::with_config(
             &crate::provider::registry::RegistryConfig {
                 claude_root: self.claude_dir.clone(),
+                codex_root: self.codex_dir.clone(),
                 max_file_size: self.max_file_size,
             },
         )
@@ -568,13 +617,46 @@ impl SnatchServer {
     /// Use detail="overview" for prompt boundaries only, "standard" for user+assistant
     /// text with tool names, or "full" for tool call details.
     #[tool(
-        description = "Read conversation messages from a session. Use detail='overview' for prompt boundaries only (typed user prompts plus queued mid-turn steering prompts), 'conversation' for user+assistant text (skipping tool-only turns), 'standard' for user+assistant text, 'full' for tool details. At detail='full', Agent/Task calls are linked to the subagent they spawned (subagent_session_id) with a result preview; set include_subagent_transcripts=true to inline each subagent's full transcript. Subagents present on disk but not joinable to a specific call are surfaced in unmatched_subagents rather than dropped. Set include_thinking=true to include reasoning blocks — note this recovers rationale only for sessions from old Claude Code (~2.1.4x and earlier); recent versions persist thinking as empty text, and the response carries a thinking_note when that is the case. Set chunk='4' or chunk='2-5' to retrieve prompt-boundary chunk(s): one prompt (typed, or queued mid-turn steering — see chunk_info.prompt_source) plus everything it produced, including late async results (detail='overview' lists the prompts at the same indices, so overview then chunk composes). Set errors_only=true to keep only entries with failed tool results (error drill-down; use with detail='standard'/'full'), and max_text_len to override content truncation (skim small, read large). Supports pagination with offset/limit; chunk requests return the whole chunk unless an explicit limit is passed."
+        description = "Read conversation messages from an agent session (Claude Code by default; other providers via provider or a qualified id). Use detail='overview' for human prompts, 'conversation' for user+assistant text (skipping tool-only turns), 'standard' for user+assistant text, and 'full' for tool details. Claude-only chain/subagent/chunk controls are refused on other provider routes until provider-neutral implementations exist. Set include_thinking=true for persisted reasoning, errors_only=true to drill into failed tool calls, and max_text_len to control truncation. Supports pagination with offset/limit."
     )]
     async fn get_session_messages(&self, request: GetSessionMessagesRequest) -> ToolOutput {
+        let provider_flags = request.provider.as_deref().unwrap_or(&[]);
+        let registry = self.provider_registry();
+        let provider_route =
+            !provider_flags.is_empty() || registry.looks_qualified(&request.session_id);
+        if provider_route
+            && (request.chain_aware.is_some()
+                || request.include_subagent_transcripts == Some(true)
+                || request.chunk.is_some())
+        {
+            return ToolOutput::error(
+                "provider-routed messages do not support chain_aware, \
+                 include_subagent_transcripts, or chunk yet",
+            );
+        }
         let chain_aware = request.chain_aware.unwrap_or(true);
-        let resolved = match resolve_session_with_chain(self, &request.session_id, chain_aware) {
+        let resolved = match if provider_route {
+            self.resolve_provider_session(provider_flags, &request.session_id)
+        } else {
+            resolve_session_with_chain(self, &request.session_id, chain_aware)
+        } {
             Ok(r) => r,
             Err(e) => return e,
+        };
+        let semantic = resolved.semantic_annotations;
+        let human = |entry: &LogEntry| {
+            if semantic {
+                matches!(entry, LogEntry::User(_))
+                    && entry
+                        .uuid()
+                        .and_then(|uuid| resolved.conversation.semantics_for_uuid(uuid))
+                        .and_then(|semantics| semantics.prompt)
+                        .is_some_and(|prompt| {
+                            matches!(prompt.authorship, crate::provider::PromptAuthorship::Human)
+                        })
+            } else {
+                is_human_prompt(entry)
+            }
         };
 
         let detail = request.detail.as_deref().unwrap_or("standard");
@@ -600,7 +682,7 @@ impl SnatchServer {
 
         // Match Agent/Task calls to the subagents they spawned (only "full" detail
         // renders tool details). Uses the unfiltered thread for spawn-order joining.
-        let resolved_subagents: ResolvedSubagents = if detail == "full" {
+        let resolved_subagents: ResolvedSubagents = if detail == "full" && !semantic {
             match self.get_claude_dir() {
                 Ok(dir) => match dir.find_session(&resolved.session_id) {
                     Ok(Some(session)) => resolve_subagent_renders(
@@ -691,7 +773,7 @@ impl SnatchServer {
 
         // Filter by message type
         match msg_type_filter {
-            "user" => entries.retain(|e| is_human_prompt(e)),
+            "user" => entries.retain(|e| human(e)),
             "assistant" => entries.retain(|e| matches!(e, LogEntry::Assistant(_))),
             "system" => entries.retain(|e| matches!(e, LogEntry::System(_))),
             _ => {} // "all" — keep everything
@@ -740,13 +822,17 @@ impl SnatchServer {
         // prompts) so its indices always match chunk indices.
         match detail {
             "overview" => {
-                entries.retain(|e| is_prompt_boundary(e));
+                if semantic {
+                    entries.retain(|e| human(e));
+                } else {
+                    entries.retain(|e| is_prompt_boundary(e));
+                }
             }
             "conversation" => {
                 // Human prompts + assistant messages with text content
                 // Skips tool-only assistant turns, system messages, and noise
                 entries.retain(|e| match e {
-                    LogEntry::User(_) => is_human_prompt(e),
+                    LogEntry::User(_) => human(e),
                     LogEntry::Assistant(_) => extract_assistant_summary(e, 1).is_some(),
                     // Queued steering prompts are dialogue, not tool noise.
                     LogEntry::Attachment(_) => queued_human_prompt(e).is_some(),
@@ -759,7 +845,16 @@ impl SnatchServer {
         // Detail-independent canonical total (see main_thread_message_total),
         // so it matches get_session_info.messages regardless of detail level.
         // `returned` below conveys how many this page actually emitted.
-        let total_messages = main_thread_message_total(&resolved.conversation);
+        let total_messages = if semantic {
+            resolved
+                .conversation
+                .main_thread_entries()
+                .into_iter()
+                .filter(|entry| matches!(entry, LogEntry::Assistant(_)) || human(entry))
+                .count()
+        } else {
+            main_thread_message_total(&resolved.conversation)
+        };
 
         // Build (original_index, entry) pairs so indices survive reordering
         let mut indexed: Vec<(usize, &LogEntry)> = entries.into_iter().enumerate().collect();
@@ -1049,6 +1144,8 @@ impl SnatchServer {
         let duplicate_notice = resolved.conversation.duplicate_notice();
         let response = SessionMessagesResponse {
             session_id: resolved.session_id,
+            provider: resolved.provider,
+            qualified_id: resolved.qualified_id,
             project_path: resolved.project_path,
             total_messages,
             returned,
@@ -1073,18 +1170,27 @@ impl SnatchServer {
     /// Get a turn-by-turn narrative timeline of a session showing what was asked,
     /// what Claude did, and what files were touched.
     #[tool(
-        description = "Get a turn-by-turn narrative timeline of a session. Each turn shows the user prompt, assistant summary, tools used, and files touched. Also surfaces compaction events."
+        description = "Get a turn-by-turn narrative timeline of an agent session (Claude Code by default; other providers via provider or a qualified id). Each turn shows the user prompt, same-turn steering prompts, assistant summary, tools used, and files touched. Also surfaces compaction events."
     )]
     async fn get_session_timeline(&self, request: GetSessionTimelineRequest) -> ToolOutput {
+        let provider_flags = request.provider.as_deref().unwrap_or(&[]);
+        let registry = self.provider_registry();
+        let provider_route =
+            !provider_flags.is_empty() || registry.looks_qualified(&request.session_id);
+        if provider_route && request.chain_aware.is_some() {
+            return ToolOutput::error("provider-routed timeline does not support chain_aware");
+        }
         let chain_aware = request.chain_aware.unwrap_or(true);
-        let resolved = match resolve_session_with_chain(self, &request.session_id, chain_aware) {
+        let resolved = match if provider_route {
+            self.resolve_provider_session(provider_flags, &request.session_id)
+        } else {
+            resolve_session_with_chain(self, &request.session_id, chain_aware)
+        } {
             Ok(r) => r,
             Err(e) => return e,
         };
 
         let limit = request.limit.unwrap_or(30);
-        let turns = resolved.conversation.turns();
-        let total_turns = turns.len();
 
         // Detect compaction events from main thread
         let main_entries = resolved.conversation.main_thread_entries();
@@ -1119,7 +1225,21 @@ impl SnatchServer {
             prompt_max_len: 200,
             summary_max_len: 200,
         };
-        let analysis_timeline = crate::analysis::timeline::build_timeline(&turns, &timeline_opts);
+        let (total_turns, analysis_timeline) = if resolved.semantic_annotations {
+            let turns = crate::analysis::timeline::semantic_turns(&resolved.conversation);
+            let total = turns.len();
+            (
+                total,
+                crate::analysis::timeline::build_semantic_timeline(&turns, &timeline_opts),
+            )
+        } else {
+            let turns = resolved.conversation.turns();
+            let total = turns.len();
+            (
+                total,
+                crate::analysis::timeline::build_timeline(&turns, &timeline_opts),
+            )
+        };
 
         // Map analysis types to MCP response types
         let timeline: Vec<TimelineTurn> = analysis_timeline
@@ -1128,6 +1248,7 @@ impl SnatchServer {
                 index: t.index,
                 timestamp: t.timestamp,
                 user_prompt: t.user_prompt,
+                steering_prompts: t.steering_prompts,
                 assistant_summary: t.assistant_summary,
                 tools_used: t.tools_used,
                 files_touched: t.files_touched,
@@ -1138,6 +1259,8 @@ impl SnatchServer {
         let duplicate_notice = resolved.conversation.duplicate_notice();
         let response = SessionTimelineResponse {
             session_id: resolved.session_id,
+            provider: resolved.provider,
+            qualified_id: resolved.qualified_id,
             project_path: resolved.project_path,
             start_time,
             end_time,
@@ -3324,6 +3447,150 @@ mod tests {
         SnatchServer::new(Some(tmp.path().to_path_buf()), None)
     }
 
+    #[cfg(feature = "codex")]
+    fn setup_codex_dir() -> (TempDir, String) {
+        let tmp = TempDir::new().unwrap();
+        let day = tmp.path().join("sessions/2026/07/17");
+        std::fs::create_dir_all(&day).unwrap();
+        let thread = "019f7000-0000-7000-8000-000000000088";
+        let line = |kind: &str, payload: serde_json::Value| {
+            serde_json::json!({
+                "timestamp": "2026-07-17T00:00:00Z",
+                "type": kind,
+                "payload": payload,
+            })
+            .to_string()
+        };
+        let content = [
+            line(
+                "session_meta",
+                serde_json::json!({"id": thread, "cwd": "/tmp/mcp-codex"}),
+            ),
+            line(
+                "turn_context",
+                serde_json::json!({"turn_id": "turn-1", "model": "gpt-test"}),
+            ),
+            line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "start task"}]}),
+            ),
+            line(
+                "event_msg",
+                serde_json::json!({"type": "user_message", "message": "start task",
+                    "images": [], "local_images": [], "text_elements": []}),
+            ),
+            line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "working"}]}),
+            ),
+            line(
+                "event_msg",
+                serde_json::json!({"type": "user_message", "message": "also inspect tests",
+                    "images": [], "local_images": [], "text_elements": []}),
+            ),
+            line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "done"}]}),
+            ),
+            line(
+                "compacted",
+                serde_json::json!({"message": "compact summary", "window_id": 1}),
+            ),
+        ]
+        .join("\n")
+            + "\n";
+        std::fs::write(
+            day.join(format!("rollout-2026-07-17T00-00-00-{thread}.jsonl")),
+            content,
+        )
+        .unwrap();
+        (tmp, thread.to_string())
+    }
+
+    #[cfg(feature = "codex")]
+    #[tokio::test]
+    async fn provider_messages_and_timeline_route_codex_with_semantics() {
+        let claude = setup_claude_dir(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            PROJECT_PATH,
+            &minimal_session_jsonl("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        );
+        let (codex, thread) = setup_codex_dir();
+        let server = make_server(&claude).with_codex_dir(codex.path());
+        let qualified = format!("codex:{thread}");
+
+        let messages = unwrap_output(
+            server
+                .get_session_messages(GetSessionMessagesRequest {
+                    session_id: qualified.clone(),
+                    provider: None,
+                    detail: Some("conversation".to_string()),
+                    message_type: None,
+                    limit: None,
+                    offset: None,
+                    reverse: None,
+                    include_thinking: None,
+                    chain_aware: None,
+                    after_timestamp: None,
+                    before_timestamp: None,
+                    include_subagent_transcripts: None,
+                    chunk: None,
+                    errors_only: None,
+                    max_text_len: None,
+                })
+                .await,
+        );
+        let messages: serde_json::Value = serde_json::from_str(&messages).unwrap();
+        assert_eq!(messages["provider"], "codex");
+        assert_eq!(messages["qualified_id"], qualified);
+        let rendered = messages["messages"].to_string();
+        assert!(rendered.contains("start task"));
+        assert!(rendered.contains("also inspect tests"));
+
+        let timeline = unwrap_output(
+            server
+                .get_session_timeline(GetSessionTimelineRequest {
+                    session_id: format!("codex:{thread}"),
+                    provider: None,
+                    limit: None,
+                    chain_aware: None,
+                })
+                .await,
+        );
+        let timeline: serde_json::Value = serde_json::from_str(&timeline).unwrap();
+        assert_eq!(timeline["provider"], "codex");
+        assert_eq!(timeline["total_turns"], 1);
+        assert_eq!(
+            timeline["timeline"][0]["steering_prompts"],
+            serde_json::json!(["also inspect tests"])
+        );
+        assert_eq!(timeline["compaction_events"].as_array().unwrap().len(), 1);
+
+        let refused = server
+            .get_session_messages(GetSessionMessagesRequest {
+                session_id: format!("codex:{thread}"),
+                provider: None,
+                detail: None,
+                message_type: None,
+                limit: None,
+                offset: None,
+                reverse: None,
+                include_thinking: None,
+                chain_aware: None,
+                after_timestamp: None,
+                before_timestamp: None,
+                include_subagent_transcripts: None,
+                chunk: Some("0".to_string()),
+                errors_only: None,
+                max_text_len: None,
+            })
+            .await;
+        assert!(matches!(refused, ToolOutput::RecoverableError { .. }));
+    }
+
     #[tokio::test]
     async fn test_list_sessions_returns_fixture() {
         let sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -3528,6 +3795,7 @@ mod tests {
             server
                 .get_session_timeline(GetSessionTimelineRequest {
                     session_id: sid.to_string(),
+                    provider: None,
                     limit: None,
                     chain_aware: None,
                 })
@@ -3594,6 +3862,7 @@ mod tests {
             server
                 .get_session_messages(GetSessionMessagesRequest {
                     session_id: sid.to_string(),
+                    provider: None,
                     detail: None,
                     message_type: None,
                     limit: None,
@@ -3687,6 +3956,7 @@ mod tests {
             server
                 .get_session_messages(GetSessionMessagesRequest {
                     session_id: sid.to_string(),
+                    provider: None,
                     detail: Some("full".to_string()),
                     message_type: None,
                     limit: None,
@@ -3735,6 +4005,7 @@ mod tests {
             server
                 .get_session_messages(GetSessionMessagesRequest {
                     session_id: sid.to_string(),
+                    provider: None,
                     detail: Some("full".to_string()),
                     message_type: None,
                     limit: None,
@@ -3799,6 +4070,7 @@ mod tests {
             server
                 .get_session_messages(GetSessionMessagesRequest {
                     session_id: sid.to_string(),
+                    provider: None,
                     detail: Some("full".to_string()),
                     message_type: None,
                     limit: Some(1),
@@ -3868,6 +4140,7 @@ mod tests {
             server
                 .get_session_messages(GetSessionMessagesRequest {
                     session_id: sid.to_string(),
+                    provider: None,
                     detail: Some("full".to_string()),
                     message_type: None,
                     limit: None,

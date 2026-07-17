@@ -780,15 +780,16 @@ breath as any completion claim).
       (round-17).
 - [x] `snatch providers` command: discovered roots, session counts, format
       families, diagnostics.
-- [~] Production routing through SourceProvider: shared resolver path
+- [x] Production routing through SourceProvider for every B3 consumer: shared resolver path
       SHIPPED (ProviderRegistry + resolution matrix; all provider-aware
       surfaces route through it, zero Codex conditionals at call sites);
       archive/native/raw methods gained production callers for BOTH
-      providers (export tiers). REMAINING IN B2 SCOPE, tracked open:
-      `api.rs` and the classic (flagless) CLI/MCP paths still call
-      Session::parse directly — they migrate to the provider seam with
-      their surfaces' provider parameters (B3 surface work), per the
-      per-surface threading policy below.
+      providers (export tiers). B3 closes the tracked remainder for its
+      consumer set: normalized exports, CLI+MCP messages/timeline, and the
+      library API route qualified ids through cached ParsedSession bundles.
+      Classic flagless inputs deliberately retain their established direct
+      Claude path under invariant #8; later analysis/project surfaces migrate
+      only when they gain provider scope in C/D, per the per-surface policy.
 - [x] Parsed-session propagation: centralized
       `Conversation::from_parsed_session(...)` so provenance, semantics, and
       source cannot be independently forgotten; per-surface source threading
@@ -1120,6 +1121,29 @@ emissions. A new future family therefore makes conformance red until it is
 mapped or consciously classified rather than disappearing inside an aggregate
 Unknown count.
 
+## B3 slice 6 — API and MCP bundle routing (2026-07-17)
+
+The last B3 consumer-routing deferral is closed. `SnatchClient` accepts
+explicit Claude/Codex roots for embedded callers; existing parse, conversation,
+analytics, comparison, and string-export methods recognize provider-qualified
+ids while unqualified behavior stays Claude-only. The new
+`parse_provider_session` API exposes the complete `Arc<ParsedSession>` rather
+than forcing callers to discard provenance and semantics. Its integration test
+proves identity/provenance survive into `Conversation`, normalized export, and
+qualified session info without process-global environment mutation.
+
+MCP `get_session_messages` and `get_session_timeline` now accept an optional
+provider selection or a qualified id, resolve through the registry/cache, and
+return additive `provider` + `qualified_id` fields. Semantic providers use
+PromptSemantics and semantic turns rather than Claude-shaped human/turn
+heuristics; same-turn steering is retained in the timeline response and
+compaction boundaries remain visible. Provider routes explicitly refuse chain,
+subagent-transcript, and chunk controls until the corresponding provider-neutral
+consumer exists. A real-shape Codex MCP fixture proves one semantic turn,
+midturn steering, compaction reporting, qualified identity, and refusal of a
+Claude-only chunk request. Classic requests remain on their existing path and
+the full suite pins compatibility.
+
 ## Review round 26 (2026-07-17, same Codex agent — B3.1.3 audit: B3.1.4)
 
 Verdict: the preserve-all loophole is fixed and all ten controls are
@@ -1438,8 +1462,8 @@ Decisions taken in-implementation, FLAGGED FOR REVIEW:
       activity (invariant #4); typed modern/legacy window metadata ships (B3
       slice 4), source-derived and mutation-tested.
 - [x] Semantic sidecar emission: prompt axes, per-call tools, turn ids,
-      valued usage observations, and InheritedHistory for fork-copied
-      records ship. Later state families may add their own typed carriers.
+      valued usage observations, InheritedHistory for fork-copied records,
+      compaction windows, and reconstruction-state checkpoints ship.
 - [x] Pre-envelope legacy files: keep unsupported-legacy refusal unless
       provenance-documented fixtures justify a parser (round-6 posture).
 - [x] Milestone: messages and timeline work on real Codex sessions, including

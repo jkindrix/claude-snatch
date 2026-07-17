@@ -60,6 +60,13 @@ pub struct ResolvedSession {
     pub conversation: Conversation,
     /// Computed analytics for the session.
     pub analytics: SessionAnalytics,
+    /// Owning provider id.
+    pub provider: String,
+    /// Provider-qualified logical session id.
+    pub qualified_id: String,
+    /// Whether provider semantic annotations are complete enough to replace
+    /// Claude-shaped prompt/turn heuristics.
+    pub semantic_annotations: bool,
 }
 
 /// Resolve a session ID to a parsed conversation.
@@ -91,6 +98,9 @@ pub fn resolve_session(
         project_path: session.project_path().to_string(),
         conversation,
         analytics,
+        provider: "claude-code".to_string(),
+        qualified_id: crate::provider::claude_code::logical_key(&session).to_string(),
+        semantic_annotations: false,
     })
 }
 
@@ -157,6 +167,14 @@ pub fn resolve_session_with_chain(
                     project_path,
                     conversation,
                     analytics,
+                    provider: "claude-code".to_string(),
+                    qualified_id: crate::provider::LogicalSessionKey {
+                        provider: crate::provider::ProviderId::claude_code(),
+                        namespace: crate::provider::SessionNamespace::global(),
+                        native_id: chain.root_id.clone(),
+                    }
+                    .to_string(),
+                    semantic_annotations: false,
                 });
             }
         }

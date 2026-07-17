@@ -183,6 +183,10 @@ pub struct GetSessionMessagesRequest {
     /// Session ID (full or prefix).
     pub session_id: String,
 
+    /// Provider selection (`claude-code` or `codex`). A provider-qualified
+    /// session id is also an explicit selection.
+    pub provider: Option<Vec<String>>,
+
     /// Detail level: "overview" (prompt boundaries only — typed user prompts
     /// plus queued mid-turn steering prompts — truncated),
     /// "conversation" (user prompts + assistant text, skips tool-only turns),
@@ -320,6 +324,8 @@ pub struct ToolDetail {
 #[derive(Debug, Serialize)]
 pub struct SessionMessagesResponse {
     pub session_id: String,
+    pub provider: String,
+    pub qualified_id: String,
     pub project_path: String,
     pub total_messages: usize,
     pub returned: usize,
@@ -416,6 +422,10 @@ pub struct GetSessionTimelineRequest {
     /// Session ID (full or prefix).
     pub session_id: String,
 
+    /// Provider selection (`claude-code` or `codex`). A provider-qualified
+    /// session id is also an explicit selection.
+    pub provider: Option<Vec<String>>,
+
     /// Maximum timeline entries. Default: 30.
     pub limit: Option<usize>,
 
@@ -431,6 +441,9 @@ pub struct TimelineTurn {
     pub timestamp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_prompt: Option<String>,
+    /// Human prompts delivered after the turn began, in native order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub steering_prompts: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assistant_summary: Option<String>,
     pub tools_used: Vec<String>,
@@ -457,6 +470,8 @@ pub struct ErrorEvent {
 #[derive(Debug, Serialize)]
 pub struct SessionTimelineResponse {
     pub session_id: String,
+    pub provider: String,
+    pub qualified_id: String,
     pub project_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_time: Option<String>,
