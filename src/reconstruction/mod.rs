@@ -116,6 +116,10 @@ pub struct Conversation {
     /// is kept; later duplicates are recorded here (never silently overwritten).
     /// This mainly surfaces when combining files (resume chains / subagents).
     duplicate_uuids: Vec<DuplicateUuid>,
+    /// Provider-qualified identity of the session these entries came from
+    /// (Phase A provider-context threading). `None` when built without source
+    /// context (tests, ad-hoc entry lists); carries no behavioral weight yet.
+    source: Option<crate::provider::LogicalSessionKey>,
 }
 
 /// A dropped duplicate-UUID entry, kept for diagnostics.
@@ -555,7 +559,28 @@ impl Conversation {
             message_groups,
             orphan_entries,
             duplicate_uuids,
+            source: None,
         })
+    }
+
+    /// Build a conversation from log entries, recording the provider-qualified
+    /// identity of the session they came from. Identical to
+    /// [`Conversation::from_entries`] except that [`Conversation::source`]
+    /// is populated.
+    pub fn from_entries_with_source(
+        entries: Vec<LogEntry>,
+        source: crate::provider::LogicalSessionKey,
+    ) -> Result<Self> {
+        let mut conversation = Self::from_entries(entries)?;
+        conversation.source = Some(source);
+        Ok(conversation)
+    }
+
+    /// Provider-qualified identity of the session these entries came from,
+    /// when the construction site supplied it.
+    #[must_use]
+    pub fn source(&self) -> Option<&crate::provider::LogicalSessionKey> {
+        self.source.as_ref()
     }
 
     /// Entries dropped because their UUID already appeared (first kept).

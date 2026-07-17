@@ -37,6 +37,26 @@ use crate::discovery::{ClaudeDirectory, Session};
 use crate::model::LogEntry;
 use crate::parser::salvage_torn_line;
 
+/// Provider-qualified logical identity of any discovered Claude Code session.
+///
+/// Main sessions use the global namespace; subagents are parent-qualified.
+/// Shared by [`ClaudeCodeProvider`] and the provider-context threading in
+/// the established pipeline.
+pub fn logical_key(session: &Session) -> LogicalSessionKey {
+    match session.parent_session_id() {
+        Some(parent) if session.is_subagent() => LogicalSessionKey {
+            provider: ProviderId::claude_code(),
+            namespace: ClaudeCodeProvider::subagent_namespace(parent, session.path()),
+            native_id: session.session_id().to_string(),
+        },
+        _ => LogicalSessionKey {
+            provider: ProviderId::claude_code(),
+            namespace: SessionNamespace::global(),
+            native_id: session.session_id().to_string(),
+        },
+    }
+}
+
 /// Claude Code sessions (`~/.claude/projects/**.jsonl`) behind the provider
 /// seam.
 pub struct ClaudeCodeProvider {
@@ -97,14 +117,7 @@ impl ClaudeCodeProvider {
 
     /// Logical key for any discovered session.
     fn key_for_session(&self, session: &Session) -> LogicalSessionKey {
-        match session.parent_session_id() {
-            Some(parent) if session.is_subagent() => LogicalSessionKey {
-                provider: ProviderId::claude_code(),
-                namespace: Self::subagent_namespace(parent, session.path()),
-                native_id: session.session_id().to_string(),
-            },
-            _ => self.key_for_main(session.session_id()),
-        }
+        logical_key(session)
     }
 
     fn artifact_for(&self, session: &Session) -> SessionArtifact {

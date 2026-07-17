@@ -78,8 +78,11 @@ pub fn resolve_session(
         .parse_with_options(server.max_file_size)
         .map_err(|e| ToolOutput::error(format!("Failed to parse session: {e}")))?;
 
-    let conversation = Conversation::from_entries(entries)
-        .map_err(|e| ToolOutput::error(format!("Failed to reconstruct conversation: {e}")))?;
+    let conversation = Conversation::from_entries_with_source(
+        entries,
+        crate::provider::claude_code::logical_key(&session),
+    )
+    .map_err(|e| ToolOutput::error(format!("Failed to reconstruct conversation: {e}")))?;
 
     let analytics = SessionAnalytics::from_conversation(&conversation);
 
@@ -137,8 +140,15 @@ pub fn resolve_session_with_chain(
                     .parse_chain(chain)
                     .map_err(|e| ToolOutput::error(format!("Failed to parse chain: {e}")))?;
 
-                let conversation = Conversation::from_entries(entries)
-                    .map_err(|e| ToolOutput::error(format!("Failed to reconstruct chain: {e}")))?;
+                let conversation = Conversation::from_entries_with_source(
+                    entries,
+                    crate::provider::LogicalSessionKey {
+                        provider: crate::provider::ProviderId::claude_code(),
+                        namespace: crate::provider::SessionNamespace::global(),
+                        native_id: chain.root_id.clone(),
+                    },
+                )
+                .map_err(|e| ToolOutput::error(format!("Failed to reconstruct chain: {e}")))?;
 
                 let analytics = SessionAnalytics::from_conversation(&conversation);
 
