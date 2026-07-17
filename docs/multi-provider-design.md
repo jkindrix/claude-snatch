@@ -304,6 +304,16 @@ directory walks.
   real assistant entry with two ToolUse blocks, and semantic call ids are
   validated against actual calls; lineage tolerates dangling endpoints
   (real corpora reference deleted/unavailable parents — keep the edge).
+  Threading status (T1-T3, 2026-07-17): logical_key(&Session) shared between
+  adapter and pipeline; Conversation carries an inert
+  source: Option<LogicalSessionKey> (from_entries_with_source), threaded at
+  the MCP shared-resolution funnel; the cache key is provider-neutral
+  (identity + RevisionSource, file variant preserving exact pre-provider
+  semantics and on-disk format). DELIBERATE DEFERRAL: the ~28 CLI
+  construction sites are threaded per-surface in B2, when each surface gains
+  its provider parameter — an inert source set by 28 no-op edits would be
+  verified by nothing today, while threading with the consumer lands each
+  edit under a behavioral test.
 - **Phase B1 — Codex inventory & decoding.** Discovery of plain, archived,
   compressed (`.zst`, with decompressed-size limits), active/truncated, and
   legacy (pre-envelope) files; envelope parser; native diagnostics. Legacy
