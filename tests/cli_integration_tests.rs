@@ -1653,3 +1653,30 @@ mod codex_provider_cli {
             .stderr(predicate::str::contains("raw-jsonl, native, archive"));
     }
 }
+
+#[cfg(feature = "codex")]
+#[test]
+fn doctor_provider_codex_reports_capped_drift_diagnostics() {
+    let claude = setup_fixture_dir();
+    let codex = TempDir::new().unwrap();
+    let day = codex.path().join("sessions/2026/07/16");
+    std::fs::create_dir_all(&day).unwrap();
+    let tid = "0198bbbb-cccc-7ddd-8eee-ffff00001111";
+    std::fs::write(
+        day.join(format!("rollout-2026-07-16T10-00-00-{tid}.jsonl")),
+        format!(
+            "{{\"timestamp\":\"2026-07-16T10:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{tid}\"}}}}\n"
+        ),
+    )
+    .unwrap();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", claude.path())
+        .env("CODEX_HOME", codex.path())
+        .args(["doctor", "--provider", "codex"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sessions scanned: 1"))
+        .stdout(predicate::str::contains(
+            "vocabulary keys dropped at cap: 0",
+        ));
+}

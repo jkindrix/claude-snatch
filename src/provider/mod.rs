@@ -1007,6 +1007,18 @@ pub trait SourceProvider {
     /// is still information worth keeping.
     fn lineage(&self) -> Result<Vec<LineageEdge>, ProviderError>;
 
+    /// Provider-defined corpus diagnostics for `snatch doctor`
+    /// (round-15/17 provider-neutral hook): schema-drift and health
+    /// findings as renderable JSON, or `None` when the provider has no
+    /// dedicated diagnostics (the classic doctor covers Claude Code).
+    /// Security is the provider's responsibility: any native strings in the
+    /// report must be cardinality/length-capped during collection with
+    /// control characters escaped, and no session ids or file paths are
+    /// emitted by default (round-16/17).
+    fn diagnostics(&self) -> Result<Option<serde_json::Value>, ProviderError> {
+        Ok(None)
+    }
+
     /// Parse one session into identified entries with full provenance and
     /// semantics.
     fn parse(&self, key: &LogicalSessionKey) -> Result<ParsedSession, ProviderError>;

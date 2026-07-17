@@ -15,6 +15,10 @@ use super::helpers::{self, SessionCollectParams};
 
 /// Run the doctor command.
 pub fn run(cli: &Cli, args: &DoctorArgs) -> Result<()> {
+    if !args.provider.is_empty() {
+        return provider_diagnostics(cli, args);
+    }
+
     // Bound the scan to the recent past unless told otherwise: drift checking
     // cares about what Claude Code writes *now*, and a full-corpus parse is
     // slow. --all removes the bound; --since overrides it.
@@ -162,4 +166,102 @@ fn print_human(report: &DoctorReport, failed: usize, since: Option<&str>) {
             println!("{}", fmt_sighting(name, s));
         }
     }
+}
+
+/// Provider diagnostics (`doctor --provider ...`): each selected provider's
+/// own drift/health report through the provider-neutral hook. Providers
+/// without dedicated diagnostics say so (the classic scan covers Claude).
+/// Reports contain aggregate vocabulary only — providers cap and escape
+/// native strings during collection, and no session ids or file paths are
+/// emitted (round-16/17 security guardrail).
+fn provider_diagnostics(cli: &Cli, args: &DoctorArgs) -> Result<()> {
+    use crate::provider::registry::{ProviderRegistry, ProviderSelection};
+
+    let selection = ProviderSelection::from_flags(&args.provider).map_err(|reason| {
+        crate::error::SnatchError::InvalidArgument {
+            name: "--provider".to_string(),
+            reason,
+        }
+    })?;
+    let registry = ProviderRegistry::with_claude_root(cli.claude_dir.as_deref());
+    let selected = registry.select(&selection)?;
+
+    let mut reports = serde_json::Map::new();
+    for provider in &selected.providers {
+        let value = match provider.diagnostics()? {
+            Some(v) => v,
+            None => serde_json::json!({
+                "note": "no dedicated provider diagnostics; the classic `snatch doctor` scan covers this provider"
+            }),
+        };
+        reports.insert(provider.id().to_string(), value);
+    }
+    for (id, reason) in &selected.skipped {
+        reports.insert(id.to_string(), serde_json::json!({"unavailable": reason}));
+    }
+
+    if cli.effective_output() == OutputFormat::Json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::Value::Object(reports))?
+        );
+        return Ok(());
+    }
+
+    for (id, value) in &reports {
+        println!("{id}");
+        if let Some(reason) = value.get("unavailable").and_then(|v| v.as_str()) {
+            println!("  unavailable: {reason}");
+            continue;
+        }
+        if let Some(note) = value.get("note").and_then(|v| v.as_str()) {
+            println!("  {note}");
+            continue;
+        }
+        // Compact counter summary; full detail via -o json.
+        for (label, key) in [
+            ("sessions scanned", "sessions"),
+            ("legacy sessions", "legacy_sessions"),
+            ("unreadable sessions", "unreadable_sessions"),
+            ("records", "records"),
+            ("unparseable records", "unparseable"),
+            ("active tails (transient)", "active_tails"),
+            ("schema-checked records", "field_schema_checked_records"),
+            (
+                "missing payload discriminators",
+                "missing_payload_discriminators",
+            ),
+            ("vocabulary keys dropped at cap", "vocabulary_keys_dropped"),
+            ("vocabulary keys truncated", "vocabulary_keys_truncated"),
+        ] {
+            if let Some(n) = value.get(key).and_then(serde_json::Value::as_u64) {
+                println!("  {label}: {n}");
+            }
+        }
+        for (label, key) in [
+            ("unknown envelope types", "unknown_envelope_types"),
+            ("unknown response_item types", "unknown_response_item_types"),
+            ("unknown event_msg types", "unknown_event_msg_types"),
+            ("unknown field paths", "unknown_field_paths"),
+            ("unbaselined payload variants", "unbaselined_payload_types"),
+        ] {
+            if let Some(map) = value.get(key).and_then(|v| v.as_object()) {
+                let total: u64 = map.values().filter_map(serde_json::Value::as_u64).sum();
+                println!("  {label}: {} distinct ({total} records)", map.len());
+            }
+        }
+        if let Some(months) = value.get("reasoning_by_month").and_then(|v| v.as_object()) {
+            if !months.is_empty() {
+                println!("  reasoning summary availability by month (with/total):");
+                for (month, pair) in months {
+                    if let Some(arr) = pair.as_array() {
+                        let total = arr.first().and_then(serde_json::Value::as_u64).unwrap_or(0);
+                        let with = arr.get(1).and_then(serde_json::Value::as_u64).unwrap_or(0);
+                        println!("    {month}: {with}/{total}");
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }

@@ -161,7 +161,7 @@ const KNOWN_EVENT_MSG_TYPES: [&str; 23] = [
 /// intentional B1 preserved-Unknown representation, not drift. CLI `doctor`
 /// surfacing and a provider-neutral diagnostics hook are explicitly Phase
 /// B2 scope (recorded in the design doc); this is the analysis capability.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct CodexDriftReport {
     /// Envelope-era sessions scanned.
     pub sessions: usize,
@@ -206,6 +206,12 @@ pub struct CodexDriftReport {
     /// response_item/event_msg records whose payload `type` discriminator is
     /// missing or not a string (the envelope counter does not cover these).
     pub missing_payload_discriminators: u64,
+    /// Distinct-key insertions dropped because a vocabulary map reached its
+    /// cardinality cap (round-16/17 security guardrail: keys are
+    /// attacker-controlled strings, capped DURING collection).
+    pub vocabulary_keys_dropped: u64,
+    /// Keys truncated to the length cap before storage (same guardrail).
+    pub vocabulary_keys_truncated: u64,
     /// reasoning response items seen.
     pub reasoning_items: u64,
     /// reasoning items carrying a non-empty plaintext summary.
@@ -235,6 +241,42 @@ pub enum FormatFamily {
     Legacy,
     /// Empty or unreadable first record.
     Undetermined,
+}
+
+/// Security caps for drift-vocabulary maps (round-16/17): every key stored
+/// in the report's maps is an attacker-controlled string read from native
+/// files, so distinct-key cardinality and key length are capped DURING
+/// collection (not at rendering) and control characters are escaped so the
+/// report can never carry terminal/structured-output injection sequences.
+const MAX_VOCAB_KEYS: usize = 64;
+const MAX_VOCAB_KEY_LEN: usize = 120;
+
+fn sanitize_vocab_key(raw: &str, truncated: &mut u64) -> String {
+    let mut out = String::new();
+    for (i, c) in raw.chars().enumerate() {
+        if i >= MAX_VOCAB_KEY_LEN {
+            out.push('…');
+            *truncated += 1;
+            break;
+        }
+        if c.is_control() {
+            out.extend(c.escape_debug());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn bump_vocab(map: &mut BTreeMap<String, u64>, dropped: &mut u64, truncated: &mut u64, raw: &str) {
+    let key = sanitize_vocab_key(raw, truncated);
+    if let Some(count) = map.get_mut(&key) {
+        *count += 1;
+    } else if map.len() >= MAX_VOCAB_KEYS {
+        *dropped += 1;
+    } else {
+        map.insert(key, 1);
+    }
 }
 
 impl CodexProvider {
@@ -701,21 +743,30 @@ impl CodexProvider {
                     continue;
                 };
                 let kind = kind.to_string();
-                *report.envelope_types.entry(kind.clone()).or_default() += 1;
+                bump_vocab(
+                    &mut report.envelope_types,
+                    &mut report.vocabulary_keys_dropped,
+                    &mut report.vocabulary_keys_truncated,
+                    &kind,
+                );
                 if !KNOWN_ENVELOPE_TYPES.contains(&kind.as_str()) {
-                    *report
-                        .unknown_envelope_types
-                        .entry(kind.clone())
-                        .or_default() += 1;
+                    bump_vocab(
+                        &mut report.unknown_envelope_types,
+                        &mut report.vocabulary_keys_dropped,
+                        &mut report.vocabulary_keys_truncated,
+                        &kind,
+                    );
                 }
                 // Envelope-level unknown keys.
                 if let Some(obj) = value.as_object() {
                     for k in obj.keys() {
                         if !matches!(k.as_str(), "timestamp" | "type" | "payload") {
-                            *report
-                                .unknown_field_paths
-                                .entry(format!("{kind}/$envelope/{k}"))
-                                .or_default() += 1;
+                            bump_vocab(
+                                &mut report.unknown_field_paths,
+                                &mut report.vocabulary_keys_dropped,
+                                &mut report.vocabulary_keys_truncated,
+                                &format!("{kind}/$envelope/{k}"),
+                            );
                         }
                     }
                 }
@@ -741,30 +792,38 @@ impl CodexProvider {
                         if let Some(obj) = payload.as_object() {
                             for k in obj.keys() {
                                 if !baseline.contains(&k.as_str()) {
-                                    *report
-                                        .unknown_field_paths
-                                        .entry(format!("{kind}/{pt}/{k}"))
-                                        .or_default() += 1;
+                                    bump_vocab(
+                                        &mut report.unknown_field_paths,
+                                        &mut report.vocabulary_keys_dropped,
+                                        &mut report.vocabulary_keys_truncated,
+                                        &format!("{kind}/{pt}/{k}"),
+                                    );
                                 }
                             }
                         }
                     } else if requires_payload_type {
-                        *report
-                            .unbaselined_payload_types
-                            .entry(format!("{kind}/{pt}"))
-                            .or_default() += 1;
+                        bump_vocab(
+                            &mut report.unbaselined_payload_types,
+                            &mut report.vocabulary_keys_dropped,
+                            &mut report.vocabulary_keys_truncated,
+                            &format!("{kind}/{pt}"),
+                        );
                     }
                     match kind.as_str() {
                         "response_item" => {
-                            *report
-                                .response_item_types
-                                .entry(pt.to_string())
-                                .or_default() += 1;
+                            bump_vocab(
+                                &mut report.response_item_types,
+                                &mut report.vocabulary_keys_dropped,
+                                &mut report.vocabulary_keys_truncated,
+                                pt,
+                            );
                             if !KNOWN_RESPONSE_ITEM_TYPES.contains(&pt) {
-                                *report
-                                    .unknown_response_item_types
-                                    .entry(pt.to_string())
-                                    .or_default() += 1;
+                                bump_vocab(
+                                    &mut report.unknown_response_item_types,
+                                    &mut report.vocabulary_keys_dropped,
+                                    &mut report.vocabulary_keys_truncated,
+                                    pt,
+                                );
                             }
                             if pt == "reasoning" {
                                 report.reasoning_items += 1;
@@ -775,22 +834,41 @@ impl CodexProvider {
                                             .is_some_and(|t| !t.trim().is_empty())
                                     })
                                 });
-                                let bucket =
-                                    report.reasoning_by_month.entry(month.clone()).or_default();
-                                bucket.0 += 1;
+                                let month_key = sanitize_vocab_key(
+                                    &month,
+                                    &mut report.vocabulary_keys_truncated,
+                                );
+                                if report.reasoning_by_month.contains_key(&month_key)
+                                    || report.reasoning_by_month.len() < MAX_VOCAB_KEYS
+                                {
+                                    let bucket =
+                                        report.reasoning_by_month.entry(month_key).or_default();
+                                    bucket.0 += 1;
+                                    if has_summary {
+                                        bucket.1 += 1;
+                                    }
+                                } else {
+                                    report.vocabulary_keys_dropped += 1;
+                                }
                                 if has_summary {
                                     report.reasoning_with_summary += 1;
-                                    bucket.1 += 1;
                                 }
                             }
                         }
                         "event_msg" => {
-                            *report.event_msg_types.entry(pt.to_string()).or_default() += 1;
+                            bump_vocab(
+                                &mut report.event_msg_types,
+                                &mut report.vocabulary_keys_dropped,
+                                &mut report.vocabulary_keys_truncated,
+                                pt,
+                            );
                             if !KNOWN_EVENT_MSG_TYPES.contains(&pt) {
-                                *report
-                                    .unknown_event_msg_types
-                                    .entry(pt.to_string())
-                                    .or_default() += 1;
+                                bump_vocab(
+                                    &mut report.unknown_event_msg_types,
+                                    &mut report.vocabulary_keys_dropped,
+                                    &mut report.vocabulary_keys_truncated,
+                                    pt,
+                                );
                             }
                         }
                         _ => {}
@@ -816,6 +894,13 @@ impl SourceProvider for CodexProvider {
 
     fn sessions(&self) -> Result<Vec<SessionDescriptor>, ProviderError> {
         self.descriptors()
+    }
+
+    fn diagnostics(&self) -> Result<Option<serde_json::Value>, ProviderError> {
+        let report = self.drift_report()?;
+        serde_json::to_value(&report)
+            .map(Some)
+            .map_err(|e| ProviderError::Other(format!("diagnostics serialization: {e}")))
     }
 
     fn parse_cache_token(&self, key: &LogicalSessionKey) -> Result<String, ProviderError> {
@@ -2244,6 +2329,83 @@ mod tests {
         // (The canonical encoding has no human-readable marker; the
         // preferred artifact id is covered by the trailing length-prefixed
         // fields, proven by the inequality above.)
+    }
+
+    #[test]
+    fn drift_vocabulary_is_capped_and_escaped_during_collection() {
+        // Round-16/17 security guardrail: field names are attacker-controlled
+        // strings. Cardinality and length are capped while COLLECTING (not at
+        // rendering), overflow is counted, and control characters can never
+        // reach the stored report.
+        let mut lines = vec![envelope_line(
+            "session_meta",
+            serde_json::json!({"id": THREAD_A, "cwd": "/tmp/p"}),
+        )];
+        // 65 distinct unknown nested fields on a baselined type (cap is 64):
+        // 63 plain, one with an ANSI-escape name (inside the cap), and one
+        // exceeding the length cap (arrives last, overflowing cardinality).
+        let mut hostile = serde_json::Map::new();
+        hostile.insert("type".into(), "token_count".into());
+        hostile.insert("info".into(), serde_json::json!({}));
+        for i in 0..63 {
+            hostile.insert(format!("evil{i}"), serde_json::json!(1));
+        }
+        hostile.insert("\u{1b}[31minjected".into(), serde_json::json!(1));
+        hostile.insert("L".repeat(500), serde_json::json!(1));
+        lines.push(envelope_line(
+            "event_msg",
+            serde_json::Value::Object(hostile),
+        ));
+        let content = lines.join("\n") + "\n";
+        let (_tmp, p) = home_with(THREAD_A, content.as_bytes(), false);
+
+        let report = p.drift_report().unwrap();
+        assert!(
+            report.unknown_field_paths.len() <= MAX_VOCAB_KEYS,
+            "cardinality cap must hold during collection, got {}",
+            report.unknown_field_paths.len()
+        );
+        assert!(
+            report.vocabulary_keys_dropped > 0,
+            "overflow past the cap must be counted"
+        );
+        assert!(
+            report.vocabulary_keys_truncated > 0,
+            "length-capped keys must be counted"
+        );
+        for key in report.unknown_field_paths.keys() {
+            assert!(
+                !key.chars().any(char::is_control),
+                "stored key contains a raw control character: {key:?}"
+            );
+            assert!(
+                key.chars().count() <= MAX_VOCAB_KEY_LEN + 1,
+                "stored key exceeds the length cap (+1 for the truncation marker): {key:?}"
+            );
+        }
+        // The escape sequence survives only in escaped form.
+        assert!(
+            report
+                .unknown_field_paths
+                .keys()
+                .any(|k| k.contains("\\u{1b}[31minjected")),
+            "escaped control character not found: {:?}",
+            report.unknown_field_paths.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn diagnostics_hook_returns_capped_report() {
+        let (_tmp, p) = home_with(THREAD_A, session_a_content().as_bytes(), false);
+        let value = p.diagnostics().unwrap().expect("codex has diagnostics");
+        assert_eq!(value["sessions"], 1);
+        assert!(value["vocabulary_keys_dropped"].is_u64());
+        // No session ids or file paths in the report (aggregate only).
+        let text = value.to_string();
+        assert!(
+            !text.contains(THREAD_A) && !text.contains("rollout-"),
+            "diagnostics must not leak session ids or file paths: {text}"
+        );
     }
 
     #[test]

@@ -125,11 +125,11 @@ name = "parser_bench"
 harness = false
 
 [features]
-default = []
+default = ["codex"]
 tracing = []
 mmap = ["dep:memmap2"]  # Memory-mapped file parsing for very large JSONL files
 mcp = ["dep:mcpkit"]  # MCP server mode for AI model integration
-codex = ["dep:zstd"]  # OpenAI Codex CLI provider (rollout ingestion; default-on at release)
+codex = ["dep:zstd"]  # OpenAI Codex CLI provider (rollout ingestion; default-on per round 11/B2)
 
 [lints.rust]
 # Use deny instead of forbid to allow targeted unsafe in mmap feature

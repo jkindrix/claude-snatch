@@ -2275,6 +2275,11 @@ pub struct DoctorArgs {
     /// Include subagent transcripts in the scan.
     #[arg(long)]
     pub subagents: bool,
+
+    /// Run provider diagnostics instead of the classic Claude scan
+    /// (repeatable; "all" = every installed provider).
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
 }
 
 /// Arguments for the health command.
