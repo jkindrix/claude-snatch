@@ -717,10 +717,36 @@ strings — before `snatch doctor` prints them, cap distinct-path cardinality
 and path length, track overflow counts, and emit no session ids, paths, or
 field values by default.
 
+## Review round 17 (2026-07-17, same Codex agent — B1 SIGN-OFF)
+
+Verdict: "sign off B1 … proceed directly into B2. No further B1 architecture
+or adapter review is needed." Reviewer independently reran the 38 applicable
+provider tests, the forged-artifact provenance test, and the opt-in corpus
+conformance test (224/224, zero errors/violations/mismatches/races; 190,846
+checked records, 11 unbaselined variants / 1,242 records explicitly reported,
+zero unknown checked paths — small count growth normal for an active corpus)
+and confirmed each round-16 fix bites.
+
+One doc-only correction ordered as the first B2 action (applied in this
+commit): the consolidated checklist's claim to contain every forward
+obligation was not literally true — (a) B2 was missing the
+unqualified-prefix-uniqueness rule and the real-session milestone for
+list/info/native/raw export; (b) B3 recorded only fork reconstruction where
+the original plan requires typed fork AND spawn lineage; (c) doctor
+responsibility appeared in both B2 and C without a boundary (now: B2 exposes
+the provider-neutral drift report, C tunes presentation only). Reviewer also
+added B2 acceptance guardrails, all folded into the checklist:
+provider-selection resolution matrix (never silently fall back to Claude),
+explicit `--provider all` partial-vs-atomic semantics, deterministic
+cross-provider ordering, doctor caps applied during collection with
+control-character escaping, a provider registry/shared resolver instead of
+Codex-specific conditionals, and a cache-consumer test spanning an artifact
+revision change between lookups.
+
 ## Execution checklist: B2 through D (consolidated 2026-07-17)
 
 Single forward-looking list gathering every obligation accumulated across
-review rounds 1-16 — read THIS (not just the phase prose) before starting a
+review rounds 1-17 — read THIS (not just the phase prose) before starting a
 phase, and check items off against their original wording (see the
 requirement-evaporation memory: deferred parts must be named in the same
 breath as any completion claim).
@@ -731,28 +757,52 @@ breath as any completion claim).
       session id. Default stays Claude-only until D.
 - [ ] Qualified-id parsing: FromStr/decoding + round-trip tests for the
       escaped encoding BEFORE ids become CLI/MCP inputs (round-6 guardrail).
+      Unqualified prefixes are allowed only when unique across the selected
+      providers; ambiguity is an error listing the candidates (phase-plan
+      original wording, restored round-17).
+- [ ] Provider-selection resolution matrix, specified and tested as a matrix
+      (round-17): repeated `--provider` flags; `all` mixed with explicit
+      providers; a qualified id naming a provider outside the selected set;
+      ambiguous unqualified prefixes. Never silently fall back to Claude.
+- [ ] `--provider all` availability semantics defined explicitly (round-17):
+      whether one unavailable provider yields partial results (with a
+      diagnostic) or fails atomically — pick one and test it.
+- [ ] Deterministic cross-provider ordering for any merged listing/output
+      (round-17).
 - [ ] `snatch providers` command: discovered roots, session counts, format
       families, diagnostics.
 - [ ] Production routing through SourceProvider: shared resolver path,
       library API (`api.rs`) and MCP paths stop calling Session::parse
       directly; archive/raw provider methods gain production callers
-      (round-10 re-phasing).
+      (round-10 re-phasing). Route through a provider registry / shared
+      resolver — no accumulation of Codex-specific conditionals at call
+      sites (round-17).
 - [ ] Parsed-session propagation: centralized
       `Conversation::from_parsed_session(...)` so provenance, semantics, and
       source cannot be independently forgotten; per-surface source threading
       lands WITH each surface's provider parameter (covers CLI + MCP +
       library/API — the ~28-site deferral inventory, rounds 10/T3).
 - [ ] First production cache consumer uses `parse_cache_token` (round-11
-      guardrail; token already implemented + tested end-to-end).
+      guardrail; token already implemented + tested end-to-end). Test the
+      consumer with an artifact revision change BETWEEN two lookups —
+      stale-hit prevention, not just hit/miss (round-17).
 - [ ] `snatch doctor` surfacing of CodexDriftReport + a provider-neutral
-      diagnostics hook (round-15 re-phasing). SECURITY (round-16): unknown
-      field names are native attacker-controlled strings — cap distinct-path
-      cardinality and path length, track overflow counts, emit no session
+      diagnostics hook (round-15 re-phasing). Boundary vs Phase C
+      (round-17): B2 exposes the native provider-neutral drift report; C
+      tunes semantic/presentation behavior (era bucketing display, etc.) —
+      it does not "surface" it again. SECURITY (round-16/17): unknown field
+      names are native attacker-controlled strings — cap distinct-path
+      cardinality and path length DURING COLLECTION (not merely at
+      rendering), track overflow counts, escape control characters to
+      prevent terminal/structured-output injection, emit no session
       ids/paths/field values by default.
 - [ ] `codex` feature becomes default-on at release (round-11).
 - [ ] Compatibility promise from B2 on: backward-compatible inputs/semantics,
       additive provider metadata permitted; Claude raw-jsonl byte-identical
       permanently (invariant #8 phasing).
+- [ ] Milestone (phase-plan original wording, restored round-17): list/info
+      + native/raw export work on REAL Codex sessions — a real-session
+      demonstration, not fixtures only.
 
 ### Phase B3 — Codex normalization
 - [ ] Envelope records flip from Unknown{entries} to Mapped with the SAME
@@ -764,8 +814,11 @@ breath as any completion claim).
 - [ ] Steered/queued prompt persisted shape — empirical (inject.rs inference
       unverified).
 - [ ] `world_state` / `ghost_snapshot` semantics — empirical.
-- [ ] Fork lineage via the embedded-second-meta heuristic (this corpus's
-      forks predate forked_from_id — B1a observation).
+- [ ] Typed fork AND spawn lineage (phase-plan original wording, restored
+      round-17): fork reconstruction via the embedded-second-meta heuristic
+      (this corpus's forks predate forked_from_id — B1a observation) AND
+      typed `Spawn` edges from Codex subagent `parent_thread_id`/source
+      metadata — both as LineageEdge kinds, not fork alone.
 - [ ] Compaction: `compacted` items with replacement_history not counted as
       new chronological activity (invariant #4); window-metadata carrier
       (deferred from A.0 round 5).
@@ -785,8 +838,10 @@ breath as any completion claim).
 - [ ] Pricing: Codex stays unpriced by default; if ever added, label
       "API-equivalent cost", explicit pricing mode, never inferred from
       auth.json (round-3).
-- [ ] Reasoning availability + drift surfaced in doctor output (era-bucketed,
-      never aggregate-only).
+- [ ] Reasoning availability + drift PRESENTATION tuning in doctor output
+      (era-bucketed, never aggregate-only). The report itself is already
+      exposed in B2 — C tunes semantics/presentation only (round-17
+      boundary).
 - [ ] Compaction-window presentation.
 
 ### Phase D — cross-provider UX
