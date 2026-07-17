@@ -32,6 +32,7 @@ pub mod notes;
 pub mod pick;
 pub mod priorities;
 pub mod prompts;
+pub mod providers;
 pub mod quickstart;
 pub mod recent;
 pub mod recover;

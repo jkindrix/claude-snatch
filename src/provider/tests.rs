@@ -561,3 +561,166 @@ fn inherited_history_is_present_but_not_new_work() {
         .count();
     assert_eq!(new_work, parsed.entries.len() - 1);
 }
+
+// ============================================================================
+// Qualified-id round-trip (B2 round-6 guardrail: parsing must be proven
+// before ids become CLI/MCP inputs)
+// ============================================================================
+
+fn key(provider: &str, namespace: &str, native: &str) -> LogicalSessionKey {
+    LogicalSessionKey {
+        provider: ProviderId(provider.into()),
+        namespace: SessionNamespace(namespace.into()),
+        native_id: native.into(),
+    }
+}
+
+#[test]
+fn qualified_id_round_trips_simple() {
+    let k = key("codex", "global", "0198c5c1-aaaa-7bbb-8ccc-0123456789ab");
+    let shown = k.to_string();
+    assert_eq!(shown, "codex:0198c5c1-aaaa-7bbb-8ccc-0123456789ab");
+    assert_eq!(shown.parse::<LogicalSessionKey>().unwrap(), k);
+}
+
+#[test]
+fn qualified_id_round_trips_hostile_segments() {
+    // Colons, percents, pre-escaped-looking text, and non-ASCII in every
+    // segment position must survive Display -> FromStr unchanged.
+    let hostile = [
+        key("claude-code", "subagent:parent:dir", "abc"),
+        key("fake", "install-a", "b:c"),
+        key("p%ro", "n%3As", "50%:done"),
+        key("codex", "global", "%25 already escaped-looking"),
+        key("codex", "глобал", "идентификатор:例"),
+    ];
+    for k in hostile {
+        let shown = k.to_string();
+        assert_eq!(
+            shown.parse::<LogicalSessionKey>().unwrap(),
+            k,
+            "round-trip failed for display form '{shown}'"
+        );
+    }
+}
+
+#[test]
+fn qualified_id_explicit_global_namespace_canonicalizes() {
+    // "codex:global:abc" is accepted, parses to the same key as "codex:abc",
+    // and re-displays in the canonical two-segment form.
+    let explicit: LogicalSessionKey = "codex:global:abc".parse().unwrap();
+    let implicit: LogicalSessionKey = "codex:abc".parse().unwrap();
+    assert_eq!(explicit, implicit);
+    assert_eq!(explicit.to_string(), "codex:abc");
+}
+
+#[test]
+fn qualified_id_injectivity_pair_parses_distinctly() {
+    // The doc-comment pair: namespace "a" + native "b:c" vs namespace "a:b" +
+    // native "c" must have distinct display forms, each parsing to itself.
+    let k1 = key("p", "a", "b:c");
+    let k2 = key("p", "a:b", "c");
+    assert_ne!(k1.to_string(), k2.to_string());
+    assert_eq!(k1.to_string().parse::<LogicalSessionKey>().unwrap(), k1);
+    assert_eq!(k2.to_string().parse::<LogicalSessionKey>().unwrap(), k2);
+}
+
+#[test]
+fn qualified_id_rejects_malformed_inputs() {
+    let bad = [
+        "",              // no segments
+        "codex",         // one segment (unqualified — caller's job)
+        "a:b:c:d",       // four segments
+        ":abc",          // empty provider
+        "codex:",        // empty native id
+        "codex::abc",    // empty namespace
+        "codex:ab%",     // truncated escape
+        "codex:ab%2",    // truncated escape
+        "codex:ab%zz",   // invalid escape
+        "codex:ab%3a",   // lowercase escape rejected (strict)
+        "codex:ab%20cd", // valid percent-encoding, but not ours
+    ];
+    for input in bad {
+        assert!(
+            input.parse::<LogicalSessionKey>().is_err(),
+            "'{input}' should have been rejected"
+        );
+    }
+}
+
+// ============================================================================
+// Provider registry (B2: shared resolver seam, round-17 guardrails)
+// ============================================================================
+
+use super::registry::{ProviderRegistry, RegisteredProvider};
+
+fn fake_entry() -> RegisteredProvider {
+    RegisteredProvider {
+        id: FakeProvider.id(),
+        root: None,
+        provider: Ok(Box::new(FakeProvider)),
+    }
+}
+
+#[test]
+fn registry_orders_entries_by_provider_id_regardless_of_registration_order() {
+    let mut r = ProviderRegistry::new();
+    r.register(RegisteredProvider {
+        id: ProviderId("zzz".into()),
+        root: None,
+        provider: Err("not built".into()),
+    })
+    .unwrap();
+    r.register(fake_entry()).unwrap();
+    r.register(RegisteredProvider {
+        id: ProviderId("aaa".into()),
+        root: None,
+        provider: Err("not built".into()),
+    })
+    .unwrap();
+    let ids: Vec<String> = r.entries().iter().map(|e| e.id.to_string()).collect();
+    assert_eq!(ids, ["aaa", "fake", "zzz"]);
+    // available() preserves the same deterministic order.
+    let avail: Vec<String> = r.available().map(|p| p.id().to_string()).collect();
+    assert_eq!(avail, ["fake"]);
+}
+
+#[test]
+fn registry_rejects_duplicate_provider_ids() {
+    let mut r = ProviderRegistry::new();
+    r.register(fake_entry()).unwrap();
+    assert!(
+        r.register(fake_entry()).is_err(),
+        "second registration of the same id must fail"
+    );
+    assert_eq!(r.entries().len(), 1);
+}
+
+#[test]
+fn registry_get_never_falls_back_to_another_provider() {
+    let mut r = ProviderRegistry::new();
+    r.register(fake_entry()).unwrap();
+    r.register(RegisteredProvider {
+        id: ProviderId("broken".into()),
+        root: None,
+        provider: Err("home not found".into()),
+    })
+    .unwrap();
+
+    // Unknown id: error naming the known set — not some other provider.
+    let unknown = r.get(&ProviderId("nope".into()));
+    let msg = unknown.err().expect("unknown id must error").to_string();
+    assert!(msg.contains("nope") && msg.contains("fake"), "got: {msg}");
+
+    // Installed-but-unavailable id: error carrying the reason — again no
+    // fallback.
+    let broken = r.get(&ProviderId("broken".into()));
+    let msg = broken.err().expect("unavailable must error").to_string();
+    assert!(
+        msg.contains("broken") && msg.contains("home not found"),
+        "got: {msg}"
+    );
+
+    // The working provider is still reachable by its own id.
+    assert_eq!(r.get(&FakeProvider.id()).unwrap().id(), FakeProvider.id());
+}

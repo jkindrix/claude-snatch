@@ -105,6 +105,68 @@ fn escape_segment(s: &str) -> String {
     s.replace('%', "%25").replace(':', "%3A")
 }
 
+/// Reverse [`escape_segment`], strictly: only the exact `%25` / `%3A`
+/// sequences the escaper emits are accepted, and any other use of `%` is an
+/// error. Strictness preserves injectivity in both directions — no two
+/// distinct external strings decode to the same segment.
+fn unescape_segment(s: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(pos) = rest.find('%') {
+        out.push_str(&rest[..pos]);
+        match rest.get(pos + 1..pos + 3) {
+            Some("25") => out.push('%'),
+            Some("3A") => out.push(':'),
+            _ => {
+                return Err(format!(
+                    "invalid escape sequence in id segment '{s}': only %25 and %3A are valid"
+                ));
+            }
+        }
+        rest = &rest[pos + 3..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+impl std::str::FromStr for LogicalSessionKey {
+    type Err = String;
+
+    /// Parse the qualified-id form produced by [`fmt::Display`]:
+    /// `provider:native-id` (global namespace) or
+    /// `provider:namespace:native-id`. An explicit namespace segment equal to
+    /// `global` is accepted and canonicalizes to the two-segment form on
+    /// re-display; the parsed key is identical either way.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let segments: Vec<&str> = s.split(':').collect();
+        let (provider, namespace, native_id) = match segments.as_slice() {
+            [p, n] => (*p, None, *n),
+            [p, ns, n] => (*p, Some(*ns), *n),
+            _ => {
+                return Err(format!(
+                    "qualified session id must have 2 or 3 colon-separated segments \
+                     (provider:native-id or provider:namespace:native-id), got {} in '{s}'",
+                    segments.len()
+                ));
+            }
+        };
+        let provider = unescape_segment(provider)?;
+        let namespace = match namespace {
+            Some(ns) => unescape_segment(ns)?,
+            None => "global".to_string(),
+        };
+        let native_id = unescape_segment(native_id)?;
+        if provider.is_empty() || namespace.is_empty() || native_id.is_empty() {
+            return Err(format!("qualified session id '{s}' has an empty segment"));
+        }
+        Ok(LogicalSessionKey {
+            provider: ProviderId(provider),
+            namespace: SessionNamespace(namespace),
+            native_id,
+        })
+    }
+}
+
 impl fmt::Display for LogicalSessionKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Qualified-id form used by CLI/MCP: "codex:<native-id>". The
@@ -983,6 +1045,7 @@ pub trait SourceProvider {
 pub mod claude_code;
 #[cfg(feature = "codex")]
 pub mod codex;
+pub mod registry;
 
 #[cfg(test)]
 pub(crate) mod fake;

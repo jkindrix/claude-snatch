@@ -1416,3 +1416,54 @@ fn test_messages_limit_zero_is_unlimited() {
         .success()
         .stdout(predicate::str::contains("showing 1-6"));
 }
+
+// =============================================================================
+// providers
+// =============================================================================
+
+#[test]
+fn test_providers_reports_claude_code_with_root_and_count() {
+    let tmp = setup_fixture_dir();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .env("CODEX_HOME", tmp.path().join("no-such-codex-home"))
+        .arg("providers")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude-code"))
+        .stdout(predicate::str::contains("status: available"))
+        .stdout(predicate::str::contains("sessions: 1"));
+}
+
+#[cfg(feature = "codex")]
+#[test]
+fn test_providers_missing_codex_home_is_visible_not_dropped() {
+    let tmp = setup_fixture_dir();
+    let out = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .env("CODEX_HOME", tmp.path().join("no-such-codex-home"))
+        .args(["-o", "json", "providers"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let reports: serde_json::Value =
+        serde_json::from_slice(&out).expect("providers JSON must parse");
+    let reports = reports.as_array().expect("array of providers");
+    // Deterministic id order: claude-code before codex.
+    let ids: Vec<&str> = reports
+        .iter()
+        .map(|r| r["provider"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["claude-code", "codex"]);
+    let codex = &reports[1];
+    assert_eq!(codex["available"], false);
+    assert!(
+        codex["diagnostic"]
+            .as_str()
+            .expect("unavailable provider carries a diagnostic")
+            .contains("not found"),
+        "diagnostic should say the home was not found: {codex}"
+    );
+}

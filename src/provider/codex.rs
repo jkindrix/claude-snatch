@@ -256,6 +256,11 @@ impl CodexProvider {
         Ok(Self::new(home))
     }
 
+    /// The Codex home directory this provider reads.
+    pub fn codex_home(&self) -> &Path {
+        &self.codex_home
+    }
+
     /// Configure the decompressed-output cap (bytes).
     #[must_use]
     pub fn with_max_decompressed(mut self, max: u64) -> Self {

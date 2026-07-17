@@ -288,6 +288,10 @@ pub enum Commands {
     #[command(display_order = 24)]
     Doctor(DoctorArgs),
 
+    /// List session-log providers: roots, availability, sessions, formats.
+    #[command(display_order = 24)]
+    Providers,
+
     /// Contextual zoom around a specific event in a session.
     #[command(display_order = 24)]
     Context(ContextArgs),
@@ -2782,6 +2786,7 @@ pub fn run() -> Result<()> {
         Some(Commands::Decisions(args)) => commands::decisions::run(&cli, args),
         Some(Commands::Thread(args)) => commands::thread::run(&cli, args),
         Some(Commands::Doctor(args)) => commands::doctor::run(&cli, args),
+        Some(Commands::Providers) => commands::providers::run(&cli),
         Some(Commands::Health(args)) => commands::health::run(&cli, args),
         Some(Commands::FileEvolution(args)) => commands::file_evolution::run(&cli, args),
         Some(Commands::Priorities(args)) => commands::priorities::run(&cli, args),
