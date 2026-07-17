@@ -979,3 +979,15 @@ fn qualified_reference_supports_native_prefix_within_its_provider() {
         .unwrap();
     assert_eq!(res.key, SmallProvider::key("421"));
 }
+
+// ============================================================================
+// Conversation bridge (B2: centralized from_parsed_session)
+// ============================================================================
+
+#[test]
+fn from_parsed_session_threads_source_identity() {
+    let parsed = FakeProvider.parse(&multi_artifact_key()).unwrap();
+    let expected = parsed.descriptor.key.clone();
+    let conversation = crate::reconstruction::Conversation::from_parsed_session(parsed).unwrap();
+    assert_eq!(conversation.source(), Some(&expected));
+}

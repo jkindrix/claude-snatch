@@ -576,6 +576,20 @@ impl Conversation {
         Ok(conversation)
     }
 
+    /// Build a conversation from a provider-parsed session.
+    ///
+    /// The single sanctioned bridge from the [`SourceProvider`] seam to
+    /// conversation surfaces: source identity is threaded here, and future
+    /// consumers of parsed provenance/semantics extend this constructor
+    /// rather than each call site (B2 centralization guardrail).
+    ///
+    /// [`SourceProvider`]: crate::provider::SourceProvider
+    pub fn from_parsed_session(parsed: crate::provider::ParsedSession) -> Result<Self> {
+        let source = parsed.descriptor.key.clone();
+        let entries = parsed.entries.into_iter().map(|e| e.entry).collect();
+        Self::from_entries_with_source(entries, source)
+    }
+
     /// Provider-qualified identity of the session these entries came from,
     /// when the construction site supplied it.
     #[must_use]

@@ -353,6 +353,26 @@ impl ProviderRegistry {
     }
 }
 
+/// Parse a provider session with caching.
+///
+/// The first production consumer of [`SourceProvider::parse_cache_token`]
+/// (round-11 guardrail). Entries are cached under the session's logical
+/// identity and revalidated against the provider's current token, so an
+/// artifact revision change between lookups forces a reparse — the token
+/// covers full descriptor state and parse policy, never just one file's
+/// mtime.
+pub fn cached_session_entries(
+    cache: &crate::cache::CacheManager,
+    provider: &dyn SourceProvider,
+    key: &LogicalSessionKey,
+) -> crate::error::Result<std::sync::Arc<Vec<crate::model::LogEntry>>> {
+    let token = provider.parse_cache_token(key)?;
+    cache.get_or_parse_keyed(key, &token, || {
+        let parsed = provider.parse(key)?;
+        Ok(parsed.entries.into_iter().map(|e| e.entry).collect())
+    })
+}
+
 /// Uniqueness rule shared by qualified-prefix and unqualified resolution:
 /// exactly one EXACT native-id match wins outright; otherwise the candidate
 /// set must have exactly one member. Ambiguity errors list qualified ids

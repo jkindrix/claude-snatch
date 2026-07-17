@@ -51,6 +51,10 @@ pub enum SnatchError {
         session_id: String,
     },
 
+    /// A source-provider operation failed.
+    #[error("{0}")]
+    Provider(#[from] crate::provider::ProviderError),
+
     /// Session prefix is ambiguous (matches multiple sessions).
     #[error("Session prefix '{prefix}' is ambiguous ({match_count} matches). Use a longer prefix or full UUID.")]
     AmbiguousSessionPrefix {

@@ -430,6 +430,24 @@ impl ParsedEntriesCache {
         Ok(arc_entries)
     }
 
+    /// Get cached entries for a provider-keyed session, valid only while the
+    /// provider's parse cache token still matches.
+    pub fn get_keyed(
+        &self,
+        key: &LogicalSessionKey,
+        current_revision: &str,
+    ) -> Option<Arc<Vec<LogEntry>>> {
+        self.inner.write().get_keyed(key, current_revision).cloned()
+    }
+
+    /// Cache parsed entries under a provider session key + parse cache token.
+    pub fn insert_keyed(&self, key: &LogicalSessionKey, revision: String, entries: Vec<LogEntry>) {
+        let size = entries.len() * 1024;
+        self.inner
+            .write()
+            .insert_keyed(key, revision, Arc::new(entries), size);
+    }
+
     /// Invalidate stale entries.
     pub fn invalidate_stale(&self) {
         self.inner.write().invalidate_stale();
@@ -535,6 +553,34 @@ impl CacheManager {
         } else {
             parse_fn().map(Arc::new)
         }
+    }
+
+    /// Get provider-keyed entries valid for `current_revision` (a parse
+    /// cache token), or parse and cache them under that revision.
+    pub fn get_or_parse_keyed<F>(
+        &self,
+        key: &LogicalSessionKey,
+        current_revision: &str,
+        parse_fn: F,
+    ) -> Result<Arc<Vec<LogEntry>>>
+    where
+        F: FnOnce() -> Result<Vec<LogEntry>>,
+    {
+        if !self.enabled {
+            return parse_fn().map(Arc::new);
+        }
+        if let Some(entries) = self.entries.get_keyed(key, current_revision) {
+            return Ok(entries);
+        }
+        let entries = Arc::new(parse_fn()?);
+        let size = entries.len() * 1024;
+        self.entries.inner.write().insert_keyed(
+            key,
+            current_revision.to_string(),
+            entries.clone(),
+            size,
+        );
+        Ok(entries)
     }
 
     /// Invalidate all stale entries.

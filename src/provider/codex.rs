@@ -2247,6 +2247,57 @@ mod tests {
     }
 
     #[test]
+    fn cached_consumer_revalidates_on_artifact_revision_change() {
+        // Round-17 guardrail: the production cache consumer must reparse
+        // when an artifact revision changes BETWEEN lookups, and must serve
+        // from cache when nothing changed.
+        use crate::cache::CacheManager;
+        use crate::config::CacheConfig;
+        use crate::provider::registry::cached_session_entries;
+
+        let (tmp, p) = home_with(THREAD_A, session_a_content().as_bytes(), false);
+        let cache = CacheManager::new(&CacheConfig {
+            enabled: true,
+            ..Default::default()
+        });
+
+        let first = cached_session_entries(&cache, &p, &key(THREAD_A)).unwrap();
+        let n = first.len();
+        assert!(n > 0);
+
+        // Unchanged revision: the same Arc comes back — a genuine cache hit.
+        let again = cached_session_entries(&cache, &p, &key(THREAD_A)).unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &again),
+            "unchanged revision must be served from cache"
+        );
+
+        // Append one well-formed record: file length changes, so the
+        // artifact revision — and therefore the parse cache token — moves.
+        let file = tmp.path().join(format!(
+            "sessions/2026/07/16/rollout-2026-07-16T23-38-33-{THREAD_A}.jsonl"
+        ));
+        let extra = envelope_line(
+            "response_item",
+            serde_json::json!({"type": "message", "role": "assistant", "content": []}),
+        ) + "\n";
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .unwrap();
+        f.write_all(extra.as_bytes()).unwrap();
+        drop(f);
+
+        let after = cached_session_entries(&cache, &p, &key(THREAD_A)).unwrap();
+        assert!(
+            !std::sync::Arc::ptr_eq(&first, &after),
+            "revision change must invalidate the cached parse"
+        );
+        assert_eq!(after.len(), n + 1, "reparse must see the appended record");
+    }
+
+    #[test]
     fn archive_frames_all_artifacts() {
         let (_tmp, p) = fixture();
         let mut bundle = Vec::new();
