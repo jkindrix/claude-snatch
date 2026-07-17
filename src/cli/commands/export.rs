@@ -2441,9 +2441,9 @@ fn render_entry(entry: &LogEntry, template: &ExportTemplate) -> String {
     }
 }
 
-/// Provider-routed export: raw-jsonl / native / archive fidelity tiers
-/// streamed through the SourceProvider seam for any provider. Normalized
-/// formats for non-Claude sessions arrive with Phase B3.
+/// Provider-routed export: source fidelity tiers stream through the provider;
+/// normalized formats render the provider's complete [`ParsedSession`]
+/// bundle through the common exporter framework.
 fn export_via_provider(cli: &Cli, args: &ExportArgs) -> Result<()> {
     // COMPLETE argument classification: the struct is destructured WITHOUT
     // `..`, so a new ExportArgs field must be classified here to compile
@@ -2498,46 +2498,76 @@ fn export_via_provider(cli: &Cli, args: &ExportArgs) -> Result<()> {
         template,
         list_templates: _,
     } = args;
-    super::helpers::refuse_unsupported_flags(
-        "provider-routed exports (fidelity tiers stream source data unmodified)",
-        &[
-            ("--all", *all),
-            ("--project", project.is_some()),
-            ("--since", since.is_some()),
-            ("--until", until.is_some()),
-            ("--subagents", *subagents),
-            ("--combine-agents", *combine_agents),
-            ("--resolve-tool-results", *resolve_tool_results),
-            ("--thinking=false", !*thinking),
-            ("--no-thinking", *no_thinking),
-            ("--tool-use=false", !*tool_use),
-            ("--no-tool-use", *no_tool_use),
-            ("--tool-results=false", !*tool_results),
-            ("--no-tool-results", *no_tool_results),
-            ("--images=false", !*images),
-            ("--no-images", *no_images),
-            ("--system", *system),
-            ("--only", !only.is_empty()),
-            ("--timestamps=false", !*timestamps),
-            ("--usage=false", !*usage),
-            ("--metadata", *metadata),
-            ("--main-thread", *main_thread),
-            ("--no-chain", *no_chain),
-            ("--pretty", *pretty),
-            ("--full", *full),
-            ("--progress", *progress),
-            ("--redact", redact.is_some()),
-            ("--warn-pii", *warn_pii),
-            ("--redact-preview", *redact_preview),
-            ("--gist", *gist),
-            ("--gist-public", *gist_public),
-            ("--gist-description", gist_description.is_some()),
-            ("--toc", *toc),
-            ("--dark", *dark),
-            ("--clipboard", *clipboard),
-            ("--template", template.is_some()),
-        ],
-    )?;
+    let fidelity_tier = matches!(
+        args.format,
+        ExportFormatArg::RawJsonl | ExportFormatArg::Native | ExportFormatArg::Archive
+    );
+    if fidelity_tier {
+        super::helpers::refuse_unsupported_flags(
+            "provider-routed fidelity exports (source data streams unmodified)",
+            &[
+                ("--all", *all),
+                ("--project", project.is_some()),
+                ("--since", since.is_some()),
+                ("--until", until.is_some()),
+                ("--subagents", *subagents),
+                ("--combine-agents", *combine_agents),
+                ("--resolve-tool-results", *resolve_tool_results),
+                ("--thinking=false", !*thinking),
+                ("--no-thinking", *no_thinking),
+                ("--tool-use=false", !*tool_use),
+                ("--no-tool-use", *no_tool_use),
+                ("--tool-results=false", !*tool_results),
+                ("--no-tool-results", *no_tool_results),
+                ("--images=false", !*images),
+                ("--no-images", *no_images),
+                ("--system", *system),
+                ("--only", !only.is_empty()),
+                ("--timestamps=false", !*timestamps),
+                ("--usage=false", !*usage),
+                ("--metadata", *metadata),
+                ("--main-thread", *main_thread),
+                ("--no-chain", *no_chain),
+                ("--pretty", *pretty),
+                ("--full", *full),
+                ("--progress", *progress),
+                ("--redact", redact.is_some()),
+                ("--warn-pii", *warn_pii),
+                ("--redact-preview", *redact_preview),
+                ("--gist", *gist),
+                ("--gist-public", *gist_public),
+                ("--gist-description", gist_description.is_some()),
+                ("--toc", *toc),
+                ("--dark", *dark),
+                ("--clipboard", *clipboard),
+                ("--template", template.is_some()),
+            ],
+        )?;
+    } else {
+        // Normalized provider exports support the common content,
+        // presentation, redaction, PII-warning, and output controls. These
+        // remaining options depend on Claude-only discovery/sidecar machinery
+        // or external delivery paths and are refused explicitly.
+        super::helpers::refuse_unsupported_flags(
+            "provider-routed normalized exports",
+            &[
+                ("--all", *all),
+                ("--project", project.is_some()),
+                ("--since", since.is_some()),
+                ("--until", until.is_some()),
+                ("--subagents", *subagents),
+                ("--combine-agents", *combine_agents),
+                ("--resolve-tool-results", *resolve_tool_results),
+                ("--no-chain", *no_chain),
+                ("--progress", *progress),
+                ("--gist", *gist),
+                ("--gist-public", *gist_public),
+                ("--gist-description", gist_description.is_some()),
+                ("--clipboard", *clipboard),
+                ("--template", template.is_some()),
+            ],
+        )?;
+    }
 
     let reference = args
         .session
@@ -2549,6 +2579,10 @@ fn export_via_provider(cli: &Cli, args: &ExportArgs) -> Result<()> {
     let resolution = registry.resolve_with_default_policy(&args.provider, reference)?;
     let provider = resolution.provider;
     let key = &resolution.key;
+
+    if !fidelity_tier {
+        return export_normalized_via_provider(cli, args, provider, key);
+    }
 
     // PREFLIGHT before touching the output file (round-18: never
     // create/truncate the destination for an export that cannot start):
@@ -2600,16 +2634,7 @@ fn export_via_provider(cli: &Cli, args: &ExportArgs) -> Result<()> {
                     .clone(),
             )
         }
-        _ => {
-            return Err(SnatchError::ConfigError {
-                message: format!(
-                    "format '{:?}' is not available through provider routing yet \
-                     (normalized formats for non-Claude sessions arrive with Phase B3); \
-                     available: raw-jsonl, native, archive",
-                    args.format
-                ),
-            });
-        }
+        _ => unreachable!("normalized formats returned above"),
     };
 
     let stream = |sink: &mut dyn std::io::Write| -> Result<()> {
@@ -2648,6 +2673,165 @@ fn export_via_provider(cli: &Cli, args: &ExportArgs) -> Result<()> {
             use std::io::Write as _;
             sink.flush()?;
         }
+    }
+
+    if !cli.quiet {
+        if let Some(path) = &args.output_file {
+            eprintln!("Exported {key} to {}", path.display());
+        }
+    }
+    Ok(())
+}
+
+fn normalized_provider_options(args: &ExportArgs) -> ExportOptions {
+    let redaction = args.redact.map(Into::into);
+    let only = build_only_filter(&args.only);
+    if args.full {
+        let mut options = ExportOptions::full();
+        options.redaction = redaction;
+        options.redaction_preview = args.redact_preview;
+        options.only = only;
+        options
+    } else {
+        ExportOptions {
+            include_thinking: args.thinking && !args.no_thinking,
+            include_tool_use: args.tool_use && !args.no_tool_use,
+            include_tool_results: args.tool_results && !args.no_tool_results,
+            include_system: args.system,
+            include_timestamps: args.timestamps,
+            relative_timestamps: false,
+            include_usage: args.usage,
+            include_metadata: args.metadata,
+            include_images: args.images && !args.no_images,
+            max_depth: None,
+            truncate_at: None,
+            include_branches: !args.main_thread,
+            main_thread_only: args.main_thread,
+            redaction,
+            redaction_preview: args.redact_preview,
+            minimization: None,
+            only,
+            subagent_transcript_count: None,
+            subagent_transcript_stats: None,
+        }
+    }
+}
+
+fn write_normalized_provider_export<W: Write>(
+    conversation: &Conversation,
+    args: &ExportArgs,
+    options: &ExportOptions,
+    writer: &mut W,
+) -> Result<()> {
+    match args.format {
+        ExportFormatArg::Markdown | ExportFormatArg::Md => {
+            MarkdownExporter::new().export_conversation(conversation, writer, options)?;
+        }
+        ExportFormatArg::Json => {
+            JsonExporter::new()
+                .pretty(args.pretty)
+                .export_conversation(conversation, writer, options)?;
+        }
+        ExportFormatArg::JsonPretty => {
+            JsonExporter::new()
+                .pretty(true)
+                .export_conversation(conversation, writer, options)?;
+        }
+        ExportFormatArg::Text => {
+            TextExporter::new().export_conversation(conversation, writer, options)?;
+        }
+        ExportFormatArg::Jsonl => {
+            conversation_to_jsonl(conversation, writer, options.main_thread_only)?;
+        }
+        ExportFormatArg::Csv => {
+            CsvExporter::new().export_conversation(conversation, writer, options)?;
+        }
+        ExportFormatArg::Html => {
+            HtmlExporter::new()
+                .with_toc(args.toc)
+                .dark_theme(args.dark)
+                .export_conversation(conversation, writer, options)?;
+        }
+        ExportFormatArg::Sqlite => unreachable!("SQLite uses its path-based exporter"),
+        ExportFormatArg::RawJsonl | ExportFormatArg::Native | ExportFormatArg::Archive => {
+            unreachable!("fidelity tiers return before normalized rendering")
+        }
+    }
+    Ok(())
+}
+
+fn export_normalized_via_provider(
+    cli: &Cli,
+    args: &ExportArgs,
+    provider: &dyn crate::provider::SourceProvider,
+    key: &crate::provider::LogicalSessionKey,
+) -> Result<()> {
+    // Parse/reconstruct/transform during preflight, before the destination is
+    // opened. A failed provider parse or unsupported SQLite stdout request can
+    // therefore never truncate an existing export.
+    let parsed = crate::provider::registry::cached_parsed_session(
+        crate::cache::global_cache(),
+        provider,
+        key,
+    )?;
+    let conversation = Conversation::from_parsed_session(parsed)?;
+    if !cli.quiet {
+        if let Some(notice) = conversation.duplicate_notice() {
+            eprintln!("{notice}");
+        }
+    }
+    if args.warn_pii {
+        check_for_pii(&conversation, cli.quiet);
+    }
+    let options = normalized_provider_options(args);
+    let conversation = crate::export::apply_export_transform(&conversation, &options).into_owned();
+
+    if matches!(args.format, ExportFormatArg::Sqlite) && args.output_file.is_none() {
+        return Err(SnatchError::export(
+            "SQLite export requires an output file (--output <path.db>)",
+        ));
+    }
+    if let Some(path) = &args.output_file {
+        if path.exists() && !args.overwrite {
+            return Err(SnatchError::ConfigError {
+                message: format!(
+                    "output file {} exists (use --overwrite to replace)",
+                    path.display()
+                ),
+            });
+        }
+    }
+
+    if matches!(args.format, ExportFormatArg::Sqlite) {
+        let path = args.output_file.as_ref().expect("preflight requires path");
+        let parent = path.parent().ok_or_else(|| SnatchError::IoError {
+            context: format!("Cannot determine parent directory for: {}", path.display()),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent directory"),
+        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| SnatchError::io("Failed to create export directory", e))?;
+        let temporary = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|e| SnatchError::io("Failed to create temporary SQLite export", e))?;
+        let temporary = temporary.into_temp_path();
+        SqliteExporter::new().export_to_file(&conversation, &temporary, &options)?;
+        temporary.persist(path).map_err(|e| {
+            SnatchError::io(
+                format!("Failed to atomically write: {}", path.display()),
+                e.error,
+            )
+        })?;
+    } else if let Some(path) = &args.output_file {
+        let mut atomic = AtomicFile::create(path)?;
+        {
+            let mut writer = std::io::BufWriter::new(atomic.writer());
+            write_normalized_provider_export(&conversation, args, &options, &mut writer)?;
+            writer.flush()?;
+        }
+        atomic.finish()?;
+    } else {
+        let mut writer = std::io::stdout().lock();
+        write_normalized_provider_export(&conversation, args, &options, &mut writer)?;
+        writer.flush()?;
     }
 
     if !cli.quiet {

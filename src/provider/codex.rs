@@ -1680,6 +1680,8 @@ mod tests {
         let (mut human_boundaries, mut human_midturn) = (0usize, 0usize);
         let (mut compactions, mut replacement_items, mut world_full, mut world_patch, mut ghosts) =
             (0usize, 0usize, 0usize, 0usize, 0usize);
+        let mut preserved_unknown_families: std::collections::BTreeMap<String, u64> =
+            std::collections::BTreeMap::new();
         let mut expected_lineage: std::collections::BTreeSet<LineageEdge> =
             std::collections::BTreeSet::new();
         let mut inherited_sessions = 0usize;
@@ -1721,6 +1723,16 @@ mod tests {
                     };
                     let raw_by_ordinal: std::collections::BTreeMap<u64, &serde_json::Value> =
                         raw_records.iter().map(|(o, v)| (*o, v)).collect();
+                    for disposition in &session.record_dispositions {
+                        if matches!(disposition.outcome, RecordOutcome::Unknown { .. }) {
+                            let value = raw_by_ordinal[&disposition.record.ordinal];
+                            let envelope = value["type"].as_str().unwrap_or("<missing>");
+                            let payload = value["payload"]["type"].as_str().unwrap_or("-");
+                            *preserved_unknown_families
+                                .entry(format!("{envelope}/{payload}"))
+                                .or_default() += 1;
+                        }
+                    }
                     let copied = independent_copied_history(&p, &d.key, &raw_records);
                     let inherited_range = copied.as_ref().map(|(_, range)| *range);
                     let first_new_after_fork =
@@ -2044,6 +2056,42 @@ mod tests {
              {replacement_items} replacement items + {world_full} world full + \
              {world_patch} world patch + {ghosts} ghost checkpoints, records: {totals:?}",
             n = sessions.len()
+        );
+        eprintln!("preserved unknown families: {preserved_unknown_families:?}");
+        // B3 semantic-coverage gate: every still-Unknown family is an
+        // intentional metadata/lifecycle/checkpoint record, or orphan usage
+        // that cannot be attributed without inventing an owner. A newly
+        // observed family fails this gate until it is explicitly classified;
+        // this prevents "content-bearing records covered" from becoming an
+        // aggregate claim that silently hides a new emission vocabulary.
+        let allowed_preserved_unknown: std::collections::BTreeSet<&str> = [
+            "event_msg/context_compacted",
+            "event_msg/entered_review_mode",
+            "event_msg/exec_command_end",
+            "event_msg/exited_review_mode",
+            "event_msg/patch_apply_end",
+            "event_msg/task_complete",
+            "event_msg/task_started",
+            "event_msg/thread_goal_updated",
+            "event_msg/thread_rolled_back",
+            "event_msg/thread_settings_applied",
+            "event_msg/token_count",
+            "event_msg/turn_aborted",
+            "event_msg/web_search_end",
+            "response_item/ghost_snapshot",
+            "session_meta/-",
+            "turn_context/-",
+            "world_state/-",
+        ]
+        .into_iter()
+        .collect();
+        let unexpected_unknown: Vec<_> = preserved_unknown_families
+            .keys()
+            .filter(|family| !allowed_preserved_unknown.contains(family.as_str()))
+            .collect();
+        assert!(
+            unexpected_unknown.is_empty(),
+            "unclassified preserved-Unknown families: {unexpected_unknown:?}"
         );
         assert_eq!(errors, 0, "no session may fail outside the legacy contract");
         assert_eq!(violations, 0, "provenance must validate corpus-wide");

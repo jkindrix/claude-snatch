@@ -1094,6 +1094,32 @@ semantic carriers placed on incompatible entry types. Exclusion: this slice
 preserves and types reconstruction state but does not render world-state
 contents or replacement items; compaction-window presentation remains Phase C.
 
+## B3 slice 5 — normalized exports and semantic-coverage gate (2026-07-17)
+
+Provider-routed normalized exports now parse through the provider-keyed cache,
+construct via `Conversation::from_parsed_session`, and use the existing common
+exporters and single redaction/filter transform. Markdown, JSON, pretty JSON,
+JSONL, text, CSV, HTML, and SQLite are supported; source-fidelity raw/native/
+archive tiers remain separate and reject every transform. Normalized routes
+support the portable content, presentation, PII-warning, redaction, and output
+flags while explicitly refusing Claude-only chain/subagent/persisted-output
+machinery and external gist/clipboard/template delivery. File output remains
+preflighted and atomic, including SQLite via an adjacent temporary database.
+An integration matrix renders every format, verifies redaction, opens the
+SQLite result, and pins provider-routed Claude markdown byte-for-byte against
+the classic path.
+
+The real-corpus conformance gate now inventories every `Unknown` disposition by
+native envelope/payload family and rejects any family not explicitly classified.
+All current `response_item` content families are mapped except the deliberately
+non-model `ghost_snapshot`. The remaining Unknowns are session/turn/world-state
+metadata; review, rollback, settings, task, abort, command/patch/search lifecycle
+events; and token-count records with no defensible assistant owner. These stay
+content-complete as exact native values but are not fabricated into semantic
+emissions. A new future family therefore makes conformance red until it is
+mapped or consciously classified rather than disappearing inside an aggregate
+Unknown count.
+
 ## Review round 26 (2026-07-17, same Codex agent — B3.1.3 audit: B3.1.4)
 
 Verdict: the preserve-all loophole is fixed and all ten controls are
@@ -1382,10 +1408,12 @@ Decisions taken in-implementation, FLAGGED FOR REVIEW:
    applied in `bump_vocab` during collection.
 
 ### Phase B3 — Codex normalization
-- [~] Content-bearing envelope records covered by B3.1 flip from
+- [x] Content-bearing response records covered by B3.1 flip from
       Unknown{entries} to Mapped with the SAME deterministic ids (B1 parse
-      comment contract). Remaining state/history families stay intentionally
-      Unknown until their dedicated slices below.
+      comment contract). The slice-5 semantic-coverage gate enumerates every
+      still-Unknown family corpus-wide and fails on any unclassified family;
+      current survivors are intentional lifecycle/metadata/checkpoint records
+      plus unattributable token counts, never an unexamined content bucket.
 - [x] turn_id carrier before normalization (round-6 guardrail), including
       ambient and per-item carriers.
 - [x] Two-stream dedup for the B3.1 content vocabulary under invariant #3's
@@ -1414,8 +1442,9 @@ Decisions taken in-implementation, FLAGGED FOR REVIEW:
       records ship. Later state families may add their own typed carriers.
 - [x] Pre-envelope legacy files: keep unsupported-legacy refusal unless
       provenance-documented fixtures justify a parser (round-6 posture).
-- [~] Milestone: messages and timeline work on real Codex sessions, including
-      steering; normalized exports remain.
+- [x] Milestone: messages and timeline work on real Codex sessions, including
+      steering; normalized markdown/JSON/JSONL/text/CSV/HTML/SQLite exports
+      route through the complete ParsedSession bundle and common transforms.
 
 ### Phase C — semantic tuning
 - [ ] Codex prompt-boundary chunking (PromptOrigin axes feed

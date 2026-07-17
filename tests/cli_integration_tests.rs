@@ -1519,7 +1519,7 @@ mod codex_provider_cli {
                 "\"payload\":{{\"id\":\"{id}\",\"cwd\":\"/tmp/p\"}}}}\n",
                 "{{\"timestamp\":\"2026-07-16T10:00:01.000Z\",\"type\":\"response_item\",",
                 "\"payload\":{{\"type\":\"message\",\"role\":\"user\",",
-                "\"content\":[{{\"type\":\"input_text\",\"text\":\"hello codex\"}}]}}}}\n",
+                "\"content\":[{{\"type\":\"input_text\",\"text\":\"hello codex user@example.com\"}}]}}}}\n",
             ),
             id = CODEX_THREAD
         );
@@ -1675,16 +1675,56 @@ mod codex_provider_cli {
     }
 
     #[test]
-    fn export_normalized_format_for_codex_is_refused_until_b3() {
+    fn normalized_exports_render_codex_and_honor_redaction() {
         let claude = setup_fixture_dir();
         let (codex, _) = setup_codex_home();
+        let target = format!("codex:{CODEX_THREAD}");
+        for format in [
+            "markdown",
+            "json",
+            "json-pretty",
+            "text",
+            "jsonl",
+            "csv",
+            "html",
+        ] {
+            snatch_cmd()
+                .env("SNATCH_CLAUDE_DIR", claude.path())
+                .env("CODEX_HOME", codex.path())
+                .args(["export", &target, "-f", format])
+                .assert()
+                .success()
+                .stdout(predicate::str::contains("hello codex"));
+        }
+
         snatch_cmd()
             .env("SNATCH_CLAUDE_DIR", claude.path())
             .env("CODEX_HOME", codex.path())
-            .args(["export", &format!("codex:{CODEX_THREAD}"), "-f", "markdown"])
+            .args(["export", &target, "-f", "markdown", "--redact", "all"])
             .assert()
-            .failure()
-            .stderr(predicate::str::contains("raw-jsonl, native, archive"));
+            .success()
+            .stdout(predicate::str::contains("hello codex"))
+            .stdout(predicate::str::contains("user@example.com").not());
+
+        let db = codex.path().join("normalized.db");
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "export",
+                &target,
+                "-f",
+                "sqlite",
+                "-O",
+                db.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        let messages: i64 = connection
+            .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+            .unwrap();
+        assert!(messages > 0, "SQLite normalized export contains entries");
     }
 }
 
@@ -1838,6 +1878,38 @@ fn provider_export_refuses_every_unsupported_flag_individually() {
 }
 
 #[test]
+fn provider_normalized_export_refuses_nonportable_flags_individually() {
+    let tmp = setup_fixture_dir();
+    let target = format!("claude-code:{SESSION_ID}");
+    let cases: &[&[&str]] = &[
+        &["--all"],
+        &["-p", "x"],
+        &["--since", "1d"],
+        &["--until", "1d"],
+        &["--subagents"],
+        &["--combine-agents"],
+        &["--resolve-tool-results"],
+        &["--no-chain"],
+        &["--progress"],
+        &["--gist"],
+        &["--gist-public"],
+        &["--gist-description", "x"],
+        &["--clipboard"],
+        &["--template", "summary"],
+    ];
+    for extra in cases {
+        let mut args = vec!["export", target.as_str(), "-f", "markdown"];
+        args.extend_from_slice(extra);
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", tmp.path())
+            .args(&args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("not supported with"));
+    }
+}
+
+#[test]
 fn provider_doctor_refuses_unsupported_filters_individually() {
     let tmp = setup_fixture_dir();
     let cases: &[&[&str]] = &[&["proj"], &["--since", "1d"], &["--subagents"]];
@@ -1929,7 +2001,7 @@ fn provider_export_preflight_never_creates_the_output_file() {
         .env("SNATCH_CLAUDE_DIR", tmp.path())
         .args([
             "export",
-            &format!("claude-code:{SESSION_ID}"),
+            "claude-code:definitely-missing",
             "-f",
             "markdown",
             "-O",
@@ -2456,5 +2528,26 @@ fn provider_routed_claude_messages_and_timeline_match_classic() {
     assert!(
         routed_turns.contains("User: Hello, Claude!"),
         "provider-routed timeline must keep the human turn: {routed_turns}"
+    );
+
+    let classic_export = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["export", SESSION_ID, "-f", "markdown"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let routed_export = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["export", &qualified, "-f", "markdown"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        routed_export, classic_export,
+        "provider routing must not alter Claude normalized export output"
     );
 }
