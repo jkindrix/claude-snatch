@@ -1,6 +1,9 @@
 # Multi-Provider Ingestion Design
 
-**Status:** Architecture confirmed (decision #30, 2026-07-17). Phase plan below.
+**Status:** Architecture confirmed (decision #30, 2026-07-17); contracts amended
+same day after external review by a Codex agent (gpt-5.6-sol) running inside the
+target tool — review verified point-by-point before adoption (see "Review
+amendments" below).
 **Goal:** goal #18 — extend snatch (CLI + MCP) to ingest and analyze session logs
 from agentic coding tools beyond Claude Code, designed for future extensibility.
 First target: OpenAI Codex CLI.
@@ -14,22 +17,99 @@ First target: OpenAI Codex CLI.
    change; that refactor is its own verifiable milestone. This is the missing
    dual of the existing `Exporter` seam.
 2. Normalize other providers into `LogEntry` (the crate's universal currency:
-   355 match sites across 41 files), under a strict fidelity contract:
-   - every `Session` carries a `provider` tag;
-   - every normalized entry retains its native raw line — `raw-jsonl` export
-     stays byte-faithful to the *source* format;
-   - synthesized linkage fields (e.g. `parentUuid` := previous entry,
-     `message.id` := `turn_id`) are documented as derived, never claimed
-     native.
-3. The CC-semantic gates become provider-parameterized instead of hard-coded:
-   pricing table (`model/usage.rs::for_model`), `is_human_prompt` noise rules
-   (`analysis/extraction.rs`), tool-name registries (`model/content.rs`),
-   prompt-boundary rules (chunking), subagent matching, chain semantics.
+   355 match sites across 41 files) under the fidelity and identity contracts
+   below.
+3. Provider semantics are pushed into normalization as canonical annotations
+   (see "Semantic annotations"), not as provider conditionals scattered
+   through the middle layers.
 
 Rejected: **A (pure adapter)** — fastest but silently bleeds CC semantics and
 weakens the fidelity story; **B (trait-generic middle)** — rewrites the whole
 middle (41 files) for isolation the evidence says normalization already
 provides.
+
+## Fidelity contract
+
+Raw fidelity lives at the **session source**, not inside normalized entries.
+Native lines are NOT embedded in `LogEntry` (that would duplicate sensitive
+payloads through clones/caches, break on 1:N and N:1 record↔entry mappings,
+undermine redaction — sanitized canonical content must not carry an
+unsanitized native copy — and has no meaning for compressed or DB-backed
+sources).
+
+Instead, a parsed session carries lightweight provenance:
+
+```rust
+struct ParsedSession {
+    descriptor: SessionDescriptor,     // SessionKey, provider, paths, meta
+    entries: Vec<LogEntry>,
+    origins: Vec<EntryOrigin>,         // record ordinal, mapping kind, digest?
+    diagnostics: IngestionDiagnostics, // unknown/suppressed/unparseable counts
+}
+```
+
+and the provider exposes a separate raw/native streaming operation.
+
+Export promises are **capability-tiered per provider** (an extension of
+decision #24's archival/complete/readable contract):
+
+- **native**: the exact source artifact, byte-for-byte, including `.jsonl.zst`
+  or DB rows. Every provider has this tier.
+- **raw-jsonl**: the provider's unmodified JSONL record stream (decompressed
+  where applicable). Only JSONL-backed providers advertise this tier.
+- **json/jsonl (normalized)**: snatch's representation, content-complete, with
+  derived-field provenance documented.
+
+Synthesized linkage (e.g. an ordering parent edge) is documented as **derived
+ordering, never native causality**.
+
+## Identity and provider context
+
+- Global identity is `SessionKey { provider: ProviderId, native_id: String }`.
+  Native ids alone are not unique across providers, and "path to a JSONL
+  file" is not a valid universal identity once DB-backed providers exist.
+- Provider context flows past `Session` into parsed sessions, `Conversation`,
+  analytics, and exports — `Conversation::from_entries` currently takes only
+  `Vec<LogEntry>` (src/reconstruction/mod.rs), which is exactly where provider
+  information would otherwise die.
+- The parse cache (currently keyed by path+mtime, src/cache/mod.rs) is re-keyed
+  by `SessionKey` + a provider-supplied revision token (path/size/mtime for
+  files; row/index revision for databases).
+- Normalized entry ids are deterministic and unique, e.g.
+  `codex:<thread-id>:<record-ordinal>:<subindex>`. `turn_id` is retained as
+  its own canonical field — it is NOT mapped onto `message.id`, which snatch
+  uses to group streaming chunks and count assistant messages (overloading it
+  would silently redefine "assistant message" as "turn").
+
+## Semantic annotations (adapter output, middle stays neutral)
+
+The adapter emits canonical annotations; middle-layer logic keys on these, not
+on provider:
+
+- `PromptOrigin::{Human, Steering, Harness, ToolResult}` — feeds
+  `is_human_prompt` / prompt-boundary chunking.
+- `ToolKind` + preserved native tool name — feeds tool analyses/lessons.
+- `UsageBasis::{PerTurn, Cumulative, Unknown}` — feeds token accounting.
+- `LineageEdgeKind::{Continuation, Fork, Spawn}` — session lineage is a typed
+  graph, not a generic "chain": CC resume chains are Continuation edges, Codex
+  forks are Fork edges, subagents are Spawn edges. Compaction window links are
+  intra-session metadata, not lineage edges.
+- `CompactionKind` + window metadata.
+
+Provider identity remains available for reporting and exceptional cases, but
+is not the primary semantic switch. Two gates stay table-driven rather than
+annotation-driven: model pricing (a rates table; see Pricing) and
+content-shaped noise filters in lessons (tuned per provider in Phase C).
+
+## Pricing
+
+Codex sessions are **unpriced by default**. Official Codex pricing
+distinguishes ChatGPT plan/credit usage from API-key token billing; applying
+API per-token rates to a ChatGPT-authenticated session would fabricate a cost
+the user never paid. If pricing is added later: label it "API-equivalent
+cost", require an explicit pricing mode, and treat it as actual estimated
+spend only when the session itself reliably records an API-billed
+provider/auth mode. Do not infer historical billing from current auth.json.
 
 ## Evidence base (research round, 2026-07-17)
 
@@ -47,8 +127,8 @@ provides.
   `token_count`, `turn_started/complete/aborted`, `thread_rolled_back`,
   `context_compacted`, review-mode events). Content duplicated across both;
   dedup policy needed (lean: response_item authoritative for content,
-  event_msg for user-facing text, reasoning summaries, token counts —
-  validate empirically in Phase B).
+  event_msg for user-facing text and token counts — validate empirically in
+  Phase B3).
 - No per-line ids, no parent links, no version field. Ordering is flat append;
   `turn_id` groups turns (also on `turn_context` and via
   `internal_chat_message_metadata_passthrough`); `session_meta.cli_version`
@@ -60,11 +140,15 @@ provides.
   `source: {subagent: …}`; `thread_spawn_edges` table in state DB.
 - Compaction: `compacted` items carry summary + full `replacement_history` +
   UUIDv7 window-id chain (`window_id`/`previous_window_id`/`first_window_id`/
-  `window_number`) — richer than CC's compact boundary.
-- Reasoning: plaintext summaries always persisted (`reasoning.summary`,
-  legacy `event_msg/agent_reasoning`); full CoT encrypted
-  (`encrypted_content`). Better than modern CC (which persists nothing
-  readable).
+  `window_number`) — richer than CC's compact boundary. Note:
+  `replacement_history` must not be counted as new chronological activity.
+- Reasoning: Codex MAY persist plaintext reasoning summaries when they are
+  emitted; availability varies by era/model/configuration. Measured on this
+  corpus: Nov 2025–Mar 2026 sessions have summaries on 85–99% of reasoning
+  items plus `agent_reasoning` events; from Apr 2026 onward both are 0% —
+  encrypted payloads only, mirroring modern Claude Code. `encrypted_content`
+  is an opaque encrypted reasoning payload (no guarantee it is "full CoT").
+  Doctor must report summary availability / empty rates per corpus.
 - Metadata: `session_meta` has session/thread id (UUIDv7 = filename uuid),
   cwd, originator, cli_version, source (cli/vscode/exec/mcp/subagent…),
   `git {commit_hash, branch, repository_url}`, model_provider,
@@ -121,33 +205,88 @@ directory walks.
 
 ## Phase plan
 
-- **Phase A — seam extraction (refactor, zero behavior change).**
-  `SourceProvider` trait over discovery + parse; `ClaudeCodeProvider` is the
-  only impl; full test suite + snapshot exports must be byte-identical before
-  and after. Session gains a `provider` field (always "claude-code").
-- **Phase B — Codex provider (read-only ingestion).** Discovery
-  ($CODEX_HOME/sessions + archived_sessions, zstd, filename parsing,
-  session_index/state_5 as optional accelerators), envelope parser, normalizer
-  into LogEntry (turn_id grouping, call_id joins, synthesized parent links,
-  native-raw retention), fork/subagent linking, drift detection (doctor
-  coverage for unknown types/fields). Empirically settle the two-stream dedup
-  policy and steered-prompt persistence. Milestone: list/info/messages/
-  timeline/export work on real Codex sessions.
-- **Phase C — semantic tuning.** Prompt-boundary chunking for Codex, lessons
-  noise filters for Codex tools, OpenAI model pricing (or explicit unpriced),
-  compaction/window-chain surfacing, fork lineage in chain views.
-- **Phase D — cross-provider UX.** Unified project history across providers
-  (same cwd/git identity), provider filters in CLI/MCP, and the long-deferred
-  union view (note #4). Candidate export targets: ATIF, OTel GenAI.
+- **Phase A — seam + identity (refactor, zero behavior change).**
+  `SourceProvider` trait, `SessionKey`/`SessionDescriptor`, provider
+  capabilities, parsed-session context threading, raw-source delegation,
+  cache re-keying. `ClaudeCodeProvider` is the production impl; a tiny
+  in-memory fake provider exists from day one so the seam is not designed
+  against a single implementation. Provider-selection UX is *designed* here
+  (flags, qualified ids). Acceptance: full suite + snapshot exports
+  byte-identical; Claude CLI/MCP/library behavior unchanged.
+- **Phase B1 — Codex inventory & decoding.** Discovery of plain, archived,
+  compressed (`.zst`, with decompressed-size limits), active/truncated, and
+  legacy (pre-envelope) files; envelope parser; native diagnostics. Legacy
+  files: recognized, inventoried, diagnosable, native/raw-exportable;
+  normalized analysis reports `unsupported-legacy` until real provenance-
+  documented fixtures justify a parser. Defer `state_5.sqlite` acceleration
+  until profiling proves need.
+- **Phase B2 — provider UX.** `--provider claude-code|codex|all` (repeatable),
+  qualified ids (`codex:<uuid>`; unqualified prefixes allowed when unique),
+  `snatch providers` (roots, session counts, format families, diagnostics),
+  MCP requests gain optional `provider`, responses always carry provider +
+  qualified session id. Default remains Claude-only until Phase D.
+  Milestone: list/info + native/raw export work on real Codex sessions.
+- **Phase B3 — normalization.** Deterministic entry ids, two-stream
+  reconciliation (no duplicated text or token usage), typed fork/spawn
+  lineage, steered-prompt and `world_state`/`ghost_snapshot` semantics settled
+  empirically. Milestone: messages/timeline/normalized exports.
+- **Phase C — semantic tuning.** Codex prompt-boundary chunking, lessons
+  noise filters, usage semantics (`UsageBasis`), reasoning-availability
+  reporting in doctor, compaction-window presentation.
+- **Phase D — cross-provider UX.** Unified project identity across providers
+  (cwd/git), union views, default-provider switch consideration, and registry
+  storage: goals/notes/decisions currently live under Claude-owned project
+  storage (`~/.claude/projects/<enc>/memory/`) — either scope those MCP
+  operations per-provider or migrate storage before claiming unified
+  projects. Candidate export targets: ATIF, OTel GenAI.
+
+## Acceptance invariants (before Codex is "supported")
+
+1. Every native record is mapped, intentionally suppressed with a recorded
+   reason, classified unknown, or reported unparseable — never silently
+   dropped.
+2. Normalized ids are stable across repeated parsing and append-only growth.
+3. Two-stream reconciliation produces no duplicated user/assistant text or
+   token usage.
+4. Compaction `replacement_history` is not counted as new chronological
+   activity.
+5. Plain and compressed versions of a session normalize identically;
+   decompressed-size limits prevent compression bombs.
+6. Active files with partial final lines do not generate permanent drift
+   findings.
+7. Claude CLI, MCP, library API, raw export, error behavior, ordering, and
+   snapshots remain unchanged throughout.
+
+## Review amendments (2026-07-17)
+
+An external review by a Codex agent (gpt-5.6-sol, xhigh) running in this repo
+was verified and adopted:
+
+- Raw fidelity moved out of `LogEntry` to source-delegated streaming +
+  `EntryOrigin` provenance (verified: raw exporter already bypasses parsing,
+  src/cli/commands/export.rs; redaction/memory/N:1 hazards real).
+- `SessionKey` qualified identity + provider context through `Conversation`
+  and the cache (verified: cache keyed path+mtime, src/cache/mod.rs;
+  `from_entries` takes bare entries).
+- Rejected `message.id := turn_id`; deterministic entry ids instead.
+- Provider-parameterized gates reframed as adapter-emitted semantic
+  annotations.
+- "Chain" replaced by typed lineage graph (Continuation/Fork/Spawn).
+- Reasoning claim corrected after re-measurement (summaries 85–99% in
+  Nov 2025–Mar 2026 era, 0% from Apr 2026 — the corpus aggregate had masked
+  the collapse).
+- Codex unpriced by default (ChatGPT-plan vs API billing distinction).
+- Phase B split into B1/B2/B3; provider UX pulled forward from D to A/B2;
+  fake provider added to A; registry-storage scope surfaced in D; acceptance
+  invariants adopted.
 
 ## Open questions (to settle in-phase)
 
-1. Two-stream dedup policy (Phase B, empirical).
-2. Steered/queued prompt persisted shape (Phase B, empirical — inferred from
+1. Two-stream dedup policy details (B3, empirical).
+2. Steered/queued prompt persisted shape (B3, empirical — inferred from
    inject.rs code paths only).
-3. `world_state` / `ghost_snapshot` semantics (Phase B).
-4. GPT-5.x pricing rates (Phase C — until sourced, Codex sessions report as
-   unpriced, which the analytics already handle).
-5. Pre-envelope (≤0.31.0) file support: parse or explicitly report as
-   unsupported-legacy (Phase B decision).
-6. How provider selection surfaces in CLI/MCP UX (Phase D).
+3. `world_state` / `ghost_snapshot` semantics (B3).
+4. `EntryOrigin` digest: include content hashes or ordinal-only (A).
+5. Provider capability surface: which tiers/features each provider advertises
+   (A).
+6. Default-provider switch to `all` (D, with union view).
