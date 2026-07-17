@@ -9,22 +9,35 @@
 //!   artifacts are separate ([`ArtifactId`]), and an artifact's identity never
 //!   includes its mutable revision ([`ArtifactRevision`] lives in
 //!   [`ArtifactSnapshot`]) — an append to an active session must not mint a
-//!   new artifact identity.
+//!   new artifact identity. Entry identity derives from the full logical key
+//!   (namespace included), so sessions colliding on native id cannot collide
+//!   on entry ids.
 //! - **Provenance cardinality is explicit**: one native record may produce
 //!   several entries, several records may collapse into one entry, and some
 //!   records produce none. Every native record gets exactly one
-//!   self-identifying [`RecordDisposition`]; [`ParsedSession::entry_origins`]
-//!   is the reverse index and the two are cross-validated by
-//!   [`ParsedSession::validate_provenance`].
-//! - **Export fidelity is capability-tiered**: the `archive` tier is
-//!   universal (lossless, provider-defined bundle); `native` (exact source
-//!   bytes) and `raw-jsonl` are optional capabilities.
-//! - **Semantic annotations are provider-neutral axes**, emitted by adapters
-//!   at normalization time (authorship vs delivery; usage scope vs
-//!   aggregation; typed lineage edges).
+//!   self-identifying [`RecordDisposition`]; entries carry their ids
+//!   ([`IdentifiedEntry`]); [`ParsedSession::entry_origins`] is the reverse
+//!   index; [`ParsedSession::validate_provenance`] cross-checks all three
+//!   plus the diagnostics counters.
+//! - **Unmodeled is not unmapped**: a parseable-but-unknown record still maps
+//!   to preserved entries ([`RecordOutcome::Unknown`] carries them) — the
+//!   content-complete promise survives schema drift. Fork-inherited history
+//!   is Mapped (it is part of the fork's content) and annotated
+//!   [`ActivityKind::InheritedHistory`] so cross-session analytics can
+//!   exclude it from "new work"; only compaction replacement snapshots are
+//!   suppressed.
+//! - **Export fidelity is capability-tiered and streaming**: the `archive`
+//!   tier is universal (lossless, provider-defined bundle written to a
+//!   caller-supplied writer); `native` (exact source bytes) and `raw-jsonl`
+//!   are optional capabilities.
+//! - **Semantic annotations are provider-neutral axes with a real carrier**:
+//!   adapters emit [`EntrySemantics`] keyed by entry id (the Phase A.0
+//!   sidecar; Phase A may move individual fields onto model types per the
+//!   design's carrier decision).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::io::Write;
 
 use crate::model::LogEntry;
 
@@ -87,7 +100,8 @@ pub struct LogicalSessionKey {
 impl fmt::Display for LogicalSessionKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Qualified-id form used by CLI/MCP: "codex:<native-id>". The
-        // namespace is omitted from the display form when global.
+        // namespace is omitted from the *display* form when global; entry-id
+        // derivation always includes it (injectivity).
         if self.namespace == SessionNamespace::global() {
             write!(f, "{}:{}", self.provider, self.native_id)
         } else {
@@ -162,7 +176,8 @@ pub struct SessionArtifact {
 pub struct SessionDescriptor {
     /// Logical identity.
     pub key: LogicalSessionKey,
-    /// All known physical artifacts (at least one).
+    /// All known physical artifacts (at least one; ids unique — see
+    /// [`SessionDescriptor::validate`]).
     pub artifacts: Vec<SessionArtifact>,
 }
 
@@ -170,9 +185,11 @@ impl SessionDescriptor {
     /// Twin precedence: the artifact reads/parses/native-export should use.
     ///
     /// Rules (documented contract, Phase A.0): active copies win over
-    /// archived; plain files win over compressed twins; databases rank with
-    /// plain files; otherwise first-discovered wins. Returns `None` only for
-    /// a descriptor with no artifacts (invalid by construction).
+    /// archived; plain files and databases win over compressed twins; the
+    /// final tie-breaker is stable [`ArtifactId`] ordering — never discovery
+    /// order, which filesystems/databases do not guarantee between runs.
+    /// Returns `None` only for a descriptor with no artifacts (invalid — see
+    /// [`SessionDescriptor::validate`]).
     pub fn preferred_artifact(&self) -> Option<&SessionArtifact> {
         fn form_rank(f: &ArtifactForm) -> u8 {
             match f {
@@ -183,9 +200,26 @@ impl SessionDescriptor {
         }
         self.artifacts
             .iter()
-            .enumerate()
-            .min_by_key(|(i, a)| (a.archived, form_rank(&a.form), *i))
-            .map(|(_, a)| a)
+            .min_by_key(|a| (a.archived, form_rank(&a.form), &a.snapshot.id))
+    }
+
+    /// Structural validity: at least one artifact, and artifact ids unique
+    /// within the descriptor. Returns human-readable violations.
+    pub fn validate(&self) -> Vec<String> {
+        let mut violations = Vec::new();
+        if self.artifacts.is_empty() {
+            violations.push(format!("descriptor {} has no artifacts", self.key));
+        }
+        let mut seen: BTreeSet<&ArtifactId> = BTreeSet::new();
+        for a in &self.artifacts {
+            if !seen.insert(&a.snapshot.id) {
+                violations.push(format!(
+                    "descriptor {} repeats artifact id {:?}",
+                    self.key, a.snapshot.id
+                ));
+            }
+        }
+        violations
     }
 }
 
@@ -212,22 +246,30 @@ pub struct ProviderCapabilities {
 /// Deterministic, provider-qualified identity of one normalized entry.
 ///
 /// Stable across repeated parsing and append-only growth (acceptance
-/// invariant #2). Canonical form: `<provider>:<session>:<ordinal>:<subindex>`.
+/// invariant #2). Canonical form always includes the namespace so sessions
+/// that collide on native id cannot collide on entry ids:
+/// `<provider>:<namespace>:<native-id>:<ordinal>:<subindex>`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EntryId(pub String);
 
 impl EntryId {
-    /// Build the canonical deterministic id.
-    pub fn deterministic(
-        provider: &ProviderId,
-        native_session_id: &str,
-        record_ordinal: u64,
-        subindex: u32,
-    ) -> Self {
+    /// Build the canonical deterministic id from the full logical key.
+    pub fn deterministic(key: &LogicalSessionKey, record_ordinal: u64, subindex: u32) -> Self {
         EntryId(format!(
-            "{provider}:{native_session_id}:{record_ordinal}:{subindex}"
+            "{}:{}:{}:{record_ordinal}:{subindex}",
+            key.provider, key.namespace.0, key.native_id
         ))
     }
+}
+
+/// A normalized entry together with its deterministic identity — the
+/// association the provenance maps are validated against.
+#[derive(Debug, Clone)]
+pub struct IdentifiedEntry {
+    /// Deterministic id (see [`EntryId::deterministic`]).
+    pub id: EntryId,
+    /// The normalized entry.
+    pub entry: LogEntry,
 }
 
 /// Reference to one native record inside one artifact.
@@ -245,14 +287,19 @@ pub struct RecordRef {
 }
 
 /// Why a native record was intentionally not normalized.
+///
+/// Fork-inherited history is NOT a suppression case: it is part of the
+/// fork's content and must be Mapped (annotated
+/// [`ActivityKind::InheritedHistory`]) so the fork is complete when viewed
+/// independently.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SuppressionReason {
     /// The record duplicates content carried by another stream of the same
     /// source (e.g. Codex `event_msg` mirroring a `response_item`).
     DuplicateStream,
-    /// The record replays prior history rather than recording new activity
-    /// (e.g. compaction `replacement_history`, fork-copied history).
-    ReplayedHistory,
+    /// The record is a compaction replacement snapshot: it replays context,
+    /// it does not record new activity.
+    CompactionReplacement,
     /// Provider-described reason.
     Other(String),
 }
@@ -266,18 +313,24 @@ pub struct ParseDiagnostic {
 
 /// What became of one native record. Exactly one disposition exists per
 /// record (acceptance invariant #1: mapped, suppressed-with-reason,
-/// unknown, or unparseable — never silently dropped).
+/// unknown-but-preserved, or unparseable — never silently dropped).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordOutcome {
-    /// Normalized into these entries (one record may feed several).
+    /// Normalized into these entries (non-empty; one record may feed several).
     Mapped(Vec<EntryId>),
     /// Intentionally not normalized.
     Suppressed {
         /// Why.
         reason: SuppressionReason,
     },
-    /// Structurally parseable but unmodeled (drift signal for doctor).
-    Unknown,
+    /// Structurally parseable but unmodeled (drift signal for doctor). The
+    /// content is still preserved — these entries (non-empty, normally one
+    /// `LogEntry::Unknown`) carry it, keeping normalized output
+    /// content-complete under schema drift.
+    Unknown {
+        /// Entries preserving the unmodeled content.
+        entries: Vec<EntryId>,
+    },
     /// Could not be parsed.
     Unparseable {
         /// What went wrong.
@@ -295,99 +348,35 @@ pub struct RecordDisposition {
     pub outcome: RecordOutcome,
 }
 
-/// Ingestion counters surfaced to doctor/diagnostics.
+/// Ingestion counters surfaced to doctor/diagnostics. Cross-checked against
+/// `record_dispositions` by [`ParsedSession::validate_provenance`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IngestionDiagnostics {
     /// Records normalized into entries.
     pub mapped: usize,
     /// Records intentionally suppressed.
     pub suppressed: usize,
-    /// Parseable-but-unmodeled records (drift).
+    /// Parseable-but-unmodeled records (drift; content preserved).
     pub unknown: usize,
     /// Unparseable records.
     pub unparseable: usize,
 }
 
-/// A fully parsed session: normalized entries plus explicit provenance.
-///
-/// Native data is NOT embedded here — raw fidelity lives at the session
-/// source, reachable through the provider's archive/native/raw streams.
-#[derive(Debug, Clone)]
-pub struct ParsedSession {
-    /// Discovery-time descriptor (identity + artifacts).
-    pub descriptor: SessionDescriptor,
-    /// Normalized entries, in canonical order.
-    pub entries: Vec<LogEntry>,
-    /// Entry-id → native records that produced it (N:1 and 1:N expressible).
-    pub entry_origins: BTreeMap<EntryId, Vec<RecordRef>>,
-    /// Exactly one disposition per native record.
-    pub record_dispositions: Vec<RecordDisposition>,
-    /// Ingestion counters.
-    pub diagnostics: IngestionDiagnostics,
-}
-
-impl ParsedSession {
-    /// Cross-validate `entry_origins` against `record_dispositions`.
-    ///
-    /// Returns human-readable violations; empty means consistent. Checks:
-    /// every disposition record is unique; every `Mapped` entry id appears in
-    /// `entry_origins`; every origin record is `Mapped`; every origin's
-    /// mapped set contains the entry; entry ids in `entry_origins` are
-    /// distinct keys by construction (BTreeMap).
-    pub fn validate_provenance(&self) -> Vec<String> {
-        let mut violations = Vec::new();
-
-        let mut mapped_records: BTreeMap<&RecordRef, &Vec<EntryId>> = BTreeMap::new();
-        let mut seen: std::collections::BTreeSet<&RecordRef> =
-            std::collections::BTreeSet::default();
-        for d in &self.record_dispositions {
-            if !seen.insert(&d.record) {
-                violations.push(format!(
-                    "record {:?}#{} has more than one disposition",
-                    d.record.artifact, d.record.ordinal
-                ));
-            }
-            if let RecordOutcome::Mapped(entries) = &d.outcome {
-                mapped_records.insert(&d.record, entries);
-                for e in entries {
-                    match self.entry_origins.get(e) {
-                        None => violations.push(format!(
-                            "disposition maps record #{} to entry {} which has no origins",
-                            d.record.ordinal, e.0
-                        )),
-                        Some(origins) if !origins.contains(&d.record) => violations.push(format!(
-                            "entry {} origins do not include record #{}",
-                            e.0, d.record.ordinal
-                        )),
-                        Some(_) => {}
-                    }
-                }
-            }
-        }
-
-        for (entry, origins) in &self.entry_origins {
-            for r in origins {
-                match mapped_records.get(r) {
-                    None => violations.push(format!(
-                        "entry {} claims origin record #{} which is not Mapped",
-                        entry.0, r.ordinal
-                    )),
-                    Some(entries) if !entries.contains(entry) => violations.push(format!(
-                        "record #{} is Mapped but not to entry {}",
-                        r.ordinal, entry.0
-                    )),
-                    Some(_) => {}
-                }
-            }
-        }
-
-        violations
-    }
-}
-
 // ============================================================================
 // Semantic annotations (provider-neutral axes; adapters emit these)
 // ============================================================================
+
+/// Whether an entry records new activity or replays inherited history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ActivityKind {
+    /// New activity in this session.
+    #[default]
+    New,
+    /// History copied from another session (e.g. Codex fork-embedded
+    /// history). Present when viewing this session; excluded from "new work"
+    /// in cross-session analytics.
+    InheritedHistory,
+}
 
 /// Who authored a prompt-shaped input (axis 1 of prompt semantics).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -410,6 +399,46 @@ pub enum PromptDelivery {
     MidTurn,
 }
 
+/// Prompt semantics: the two independent axes together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptSemantics {
+    /// Who authored it.
+    pub authorship: PromptAuthorship,
+    /// How it was delivered.
+    pub delivery: PromptDelivery,
+}
+
+/// Coarse provider-neutral tool classification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolKind {
+    /// Shell/command execution.
+    Shell,
+    /// Reading files/content.
+    FileRead,
+    /// Writing or editing files.
+    FileWrite,
+    /// Searching (code, files).
+    Search,
+    /// Web search/fetch.
+    Web,
+    /// Spawning a subagent.
+    Subagent,
+    /// An MCP tool.
+    Mcp,
+    /// Provider-described.
+    Other(String),
+}
+
+/// Tool semantics: canonical kind plus the provider's own tool name,
+/// preserved verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolSemantics {
+    /// Canonical classification.
+    pub kind: ToolKind,
+    /// The native tool name, unmodified.
+    pub native_name: String,
+}
+
 /// What a usage observation covers (axis 1 of usage semantics).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageScope {
@@ -429,6 +458,34 @@ pub enum UsageAggregation {
     Delta,
     /// A running cumulative total.
     Cumulative,
+}
+
+/// One usage observation attached to an entry: both axes, explicit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsageObservation {
+    /// What the numbers cover.
+    pub scope: UsageScope,
+    /// How they aggregate.
+    pub aggregation: UsageAggregation,
+}
+
+/// The Phase A.0 semantic carrier.
+///
+/// Everything an adapter asserts about one entry, keyed by entry id in
+/// [`ParsedSession::semantics`]. Phase A may migrate individual fields onto
+/// model types per the design's carrier decision; the sidecar is the
+/// seam-level contract.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EntrySemantics {
+    /// New activity vs inherited history.
+    pub activity: ActivityKind,
+    /// Prompt axes, when the entry is prompt-shaped.
+    pub prompt: Option<PromptSemantics>,
+    /// Tool axes, when the entry is a tool call.
+    pub tool: Option<ToolSemantics>,
+    /// Usage observations carried by the entry (may be several: Codex emits
+    /// a Call/Delta and a Session/Cumulative side by side).
+    pub usage: Vec<UsageObservation>,
 }
 
 /// Typed session-lineage edge. Lineage is a graph with typed edges, not a
@@ -456,6 +513,165 @@ pub enum CompactionKind {
 }
 
 // ============================================================================
+// ParsedSession
+// ============================================================================
+
+/// A fully parsed session: identified normalized entries plus explicit
+/// provenance and semantics.
+///
+/// Native data is NOT embedded here — raw fidelity lives at the session
+/// source, reachable through the provider's archive/native/raw streams.
+#[derive(Debug, Clone)]
+pub struct ParsedSession {
+    /// Discovery-time descriptor (identity + artifacts).
+    pub descriptor: SessionDescriptor,
+    /// Normalized entries with their deterministic ids, in canonical order.
+    pub entries: Vec<IdentifiedEntry>,
+    /// Entry-id → native records that produced it (N:1 and 1:N expressible).
+    pub entry_origins: BTreeMap<EntryId, Vec<RecordRef>>,
+    /// Exactly one disposition per native record.
+    pub record_dispositions: Vec<RecordDisposition>,
+    /// Adapter-asserted semantics, keyed by entry id.
+    pub semantics: BTreeMap<EntryId, EntrySemantics>,
+    /// Ingestion counters (cross-checked against dispositions).
+    pub diagnostics: IngestionDiagnostics,
+}
+
+impl ParsedSession {
+    /// Cross-validate entries, `entry_origins`, `record_dispositions`,
+    /// `semantics`, and `diagnostics`.
+    ///
+    /// Returns human-readable violations; empty means consistent. Checks:
+    /// descriptor validity; entry ids unique; every entry has a non-empty
+    /// origin set; every origin key names an existing entry; dispositions
+    /// name each record at most once; `Mapped`/`Unknown` entry lists are
+    /// non-empty, name existing entries, and agree with the reverse origin
+    /// index; every origin record is producing (`Mapped` or `Unknown`);
+    /// semantics keys name existing entries; diagnostics counters equal the
+    /// disposition tallies.
+    pub fn validate_provenance(&self) -> Vec<String> {
+        let mut violations = self.descriptor.validate();
+
+        // Entry ids: unique, and the authoritative id set.
+        let mut entry_ids: BTreeSet<&EntryId> = BTreeSet::new();
+        for e in &self.entries {
+            if !entry_ids.insert(&e.id) {
+                violations.push(format!("duplicate entry id {}", e.id.0));
+            }
+        }
+
+        // Dispositions: unique records, valid outcome shapes, tallies.
+        let mut producing: BTreeMap<&RecordRef, &Vec<EntryId>> = BTreeMap::new();
+        let mut seen_records: BTreeSet<&RecordRef> = BTreeSet::new();
+        let mut tally = IngestionDiagnostics::default();
+        for d in &self.record_dispositions {
+            if !seen_records.insert(&d.record) {
+                violations.push(format!(
+                    "record {:?}#{} has more than one disposition",
+                    d.record.artifact, d.record.ordinal
+                ));
+            }
+            let produced = match &d.outcome {
+                RecordOutcome::Mapped(entries) => {
+                    tally.mapped += 1;
+                    Some(entries)
+                }
+                RecordOutcome::Unknown { entries } => {
+                    tally.unknown += 1;
+                    Some(entries)
+                }
+                RecordOutcome::Suppressed { .. } => {
+                    tally.suppressed += 1;
+                    None
+                }
+                RecordOutcome::Unparseable { .. } => {
+                    tally.unparseable += 1;
+                    None
+                }
+            };
+            if let Some(entries) = produced {
+                if entries.is_empty() {
+                    violations.push(format!(
+                        "record #{} has a producing outcome with an empty entry list",
+                        d.record.ordinal
+                    ));
+                }
+                producing.insert(&d.record, entries);
+                for e in entries {
+                    if !entry_ids.contains(e) {
+                        violations.push(format!(
+                            "record #{} names entry {} which does not exist",
+                            d.record.ordinal, e.0
+                        ));
+                    }
+                    match self.entry_origins.get(e) {
+                        None => violations.push(format!(
+                            "record #{} maps to entry {} which has no origins",
+                            d.record.ordinal, e.0
+                        )),
+                        Some(origins) if !origins.contains(&d.record) => violations.push(format!(
+                            "entry {} origins do not include record #{}",
+                            e.0, d.record.ordinal
+                        )),
+                        Some(_) => {}
+                    }
+                }
+            }
+        }
+        if tally != self.diagnostics {
+            violations.push(format!(
+                "diagnostics {:?} do not match disposition tallies {:?}",
+                self.diagnostics, tally
+            ));
+        }
+
+        // Every entry must have provenance; every origin must be real.
+        for e in &self.entries {
+            match self.entry_origins.get(&e.id) {
+                None => violations.push(format!("entry {} has no origins", e.id.0)),
+                Some(origins) if origins.is_empty() => {
+                    violations.push(format!("entry {} has an empty origin list", e.id.0));
+                }
+                Some(_) => {}
+            }
+        }
+        for (entry, origins) in &self.entry_origins {
+            if !entry_ids.contains(entry) {
+                violations.push(format!(
+                    "entry_origins names entry {} which does not exist",
+                    entry.0
+                ));
+            }
+            for r in origins {
+                match producing.get(r) {
+                    None => violations.push(format!(
+                        "entry {} claims origin record #{} which has no producing disposition",
+                        entry.0, r.ordinal
+                    )),
+                    Some(entries) if !entries.contains(entry) => violations.push(format!(
+                        "record #{} produces entries but not entry {}",
+                        r.ordinal, entry.0
+                    )),
+                    Some(_) => {}
+                }
+            }
+        }
+
+        // Semantics may only describe existing entries.
+        for id in self.semantics.keys() {
+            if !entry_ids.contains(id) {
+                violations.push(format!(
+                    "semantics names entry {} which does not exist",
+                    id.0
+                ));
+            }
+        }
+
+        violations
+    }
+}
+
+// ============================================================================
 // SourceProvider seam
 // ============================================================================
 
@@ -469,6 +685,8 @@ pub enum ProviderError {
     },
     /// The session/artifact was not found.
     NotFound(String),
+    /// An I/O failure while streaming.
+    Io(std::io::Error),
     /// Any other provider failure.
     Other(String),
 }
@@ -480,6 +698,7 @@ impl fmt::Display for ProviderError {
                 write!(f, "provider does not support {capability}")
             }
             ProviderError::NotFound(what) => write!(f, "not found: {what}"),
+            ProviderError::Io(e) => write!(f, "stream error: {e}"),
             ProviderError::Other(msg) => f.write_str(msg),
         }
     }
@@ -487,11 +706,18 @@ impl fmt::Display for ProviderError {
 
 impl std::error::Error for ProviderError {}
 
+impl From<std::io::Error> for ProviderError {
+    fn from(e: std::io::Error) -> Self {
+        ProviderError::Io(e)
+    }
+}
+
 /// The discovery+parse seam: the dual of the existing `Exporter` trait.
 ///
 /// Phase A.0 pins the signatures; production implementations arrive in
-/// Phase A (`claude-code`) and Phase B (`codex`). Streaming refinements
-/// (readers instead of byte buffers) are a Phase A concern.
+/// Phase A (`claude-code`) and Phase B (`codex`). All fidelity tiers stream
+/// to a caller-supplied writer — archives and compressed logs can be
+/// multi-gigabyte and must never require full in-memory buffering.
 pub trait SourceProvider {
     /// Provider identity.
     fn id(&self) -> ProviderId;
@@ -502,19 +728,31 @@ pub trait SourceProvider {
     /// Enumerate discovered sessions (logical identity + artifacts).
     fn sessions(&self) -> Result<Vec<SessionDescriptor>, ProviderError>;
 
-    /// Parse one session into normalized entries with full provenance.
+    /// Parse one session into identified entries with full provenance and
+    /// semantics.
     fn parse(&self, key: &LogicalSessionKey) -> Result<ParsedSession, ProviderError>;
 
-    /// Universal lossless tier: a provider-defined bundle for the session.
-    fn read_archive(&self, key: &LogicalSessionKey) -> Result<Vec<u8>, ProviderError>;
+    /// Universal lossless tier: write a provider-defined bundle (with
+    /// manifest) for the session. Must be lossless: the session's native
+    /// records are recoverable from the bundle.
+    fn write_archive(
+        &self,
+        key: &LogicalSessionKey,
+        out: &mut dyn Write,
+    ) -> Result<(), ProviderError>;
 
-    /// `native` tier: exact bytes of one source artifact. Errs with
+    /// `native` tier: stream exact bytes of one source artifact. Errs with
     /// [`ProviderError::Unsupported`] unless `capabilities().native_export`.
-    fn read_native(&self, artifact: &ArtifactId) -> Result<Vec<u8>, ProviderError>;
+    fn write_native(&self, artifact: &ArtifactId, out: &mut dyn Write)
+        -> Result<(), ProviderError>;
 
-    /// `raw-jsonl` tier: the unmodified JSONL record stream. Errs with
-    /// [`ProviderError::Unsupported`] unless `capabilities().raw_jsonl`.
-    fn read_raw_jsonl(&self, key: &LogicalSessionKey) -> Result<Vec<u8>, ProviderError>;
+    /// `raw-jsonl` tier: stream the unmodified JSONL record stream. Errs
+    /// with [`ProviderError::Unsupported`] unless `capabilities().raw_jsonl`.
+    fn write_raw_jsonl(
+        &self,
+        key: &LogicalSessionKey,
+        out: &mut dyn Write,
+    ) -> Result<(), ProviderError>;
 }
 
 #[cfg(test)]

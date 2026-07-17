@@ -66,8 +66,11 @@ enum RecordOutcome {
 native record has exactly one disposition. `RecordRef` is artifact identity +
 record ordinal — no content hashes (unnecessary absent a corruption-detection
 requirement, and hashes of low-entropy sensitive text leak equality
-information). The provider exposes separate archive/native/raw streaming
-operations.
+information). The provider exposes separate archive/native/raw operations that stream to a
+caller-supplied writer — archives and compressed logs can be multi-gigabyte
+and must never require full in-memory buffering. The archive tier's
+lossless promise is testable: native records must round-trip out of the
+bundle.
 
 Export promises are **capability-tiered per provider** (an extension of
 decision #24's archival/complete/readable contract):
@@ -110,9 +113,10 @@ ordering, never native causality**.
   SessionDescriptor { key, artifacts, preferred_artifact, ... }
   ```
 
-  Phase A must define twin precedence (e.g. plain `.jsonl` over `.zst`),
-  duplicate detection across roots, and which artifact archive/native export
-  selects. Native ids alone are not unique across providers, and "path to a
+  Twin precedence (pinned in A.0): active over archived, plain/database over
+  compressed, final tie-breaker = stable ArtifactId ordering (never
+  discovery order, which filesystems do not guarantee between runs).
+  Descriptors validate non-empty, id-unique artifact sets. Native ids alone are not unique across providers, and "path to a
   JSONL file" is not a valid universal identity once DB-backed providers
   exist.
 - Provider context flows past `Session` into parsed sessions, `Conversation`,
@@ -122,8 +126,9 @@ ordering, never native causality**.
 - The parse cache (currently keyed by path+mtime, src/cache/mod.rs) is re-keyed
   by `LogicalSessionKey` + a provider-supplied revision token (path/size/mtime for
   files; row/index revision for databases).
-- Normalized entry ids are deterministic and unique, e.g.
-  `codex:<thread-id>:<record-ordinal>:<subindex>`. `turn_id` is retained as
+- Normalized entry ids are deterministic, unique, and derived from the full
+  logical key (namespace always included, for injectivity):
+  `<provider>:<namespace>:<native-id>:<record-ordinal>:<subindex>`. `turn_id` is retained as
   its own canonical field — it is NOT mapped onto `message.id`, which snatch
   uses to group streaming chunks and count assistant messages (overloading it
   would silently redefine "assistant message" as "turn").
@@ -387,6 +392,24 @@ ArtifactSnapshot); provider-defined SessionNamespace in LogicalSessionKey;
 invariants #7/#8 reconciled as a phased compatibility contract;
 RecordDisposition made self-identifying; stale UsageBasis / "no duplicated
 text" shorthand cleaned up.
+
+## Review round 4 (2026-07-17, same Codex agent — A.0 checkpoint)
+
+Checkpoint review found six contract holes in the first A.0 cut; all fixed in
+place: (1) EntryId now derives from the full LogicalSessionKey (namespace
+included) — the fake's cross-namespace sessions previously produced colliding
+ids; (2) entries carry their ids (IdentifiedEntry) and validate_provenance
+cross-checks entries/origins/dispositions/semantics/diagnostics — the earlier
+validator compared the maps only against each other; (3) Unknown outcomes now
+carry preserved entries (content-complete under drift) and fork-inherited
+history is Mapped + ActivityKind::InheritedHistory rather than suppressed;
+(4) fidelity tiers stream to caller-supplied writers and the fake's archive
+is a real manifest+records bundle with a round-trip test (the previous fake
+archive was a hollow string checked with is_ok()); (5) real semantic
+carriers exist (EntrySemantics sidecar: PromptSemantics, ToolSemantics with
+ToolKind + native name, UsageObservation) — emitted by the fake, consumed by
+tests; (6) twin-precedence tie-breaking uses stable ArtifactId ordering with
+reordering-stability and descriptor-validation tests.
 
 ## Open questions (to settle in-phase)
 

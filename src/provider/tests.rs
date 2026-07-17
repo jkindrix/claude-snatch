@@ -1,8 +1,8 @@
 //! Phase A.0 contract tests, exercised through the deliberately awkward
 //! fake provider (non-file-backed, capability-poor, multi-artifact,
-//! namespace-colliding).
+//! namespace-colliding, with a real record store and semantics).
 
-use super::fake::{colliding_key, multi_artifact_key, FakeProvider};
+use super::fake::{colliding_key, multi_artifact_key, native_records, FakeProvider};
 use super::*;
 
 #[test]
@@ -14,23 +14,41 @@ fn namespaces_prevent_native_id_collision() {
         a, b,
         "same native id in different namespaces must not collide"
     );
-    // Display form of a non-global namespace includes the namespace.
     assert_eq!(a.to_string(), "fake:install-a:42");
 }
 
 #[test]
-fn global_namespace_display_omits_namespace() {
+fn entry_ids_are_namespace_aware() {
+    // Both fake sessions share provider + native id; their entries must not
+    // collide (the pre-review EntryId did).
+    let pa = FakeProvider.parse(&multi_artifact_key()).unwrap();
+    let pb = FakeProvider.parse(&colliding_key()).unwrap();
+    let ids_a: std::collections::BTreeSet<_> = pa.entries.iter().map(|e| &e.id).collect();
+    let ids_b: std::collections::BTreeSet<_> = pb.entries.iter().map(|e| &e.id).collect();
+    assert!(
+        ids_a.is_disjoint(&ids_b),
+        "cross-namespace sessions produced overlapping entry ids"
+    );
+    assert_eq!(pb.entries[0].id.0, "fake:install-b:42:0:0");
+}
+
+#[test]
+fn global_namespace_display_omits_namespace_but_id_includes_it() {
     let key = LogicalSessionKey {
         provider: ProviderId::codex(),
         namespace: SessionNamespace::global(),
         native_id: "019f6d4b-d408".into(),
     };
     assert_eq!(key.to_string(), "codex:019f6d4b-d408");
+    // Entry ids always include the namespace (injectivity).
+    assert_eq!(
+        EntryId::deterministic(&key, 17, 2).0,
+        "codex:global:019f6d4b-d408:17:2"
+    );
 }
 
 #[test]
 fn artifact_identity_survives_revision_change() {
-    // An append to an active session changes the revision, never the identity.
     let before = ArtifactSnapshot {
         id: ArtifactId {
             provider_instance: "root".into(),
@@ -46,65 +64,96 @@ fn artifact_identity_survives_revision_change() {
     assert_ne!(before, after, "snapshots differ when revision differs");
 }
 
-#[test]
-fn twin_precedence_prefers_active_then_plain() {
-    let plain_archived = SessionArtifact {
+fn artifact(instance: &str, locator: &str, form: ArtifactForm, archived: bool) -> SessionArtifact {
+    SessionArtifact {
         snapshot: ArtifactSnapshot {
             id: ArtifactId {
-                provider_instance: "r".into(),
-                locator: "archived/s.jsonl".into(),
+                provider_instance: instance.into(),
+                locator: locator.into(),
             },
             revision: ArtifactRevision("1".into()),
         },
-        form: ArtifactForm::PlainFile,
-        archived: true,
-    };
-    let compressed_active = SessionArtifact {
-        snapshot: ArtifactSnapshot {
-            id: ArtifactId {
-                provider_instance: "r".into(),
-                locator: "s.jsonl.zst".into(),
-            },
-            revision: ArtifactRevision("1".into()),
-        },
-        form: ArtifactForm::CompressedFile,
-        archived: false,
-    };
-    let plain_active = SessionArtifact {
-        snapshot: ArtifactSnapshot {
-            id: ArtifactId {
-                provider_instance: "r".into(),
-                locator: "s.jsonl".into(),
-            },
-            revision: ArtifactRevision("1".into()),
-        },
-        form: ArtifactForm::PlainFile,
-        archived: false,
-    };
-    let key = LogicalSessionKey {
+        form,
+        archived,
+    }
+}
+
+fn key_x() -> LogicalSessionKey {
+    LogicalSessionKey {
         provider: ProviderId::claude_code(),
         namespace: SessionNamespace::global(),
         native_id: "x".into(),
-    };
+    }
+}
+
+#[test]
+fn twin_precedence_prefers_active_then_plain() {
+    let plain_archived = artifact("r", "archived/s.jsonl", ArtifactForm::PlainFile, true);
+    let compressed_active = artifact("r", "s.jsonl.zst", ArtifactForm::CompressedFile, false);
+    let plain_active = artifact("r", "s.jsonl", ArtifactForm::PlainFile, false);
 
     // Active beats archived even when the archived twin is plain.
     let d = SessionDescriptor {
-        key: key.clone(),
+        key: key_x(),
         artifacts: vec![plain_archived.clone(), compressed_active.clone()],
     };
     assert_eq!(d.preferred_artifact(), Some(&compressed_active));
 
     // Among active copies, plain beats compressed.
     let d = SessionDescriptor {
-        key,
+        key: key_x(),
         artifacts: vec![compressed_active, plain_active.clone()],
     };
     assert_eq!(d.preferred_artifact(), Some(&plain_active));
 }
 
 #[test]
+fn twin_precedence_is_stable_under_reordering() {
+    // Two equivalent-rank artifacts: the tie-breaker must be stable
+    // ArtifactId ordering, not discovery order.
+    let a = artifact("root-a", "s.jsonl", ArtifactForm::PlainFile, false);
+    let b = artifact("root-b", "s.jsonl", ArtifactForm::PlainFile, false);
+    let d1 = SessionDescriptor {
+        key: key_x(),
+        artifacts: vec![a.clone(), b.clone()],
+    };
+    let d2 = SessionDescriptor {
+        key: key_x(),
+        artifacts: vec![b, a],
+    };
+    assert_eq!(
+        d1.preferred_artifact(),
+        d2.preferred_artifact(),
+        "discovery order changed the preferred artifact"
+    );
+}
+
+#[test]
+fn descriptor_validation_catches_empty_and_duplicate_artifacts() {
+    let empty = SessionDescriptor {
+        key: key_x(),
+        artifacts: vec![],
+    };
+    assert!(empty.validate().iter().any(|v| v.contains("no artifacts")));
+    assert_eq!(empty.preferred_artifact(), None);
+
+    let a = artifact("r", "s.jsonl", ArtifactForm::PlainFile, false);
+    let dup = SessionDescriptor {
+        key: key_x(),
+        artifacts: vec![a.clone(), a],
+    };
+    assert!(dup
+        .validate()
+        .iter()
+        .any(|v| v.contains("repeats artifact id")));
+}
+
+#[test]
 fn fake_provider_multi_artifact_prefers_live_db_copy() {
     let sessions = FakeProvider.sessions().unwrap();
+    for d in &sessions {
+        assert!(d.validate().is_empty(), "invalid descriptor: {:?}", d.key);
+    }
     let multi = sessions
         .iter()
         .find(|d| d.key == multi_artifact_key())
@@ -120,25 +169,49 @@ fn capability_gating_errors_are_explicit() {
     let p = FakeProvider;
     assert!(!p.capabilities().native_export);
     assert!(!p.capabilities().raw_jsonl);
+    let mut sink = Vec::new();
     // Universal archive tier always works.
-    assert!(p.read_archive(&multi_artifact_key()).is_ok());
+    assert!(p.write_archive(&multi_artifact_key(), &mut sink).is_ok());
     // Optional tiers refuse loudly, not silently.
     let art = ArtifactId {
         provider_instance: "mem://install-a".into(),
         locator: "table=sessions;rowid=42".into(),
     };
     assert!(matches!(
-        p.read_native(&art),
+        p.write_native(&art, &mut sink),
         Err(ProviderError::Unsupported { .. })
     ));
     assert!(matches!(
-        p.read_raw_jsonl(&multi_artifact_key()),
+        p.write_raw_jsonl(&multi_artifact_key(), &mut sink),
         Err(ProviderError::Unsupported { .. })
     ));
 }
 
 #[test]
-fn provenance_expresses_one_to_many_and_many_to_one() {
+fn archive_bundle_round_trips_native_records() {
+    // The archive tier's lossless promise, demonstrated: the bundle contains
+    // a manifest and the exact native records.
+    let mut buf = Vec::new();
+    FakeProvider
+        .write_archive(&multi_artifact_key(), &mut buf)
+        .unwrap();
+    let bundle: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+
+    let manifest = &bundle["manifest"];
+    assert_eq!(manifest["provider"], "fake");
+    assert_eq!(manifest["session"], multi_artifact_key().to_string());
+    assert_eq!(manifest["artifacts"].as_array().unwrap().len(), 2);
+
+    let recovered = bundle["records"].as_array().unwrap();
+    let original = native_records();
+    assert_eq!(recovered.len(), original.len());
+    for (r, o) in recovered.iter().zip(original.iter()) {
+        assert_eq!(r, o, "archive round-trip altered a native record");
+    }
+}
+
+#[test]
+fn provenance_expresses_every_cardinality() {
     let parsed = FakeProvider.parse(&multi_artifact_key()).unwrap();
     assert!(
         parsed.validate_provenance().is_empty(),
@@ -146,20 +219,27 @@ fn provenance_expresses_one_to_many_and_many_to_one() {
         parsed.validate_provenance()
     );
     // 1:N — record 0 produced two entries.
-    let mapped_from_zero = parsed
+    let from_zero = parsed
         .record_dispositions
         .iter()
         .find(|d| d.record.ordinal == 0)
         .unwrap();
-    assert!(matches!(&mapped_from_zero.outcome, RecordOutcome::Mapped(e) if e.len() == 2));
+    assert!(matches!(&from_zero.outcome, RecordOutcome::Mapped(e) if e.len() == 2));
     // N:1 — one entry has two origin records.
     assert!(parsed.entry_origins.values().any(|o| o.len() == 2));
-    // Every record accounted for (invariant #1).
-    assert_eq!(parsed.record_dispositions.len(), 5);
+    // Unknown is preserved, not dropped: record 4 produced an entry.
+    let from_four = parsed
+        .record_dispositions
+        .iter()
+        .find(|d| d.record.ordinal == 4)
+        .unwrap();
+    assert!(matches!(&from_four.outcome, RecordOutcome::Unknown { entries } if entries.len() == 1));
+    // Every record accounted for (invariant #1) and tallies agree.
+    assert_eq!(parsed.record_dispositions.len(), 6);
     assert_eq!(
         parsed.diagnostics,
         IngestionDiagnostics {
-            mapped: 3,
+            mapped: 4,
             suppressed: 1,
             unknown: 1,
             unparseable: 0
@@ -169,23 +249,27 @@ fn provenance_expresses_one_to_many_and_many_to_one() {
 
 #[test]
 fn validator_catches_broken_provenance() {
-    let mut parsed = FakeProvider.parse(&multi_artifact_key()).unwrap();
+    let good = FakeProvider.parse(&multi_artifact_key()).unwrap();
 
-    // Origin pointing at a record that is not Mapped.
+    // Origin pointing at a record with no producing disposition.
+    let mut parsed = good.clone();
     let bogus_record = RecordRef {
         artifact: parsed.record_dispositions[0].record.artifact.clone(),
         ordinal: 999,
     };
-    parsed
-        .entry_origins
-        .insert(EntryId("fake:42:999:0".into()), vec![bogus_record]);
+    let phantom = EntryId("fake:install-a:42:999:0".into());
+    parsed.entries.push(IdentifiedEntry {
+        id: phantom.clone(),
+        entry: LogEntry::Unknown(serde_json::json!({})),
+    });
+    parsed.entry_origins.insert(phantom, vec![bogus_record]);
     assert!(parsed
         .validate_provenance()
         .iter()
-        .any(|v| v.contains("not Mapped")));
+        .any(|v| v.contains("no producing disposition")));
 
     // Duplicate disposition for the same record.
-    let mut parsed = FakeProvider.parse(&multi_artifact_key()).unwrap();
+    let mut parsed = good.clone();
     let dup = parsed.record_dispositions[0].clone();
     parsed.record_dispositions.push(dup);
     assert!(parsed
@@ -193,38 +277,133 @@ fn validator_catches_broken_provenance() {
         .iter()
         .any(|v| v.contains("more than one disposition")));
 
-    // Mapped entry missing from entry_origins.
-    let mut parsed = FakeProvider.parse(&multi_artifact_key()).unwrap();
+    // Entry present but with no origins at all.
+    let mut parsed = good.clone();
     parsed.entry_origins.clear();
     assert!(parsed
         .validate_provenance()
         .iter()
-        .any(|v| v.contains("no origins")));
+        .any(|v| v.contains("has no origins")));
+
+    // Duplicate entry ids.
+    let mut parsed = good.clone();
+    let first = parsed.entries[0].clone();
+    parsed.entries.push(first);
+    assert!(parsed
+        .validate_provenance()
+        .iter()
+        .any(|v| v.contains("duplicate entry id")));
+
+    // Disposition naming a nonexistent entry.
+    let mut parsed = good.clone();
+    parsed.entries.remove(0);
+    assert!(parsed
+        .validate_provenance()
+        .iter()
+        .any(|v| v.contains("does not exist")));
+
+    // Empty Mapped list.
+    let mut parsed = good.clone();
+    parsed.record_dispositions[1].outcome = RecordOutcome::Mapped(vec![]);
+    assert!(parsed
+        .validate_provenance()
+        .iter()
+        .any(|v| v.contains("empty entry list")));
+
+    // Diagnostics disagreeing with the disposition tallies.
+    let mut parsed = good.clone();
+    parsed.diagnostics.mapped = 99;
+    assert!(parsed
+        .validate_provenance()
+        .iter()
+        .any(|v| v.contains("do not match disposition tallies")));
+
+    // Semantics naming a nonexistent entry.
+    let mut parsed = good;
+    parsed.semantics.insert(
+        EntryId("fake:install-a:42:777:0".into()),
+        EntrySemantics::default(),
+    );
+    assert!(parsed
+        .validate_provenance()
+        .iter()
+        .any(|v| v.contains("semantics names entry")));
 }
 
 #[test]
 fn entry_ids_are_deterministic_and_stable() {
-    let a = EntryId::deterministic(&ProviderId::codex(), "thread-1", 17, 2);
-    let b = EntryId::deterministic(&ProviderId::codex(), "thread-1", 17, 2);
-    assert_eq!(a, b);
-    assert_eq!(a.0, "codex:thread-1:17:2");
-    // Re-parsing (same fake input) yields identical ids and origins.
     let p1 = FakeProvider.parse(&multi_artifact_key()).unwrap();
     let p2 = FakeProvider.parse(&multi_artifact_key()).unwrap();
     assert_eq!(p1.entry_origins, p2.entry_origins);
+    let ids1: Vec<_> = p1.entries.iter().map(|e| e.id.clone()).collect();
+    let ids2: Vec<_> = p2.entries.iter().map(|e| e.id.clone()).collect();
+    assert_eq!(ids1, ids2);
 }
 
 #[test]
-fn semantic_axes_are_independent() {
-    // A steered message: human-authored, mid-turn-delivered — the two axes
-    // must be expressible independently (the old single enum could not).
-    let authorship = PromptAuthorship::Human;
-    let delivery = PromptDelivery::MidTurn;
-    assert_eq!(authorship, PromptAuthorship::Human);
-    assert_eq!(delivery, PromptDelivery::MidTurn);
-    // Codex token_count: same event carries a Call/Delta and a
-    // Session/Cumulative observation.
-    let last = (UsageScope::Call, UsageAggregation::Delta);
-    let total = (UsageScope::Session, UsageAggregation::Cumulative);
-    assert_ne!(last, total);
+fn semantics_are_emitted_and_consumable() {
+    let parsed = FakeProvider.parse(&multi_artifact_key()).unwrap();
+
+    // Steered prompt: the two axes are independently visible.
+    let steered = parsed
+        .semantics
+        .values()
+        .find_map(|s| s.prompt)
+        .expect("fake emits a prompt semantic");
+    assert_eq!(steered.authorship, PromptAuthorship::Human);
+    assert_eq!(steered.delivery, PromptDelivery::MidTurn);
+
+    // Tool semantics preserve the native name alongside the canonical kind.
+    let tool = parsed
+        .semantics
+        .values()
+        .find_map(|s| s.tool.clone())
+        .expect("fake emits a tool semantic");
+    assert_eq!(tool.kind, ToolKind::FileWrite);
+    assert_eq!(tool.native_name, "fake_apply_patch");
+
+    // Dual usage observation (Codex token_count shape): both axes explicit.
+    let usage: Vec<_> = parsed
+        .semantics
+        .values()
+        .flat_map(|s| s.usage.iter().copied())
+        .collect();
+    assert!(usage.contains(&UsageObservation {
+        scope: UsageScope::Call,
+        aggregation: UsageAggregation::Delta
+    }));
+    assert!(usage.contains(&UsageObservation {
+        scope: UsageScope::Session,
+        aggregation: UsageAggregation::Cumulative
+    }));
+}
+
+#[test]
+fn inherited_history_is_present_but_not_new_work() {
+    let parsed = FakeProvider.parse(&multi_artifact_key()).unwrap();
+    let default_semantics = EntrySemantics::default();
+    let activity = |id: &EntryId| {
+        parsed
+            .semantics
+            .get(id)
+            .unwrap_or(&default_semantics)
+            .activity
+    };
+
+    // The inherited record is Mapped — present when viewing this session.
+    let inherited = parsed
+        .entries
+        .iter()
+        .filter(|e| activity(&e.id) == ActivityKind::InheritedHistory)
+        .count();
+    assert_eq!(inherited, 1, "fork-inherited entry must be present");
+
+    // A "new work" projection (what cross-session analytics computes)
+    // excludes it without losing it.
+    let new_work = parsed
+        .entries
+        .iter()
+        .filter(|e| activity(&e.id) == ActivityKind::New)
+        .count();
+    assert_eq!(new_work, parsed.entries.len() - 1);
 }

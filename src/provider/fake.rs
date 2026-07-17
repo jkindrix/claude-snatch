@@ -4,9 +4,14 @@
 //! test the seam honestly. This one is **non-file-backed** (database form),
 //! advertises **neither** `native` nor `raw-jsonl`, gives one logical session
 //! **multiple artifacts** (a live DB range plus an archived imported copy),
-//! and hosts two sessions whose native ids collide across namespaces.
+//! hosts two sessions whose native ids collide across namespaces, carries a
+//! **real native record store** so archives are demonstrably lossless, emits
+//! **semantics** (steered prompt, dual usage observations, tool kinds,
+//! fork-inherited history), and exercises every provenance cardinality:
+//! 1:N, N:1, suppression, unknown-but-preserved, and inherited history.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 
 use super::*;
 
@@ -73,6 +78,38 @@ fn imported_artifact() -> SessionArtifact {
     }
 }
 
+fn secondary_artifact() -> SessionArtifact {
+    SessionArtifact {
+        snapshot: ArtifactSnapshot {
+            id: ArtifactId {
+                provider_instance: "mem://install-b".into(),
+                locator: "table=sessions;rowid=42".into(),
+            },
+            revision: ArtifactRevision("rev-1".into()),
+        },
+        form: ArtifactForm::Database,
+        archived: false,
+    }
+}
+
+/// The primary session's native record store: what the archive tier must
+/// preserve losslessly. Six records exercising every cardinality:
+///   0 -> two entries (1:N)
+///   1+2 -> one entry (N:1)
+///   3 suppressed (duplicate stream)
+///   4 unknown-but-preserved (drift)
+///   5 fork-inherited user message (Mapped + InheritedHistory)
+pub fn native_records() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({"kind": "prompt", "text": "steered mid-turn ask", "steered": true}),
+        serde_json::json!({"kind": "tool_call_part1", "tool": "fake_apply_patch"}),
+        serde_json::json!({"kind": "tool_call_part2", "usage": {"last": 10, "total": 200}}),
+        serde_json::json!({"kind": "mirror_event", "text": "steered mid-turn ask"}),
+        serde_json::json!({"kind": "mystery_v9", "payload": {"future": true}}),
+        serde_json::json!({"kind": "prompt", "text": "copied from fork source", "inherited": true}),
+    ]
+}
+
 impl SourceProvider for FakeProvider {
     fn id(&self) -> ProviderId {
         provider_id()
@@ -94,36 +131,84 @@ impl SourceProvider for FakeProvider {
             },
             SessionDescriptor {
                 key: colliding_key(),
-                artifacts: vec![live_artifact()],
+                artifacts: vec![secondary_artifact()],
             },
         ])
     }
 
     fn parse(&self, key: &LogicalSessionKey) -> Result<ParsedSession, ProviderError> {
+        if *key == colliding_key() {
+            // Minimal one-record session so cross-namespace entry ids can be
+            // compared against the primary session's.
+            let rec = RecordRef {
+                artifact: secondary_artifact().snapshot.id,
+                ordinal: 0,
+            };
+            let e = EntryId::deterministic(key, 0, 0);
+            let mut entry_origins = BTreeMap::new();
+            entry_origins.insert(e.clone(), vec![rec.clone()]);
+            return Ok(ParsedSession {
+                descriptor: SessionDescriptor {
+                    key: key.clone(),
+                    artifacts: vec![secondary_artifact()],
+                },
+                entries: vec![IdentifiedEntry {
+                    id: e.clone(),
+                    entry: LogEntry::Unknown(serde_json::json!({"fake": "b-entry"})),
+                }],
+                entry_origins,
+                record_dispositions: vec![RecordDisposition {
+                    record: rec,
+                    outcome: RecordOutcome::Mapped(vec![e]),
+                }],
+                semantics: BTreeMap::new(),
+                diagnostics: IngestionDiagnostics {
+                    mapped: 1,
+                    ..Default::default()
+                },
+            });
+        }
         if *key != multi_artifact_key() {
             return Err(ProviderError::NotFound(key.to_string()));
         }
-        // Five native records exercising every cardinality:
-        //   record 0 -> two entries (1:N)
-        //   records 1+2 -> one entry (N:1)
-        //   record 3 suppressed (duplicate stream)
-        //   record 4 unknown (drift)
+
         let art = live_artifact().snapshot.id;
         let rec = |ordinal| RecordRef {
             artifact: art.clone(),
             ordinal,
         };
-        let e = |ordinal, sub| EntryId::deterministic(&provider_id(), "42", ordinal, sub);
+        let e = |ordinal, sub| EntryId::deterministic(key, ordinal, sub);
+        let records = native_records();
 
         let entries = vec![
-            LogEntry::Unknown(serde_json::json!({"fake": "entry-0-0"})),
-            LogEntry::Unknown(serde_json::json!({"fake": "entry-0-1"})),
-            LogEntry::Unknown(serde_json::json!({"fake": "entry-1-0"})),
+            IdentifiedEntry {
+                id: e(0, 0),
+                entry: LogEntry::Unknown(records[0].clone()),
+            },
+            IdentifiedEntry {
+                id: e(0, 1),
+                entry: LogEntry::Unknown(serde_json::json!({"kind": "prompt_echo"})),
+            },
+            IdentifiedEntry {
+                id: e(1, 0),
+                entry: LogEntry::Unknown(serde_json::json!({"kind": "merged_tool_call"})),
+            },
+            IdentifiedEntry {
+                id: e(4, 0),
+                entry: LogEntry::Unknown(records[4].clone()),
+            },
+            IdentifiedEntry {
+                id: e(5, 0),
+                entry: LogEntry::Unknown(records[5].clone()),
+            },
         ];
+
         let mut entry_origins = BTreeMap::new();
         entry_origins.insert(e(0, 0), vec![rec(0)]);
         entry_origins.insert(e(0, 1), vec![rec(0)]);
         entry_origins.insert(e(1, 0), vec![rec(1), rec(2)]);
+        entry_origins.insert(e(4, 0), vec![rec(4)]);
+        entry_origins.insert(e(5, 0), vec![rec(5)]);
 
         let record_dispositions = vec![
             RecordDisposition {
@@ -146,9 +231,58 @@ impl SourceProvider for FakeProvider {
             },
             RecordDisposition {
                 record: rec(4),
-                outcome: RecordOutcome::Unknown,
+                outcome: RecordOutcome::Unknown {
+                    entries: vec![e(4, 0)],
+                },
+            },
+            RecordDisposition {
+                record: rec(5),
+                outcome: RecordOutcome::Mapped(vec![e(5, 0)]),
             },
         ];
+
+        let mut semantics = BTreeMap::new();
+        // Steered prompt: human-authored, mid-turn-delivered.
+        semantics.insert(
+            e(0, 0),
+            EntrySemantics {
+                prompt: Some(PromptSemantics {
+                    authorship: PromptAuthorship::Human,
+                    delivery: PromptDelivery::MidTurn,
+                }),
+                ..Default::default()
+            },
+        );
+        // Merged tool call: canonical kind + preserved native name, and a
+        // dual usage observation (Codex token_count shape).
+        semantics.insert(
+            e(1, 0),
+            EntrySemantics {
+                tool: Some(ToolSemantics {
+                    kind: ToolKind::FileWrite,
+                    native_name: "fake_apply_patch".into(),
+                }),
+                usage: vec![
+                    UsageObservation {
+                        scope: UsageScope::Call,
+                        aggregation: UsageAggregation::Delta,
+                    },
+                    UsageObservation {
+                        scope: UsageScope::Session,
+                        aggregation: UsageAggregation::Cumulative,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        // Fork-inherited history: mapped, present, excluded from "new work".
+        semantics.insert(
+            e(5, 0),
+            EntrySemantics {
+                activity: ActivityKind::InheritedHistory,
+                ..Default::default()
+            },
+        );
 
         Ok(ParsedSession {
             descriptor: SessionDescriptor {
@@ -158,8 +292,9 @@ impl SourceProvider for FakeProvider {
             entries,
             entry_origins,
             record_dispositions,
+            semantics,
             diagnostics: IngestionDiagnostics {
-                mapped: 3,
+                mapped: 4,
                 suppressed: 1,
                 unknown: 1,
                 unparseable: 0,
@@ -167,18 +302,62 @@ impl SourceProvider for FakeProvider {
         })
     }
 
-    fn read_archive(&self, key: &LogicalSessionKey) -> Result<Vec<u8>, ProviderError> {
-        // Universal tier: a provider-defined lossless bundle.
-        Ok(format!("FAKE-ARCHIVE-BUNDLE {key}").into_bytes())
+    fn write_archive(
+        &self,
+        key: &LogicalSessionKey,
+        out: &mut dyn Write,
+    ) -> Result<(), ProviderError> {
+        if *key != multi_artifact_key() && *key != colliding_key() {
+            return Err(ProviderError::NotFound(key.to_string()));
+        }
+        // Lossless bundle: manifest + the native records, round-trippable.
+        let records = if *key == multi_artifact_key() {
+            native_records()
+        } else {
+            vec![serde_json::json!({"kind": "prompt", "text": "b"})]
+        };
+        let descriptor = self
+            .sessions()?
+            .into_iter()
+            .find(|d| d.key == *key)
+            .expect("session listed above");
+        let bundle = serde_json::json!({
+            "manifest": {
+                "provider": self.id().0,
+                "session": key.to_string(),
+                "artifacts": descriptor
+                    .artifacts
+                    .iter()
+                    .map(|a| serde_json::json!({
+                        "instance": a.snapshot.id.provider_instance,
+                        "locator": a.snapshot.id.locator,
+                        "revision": a.snapshot.revision.0,
+                        "archived": a.archived,
+                    }))
+                    .collect::<Vec<_>>(),
+            },
+            "records": records,
+        });
+        serde_json::to_writer(&mut *out, &bundle)
+            .map_err(|e| ProviderError::Other(format!("bundle serialization: {e}")))?;
+        Ok(())
     }
 
-    fn read_native(&self, _artifact: &ArtifactId) -> Result<Vec<u8>, ProviderError> {
+    fn write_native(
+        &self,
+        _artifact: &ArtifactId,
+        _out: &mut dyn Write,
+    ) -> Result<(), ProviderError> {
         Err(ProviderError::Unsupported {
             capability: "native export",
         })
     }
 
-    fn read_raw_jsonl(&self, _key: &LogicalSessionKey) -> Result<Vec<u8>, ProviderError> {
+    fn write_raw_jsonl(
+        &self,
+        _key: &LogicalSessionKey,
+        _out: &mut dyn Write,
+    ) -> Result<(), ProviderError> {
         Err(ProviderError::Unsupported {
             capability: "raw-jsonl",
         })
