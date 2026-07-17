@@ -1,6 +1,6 @@
 //! Notes command implementation.
 //!
-//! Manage tactical session notes for a project. Notes capture
+//! Manage tactical notes in Claude Code project-memory storage. Notes capture
 //! mid-work state that survives compaction.
 
 use crate::cli::{Cli, NotesArgs, OutputFormat};

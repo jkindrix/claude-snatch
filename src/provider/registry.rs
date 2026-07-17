@@ -439,12 +439,13 @@ impl ProviderRegistry {
             .is_some_and(|first| self.entry(&ProviderId(first.to_string())).is_some())
     }
 
-    /// Resolve with the B2 default policy: with no `--provider` flags an
-    /// UNQUALIFIED reference stays Claude-only (the phase-plan default until
-    /// Phase D), while a QUALIFIED id is itself an explicit provider request
-    /// and resolves against exactly the provider it names. With flags, the
-    /// full selection matrix applies. No path ever falls back to a provider
-    /// the user did not name.
+    /// Resolve with the compatibility default: with no `--provider` flags an
+    /// UNQUALIFIED reference stays Claude-only, while a QUALIFIED id is itself
+    /// an explicit provider request and resolves against exactly the provider
+    /// it names. Phase D retained this default to avoid surprise scans,
+    /// unavailable-provider failures, and new cross-provider ambiguity on
+    /// existing commands. With flags, the full selection matrix applies. No
+    /// path ever falls back to a provider the user did not name.
     pub fn resolve_with_default_policy(
         &self,
         provider_flags: &[String],
@@ -465,6 +466,9 @@ impl ProviderRegistry {
 /// One provider's diagnostics: `None` means the provider has no dedicated
 /// diagnostics (a success — the classic doctor covers it).
 pub type ProviderDiagnostics = (ProviderId, Option<serde_json::Value>);
+
+/// One provider's typed lineage graph.
+pub type ProviderLineage = (ProviderId, Vec<super::LineageEdge>);
 
 /// Result of collecting across a selection with the runtime-failure
 /// contract enforced centrally (round-19 blocker 4): surfaces render this,
@@ -500,6 +504,22 @@ pub struct CollectedProjects {
     /// Providers skipped under an `all` selection.
     pub skipped: Vec<(ProviderId, String)>,
     /// Sessions retained without project evidence.
+    pub context_warnings: Vec<ProjectContextWarning>,
+}
+
+/// Cross-provider projects with a complete, provider-owned lineage graph.
+///
+/// Consumers that collapse continuations, exclude spawns, or project fork
+/// activity must use this instead of independently joining two scans.
+pub struct CollectedProjectUnion {
+    /// Deterministically grouped projects, excluding providers whose lineage
+    /// could not be established under `all`.
+    pub projects: Vec<super::project::UnifiedProject>,
+    /// Sorted, deduplicated typed edges for the retained providers.
+    pub lineage: Vec<super::LineageEdge>,
+    /// Construction, inventory, or lineage failures softened under `all`.
+    pub skipped: Vec<(ProviderId, String)>,
+    /// Project-context warnings for retained sessions.
     pub context_warnings: Vec<ProjectContextWarning>,
 }
 
@@ -556,6 +576,51 @@ impl ProviderRegistry {
                 }
                 Err(e) if atomic => return Err(e),
                 Err(e) => skipped.push((provider.id(), format!("diagnostics failed: {e}"))),
+            }
+        }
+        if succeeded == 0 {
+            return Err(no_provider_succeeded(&skipped));
+        }
+        Ok(Collected { items, skipped })
+    }
+
+    /// Collect typed lineage with the same atomic-vs-partial contract as
+    /// session inventory and diagnostics. A successful empty graph is still a
+    /// successful provider scan.
+    pub fn collect_selected_lineage(
+        &self,
+        selection: &ProviderSelection,
+    ) -> Result<Collected<Vec<ProviderLineage>>, ProviderError> {
+        let selected = self.select(selection)?;
+        let atomic = matches!(selection, ProviderSelection::Explicit(_));
+        let mut skipped = selected.skipped.clone();
+        let mut items = Vec::new();
+        let mut succeeded = 0_usize;
+        for provider in &selected.providers {
+            match provider.lineage() {
+                Ok(mut edges) => {
+                    let provider_id = provider.id();
+                    if edges.iter().any(|edge| {
+                        edge.from.provider != provider_id || edge.to.provider != provider_id
+                    }) {
+                        let error = ProviderError::Other(format!(
+                            "provider '{provider_id}' returned a lineage edge outside its own identity"
+                        ));
+                        if atomic {
+                            return Err(error);
+                        }
+                        skipped.push((provider_id, format!("lineage scan failed: {error}")));
+                        continue;
+                    }
+                    edges.sort();
+                    edges.dedup();
+                    items.push((provider_id, edges));
+                    succeeded += 1;
+                }
+                Err(error) if atomic => return Err(error),
+                Err(error) => {
+                    skipped.push((provider.id(), format!("lineage scan failed: {error}")));
+                }
             }
         }
         if succeeded == 0 {
@@ -644,6 +709,65 @@ impl ProviderRegistry {
             projects: super::project::group_sessions(project_sessions),
             skipped,
             context_warnings,
+        })
+    }
+
+    /// Collect unified projects plus the typed lineage required to interpret
+    /// their cross-session history. Explicit selections are atomic. Under
+    /// `all`, a provider whose lineage fails is removed from the project union
+    /// and reported—never rendered with guessed continuation/spawn/fork state.
+    pub fn collect_project_union(
+        &self,
+        selection: &ProviderSelection,
+    ) -> Result<CollectedProjectUnion, ProviderError> {
+        let mut projects = self.collect_unified_projects(selection)?;
+        let lineage = self.collect_selected_lineage(selection)?;
+        let successful: std::collections::BTreeSet<_> = lineage
+            .items
+            .iter()
+            .map(|(provider, _)| provider.clone())
+            .collect();
+        let represented: std::collections::BTreeSet<_> = projects
+            .projects
+            .iter()
+            .flat_map(|project| project.providers.iter().cloned())
+            .collect();
+        let failed: std::collections::BTreeSet<_> =
+            represented.difference(&successful).cloned().collect();
+        if !failed.is_empty() {
+            for project in &mut projects.projects {
+                project
+                    .sessions
+                    .retain(|session| !failed.contains(&session.descriptor.key.provider));
+                project
+                    .providers
+                    .retain(|provider| !failed.contains(provider));
+            }
+            projects
+                .projects
+                .retain(|project| !project.sessions.is_empty());
+            projects
+                .context_warnings
+                .retain(|warning| !failed.contains(&warning.key.provider));
+        }
+
+        projects.skipped.extend(lineage.skipped);
+        projects
+            .skipped
+            .sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        projects.skipped.dedup_by(|a, b| a.0 == b.0);
+        let mut edges: Vec<_> = lineage
+            .items
+            .into_iter()
+            .flat_map(|(_, edges)| edges)
+            .collect();
+        edges.sort();
+        edges.dedup();
+        Ok(CollectedProjectUnion {
+            projects: projects.projects,
+            lineage: edges,
+            skipped: projects.skipped,
+            context_warnings: projects.context_warnings,
         })
     }
 }

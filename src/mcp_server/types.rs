@@ -524,6 +524,10 @@ pub struct GetProjectHistoryRequest {
     /// Project path filter (substring match).
     pub project: String,
 
+    /// Session-log providers to union (e.g. `["all"]` or
+    /// `["claude-code", "codex"]`). Omit for the classic Claude-only path.
+    pub provider: Option<Vec<String>>,
+
     /// Time period: "24h", "7d", "30d", "all". Default: "7d".
     pub period: Option<String>,
 
@@ -538,6 +542,12 @@ pub struct GetProjectHistoryRequest {
 #[derive(Debug, Serialize)]
 pub struct ProjectSessionEntry {
     pub session_id: String,
+    /// Provider owning this logical conversation (provider route only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Fully qualified root session id (provider route only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qualified_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
     /// Root chain ID if this session represents a chain.
@@ -574,7 +584,12 @@ pub struct ProjectSessionEntry {
 pub struct ProjectAggregate {
     pub total_sessions: usize,
     pub total_tokens: u64,
-    pub total_cost: f64,
+    /// Total estimate only when every included session is priced.
+    pub total_cost: Option<f64>,
+    /// Sessions whose provider deliberately did not produce a cost estimate
+    /// (provider route only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_unpriced_sessions: Option<bool>,
     pub total_prompts: usize,
     pub active_branches: Vec<String>,
 }
@@ -583,10 +598,26 @@ pub struct ProjectAggregate {
 #[derive(Debug, Serialize)]
 pub struct ProjectHistoryResponse {
     pub project_path: String,
+    /// Provider-neutral project key (provider route only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_key: Option<String>,
+    /// Providers represented in the selected union.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<String>,
     pub period: String,
     pub sessions_found: usize,
     pub sessions: Vec<ProjectSessionEntry>,
     pub aggregate: ProjectAggregate,
+    /// Providers skipped under explicit `all` partial-success semantics.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_providers: Vec<String>,
+    /// Sessions retained but assigned to fallback projects because native
+    /// project evidence was unavailable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_warnings: Vec<String>,
+    /// Cross-session provider history excludes fork-inherited history.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity_basis: Option<String>,
 }
 
 // ============================================================================
@@ -800,6 +831,11 @@ pub struct ManageGoalsRequest {
     /// Project path filter (substring match). Required.
     pub project: String,
 
+    /// Registry storage provider. Omitted or `claude-code` uses the existing
+    /// Claude project-memory store; other values are rejected (registries are
+    /// not cross-provider unions).
+    pub provider: Option<String>,
+
     /// Goal text (required for "add"; optional for "update").
     pub text: Option<String>,
 
@@ -830,6 +866,9 @@ pub struct GoalEntry {
 pub struct ManageGoalsResponse {
     pub operation: String,
     pub project_path: String,
+    /// Present when the request explicitly selected the registry store.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -889,6 +928,10 @@ pub struct ManageNotesRequest {
     /// Project path filter (substring match). Required.
     pub project: String,
 
+    /// Registry storage provider. Omitted or `claude-code` uses the existing
+    /// Claude project-memory store; other values are rejected.
+    pub provider: Option<String>,
+
     /// Note text (required for "add"; optional for "update").
     pub text: Option<String>,
 
@@ -926,6 +969,9 @@ pub struct NoteEntry {
 pub struct ManageNotesResponse {
     pub operation: String,
     pub project_path: String,
+    /// Present when the request explicitly selected the registry store.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -946,6 +992,10 @@ pub struct ManageDecisionsRequest {
 
     /// Project path filter (substring match). Required.
     pub project: String,
+
+    /// Registry storage provider. Omitted or `claude-code` uses the existing
+    /// Claude project-memory store; other values are rejected.
+    pub provider: Option<String>,
 
     /// Decision title (required for "add"; optional for "update").
     pub title: Option<String>,
@@ -1010,6 +1060,9 @@ pub struct DecisionEntry {
 pub struct ManageDecisionsResponse {
     pub operation: String,
     pub project_path: String,
+    /// Present when the request explicitly selected the registry store.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

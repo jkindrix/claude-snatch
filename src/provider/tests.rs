@@ -814,6 +814,64 @@ impl SourceProvider for SmallProvider {
     }
 }
 
+/// Deliberately violates provider ownership by trying to inject a `small`
+/// endpoint into its lineage graph.
+struct ForeignLineageProvider;
+
+impl SourceProvider for ForeignLineageProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId("foreign".into())
+    }
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::default()
+    }
+    fn sessions(&self) -> Result<Vec<SessionDescriptor>, ProviderError> {
+        Ok(Vec::new())
+    }
+    fn lineage(&self) -> Result<Vec<LineageEdge>, ProviderError> {
+        Ok(vec![LineageEdge {
+            from: SmallProvider::key("421"),
+            to: LogicalSessionKey {
+                provider: self.id(),
+                namespace: SessionNamespace::global(),
+                native_id: "child".into(),
+            },
+            kind: LineageEdgeKind::Fork,
+        }])
+    }
+    fn parse(&self, key: &LogicalSessionKey) -> Result<ParsedSession, ProviderError> {
+        Err(ProviderError::NotFound(key.to_string()))
+    }
+    fn parse_cache_token(&self, key: &LogicalSessionKey) -> Result<String, ProviderError> {
+        Err(ProviderError::NotFound(key.to_string()))
+    }
+    fn write_archive(
+        &self,
+        key: &LogicalSessionKey,
+        _out: &mut dyn std::io::Write,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::NotFound(key.to_string()))
+    }
+    fn write_native(
+        &self,
+        _artifact: &ArtifactId,
+        _out: &mut dyn std::io::Write,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::Unsupported {
+            capability: "native export",
+        })
+    }
+    fn write_raw_jsonl(
+        &self,
+        _key: &LogicalSessionKey,
+        _out: &mut dyn std::io::Write,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::Unsupported {
+            capability: "raw-jsonl export",
+        })
+    }
+}
+
 fn matrix_registry() -> ProviderRegistry {
     let mut r = ProviderRegistry::new();
     r.register(fake_entry()).unwrap();
@@ -1462,4 +1520,50 @@ fn collect_diagnostics_mirrors_the_contract() {
     assert!(only_flaky
         .collect_selected_diagnostics(&ProviderSelection::All)
         .is_err());
+}
+
+#[test]
+fn collect_lineage_rejects_cross_provider_edge_injection() {
+    let mut registry = ProviderRegistry::new();
+    registry
+        .register(RegisteredProvider {
+            id: ProviderId("foreign".into()),
+            root: None,
+            provider: Ok(Box::new(ForeignLineageProvider)),
+        })
+        .unwrap();
+    registry
+        .register(RegisteredProvider {
+            id: ProviderId("small".into()),
+            root: None,
+            provider: Ok(Box::new(SmallProvider)),
+        })
+        .unwrap();
+
+    let explicit = ProviderSelection::Explicit(vec![ProviderId("foreign".into())]);
+    let error = registry
+        .collect_selected_lineage(&explicit)
+        .err()
+        .expect("explicit selection must reject foreign endpoints")
+        .to_string();
+    assert!(error.contains("outside its own identity"), "got: {error}");
+
+    let collected = registry
+        .collect_selected_lineage(&ProviderSelection::All)
+        .expect("healthy provider keeps all-selection successful");
+    assert_eq!(collected.items.len(), 1);
+    assert_eq!(collected.items[0].0, ProviderId("small".into()));
+    assert_eq!(collected.skipped.len(), 1);
+    assert_eq!(collected.skipped[0].0, ProviderId("foreign".into()));
+
+    let union = registry
+        .collect_project_union(&ProviderSelection::All)
+        .expect("project union shares the same centralized policy");
+    assert!(union
+        .projects
+        .iter()
+        .flat_map(|project| &project.sessions)
+        .all(|session| session.descriptor.key.provider == ProviderId("small".into())));
+    assert_eq!(union.skipped.len(), 1);
+    assert_eq!(union.skipped[0].0, ProviderId("foreign".into()));
 }

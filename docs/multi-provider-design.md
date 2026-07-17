@@ -352,7 +352,8 @@ directory walks.
   qualified-id encoding BEFORE ids become CLI/MCP inputs),
   `snatch providers` (roots, session counts, format families, diagnostics),
   MCP requests gain optional `provider`, responses always carry provider +
-  qualified session id. Default remains Claude-only until Phase D.
+  qualified session id. Phase D evaluates (and ultimately retains) the
+  Claude-only default for unqualified, flagless requests.
   Milestone: list/info + native/raw export work on real Codex sessions.
 - **Phase B3 — normalization.** Round-6 guardrail: a turn_id carrier must
   exist before normalization (the design promises its preservation).
@@ -1622,22 +1623,36 @@ negative controls establish its error boundaries without claiming subjective
 ground truth.
 
 ### Phase D — cross-provider UX
-- [~] Unified project identity across providers (cwd/git), union views
-      (Phase D slice 1 foundation + CLI listing): providers expose cheap
+- [x] Unified project identity across providers (cwd/git), union views:
+      providers expose cheap
       native project evidence; grouping prefers a credential-free normalized
       git remote, then local git root, then normalized cwd. A cwd reused for
       conflicting remotes never bridges them, and missing metadata retains the
       session in a session-identity fallback project. `list projects|sessions|
       all --provider ...` and session `--project` filtering share the same
-      deterministic groups. MCP project history and cross-session lessons are
-      the remaining consumers before this item is complete (absorbs the
-      long-deferred union-view item, note #4).
-- [ ] Default-provider switch to `all` considered only here.
-- [ ] Registry storage: goals/notes/decisions live under Claude-owned
-      project storage — scope those MCP ops per-provider or migrate storage
-      BEFORE claiming unified projects (round-3 hidden scope).
-- [ ] Candidate export targets: ATIF, OTel GenAI (landscape verdict: export
-      targets only, never the internal model).
+      deterministic groups. MCP `list_sessions` shares project filtering and
+      typed subagent exclusion; MCP project history collapses only typed
+      continuations, preserves forks as separate units, excludes spawns, and
+      removes fork-inherited activity; CLI cross-session lessons uses the same
+      centralized project+lineage collection contract. This absorbs the
+      long-deferred union-view item (note #4).
+- [x] Default-provider switch considered: retain Claude-only for flagless,
+      unqualified requests. Switching to `all` would make established commands
+      scan an additional store, introduce new ambiguity/failure modes, and
+      change performance without explicit consent. `--provider all` is the
+      deliberate union; a qualified id remains explicit opt-in.
+- [x] Registry storage scoped honestly instead of migrated: goals/notes/
+      decisions remain in Claude Code project memory. MCP operations accept an
+      optional single storage provider (`claude-code`) and reject `codex`,
+      `all`, and unknown stores before any read/write; explicit responses name
+      `storage_provider`. Omitted values preserve classic JSON. CLI help also
+      labels these commands Claude-storage-scoped.
+- [x] ATIF and OTel GenAI evaluated as optional future interchange exports,
+      not implemented in this expansion. ATIF cannot retain the full lineage,
+      compaction, provenance, and archive-fidelity contract; OTel GenAI is
+      span-shaped/experimental rather than a lossless session representation.
+      Either may be added later as an explicitly lossy export without changing
+      the internal model or native/archive guarantees.
 
 #### Phase D status (2026-07-17)
 
@@ -1650,17 +1665,47 @@ Provider-context failure never drops a session. The CLI's provider project and
 session listings now expose the project key/evidence and use it for filtering,
 while flagless Claude output remains on the unchanged classic path.
 
+Slice 2 completes the project-history consumers.
+`ProviderRegistry::collect_project_union` is the single atomic-vs-partial join of inventory,
+project evidence, and provider-owned typed lineage; a provider cannot inject an
+edge into another provider's graph. Continuation cycles and multiple-parent
+malformations resolve deterministically. CLI lessons and MCP project history
+operate on logical continuation units, omit spawned sessions, and project each
+fork to new activity only. An end-to-end parent/fork fixture proves copied
+prompt and token usage are not double-counted while the fork remains a distinct
+history row. MCP project unions report unpriced sessions as `null`, never $0.
+MCP listing now honors unified project filters and `include_subagents` rather
+than refusing or ignoring them.
+
+The union claim is intentionally bounded to the surfaces implemented here:
+provider project/session listing, MCP project history, and cross-session
+lessons. Commands without a provider parameter remain explicitly Claude-scoped;
+they are not silently described as union views.
+
+Phase D exit audit: the full repository gate passes 945 unit tests (943
+passing, 2 opt-in corpus tests), 81 CLI integration tests, 19 corpus-coverage
+tests, 50 general integrations (1 stress test ignored), 16 property tests, 11
+export snapshots, 22 doctests, formatting, lint, and warning-free docs. The
+opt-in real Codex run parses 226/226 sessions with zero errors, provenance
+violations, races, or unknown checked vocabulary; 228,230 physical records are
+accounted for (165,755 mapped, 30,275 intentionally suppressed, 32,198
+preserved unknown, 2 unparseable). Nested drift checks cover 196,203 records;
+12 explicitly unbaselined variants (1,561 records) remain reported as outside
+that claim. Sixteen lineage edges/fork copies pass the inherited-activity
+audit. Classic export snapshots and provider-routed Claude parity remain green.
+
 ### Standing constraints (all phases)
-- [ ] The 8 acceptance invariants (above) gate "Codex supported".
-- [ ] Drift-coverage claims must state checked vs unchecked counts
+- [x] The 8 acceptance invariants (above) gate "Codex supported".
+- [x] Drift-coverage claims must state checked vs unchecked counts
       (round-16); baselines absorb instrument discoveries WITH provenance.
-- [ ] Every completion claim re-reads the original requirement wording
+- [x] Every completion claim re-reads the original requirement wording
       (requirement-evaporation memory).
 
 ## Open questions (to settle in-phase)
 
 Resolved in their assigned phases: two-stream dedup, steering persistence,
 world-state/ghost semantics (B3); twin precedence and annotation carrier
-placement (A.0). The remaining product-policy question is deliberately D-only:
-whether the default provider switches to `all` once a truthful union view and
-provider-neutral registry storage exist.
+placement (A.0); and the D-only default policy. The default remains
+Claude-only, with explicit `--provider all` for union scans. Persistent
+registries remain explicitly Claude-storage-scoped rather than being presented
+as provider-neutral data.

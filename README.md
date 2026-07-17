@@ -3,11 +3,14 @@
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-High-performance CLI tool for extracting, analyzing, and exporting Claude Code conversation logs with **maximum data fidelity**.
+High-performance CLI and MCP tool for retrieving, analyzing, and exporting
+Claude Code and OpenAI Codex CLI session logs with **maximum data fidelity**.
 
 ## Features
 
 - **Maximum Fidelity**: Extract all 77+ documented JSONL data elements
+- **Claude Code + Codex CLI**: Provider-qualified sessions, normalized views,
+  native/archive export, and cross-provider project history
 - **Multiple Export Formats**: Markdown, JSON, HTML, CSV, SQLite, JSONL, and more
 - **Rust Performance**: Native speed, 10-100x faster than Python/Node alternatives
 - **Lossless Round-Trip**: Preserve unknown fields for forward compatibility
@@ -78,6 +81,42 @@ snatch stats -s <session-id>
 # Show global statistics across all sessions
 snatch stats --global
 ```
+
+### OpenAI Codex CLI and provider selection
+
+Codex support is built by default. `snatch` discovers `$CODEX_HOME` (or
+`~/.codex`) alongside Claude Code's store. Existing flagless commands remain
+Claude-only for compatibility; select Codex or a union explicitly:
+
+```bash
+# Inspect provider availability and format diagnostics
+snatch providers
+
+# Discover Codex sessions and use a qualified id
+snatch list sessions --provider codex
+snatch info codex:<thread-id>
+snatch messages codex:<thread-id> --detail full
+snatch timeline codex:<thread-id>
+snatch chunks codex:<thread-id>
+
+# Normalized and source-fidelity exports
+snatch export codex:<thread-id> -f markdown -o conversation.md
+snatch export codex:<thread-id> -f raw-jsonl -o rollout.jsonl
+snatch export codex:<thread-id> -f archive -o session.archive
+
+# Cross-provider project and lesson views
+snatch list projects --provider all
+snatch list sessions --provider all --project /path/to/project
+snatch lessons --all --provider all
+```
+
+Codex `.jsonl` and `.jsonl.zst` rollouts are supported, including archived
+twins, forks, subagents, compaction windows, steering prompts, usage
+observations, and drift diagnostics. Pre-envelope Codex files (CLI ≤0.31.0)
+are inventoried and source-exportable but intentionally refused for normalized
+analysis until provenance-backed fixtures justify a legacy parser. Codex cost
+is reported as unavailable—not `$0`—because ChatGPT-plan sessions cannot be
+honestly priced from token counts as API spend.
 
 ## Commands
 
@@ -153,9 +192,15 @@ Configure it in your Claude Code MCP settings:
 | `get_project_history` | Cross-session activity history for a project |
 | `search_sessions` | Full-text search across all sessions |
 | `get_tool_calls` | Tool call history with input summaries and error detection |
-| `manage_goals` | Create, update, list, and complete goals |
-| `manage_notes` | Create, list, and delete session notes |
-| `manage_decisions` | Record and recall architectural decisions |
+| `manage_goals` | Manage the Claude Code project-memory goal registry |
+| `manage_notes` | Manage the Claude Code project-memory note registry |
+| `manage_decisions` | Manage the Claude Code project-memory decision registry |
+
+Provider-aware MCP tools accept an optional `provider` selection and return
+qualified session ids. `get_project_history` can union Claude Code and Codex by
+cwd/git identity while excluding fork-copied history from new-activity totals.
+The three persistent registries above remain explicitly Claude-storage-scoped;
+they reject `codex`/`all` rather than pretending their data is unified.
 
 ## Analysis and Recall
 

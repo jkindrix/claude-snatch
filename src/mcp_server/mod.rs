@@ -108,10 +108,18 @@ impl SnatchServer {
 
     /// Get the Claude directory.
     /// Provider-neutral session listing for `list_sessions` with `provider`
-    /// set: qualified ids + artifact summaries via the registry's selection
-    /// matrix (B2; titles/timestamps arrive with normalization in B3).
-    fn provider_sessions_output(&self, flags: &[String], limit: usize) -> ToolOutput {
+    /// set. Project filtering uses the same unified identity as project
+    /// history; subagent filtering is driven by typed Spawn lineage.
+    fn provider_sessions_output(
+        &self,
+        flags: &[String],
+        project_filter: Option<&str>,
+        include_subagents: bool,
+        limit: usize,
+    ) -> ToolOutput {
         use crate::provider::registry::ProviderSelection;
+        use crate::provider::LineageEdgeKind;
+        use std::collections::BTreeSet;
 
         let selection = match ProviderSelection::from_flags(flags) {
             Ok(s) => s,
@@ -119,26 +127,43 @@ impl SnatchServer {
                 return ToolOutput::error(format!("Invalid provider selection: {reason}"))
             }
         };
-        // Thin renderer: runtime-failure semantics are enforced centrally
-        // in the registry (round-19 blocker 4).
         let registry = self.provider_registry();
-        let collected = match registry.collect_selected_sessions(&selection) {
+        let collected = match registry.collect_project_union(&selection) {
             Ok(c) => c,
             Err(e) => return ToolOutput::error(e.to_string()),
         };
 
+        let mut spawned = BTreeSet::new();
+        for edge in &collected.lineage {
+            if matches!(edge.kind, LineageEdgeKind::Spawn { .. }) {
+                spawned.insert(edge.to.clone());
+            }
+        }
+
         let mut rows: Vec<serde_json::Value> = collected
-            .items
+            .projects
             .iter()
-            .map(|d| {
-                serde_json::json!({
-                    "provider": d.key.provider.to_string(),
-                    "qualified_id": d.key.to_string(),
-                    "native_id": d.key.native_id,
-                    "artifacts": d.artifacts.len(),
+            .filter(|project| project_filter.map_or(true, |needle| project.matches(needle)))
+            .flat_map(|project| {
+                project.sessions.iter().filter_map(|session| {
+                    let descriptor = &session.descriptor;
+                    if !include_subagents && spawned.contains(&descriptor.key) {
+                        return None;
+                    }
+                    Some(serde_json::json!({
+                        "provider": descriptor.key.provider.to_string(),
+                        "qualified_id": descriptor.key.to_string(),
+                        "native_id": descriptor.key.native_id,
+                        "artifacts": descriptor.artifacts.len(),
+                        "project_key": project.identity.to_string(),
+                        "project_path": project.display_path,
+                        "git_repository": project.git_repository,
+                        "is_subagent": spawned.contains(&descriptor.key),
+                    }))
                 })
             })
             .collect();
+        rows.sort_by(|a, b| a["qualified_id"].as_str().cmp(&b["qualified_id"].as_str()));
         let total = rows.len();
         // ALWAYS truncate to the requested limit — classic MCP semantics
         // (`limit: 0` means zero rows, not unlimited; round-19 blocker 3).
@@ -285,6 +310,350 @@ impl SnatchServer {
         )
     }
 
+    /// Provider-neutral project history used when the request explicitly
+    /// selects one or more providers. The classic flagless implementation
+    /// remains byte-for-byte compatible in the tool method below.
+    fn provider_project_history(&self, request: &GetProjectHistoryRequest) -> ToolOutput {
+        use crate::analysis::usage::provider_usage_summary;
+        use crate::provider::project::{history_units, new_activity_entries};
+        use crate::provider::registry::{cached_parsed_session, ProviderSelection};
+        use crate::provider::{ActivityKind, LineageEdgeKind, PromptAuthorship, SessionNamespace};
+
+        let Some(flags) = request.provider.as_ref() else {
+            return ToolOutput::error("provider selection missing");
+        };
+        if flags.is_empty() {
+            return ToolOutput::error("provider must name at least one provider or 'all'");
+        }
+        let selection = match ProviderSelection::from_flags(flags) {
+            Ok(selection) => selection,
+            Err(error) => return ToolOutput::error(error),
+        };
+        let atomic = matches!(selection, ProviderSelection::Explicit(_));
+        let registry = self.provider_registry();
+        let collected = match registry.collect_project_union(&selection) {
+            Ok(collected) => collected,
+            Err(error) => return ToolOutput::error(error.to_string()),
+        };
+        let lineage = &collected.lineage;
+
+        let mut matches: Vec<_> = collected
+            .projects
+            .iter()
+            .filter(|project| project.matches(&request.project))
+            .collect();
+        let exact: Vec<usize> = matches
+            .iter()
+            .enumerate()
+            .filter(|(_, project)| {
+                project.identity.to_string() == request.project
+                    || project.display_path.as_deref() == Some(request.project.as_str())
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if exact.len() == 1 {
+            let project = matches.swap_remove(exact[0]);
+            matches.clear();
+            matches.push(project);
+        }
+        if matches.len() > 1 {
+            let mut candidates: Vec<_> = matches
+                .iter()
+                .map(|project| project.identity.to_string())
+                .collect();
+            candidates.sort();
+            candidates.truncate(5);
+            return ToolOutput::error(format!(
+                "project filter '{}' is ambiguous; use an exact project key ({})",
+                request.project,
+                candidates.join(", ")
+            ));
+        }
+
+        let period = request.period.as_deref().unwrap_or("7d");
+        let cutoff = match period_cutoff(period) {
+            Ok(cutoff) => cutoff,
+            Err(error) => return ToolOutput::error(error),
+        };
+        let limit = request.limit.unwrap_or(20);
+        let include_summaries = request.include_summaries.unwrap_or(true);
+
+        let Some(project) = matches.pop() else {
+            let response = ProjectHistoryResponse {
+                project_path: request.project.clone(),
+                project_key: None,
+                providers: Vec::new(),
+                period: period.to_string(),
+                sessions_found: 0,
+                sessions: Vec::new(),
+                aggregate: ProjectAggregate {
+                    total_sessions: 0,
+                    total_tokens: 0,
+                    total_cost: Some(0.0),
+                    has_unpriced_sessions: Some(false),
+                    total_prompts: 0,
+                    active_branches: Vec::new(),
+                },
+                skipped_providers: collected
+                    .skipped
+                    .iter()
+                    .map(|(id, _)| format!("{id}: unavailable"))
+                    .collect(),
+                project_warnings: Vec::new(),
+                activity_basis: Some("new-activity-only".into()),
+            };
+            return ToolOutput::json(&response)
+                .unwrap_or_else(|error| ToolOutput::error(error.to_string()));
+        };
+
+        let context_by_key: HashMap<_, _> = project
+            .sessions
+            .iter()
+            .map(|session| (&session.descriptor.key, &session.context))
+            .collect();
+        let fork_parent: HashMap<_, _> = lineage
+            .iter()
+            .filter(|edge| matches!(edge.kind, LineageEdgeKind::Fork))
+            .map(|edge| (edge.to.clone(), edge.from.to_string()))
+            .collect();
+
+        let mut session_entries = Vec::new();
+        let mut parse_warnings = Vec::new();
+        for unit in history_units(project, lineage) {
+            if let Some(cutoff) = cutoff {
+                let latest = unit
+                    .members
+                    .iter()
+                    .filter_map(|key| {
+                        context_by_key
+                            .get(key)
+                            .and_then(|context| context.modified_at)
+                    })
+                    .max();
+                if latest.is_some_and(|latest| latest < cutoff) {
+                    continue;
+                }
+            }
+
+            let mut normalized_entries = Vec::new();
+            let mut semantic_human_ids = HashSet::new();
+            let mut parse_failed = None;
+            for key in &unit.members {
+                let provider = match registry.get(&key.provider) {
+                    Ok(provider) => provider,
+                    Err(error) => {
+                        parse_failed = Some(error.to_string());
+                        break;
+                    }
+                };
+                let parsed =
+                    match cached_parsed_session(crate::cache::global_cache(), provider, key) {
+                        Ok(parsed) => parsed,
+                        Err(error) => {
+                            parse_failed = Some(error.to_string());
+                            break;
+                        }
+                    };
+                if provider.capabilities().semantic_annotations {
+                    for identified in &parsed.entries {
+                        let Some(semantics) = parsed.semantics.get(&identified.id) else {
+                            continue;
+                        };
+                        if semantics.activity == ActivityKind::New
+                            && semantics
+                                .prompt
+                                .is_some_and(|prompt| prompt.authorship == PromptAuthorship::Human)
+                        {
+                            if let Some(uuid) = identified.entry.uuid() {
+                                semantic_human_ids.insert(uuid.to_string());
+                            }
+                        }
+                    }
+                }
+                normalized_entries.extend(new_activity_entries(&parsed));
+            }
+            if let Some(error) = parse_failed {
+                // A broken logical unit is never partially counted. Explicit
+                // selections are atomic; `all` skips it with a bounded,
+                // path-free warning.
+                if atomic {
+                    return ToolOutput::error(format!(
+                        "failed to parse selected session {}: {error}",
+                        unit.root
+                    ));
+                }
+                parse_warnings.push(format!("{}: parse failed", unit.root));
+                continue;
+            }
+            let conversation = match Conversation::from_entries(normalized_entries) {
+                Ok(conversation) => conversation,
+                Err(error) if atomic => {
+                    return ToolOutput::error(format!(
+                        "failed to reconstruct selected session {}: {error}",
+                        unit.root
+                    ));
+                }
+                Err(_) => {
+                    parse_warnings.push(format!("{}: reconstruction failed", unit.root));
+                    continue;
+                }
+            };
+            let main_entries = conversation.main_thread_entries();
+            let root_provider = match registry.get(&unit.root.provider) {
+                Ok(provider) => provider,
+                Err(error) if atomic => {
+                    return ToolOutput::error(format!(
+                        "failed to resolve selected provider for {}: {error}",
+                        unit.root
+                    ));
+                }
+                Err(_) => {
+                    parse_warnings.push(format!("{}: provider unavailable", unit.root));
+                    continue;
+                }
+            };
+            let semantic = root_provider.capabilities().semantic_annotations;
+            let mut prompts = Vec::new();
+            let mut prompt_count = 0_usize;
+            for entry in &main_entries {
+                let human = if semantic {
+                    entry
+                        .uuid()
+                        .is_some_and(|uuid| semantic_human_ids.contains(uuid))
+                } else {
+                    is_human_prompt(entry)
+                };
+                if human {
+                    prompt_count += 1;
+                    if include_summaries && prompts.len() < 3 {
+                        if let Some(text) = extract_user_prompt_text(entry) {
+                            if text.len() > 20 {
+                                prompts.push(truncate_text(&text, 150));
+                            }
+                        }
+                    }
+                }
+            }
+
+            let analytics = SessionAnalytics::from_conversation(&conversation);
+            let usage = provider_usage_summary(&conversation, root_provider.capabilities().pricing);
+            let branch = unit.members.iter().find_map(|key| {
+                context_by_key
+                    .get(key)
+                    .and_then(|context| context.git_branch.clone())
+            });
+            let compaction_count = main_entries
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        entry,
+                        LogEntry::System(system)
+                            if matches!(system.subtype,
+                                Some(crate::model::SystemSubtype::CompactBoundary
+                                    | crate::model::SystemSubtype::MicrocompactBoundary))
+                    )
+                })
+                .count();
+            let files = extract_files_from_tools(&main_entries);
+            let mut tool_counts = HashMap::new();
+            for entry in &main_entries {
+                for name in extract_tool_names(entry) {
+                    *tool_counts.entry(name).or_default() += 1;
+                }
+            }
+            let first_prompt = prompts.first().cloned();
+            let member_count = unit.members.len();
+            session_entries.push(ProjectSessionEntry {
+                session_id: unit.root.native_id.clone(),
+                provider: Some(unit.root.provider.to_string()),
+                qualified_id: Some(unit.root.to_string()),
+                slug: None,
+                chain_id: (member_count > 1).then(|| unit.root.to_string()),
+                chain_length: (member_count > 1).then_some(member_count),
+                is_subagent: unit.root.namespace != SessionNamespace::global(),
+                parent_session_id: fork_parent.get(&unit.root).cloned(),
+                start_time: analytics.start_time.map(|time| time.to_rfc3339()),
+                end_time: analytics.end_time.map(|time| time.to_rfc3339()),
+                span: analytics.duration_string(),
+                compaction_count,
+                git_branch: branch,
+                user_prompt_count: prompt_count,
+                first_prompt,
+                key_prompts: prompts,
+                tools_summary: tool_counts,
+                files_touched: files.into_iter().take(10).collect(),
+                estimated_cost: usage.pricing.estimated_cost,
+                total_tokens: usage.canonical.total_processed_tokens,
+            });
+        }
+
+        session_entries.retain(|entry| entry.user_prompt_count > 0 || entry.total_tokens > 0);
+        session_entries.sort_by(|a, b| {
+            b.start_time
+                .cmp(&a.start_time)
+                .then_with(|| a.qualified_id.cmp(&b.qualified_id))
+        });
+        if limit < session_entries.len() {
+            session_entries.truncate(limit);
+        }
+        let total_tokens = session_entries
+            .iter()
+            .fold(0_u64, |sum, entry| sum.saturating_add(entry.total_tokens));
+        let total_prompts = session_entries
+            .iter()
+            .map(|entry| entry.user_prompt_count)
+            .sum();
+        let has_unpriced = session_entries
+            .iter()
+            .any(|entry| entry.estimated_cost.is_none());
+        let total_cost = (!has_unpriced).then(|| {
+            session_entries
+                .iter()
+                .filter_map(|entry| entry.estimated_cost)
+                .sum()
+        });
+        let mut branches: Vec<_> = session_entries
+            .iter()
+            .filter_map(|entry| entry.git_branch.clone())
+            .collect();
+        branches.sort();
+        branches.dedup();
+        let sessions_found = session_entries.len();
+        let response = ProjectHistoryResponse {
+            project_path: project
+                .display_path
+                .clone()
+                .unwrap_or_else(|| project.identity.to_string()),
+            project_key: Some(project.identity.to_string()),
+            providers: project.providers.iter().map(ToString::to_string).collect(),
+            period: period.to_string(),
+            sessions_found,
+            sessions: session_entries,
+            aggregate: ProjectAggregate {
+                total_sessions: sessions_found,
+                total_tokens,
+                total_cost,
+                has_unpriced_sessions: Some(has_unpriced),
+                total_prompts,
+                active_branches: branches,
+            },
+            skipped_providers: collected
+                .skipped
+                .iter()
+                .map(|(id, _)| format!("{id}: unavailable"))
+                .collect(),
+            project_warnings: collected
+                .context_warnings
+                .iter()
+                .map(|warning| format!("{}: project metadata unavailable", warning.key))
+                .chain(parse_warnings)
+                .collect(),
+            activity_basis: Some("new-activity-only".into()),
+        };
+        ToolOutput::json(&response)
+            .unwrap_or_else(|error| ToolOutput::error(format!("JSON serialization error: {error}")))
+    }
+
     pub(crate) fn get_claude_dir(&self) -> Result<ClaudeDirectory, String> {
         let result = if let Some(ref path) = self.claude_dir {
             ClaudeDirectory::from_path(path.clone())
@@ -292,6 +661,20 @@ impl SnatchServer {
             ClaudeDirectory::discover()
         };
         result.map_err(|e| format!("Failed to access Claude directory: {e}"))
+    }
+}
+
+/// Resolve the persistence namespace for goals/notes/decisions. These stores
+/// still live in Claude Code project memory; naming another provider must fail
+/// before project resolution so callers cannot mistake them for union data.
+fn claude_registry_scope(provider: Option<&str>) -> Result<bool, String> {
+    match provider {
+        None => Ok(false),
+        Some("claude-code") => Ok(true),
+        Some(other) => Err(format!(
+            "registry storage is scoped to 'claude-code', not '{other}'; \
+             cross-provider goals/notes/decisions are not available"
+        )),
     }
 }
 
@@ -307,23 +690,12 @@ impl SnatchServer {
     )]
     async fn list_sessions(&self, request: ListSessionsRequest) -> ToolOutput {
         if let Some(flags) = request.provider.as_ref().filter(|f| !f.is_empty()) {
-            // Scope arguments the provider route does not implement are
-            // refused, never ignored — silently returning sessions outside
-            // the requested project would be a scope/privacy bug (round-18).
-            if request.project.is_some() {
-                return ToolOutput::error(
-                    "'project' is not supported with 'provider' yet (provider-neutral \
-                     listing has no project scoping until normalization); refused rather \
-                     than ignored",
-                );
-            }
-            if request.include_subagents.is_some() {
-                return ToolOutput::error(
-                    "'include_subagents' is not supported with 'provider'; refused rather \
-                     than ignored",
-                );
-            }
-            return self.provider_sessions_output(flags, request.limit.unwrap_or(50));
+            return self.provider_sessions_output(
+                flags,
+                request.project.as_deref(),
+                request.include_subagents.unwrap_or(false),
+                request.limit.unwrap_or(50),
+            );
         }
 
         let claude_dir = match self.get_claude_dir() {
@@ -1322,9 +1694,12 @@ impl SnatchServer {
     /// Get a cross-session overview for a project, showing what was worked on
     /// across sessions with key prompts, tools used, and files touched.
     #[tool(
-        description = "Get cross-session history for a project. Shows sessions with key prompts, tools, files, and costs. Filter by period (24h/7d/30d/all). Use to understand what has been worked on across sessions."
+        description = "Get cross-session history for a project. Shows sessions with key prompts, tools, files, and costs. Filter by period (24h/7d/30d/all). Omit provider for the classic Claude-only path; set provider=['all'] (or explicit providers) for a cwd/git-unified history. Provider unions exclude fork-inherited history and collapse only typed continuations."
     )]
     async fn get_project_history(&self, request: GetProjectHistoryRequest) -> ToolOutput {
+        if request.provider.is_some() {
+            return self.provider_project_history(&request);
+        }
         let claude_dir = match get_claude_dir(self) {
             Ok(dir) => dir,
             Err(e) => return e,
@@ -1490,6 +1865,8 @@ impl SnatchServer {
 
                 session_entries.push(ProjectSessionEntry {
                     session_id: session.session_id().to_string(),
+                    provider: None,
+                    qualified_id: None,
                     slug,
                     chain_id,
                     chain_length,
@@ -1525,16 +1902,22 @@ impl SnatchServer {
 
         let response = ProjectHistoryResponse {
             project_path,
+            project_key: None,
+            providers: Vec::new(),
             period: period.to_string(),
             sessions_found,
             sessions: session_entries,
             aggregate: ProjectAggregate {
                 total_sessions: sessions_found,
                 total_tokens: agg_tokens,
-                total_cost: agg_cost,
+                total_cost: Some(agg_cost),
+                has_unpriced_sessions: None,
                 total_prompts: agg_prompts,
                 active_branches: branches,
             },
+            skipped_providers: Vec::new(),
+            project_warnings: Vec::new(),
+            activity_basis: None,
         };
 
         match ToolOutput::json(&response) {
@@ -1976,12 +2359,17 @@ impl SnatchServer {
     // Goal Management
     // ========================================================================
 
-    /// Manage persistent goals for a project. Goals survive compaction and sessions.
+    /// Manage persistent goals in Claude Code project-memory storage.
     #[tool(
-        description = "Manage persistent goals for a project. Operations: list, add, update, remove. Goals survive compaction and sessions."
+        description = "Manage persistent goals in the Claude Code project-memory registry (not a cross-provider union). Operations: list, add, update, remove. Omit provider or use provider='claude-code'."
     )]
     async fn manage_goals(&self, request: ManageGoalsRequest) -> ToolOutput {
         use crate::goals::{load_goals, save_goals, GoalStatus};
+
+        let explicit_scope = match claude_registry_scope(request.provider.as_deref()) {
+            Ok(explicit) => explicit,
+            Err(error) => return ToolOutput::error(error),
+        };
 
         let resolved = match resolve_project(self, &request.project) {
             Ok(r) => r,
@@ -2011,6 +2399,7 @@ impl SnatchServer {
                 let response = ManageGoalsResponse {
                     operation: "list".into(),
                     project_path: resolved.project_path,
+                    storage_provider: explicit_scope.then(|| "claude-code".into()),
                     message: Some(format!("{} goal(s)", goals.len())),
                     goals: Some(goals),
                     goal: None,
@@ -2038,6 +2427,7 @@ impl SnatchServer {
                 let response = ManageGoalsResponse {
                     operation: "add".into(),
                     project_path: resolved.project_path,
+                    storage_provider: explicit_scope.then(|| "claude-code".into()),
                     message: Some(format!("Added goal #{id}")),
                     goals: None,
                     goal: Some(GoalEntry {
@@ -2096,6 +2486,7 @@ impl SnatchServer {
                 let response = ManageGoalsResponse {
                     operation: "update".into(),
                     project_path: resolved.project_path,
+                    storage_provider: explicit_scope.then(|| "claude-code".into()),
                     message: Some(format!("Updated goal #{id}")),
                     goals: None,
                     goal: Some(GoalEntry {
@@ -2131,6 +2522,7 @@ impl SnatchServer {
                 let response = ManageGoalsResponse {
                     operation: "remove".into(),
                     project_path: resolved.project_path,
+                    storage_provider: explicit_scope.then(|| "claude-code".into()),
                     message: Some(format!("Removed goal #{id}")),
                     goals: None,
                     goal: None,
@@ -2201,12 +2593,17 @@ impl SnatchServer {
     // Tactical Notes
     // ========================================================================
 
-    /// Manage tactical session notes for a project. Notes capture work state that survives compaction.
+    /// Manage tactical notes in Claude Code project-memory storage.
     #[tool(
-        description = "Manage tactical session notes for a project. Notes capture mid-work state (\"tried X, failed because Y\") that survives compaction. Operations: list, add, update, remove, clear."
+        description = "Manage tactical notes in the Claude Code project-memory registry (not a cross-provider union). Operations: list, add, update, remove, clear. Omit provider or use provider='claude-code'."
     )]
     async fn manage_notes(&self, request: ManageNotesRequest) -> ToolOutput {
         use crate::notes::{load_notes, save_notes};
+
+        let explicit_scope = match claude_registry_scope(request.provider.as_deref()) {
+            Ok(explicit) => explicit,
+            Err(error) => return ToolOutput::error(error),
+        };
 
         let resolved = match resolve_project(self, &request.project) {
             Ok(r) => r,
@@ -2236,6 +2633,7 @@ impl SnatchServer {
                 let response = ManageNotesResponse {
                     operation: "list".into(),
                     project_path: resolved.project_path,
+                    storage_provider: explicit_scope.then(|| "claude-code".into()),
                     message: Some(format!("{} note(s)", notes.len())),
                     notes: Some(notes),
                     note: None,
@@ -2266,6 +2664,7 @@ impl SnatchServer {
                 let response = ManageNotesResponse {
                     operation: "add".into(),
                     project_path: resolved.project_path,
+                    storage_provider: explicit_scope.then(|| "claude-code".into()),
                     message: Some(format!("Added note #{id}")),
                     notes: None,
                     note: Some(NoteEntry {
@@ -2319,6 +2718,7 @@ impl SnatchServer {
                 let response = ManageNotesResponse {
                     operation: "update".into(),
                     project_path: resolved.project_path,
+                    storage_provider: explicit_scope.then(|| "claude-code".into()),
                     message: Some(format!("Updated note #{id}")),
                     notes: None,
                     note: Some(NoteEntry {
@@ -2354,6 +2754,7 @@ impl SnatchServer {
                 let response = ManageNotesResponse {
                     operation: "remove".into(),
                     project_path: resolved.project_path,
+                    storage_provider: explicit_scope.then(|| "claude-code".into()),
                     message: Some(format!("Removed note #{id}")),
                     notes: None,
                     note: None,
@@ -2375,6 +2776,7 @@ impl SnatchServer {
                 let response = ManageNotesResponse {
                     operation: "clear".into(),
                     project_path: resolved.project_path,
+                    storage_provider: explicit_scope.then(|| "claude-code".into()),
                     message: Some(format!("Cleared {removed} note(s)")),
                     notes: None,
                     note: None,
@@ -2393,10 +2795,15 @@ impl SnatchServer {
     }
 
     #[tool(
-        description = "Manage a persistent decision registry for a project. Decisions track design choices with status, confidence, tags, and session provenance. Operations: list, add, update, remove, supersede. For confidence auto-scoring use CLI: snatch decisions score -p <project>."
+        description = "Manage the persistent Claude Code project-memory decision registry (not a cross-provider union). Operations: list, add, update, remove, supersede. Omit provider or use provider='claude-code'. For confidence auto-scoring use CLI: snatch decisions score -p <project>."
     )]
     async fn manage_decisions(&self, request: ManageDecisionsRequest) -> ToolOutput {
         use crate::decisions::{load_decisions, save_decisions, DecisionStatus, DecisionUpdate};
+
+        let explicit_scope = match claude_registry_scope(request.provider.as_deref()) {
+            Ok(explicit) => explicit,
+            Err(error) => return ToolOutput::error(error),
+        };
 
         let resolved = match resolve_project(self, &request.project) {
             Ok(r) => r,
@@ -2453,6 +2860,7 @@ impl SnatchServer {
                 let response = ManageDecisionsResponse {
                     operation: "list".into(),
                     project_path: resolved.project_path,
+                    storage_provider: explicit_scope.then(|| "claude-code".into()),
                     message: Some(format!("{} decision(s)", entries.len())),
                     decisions: Some(entries),
                     decision: None,
@@ -2515,6 +2923,7 @@ impl SnatchServer {
                 let response = ManageDecisionsResponse {
                     operation: "add".into(),
                     project_path: resolved.project_path,
+                    storage_provider: explicit_scope.then(|| "claude-code".into()),
                     message: Some(format!("Added decision #{id}")),
                     decisions: None,
                     decision: Some(to_entry(decision)),
@@ -2586,6 +2995,7 @@ impl SnatchServer {
                 let response = ManageDecisionsResponse {
                     operation: "update".into(),
                     project_path: resolved.project_path,
+                    storage_provider: explicit_scope.then(|| "claude-code".into()),
                     message: Some(format!("Updated decision #{id}")),
                     decisions: None,
                     decision: Some(to_entry(decision)),
@@ -2614,6 +3024,7 @@ impl SnatchServer {
                 let response = ManageDecisionsResponse {
                     operation: "remove".into(),
                     project_path: resolved.project_path,
+                    storage_provider: explicit_scope.then(|| "claude-code".into()),
                     message: Some(format!("Removed decision #{id}")),
                     decisions: None,
                     decision: None,
@@ -2651,6 +3062,7 @@ impl SnatchServer {
                 let response = ManageDecisionsResponse {
                     operation: "supersede".into(),
                     project_path: resolved.project_path,
+                    storage_provider: explicit_scope.then(|| "claude-code".into()),
                     message: Some(format!("Decision #{id} superseded by #{by}")),
                     decisions: None,
                     decision: Some(to_entry(decision)),
@@ -3492,12 +3904,83 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn persistent_registries_are_explicitly_claude_storage_scoped() {
+        let sid = "abababab-1111-2222-3333-444444444444";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let server = make_server(&tmp);
+
+        let goals = server
+            .manage_goals(ManageGoalsRequest {
+                operation: "list".into(),
+                project: PROJECT_PATH.into(),
+                provider: Some("codex".into()),
+                text: None,
+                id: None,
+                status: None,
+                progress: None,
+            })
+            .await;
+        let notes = server
+            .manage_notes(ManageNotesRequest {
+                operation: "list".into(),
+                project: PROJECT_PATH.into(),
+                provider: Some("all".into()),
+                text: None,
+                session_id: None,
+                id: None,
+                resurface_when: None,
+                expires_when: None,
+            })
+            .await;
+        let decisions = server
+            .manage_decisions(ManageDecisionsRequest {
+                operation: "list".into(),
+                project: PROJECT_PATH.into(),
+                provider: Some("codex".into()),
+                title: None,
+                description: None,
+                id: None,
+                status: None,
+                confidence: None,
+                tags: None,
+                superseded_by: None,
+                session_id: None,
+                resurface_when: None,
+                expires_when: None,
+            })
+            .await;
+        for output in [goals, notes, decisions] {
+            let message = format!("{output:?}");
+            assert!(
+                message.contains("scoped to 'claude-code'"),
+                "got: {message}"
+            );
+        }
+
+        let explicit = unwrap_output(
+            server
+                .manage_goals(ManageGoalsRequest {
+                    operation: "list".into(),
+                    project: PROJECT_PATH.into(),
+                    provider: Some("claude-code".into()),
+                    text: None,
+                    id: None,
+                    status: None,
+                    progress: None,
+                })
+                .await,
+        );
+        let explicit: serde_json::Value = serde_json::from_str(&explicit).unwrap();
+        assert_eq!(explicit["storage_provider"], "claude-code");
+    }
+
     fn make_server(tmp: &TempDir) -> SnatchServer {
         SnatchServer::new(Some(tmp.path().to_path_buf()), None)
     }
 
     #[cfg(feature = "codex")]
-    fn setup_codex_dir() -> (TempDir, String) {
+    fn setup_codex_dir_with_cwd(cwd: &str) -> (TempDir, String) {
         let tmp = TempDir::new().unwrap();
         let day = tmp.path().join("sessions/2026/07/17");
         std::fs::create_dir_all(&day).unwrap();
@@ -3513,7 +3996,7 @@ mod tests {
         let content = [
             line(
                 "session_meta",
-                serde_json::json!({"id": thread, "cwd": "/tmp/mcp-codex"}),
+                serde_json::json!({"id": thread, "cwd": cwd}),
             ),
             line(
                 "turn_context",
@@ -3565,6 +4048,224 @@ mod tests {
         )
         .unwrap();
         (tmp, thread.to_string())
+    }
+
+    #[cfg(feature = "codex")]
+    fn setup_codex_dir() -> (TempDir, String) {
+        setup_codex_dir_with_cwd("/tmp/mcp-codex")
+    }
+
+    #[cfg(feature = "codex")]
+    fn setup_codex_fork_dir_with_cwd(cwd: &str) -> (TempDir, String, String) {
+        let tmp = TempDir::new().unwrap();
+        let day = tmp.path().join("sessions/2026/07/17");
+        std::fs::create_dir_all(&day).unwrap();
+        let parent = "019f7000-0000-7000-8000-000000000101";
+        let child = "019f7000-0000-7000-8000-000000000102";
+        let envelope = |timestamp: &str, kind: &str, payload: serde_json::Value| {
+            serde_json::json!({
+                "timestamp": timestamp,
+                "type": kind,
+                "payload": payload,
+            })
+        };
+        let usage = |input: u64, output: u64| {
+            serde_json::json!({
+                "input_tokens": input,
+                "cached_input_tokens": 0,
+                "output_tokens": output,
+                "total_tokens": input + output,
+            })
+        };
+        let parent_records = vec![
+            envelope(
+                "2026-07-17T00:00:00Z",
+                "session_meta",
+                serde_json::json!({"id": parent, "cwd": cwd}),
+            ),
+            envelope(
+                "2026-07-17T00:00:01Z",
+                "turn_context",
+                serde_json::json!({"turn_id": "parent-turn", "model": "gpt-test"}),
+            ),
+            envelope(
+                "2026-07-17T00:00:02Z",
+                "response_item",
+                serde_json::json!({"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "parent prompt long enough"}]}),
+            ),
+            envelope(
+                "2026-07-17T00:00:03Z",
+                "event_msg",
+                serde_json::json!({"type": "user_message", "message": "parent prompt long enough",
+                    "images": [], "local_images": [], "text_elements": []}),
+            ),
+            envelope(
+                "2026-07-17T00:00:04Z",
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "parent answer"}]}),
+            ),
+            envelope(
+                "2026-07-17T00:00:05Z",
+                "event_msg",
+                serde_json::json!({"type": "token_count", "info": {
+                    "last_token_usage": usage(10, 2),
+                    "total_token_usage": usage(10, 2)}}),
+            ),
+        ];
+        let serialize = |records: &[serde_json::Value]| {
+            records
+                .iter()
+                .map(serde_json::Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n"
+        };
+        std::fs::write(
+            day.join(format!("rollout-2026-07-17T00-00-00-{parent}.jsonl")),
+            serialize(&parent_records),
+        )
+        .unwrap();
+
+        let mut child_records = vec![envelope(
+            "2026-07-17T01:00:00Z",
+            "session_meta",
+            serde_json::json!({"id": child, "cwd": cwd}),
+        )];
+        child_records.extend(parent_records.iter().cloned().map(|mut record| {
+            record["timestamp"] = serde_json::json!("2026-07-17T01:00:01Z");
+            record
+        }));
+        child_records.extend([
+            envelope(
+                "2026-07-17T01:00:10Z",
+                "turn_context",
+                serde_json::json!({"turn_id": "child-turn", "model": "gpt-test"}),
+            ),
+            envelope(
+                "2026-07-17T01:00:11Z",
+                "response_item",
+                serde_json::json!({"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "child prompt long enough"}]}),
+            ),
+            envelope(
+                "2026-07-17T01:00:12Z",
+                "event_msg",
+                serde_json::json!({"type": "user_message", "message": "child prompt long enough",
+                    "images": [], "local_images": [], "text_elements": []}),
+            ),
+            envelope(
+                "2026-07-17T01:00:13Z",
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "child answer"}]}),
+            ),
+            envelope(
+                "2026-07-17T01:00:14Z",
+                "event_msg",
+                serde_json::json!({"type": "token_count", "info": {
+                    "last_token_usage": usage(10, 2),
+                    "total_token_usage": usage(20, 4)}}),
+            ),
+        ]);
+        std::fs::write(
+            day.join(format!("rollout-2026-07-17T01-00-00-{child}.jsonl")),
+            serialize(&child_records),
+        )
+        .unwrap();
+        (tmp, parent.to_string(), child.to_string())
+    }
+
+    #[cfg(feature = "codex")]
+    #[tokio::test]
+    async fn provider_project_history_unifies_cwd_and_reports_unpriced_cost() {
+        let claude_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        let claude = setup_claude_dir(claude_id, PROJECT_PATH, &minimal_session_jsonl(claude_id));
+        let (codex, thread) = setup_codex_dir_with_cwd(PROJECT_PATH);
+        let server = make_server(&claude).with_codex_dir(codex.path());
+        let output = unwrap_output(
+            server
+                .get_project_history(GetProjectHistoryRequest {
+                    project: PROJECT_PATH.to_string(),
+                    provider: Some(vec!["all".to_string()]),
+                    period: Some("all".to_string()),
+                    limit: None,
+                    include_summaries: Some(true),
+                })
+                .await,
+        );
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["sessions_found"], 2);
+        assert_eq!(value["aggregate"]["total_sessions"], 2);
+        assert!(value["aggregate"]["total_cost"].is_null());
+        assert_eq!(value["aggregate"]["has_unpriced_sessions"], true);
+        assert_eq!(value["activity_basis"], "new-activity-only");
+        assert_eq!(
+            value["providers"],
+            serde_json::json!(["claude-code", "codex"])
+        );
+        let ids: std::collections::BTreeSet<_> = value["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|session| session["qualified_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                format!("claude-code:{claude_id}"),
+                format!("codex:{thread}"),
+            ]
+            .iter()
+            .map(String::as_str)
+            .collect()
+        );
+    }
+
+    #[cfg(feature = "codex")]
+    #[tokio::test]
+    async fn provider_project_history_never_double_counts_fork_inherited_activity() {
+        let claude = setup_claude_dir(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "/tmp/unrelated-claude-project",
+            &minimal_session_jsonl("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        );
+        let project = "/tmp/mcp-codex-fork-project";
+        let (codex, parent, child) = setup_codex_fork_dir_with_cwd(project);
+        let server = make_server(&claude).with_codex_dir(codex.path());
+        let output = unwrap_output(
+            server
+                .get_project_history(GetProjectHistoryRequest {
+                    project: project.to_string(),
+                    provider: Some(vec!["codex".to_string()]),
+                    period: Some("all".to_string()),
+                    limit: None,
+                    include_summaries: Some(false),
+                })
+                .await,
+        );
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let sessions = value["sessions"].as_array().unwrap();
+        assert_eq!(
+            sessions.len(),
+            2,
+            "fork remains an independent history unit"
+        );
+        assert_eq!(value["aggregate"]["total_prompts"], 2);
+        assert_eq!(value["aggregate"]["total_tokens"], 24);
+        let by_id: std::collections::BTreeMap<_, _> = sessions
+            .iter()
+            .map(|session| (session["session_id"].as_str().unwrap(), session))
+            .collect();
+        assert_eq!(by_id[parent.as_str()]["user_prompt_count"], 1);
+        assert_eq!(by_id[child.as_str()]["user_prompt_count"], 1);
+        assert_eq!(by_id[parent.as_str()]["total_tokens"], 12);
+        assert_eq!(by_id[child.as_str()]["total_tokens"], 12);
+        assert_eq!(
+            by_id[child.as_str()]["parent_session_id"],
+            format!("codex:{parent}")
+        );
     }
 
     #[cfg(feature = "codex")]
@@ -4019,6 +4720,7 @@ mod tests {
             server
                 .get_project_history(GetProjectHistoryRequest {
                     project: "test-project".to_string(),
+                    provider: None,
                     period: Some("all".to_string()),
                     limit: None,
                     include_summaries: None,
@@ -4408,29 +5110,83 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_list_sessions_refuses_scope_args_rather_than_ignoring() {
+    async fn provider_list_sessions_honors_project_and_subagent_scope() {
         let sid = "abcdabcd-5555-6666-7777-888899990000";
         let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let subagents = tmp
+            .path()
+            .join("projects")
+            .join(encode_project_path(PROJECT_PATH))
+            .join(sid)
+            .join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(
+            subagents.join("agent-scope.jsonl"),
+            format!(
+                "{}\n",
+                r#"{"type":"assistant","uuid":"scope-a","parentUuid":null,"timestamp":"2026-06-09T18:00:01Z","sessionId":"agent-scope","version":"2.1.0","isSidechain":true,"message":{"id":"scope-m","type":"message","role":"assistant","model":"claude","content":[{"type":"text","text":"scoped subagent"}]}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            subagents.join("agent-scope.meta.json"),
+            r#"{"agentType":"Explore","description":"scope test"}"#,
+        )
+        .unwrap();
         let server = make_server(&tmp);
-        for (project, include_subagents) in [
-            (Some("proj".to_string()), None),
-            (None, Some(true)),
-            (None, Some(false)),
-        ] {
-            let out = server
+
+        let filtered = unwrap_output(
+            server
                 .list_sessions(ListSessionsRequest {
-                    project,
+                    project: Some("test-project".to_string()),
                     limit: None,
-                    include_subagents,
+                    include_subagents: Some(false),
                     provider: Some(vec!["claude-code".to_string()]),
                 })
-                .await;
-            let msg = format!("{out:?}");
-            assert!(
-                msg.contains("refused rather than ignored"),
-                "scope arg must be refused, got: {msg}"
-            );
-        }
+                .await,
+        );
+        let filtered: serde_json::Value = serde_json::from_str(&filtered).unwrap();
+        assert_eq!(filtered["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            filtered["sessions"][0]["qualified_id"],
+            format!("claude-code:{sid}")
+        );
+        assert_eq!(filtered["sessions"][0]["is_subagent"], false);
+        assert!(filtered["sessions"][0]["project_key"]
+            .as_str()
+            .unwrap()
+            .contains("test-project"));
+
+        let included = unwrap_output(
+            server
+                .list_sessions(ListSessionsRequest {
+                    project: Some("does-not-match".to_string()),
+                    limit: None,
+                    include_subagents: Some(true),
+                    provider: Some(vec!["claude-code".to_string()]),
+                })
+                .await,
+        );
+        let included: serde_json::Value = serde_json::from_str(&included).unwrap();
+        assert_eq!(included["sessions"].as_array().unwrap().len(), 0);
+
+        let included = unwrap_output(
+            server
+                .list_sessions(ListSessionsRequest {
+                    project: Some("test-project".to_string()),
+                    limit: None,
+                    include_subagents: Some(true),
+                    provider: Some(vec!["claude-code".to_string()]),
+                })
+                .await,
+        );
+        let included: serde_json::Value = serde_json::from_str(&included).unwrap();
+        assert_eq!(included["sessions"].as_array().unwrap().len(), 2);
+        assert!(included["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["is_subagent"] == true));
     }
 
     #[tokio::test]

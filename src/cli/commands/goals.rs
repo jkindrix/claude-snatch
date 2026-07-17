@@ -1,7 +1,7 @@
 //! Goals command implementation.
 //!
-//! Manage persistent goals for a project. Goals survive compaction
-//! and sessions, enabling long-term intent tracking.
+//! Manage persistent goals in Claude Code project-memory storage. Goals
+//! survive compaction and sessions, enabling long-term intent tracking.
 
 use crate::cli::{Cli, GoalsArgs, OutputFormat};
 use crate::error::{Result, SnatchError};

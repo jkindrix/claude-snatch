@@ -310,7 +310,7 @@ pub enum Commands {
     #[command(display_order = 26)]
     Chunks(ChunksArgs),
 
-    /// Manage persistent goals for a project.
+    /// Manage goals in Claude Code project-memory storage (not provider-unified).
     #[command(display_order = 27)]
     Goals(GoalsArgs),
 
@@ -318,11 +318,11 @@ pub enum Commands {
     #[command(display_order = 28)]
     Digest(DigestArgs),
 
-    /// Manage tactical session notes for a project.
+    /// Manage notes in Claude Code project-memory storage (not provider-unified).
     #[command(display_order = 29)]
     Notes(NotesArgs),
 
-    /// Manage a persistent decision registry for a project.
+    /// Manage decisions in Claude Code project-memory storage (not provider-unified).
     #[command(display_order = 30)]
     Decisions(DecisionsArgs),
 
@@ -2067,7 +2067,7 @@ pub struct LessonsArgs {
     pub all: bool,
 }
 
-/// Arguments for the goals command.
+/// Arguments for the Claude Code project-memory goals command.
 #[derive(Debug, Parser)]
 pub struct GoalsArgs {
     /// Operation: list, add, update, remove (default: list).
@@ -2105,7 +2105,7 @@ pub struct DigestArgs {
     pub max_prompts: usize,
 }
 
-/// Arguments for the notes command.
+/// Arguments for the Claude Code project-memory notes command.
 #[derive(Debug, Parser)]
 pub struct NotesArgs {
     /// Operation: list, add, update, remove, clear (default: list).
@@ -2136,7 +2136,7 @@ pub struct NotesArgs {
     pub expires_when: Option<String>,
 }
 
-/// Arguments for the decisions command.
+/// Arguments for the Claude Code project-memory decisions command.
 #[derive(Debug, Parser)]
 pub struct DecisionsArgs {
     /// Operation: list, add, update, remove, supersede (default: list).

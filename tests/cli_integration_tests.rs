@@ -2584,29 +2584,39 @@ mod codex_normalization_cli {
     }
 
     #[test]
-    fn cross_session_lessons_refuse_provider_requests_until_union_semantics_exist() {
+    fn cross_session_lessons_use_provider_union_and_reject_inert_qualified_ids() {
         let claude = setup_fixture_dir();
         let codex = lessons_home();
-        let cases = vec![
-            vec!["lessons", "--all", "--provider", "codex"]
-                .into_iter()
-                .map(str::to_string)
-                .collect::<Vec<_>>(),
-            vec![
-                "lessons".to_string(),
-                format!("codex:{THREAD}"),
-                "--all".to_string(),
-            ],
-        ];
-        for args in cases {
-            snatch_cmd()
-                .env("SNATCH_CLAUDE_DIR", claude.path())
-                .env("CODEX_HOME", codex.path())
-                .args(args)
-                .assert()
-                .failure()
-                .stderr(predicate::str::contains("Phase D"));
-        }
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "lessons", "--all", "--provider", "all"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            value["providers"],
+            serde_json::json!(["claude-code", "codex"])
+        );
+        assert_eq!(value["sessions_scanned"], 2);
+        assert_eq!(value["summary"]["total_errors"], 2);
+        assert_eq!(value["summary"]["total_corrections"], 1);
+        assert_eq!(value["activity_basis"], "new-activity-only");
+        assert_eq!(
+            value["error_fix_pairs"][0]["session_id"],
+            format!("codex:{THREAD}")
+        );
+
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["lessons", &format!("codex:{THREAD}"), "--all"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("cannot be combined"));
     }
 
     #[test]

@@ -11,7 +11,9 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 
-use super::{ParsedSession, ProviderId, SessionDescriptor};
+use super::{
+    LineageEdge, LineageEdgeKind, LogicalSessionKey, ParsedSession, ProviderId, SessionDescriptor,
+};
 use crate::model::LogEntry;
 
 /// Native and locally-derived evidence tying one session to a project.
@@ -152,6 +154,17 @@ pub struct UnifiedProject {
     pub providers: Vec<ProviderId>,
     /// Sessions in qualified-key order.
     pub sessions: Vec<ProjectSession>,
+}
+
+/// One cross-session history unit. Continuation members collapse into one
+/// logical conversation; forks remain independent; spawned subagents are
+/// excluded from the project-level main-session history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectHistoryUnit {
+    /// Root session shown to callers.
+    pub root: LogicalSessionKey,
+    /// Continuation members in parent-depth/key order (root first).
+    pub members: Vec<LogicalSessionKey>,
 }
 
 impl UnifiedProject {
@@ -400,6 +413,87 @@ pub fn group_sessions(sessions: Vec<ProjectSession>) -> Vec<UnifiedProject> {
         .collect()
 }
 
+/// Build logical history units from typed lineage.
+///
+/// Only `Continuation` collapses sessions. `Fork` must remain visible as its
+/// own work stream (with inherited entries removed later), while `Spawn`
+/// identifies subagent sessions omitted from the main project history.
+#[must_use]
+pub fn history_units(project: &UnifiedProject, lineage: &[LineageEdge]) -> Vec<ProjectHistoryUnit> {
+    let keys: BTreeSet<LogicalSessionKey> = project
+        .sessions
+        .iter()
+        .map(|session| session.descriptor.key.clone())
+        .collect();
+    let mut continuation_parent: BTreeMap<LogicalSessionKey, LogicalSessionKey> = BTreeMap::new();
+    let mut spawned = BTreeSet::new();
+    for edge in lineage {
+        if !keys.contains(&edge.to) {
+            continue;
+        }
+        match edge.kind {
+            LineageEdgeKind::Continuation if keys.contains(&edge.from) => {
+                continuation_parent
+                    .entry(edge.to.clone())
+                    .and_modify(|parent| {
+                        if edge.from < *parent {
+                            parent.clone_from(&edge.from);
+                        }
+                    })
+                    .or_insert_with(|| edge.from.clone());
+            }
+            LineageEdgeKind::Spawn { .. } => {
+                spawned.insert(edge.to.clone());
+            }
+            LineageEdgeKind::Continuation | LineageEdgeKind::Fork => {}
+        }
+    }
+
+    fn root_and_depth(
+        key: &LogicalSessionKey,
+        parents: &BTreeMap<LogicalSessionKey, LogicalSessionKey>,
+    ) -> (LogicalSessionKey, usize) {
+        let mut current = key.clone();
+        let mut path = Vec::new();
+        loop {
+            if let Some(cycle_start) = path.iter().position(|seen| seen == &current) {
+                // Malformed provider lineage must still group deterministically
+                // rather than splitting one cycle differently by starting key.
+                let root = path[cycle_start..]
+                    .iter()
+                    .min()
+                    .cloned()
+                    .expect("cycle contains current key");
+                return (root, 0);
+            }
+            path.push(current.clone());
+            let Some(parent) = parents.get(&current) else {
+                return (current, path.len().saturating_sub(1));
+            };
+            current = parent.clone();
+        }
+    }
+
+    let mut grouped: BTreeMap<LogicalSessionKey, Vec<(usize, LogicalSessionKey)>> = BTreeMap::new();
+    for key in keys {
+        if spawned.contains(&key) {
+            continue;
+        }
+        let (root, depth) = root_and_depth(&key, &continuation_parent);
+        grouped.entry(root).or_default().push((depth, key));
+    }
+    grouped
+        .into_iter()
+        .map(|(root, mut members)| {
+            members.sort();
+            ProjectHistoryUnit {
+                root,
+                members: members.into_iter().map(|(_, key)| key).collect(),
+            }
+        })
+        .collect()
+}
+
 /// A session's provider id, for renderers that do not need the full key.
 #[must_use]
 pub fn session_provider(session: &ProjectSession) -> &ProviderId {
@@ -519,5 +613,107 @@ mod tests {
             normalize_cwd(r"C:\\Users\\Me\\src\\.\\app\\..\\tool\\"),
             Some("c:/Users/Me/src/tool".into())
         );
+    }
+
+    #[test]
+    fn history_collapses_only_continuations_and_omits_spawned_sessions() {
+        let sessions = vec![
+            session("claude-code", "root", "/work/app", None),
+            session("claude-code", "resume", "/work/app", None),
+            session("codex", "fork", "/work/app", None),
+            session("codex", "subagent", "/work/app", None),
+        ];
+        let project = group_sessions(sessions).pop().unwrap();
+        let key = |provider: &str, native: &str| LogicalSessionKey {
+            provider: ProviderId(provider.into()),
+            namespace: SessionNamespace::global(),
+            native_id: native.into(),
+        };
+        let lineage = vec![
+            LineageEdge {
+                from: key("claude-code", "root"),
+                to: key("claude-code", "resume"),
+                kind: LineageEdgeKind::Continuation,
+            },
+            LineageEdge {
+                from: key("claude-code", "root"),
+                to: key("codex", "fork"),
+                kind: LineageEdgeKind::Fork,
+            },
+            LineageEdge {
+                from: key("codex", "fork"),
+                to: key("codex", "subagent"),
+                kind: LineageEdgeKind::Spawn {
+                    tool_use_id: None,
+                    agent_type: None,
+                    description: None,
+                },
+            },
+        ];
+        let units = history_units(&project, &lineage);
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].members.len(), 2);
+        assert_eq!(units[1].root.native_id, "fork");
+        assert!(units
+            .iter()
+            .flat_map(|unit| &unit.members)
+            .all(|key| key.native_id != "subagent"));
+    }
+
+    #[test]
+    fn malformed_continuation_cycle_groups_deterministically() {
+        let project = group_sessions(vec![
+            session("claude-code", "a", "/work/app", None),
+            session("claude-code", "b", "/work/app", None),
+        ])
+        .pop()
+        .unwrap();
+        let key = |native: &str| LogicalSessionKey {
+            provider: ProviderId::claude_code(),
+            namespace: SessionNamespace::global(),
+            native_id: native.into(),
+        };
+        let mut edges = vec![
+            LineageEdge {
+                from: key("a"),
+                to: key("b"),
+                kind: LineageEdgeKind::Continuation,
+            },
+            LineageEdge {
+                from: key("b"),
+                to: key("a"),
+                kind: LineageEdgeKind::Continuation,
+            },
+        ];
+        let forward = history_units(&project, &edges);
+        edges.reverse();
+        let reverse = history_units(&project, &edges);
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.len(), 1);
+        assert_eq!(forward[0].root, key("a"));
+        assert_eq!(forward[0].members, vec![key("a"), key("b")]);
+    }
+
+    #[test]
+    fn cross_session_projection_excludes_inherited_entries_without_hiding_new_work() {
+        use crate::provider::fake::{multi_artifact_key, FakeProvider};
+        use crate::provider::SourceProvider;
+
+        let parsed = FakeProvider.parse(&multi_artifact_key()).unwrap();
+        let inherited = parsed
+            .entries
+            .iter()
+            .filter(|entry| {
+                parsed.semantics.get(&entry.id).is_some_and(|semantics| {
+                    semantics.activity == crate::provider::ActivityKind::InheritedHistory
+                })
+            })
+            .count();
+        assert_eq!(inherited, 1, "fixture must bite");
+        let projected = new_activity_entries(&parsed);
+        assert_eq!(projected.len(), parsed.entries.len() - inherited);
+        assert!(projected
+            .iter()
+            .any(|entry| entry.message_type() == "assistant"));
     }
 }

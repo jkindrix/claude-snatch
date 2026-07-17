@@ -1,7 +1,7 @@
 //! Decisions command implementation.
 //!
-//! Manage a persistent decision registry for a project. Decisions survive
-//! compaction and sessions, enabling design decision tracking.
+//! Manage a persistent decision registry in Claude Code project-memory
+//! storage. Decisions survive compaction and sessions.
 
 use crate::cli::{Cli, DecisionsArgs, OutputFormat};
 use crate::decisions::{load_decisions, save_decisions, DecisionStatus, DecisionUpdate};
