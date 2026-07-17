@@ -2278,18 +2278,11 @@ mod codex_normalization_cli {
     }
 
     #[test]
-    fn midturn_steering_does_not_split_the_turn() {
-        // Round-24 blocker 1: a MidTurn human prompt (unmatched user event
-        // = steering) must NOT open a new timeline turn. Boundary prompt,
-        // assistant output, steering prompt, second assistant output — one
-        // turn_id, ONE turn.
-        //
-        // Scope (round-25): this asserts "does not split" only. The current
-        // ConversationTurn carries a single user_message, so the steering
-        // prompt itself is NOT displayed inside the rendered turn; full
-        // steering-prompt presentation is deferred to the steering slice
-        // (design-doc forward checklist). This test deliberately does not
-        // claim the steering text appears.
+    fn midturn_steering_renders_once_without_splitting_the_turn() {
+        // B3 steering census: one of the two unique unmatched user_message
+        // events in the 226-session corpus occurs between assistant
+        // emissions in one native turn window. It must remain in that turn
+        // AND render once in native human-message order.
         let tmp = TempDir::new().unwrap();
         let day = tmp.path().join("sessions/2026/07/16");
         std::fs::create_dir_all(&day).unwrap();
@@ -2308,7 +2301,8 @@ mod codex_normalization_cli {
                             "content": [{"type": "output_text", "text": "working"}]}}),
             // Steering: user event with NO response twin, mid-window.
             serde_json::json!({"timestamp": "2026-07-16T10:00:04.000Z", "type": "event_msg",
-                "payload": {"type": "user_message", "message": "also check the docs"}}),
+                "payload": {"type": "user_message", "message": "also check the docs",
+                            "images": [], "local_images": [], "text_elements": []}}),
             serde_json::json!({"timestamp": "2026-07-16T10:00:05.000Z", "type": "response_item",
                 "payload": {"type": "message", "role": "assistant",
                             "content": [{"type": "output_text", "text": "done, docs checked"}]}}),
@@ -2341,9 +2335,36 @@ mod codex_normalization_cli {
             "steering split the turn: {text}"
         );
         assert!(text.contains("User: start the task"), "got: {text}");
+        assert_eq!(
+            text.matches("Steering: also check the docs").count(),
+            1,
+            "steering prompt must render exactly once: {text}"
+        );
         assert!(
             text.contains("done, docs checked"),
             "final answer belongs to the same turn: {text}"
+        );
+        let boundary = text.find("User: start the task").unwrap();
+        let steering = text.find("Steering: also check the docs").unwrap();
+        let answer = text.find("Assistant: done, docs checked").unwrap();
+        assert!(
+            boundary < steering && steering < answer,
+            "human emissions and final answer must retain native order: {text}"
+        );
+
+        let json = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", tmp.path())
+            .args(["-o", "json", "timeline", &format!("codex:{THREAD}")])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(
+            value["timeline"][0]["steering_prompts"],
+            serde_json::json!(["also check the docs"])
         );
     }
 

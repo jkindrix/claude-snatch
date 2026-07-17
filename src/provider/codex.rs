@@ -1329,6 +1329,7 @@ mod tests {
         let mut totals = IngestionDiagnostics::default();
         let (mut parsed_ok, mut legacy, mut errors, mut violations) = (0u32, 0u32, 0u32, 0u32);
         let (mut count_mismatches, mut raced) = (0u32, 0u32);
+        let (mut human_boundaries, mut human_midturn) = (0usize, 0usize);
         for d in &sessions {
             assert!(d.validate().is_empty(), "invalid descriptor");
             match p.parse(&d.key) {
@@ -1462,6 +1463,43 @@ mod tests {
                         usage_violations.len()
                     );
 
+                    // (c) Native-derived human-prompt partition: response
+                    // twins open turns; unique same-window user events are
+                    // steering. The oracle is mutation-tested below and
+                    // checks the exact set, not merely aggregate counts.
+                    let prompt_audit = audit_prompt_semantics(&d.key, &raw_records, &session);
+                    assert!(
+                        prompt_audit.violations.is_empty(),
+                        "prompt semantics audit failed: {} violation(s)",
+                        prompt_audit.violations.len()
+                    );
+                    human_boundaries += prompt_audit.boundary_count;
+                    human_midturn += prompt_audit.midturn_count;
+                    let conversation = crate::reconstruction::Conversation::from_parsed_session(
+                        std::sync::Arc::new(session.clone()),
+                    )
+                    .expect("normalized corpus session reconstructs");
+                    let turns = crate::analysis::timeline::semantic_turns(&conversation);
+                    let retained_steering: usize =
+                        turns.iter().map(|t| t.steering_messages.len()).sum();
+                    assert_eq!(
+                        retained_steering, prompt_audit.midturn_count,
+                        "every native-derived midturn prompt must survive semantic grouping"
+                    );
+                    let rendered = crate::analysis::timeline::build_semantic_timeline(
+                        &turns,
+                        &crate::analysis::timeline::TimelineOptions {
+                            limit: usize::MAX,
+                            ..Default::default()
+                        },
+                    );
+                    let rendered_steering: usize =
+                        rendered.iter().map(|t| t.steering_prompts.len()).sum();
+                    assert_eq!(
+                        rendered_steering, prompt_audit.midturn_count,
+                        "every native-derived midturn prompt must survive timeline rendering"
+                    );
+
                     // physical record — compare against an independent count
                     // of the preferred artifact's records. Active sessions
                     // can append between the parse and the count; a mismatch
@@ -1552,7 +1590,8 @@ mod tests {
         eprintln!(
             "codex corpus: {n} sessions, {parsed_ok} parsed, {legacy} legacy-refused, \
              {errors} errors, {violations} provenance violations, {edges} lineage edges, \
-             {raced} raced, records: {totals:?}",
+             {raced} raced, human prompts: {human_boundaries} boundary + \
+             {human_midturn} midturn, records: {totals:?}",
             n = sessions.len()
         );
         assert_eq!(errors, 0, "no session may fail outside the legacy contract");
@@ -2811,6 +2850,148 @@ mod tests {
         suppressed
     }
 
+    /// Human prompt delivery expected from the native stream, independently
+    /// of the normalizer's match plan or semantic sidecar.
+    ///
+    /// A response_item user message with a claim-once, same-window
+    /// user_message event is a turn boundary. A unique user_message event
+    /// without such a response twin is same-turn input (Codex steering).
+    /// Exact duplicate native events are one emission and add no expectation.
+    fn independent_prompt_expectations(
+        raw: &[(u64, serde_json::Value)],
+    ) -> (
+        std::collections::BTreeSet<u64>,
+        std::collections::BTreeSet<u64>,
+    ) {
+        let mut boundaries = std::collections::BTreeSet::new();
+        let mut midturn = std::collections::BTreeSet::new();
+        let mut start = 0usize;
+        let mut i = 0usize;
+        loop {
+            let at_boundary = i == raw.len() || is_window_boundary_raw(&raw[i].1);
+            if at_boundary && i > start {
+                let window = &raw[start..i];
+                let mut representatives: std::collections::HashSet<(String, String, String)> =
+                    std::collections::HashSet::new();
+                let mut users: Vec<(u64, String, bool)> = window
+                    .iter()
+                    .filter(|(_, val)| {
+                        val["type"] == "response_item"
+                            && val["payload"]["type"] == "message"
+                            && val["payload"]["role"] == "user"
+                    })
+                    .map(|(ordinal, val)| (*ordinal, joined_content(&val["payload"]), false))
+                    .collect();
+
+                for (ordinal, val) in window {
+                    if val["type"] != "event_msg" || val["payload"]["type"] != "user_message" {
+                        continue;
+                    }
+                    let fingerprint = (
+                        val["payload"]["type"].as_str().unwrap_or("").to_string(),
+                        val["payload"].to_string(),
+                        val["timestamp"].as_str().unwrap_or("").to_string(),
+                    );
+                    if !representatives.insert(fingerprint) {
+                        continue;
+                    }
+                    let text = val["payload"]["message"].as_str().unwrap_or("");
+                    if let Some(candidate) = users
+                        .iter_mut()
+                        .find(|(_, candidate, claimed)| !*claimed && candidate == text)
+                    {
+                        candidate.2 = true;
+                        boundaries.insert(candidate.0);
+                    } else {
+                        midturn.insert(*ordinal);
+                    }
+                }
+            }
+            if i == raw.len() {
+                break;
+            }
+            if at_boundary {
+                start = i;
+            }
+            i += 1;
+        }
+        (boundaries, midturn)
+    }
+
+    #[derive(Default)]
+    struct PromptAudit {
+        boundary_count: usize,
+        midturn_count: usize,
+        violations: Vec<String>,
+    }
+
+    /// Source-derived audit for human-prompt authorship and delivery.
+    ///
+    /// Expected ids and axes come only from native records. Emitted semantics
+    /// are read afterward as the object under test, and mutation controls
+    /// prove that boundary/midturn and harness/human mistakes are rejected.
+    fn audit_prompt_semantics(
+        key: &LogicalSessionKey,
+        raw: &[(u64, serde_json::Value)],
+        session: &crate::provider::ParsedSession,
+    ) -> PromptAudit {
+        use crate::provider::{PromptAuthorship, PromptDelivery};
+
+        let (boundaries, midturn) = independent_prompt_expectations(raw);
+        let mut expected: std::collections::BTreeMap<crate::provider::EntryId, PromptDelivery> =
+            std::collections::BTreeMap::new();
+        for ordinal in &boundaries {
+            expected.insert(
+                crate::provider::EntryId::deterministic(key, *ordinal, 0),
+                PromptDelivery::TurnBoundary,
+            );
+        }
+        for ordinal in &midturn {
+            expected.insert(
+                crate::provider::EntryId::deterministic(key, *ordinal, 0),
+                PromptDelivery::MidTurn,
+            );
+        }
+
+        let entries: std::collections::BTreeMap<_, _> =
+            session.entries.iter().map(|e| (&e.id, &e.entry)).collect();
+        let mut violations = Vec::new();
+        for (id, delivery) in &expected {
+            if !matches!(entries.get(id), Some(crate::model::LogEntry::User(_))) {
+                violations.push(format!(
+                    "expected human prompt entry {id} is missing or not user"
+                ));
+                continue;
+            }
+            match session.semantics.get(id).and_then(|s| s.prompt) {
+                Some(prompt) if prompt.authorship != PromptAuthorship::Human => violations.push(
+                    format!("expected human prompt {id} has non-human authorship"),
+                ),
+                Some(prompt) if prompt.delivery != *delivery => violations.push(format!(
+                    "expected human prompt {id} has wrong delivery (expected {delivery:?})"
+                )),
+                None => violations.push(format!("expected human prompt {id} has no semantics")),
+                _ => {}
+            }
+        }
+
+        for (id, sem) in &session.semantics {
+            if sem
+                .prompt
+                .is_some_and(|p| p.authorship == PromptAuthorship::Human)
+                && !expected.contains_key(id)
+            {
+                violations.push(format!("unexpected human prompt semantics on {id}"));
+            }
+        }
+
+        PromptAudit {
+            boundary_count: boundaries.len(),
+            midturn_count: midturn.len(),
+            violations,
+        }
+    }
+
     fn independent_suppress_window(
         window: &[(u64, serde_json::Value)],
         suppressed: &mut std::collections::BTreeSet<u64>,
@@ -4003,6 +4184,98 @@ mod tests {
             })
             .count();
         assert_eq!(human_entries, 1, "exactly one human emission");
+    }
+
+    fn prompt_audit_fixture() -> (
+        tempfile::TempDir,
+        crate::provider::ParsedSession,
+        Vec<(u64, serde_json::Value)>,
+    ) {
+        // Mined corpus shapes (226-session census): 1,705 response/event
+        // human prompt pairs, two exact duplicate events, and two unique
+        // unmatched user events. One unmatched event precedes the first
+        // assistant response in its turn; the other occurs between assistant
+        // emissions. This fixture covers the former placement and the current
+        // five-key user_message payload.
+        parse_and_raw(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line(
+                "turn_context",
+                serde_json::json!({"turn_id": "turn-1", "model": "gpt-test"}),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "<environment_context>"}]}),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "start the task"}]}),
+            ),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "user_message", "message": "start the task",
+                    "images": [], "local_images": [], "text_elements": []}),
+            ),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "user_message", "message": "check tests first",
+                    "images": [], "local_images": [], "text_elements": []}),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "tests checked"}]}),
+            ),
+        ])
+    }
+
+    #[test]
+    fn prompt_semantics_audit_accepts_native_boundary_and_steering() {
+        let (_tmp, parsed, raw) = prompt_audit_fixture();
+        let audit = audit_prompt_semantics(&key(THREAD_A), &raw, &parsed);
+        assert!(audit.violations.is_empty(), "{:?}", audit.violations);
+        assert_eq!(audit.boundary_count, 1);
+        assert_eq!(audit.midturn_count, 1);
+    }
+
+    #[test]
+    fn nc_midturn_prompt_reclassified_as_boundary_is_rejected() {
+        let (_tmp, mut parsed, raw) = prompt_audit_fixture();
+        let id = crate::provider::EntryId::deterministic(&key(THREAD_A), 5, 0);
+        parsed.semantics.get_mut(&id).unwrap().prompt = Some(crate::provider::PromptSemantics {
+            authorship: crate::provider::PromptAuthorship::Human,
+            delivery: crate::provider::PromptDelivery::TurnBoundary,
+        });
+        let audit = audit_prompt_semantics(&key(THREAD_A), &raw, &parsed);
+        assert!(
+            audit
+                .violations
+                .iter()
+                .any(|v| v.contains("wrong delivery")),
+            "{:?}",
+            audit.violations
+        );
+    }
+
+    #[test]
+    fn nc_harness_prompt_reclassified_as_human_is_rejected() {
+        let (_tmp, mut parsed, raw) = prompt_audit_fixture();
+        let id = crate::provider::EntryId::deterministic(&key(THREAD_A), 2, 0);
+        parsed.semantics.get_mut(&id).unwrap().prompt = Some(crate::provider::PromptSemantics {
+            authorship: crate::provider::PromptAuthorship::Human,
+            delivery: crate::provider::PromptDelivery::TurnBoundary,
+        });
+        let audit = audit_prompt_semantics(&key(THREAD_A), &raw, &parsed);
+        assert!(
+            audit
+                .violations
+                .iter()
+                .any(|v| v.contains("unexpected human prompt semantics")),
+            "{:?}",
+            audit.violations
+        );
     }
 
     #[test]

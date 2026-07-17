@@ -979,6 +979,37 @@ Mapping (each mapped record keeps its B1 id `(ordinal, 0)` — constraint 1):
   Claude-shaped adjacent-pairing/is_human_prompt heuristics mislabeled
   harness context (a one-task real session reported 77 turns; now 1).
 
+## B3 slice 2 — same-turn steering presentation (2026-07-17)
+
+Codex's documented interaction model distinguishes steering (append input to
+the active turn) from queuing (save input for the next turn); app-server's
+`turn/steer` likewise appends input without creating a new turn. Sources:
+[Codex prompting — steering and queuing](https://learn.chatgpt.com/docs/prompting.md)
+and [official app-server protocol](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md#example-steer-an-active-turn).
+
+An independent census over the preferred artifacts of 226 sessions found
+1,709 native `event_msg.user_message` records: 1,705 claim-once exact-content
+pairs with response-item user prompts, two exact duplicate events, and two
+unique same-window additions. Of the two additions, one precedes the first
+assistant emission and one occurs between assistant emissions; both use the
+current `images,local_images,message,text_elements,type` payload shape. No
+window contains more than one unique addition. These are represented as
+Human/MidTurn steering while paired prompts remain Human/TurnBoundary.
+
+Presentation is additive: a separate provider-aware `SemanticTurn` retains
+`steering_messages` in native order (the public legacy `ConversationTurn`
+stays source-compatible); timeline text renders `Steering: ...`, and JSON adds
+`steering_prompts` only when non-empty, so Claude output remains unchanged.
+The corpus conformance test independently derives the expected boundary vs
+midturn partition from native records, requires both steering records to
+survive semantic grouping and timeline rendering, and reports only aggregate
+counts. Mutation controls prove the oracle rejects a steering prompt relabeled
+as a boundary and a harness prompt relabeled human. The two observed placement
+shapes are covered between the real-corpus gate and a mined integration
+fixture. Exclusion stated explicitly: no distinct native "queued" discriminator
+was observed; queued input is represented as its later ordinary turn-boundary
+prompt, consistent with the documented next-turn behavior.
+
 ## Review round 26 (2026-07-17, same Codex agent — B3.1.3 audit: B3.1.4)
 
 Verdict: the preserve-all loophole is fixed and all ten controls are
@@ -1267,19 +1298,20 @@ Decisions taken in-implementation, FLAGGED FOR REVIEW:
    applied in `bump_vocab` during collection.
 
 ### Phase B3 — Codex normalization
-- [ ] Envelope records flip from Unknown{entries} to Mapped with the SAME
-      deterministic ids (B1 parse comment contract).
-- [ ] turn_id carrier before normalization (round-6 guardrail).
-- [ ] Two-stream dedup under invariant #3's emission-identity rule (lean:
-      response_item authoritative for content; event_msg for user-facing
-      text/token counts) — settle empirically.
-- [ ] Steered/queued prompt persisted shape — empirical (inject.rs inference
-      unverified). PRESENTATION OBLIGATION (round-25): the B3.1 timeline
-      already refuses to SPLIT a turn on a Human/MidTurn steering prompt,
-      but `ConversationTurn` carries a single user_message so the steering
-      prompt is not yet RENDERED inside its turn. This slice must display
-      steering prompts within the turn (multi-user-message turn shape or
-      equivalent), not merely avoid splitting.
+- [~] Content-bearing envelope records covered by B3.1 flip from
+      Unknown{entries} to Mapped with the SAME deterministic ids (B1 parse
+      comment contract). Remaining state/history families stay intentionally
+      Unknown until their dedicated slices below.
+- [x] turn_id carrier before normalization (round-6 guardrail), including
+      ambient and per-item carriers.
+- [x] Two-stream dedup for the B3.1 content vocabulary under invariant #3's
+      emission-identity rule: response_item authoritative when a proven twin
+      exists; unique event content maps; usage reconciles independently.
+- [x] Steered/queued prompt shape and presentation (B3 slice 2): paired native
+      prompts are Human/TurnBoundary; the two corpus-observed unique same-turn
+      additions are Human/MidTurn and render once inside their existing turn.
+      Queue has no observed native discriminator and remains an ordinary later
+      turn boundary, matching Codex's documented next-turn semantics.
 - [ ] `world_state` / `ghost_snapshot` semantics — empirical.
 - [ ] Typed fork AND spawn lineage (phase-plan original wording, restored
       round-17): fork reconstruction via the embedded-second-meta heuristic
@@ -1289,12 +1321,13 @@ Decisions taken in-implementation, FLAGGED FOR REVIEW:
 - [ ] Compaction: `compacted` items with replacement_history not counted as
       new chronological activity (invariant #4); window-metadata carrier
       (deferred from A.0 round 5).
-- [ ] Semantic sidecar emission (EntrySemantics: prompt axes, per-call tools,
-      usage observations with values, InheritedHistory for fork-copied
-      records).
-- [ ] Pre-envelope legacy files: keep unsupported-legacy refusal unless
+- [~] Semantic sidecar emission: prompt axes, per-call tools, turn ids, and
+      valued usage observations ship; InheritedHistory for fork-copied
+      records remains in the lineage slice.
+- [x] Pre-envelope legacy files: keep unsupported-legacy refusal unless
       provenance-documented fixtures justify a parser (round-6 posture).
-- [ ] Milestone: messages/timeline/normalized exports on real Codex sessions.
+- [~] Milestone: messages and timeline work on real Codex sessions, including
+      steering; normalized exports remain.
 
 ### Phase C — semantic tuning
 - [ ] Codex prompt-boundary chunking (PromptOrigin axes feed

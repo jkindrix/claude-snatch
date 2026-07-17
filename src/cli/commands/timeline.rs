@@ -4,7 +4,9 @@
 //! collapsed for readability. Mirrors the MCP `get_session_timeline` tool.
 
 use crate::analysis::subagents::{match_subagents, SubagentMatches};
-use crate::analysis::timeline::{build_timeline, TimelineOptions};
+use crate::analysis::timeline::{
+    build_semantic_timeline, build_timeline, semantic_turns, TimelineOptions,
+};
 use crate::cli::{Cli, OutputFormat, TimelineArgs};
 use crate::error::{Result, SnatchError};
 use crate::reconstruction::Conversation;
@@ -58,6 +60,9 @@ struct TimelineTurnOutput {
     timestamp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     user_prompt: Option<String>,
+    /// Human prompts delivered while the turn was already active.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    steering_prompts: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     assistant_summary: Option<String>,
     tools_used: Vec<String>,
@@ -161,102 +166,6 @@ struct TimelineContext<'a> {
     session: Option<&'a crate::discovery::Session>,
 }
 
-/// Group a provider conversation into turns using the semantics sidecar:
-/// a new turn starts when the entry's `turn_id` changes to a different
-/// known id, or at a Human/TurnBoundary prompt. A Human/MidTurn prompt
-/// (steering) stays inside the current turn and does NOT open a new one.
-/// Harness context preceding the first human prompt forms no turn of its
-/// own unless it produced assistant activity.
-///
-/// Presentation note (round-25): [`ConversationTurn`] carries a single
-/// `user_message`, so a MidTurn steering prompt does not split the turn but
-/// is also not rendered inside it. Full steering-prompt presentation is
-/// deferred to the steering slice (tracked in the design-doc forward
-/// checklist); the current guarantee is "does not split", not "fully
-/// represented".
-fn semantic_turns<'a>(
-    conversation: &'a Conversation,
-) -> Vec<crate::reconstruction::ConversationTurn<'a>> {
-    use crate::model::LogEntry;
-    use crate::provider::PromptAuthorship;
-
-    let mut turns: Vec<crate::reconstruction::ConversationTurn<'a>> = Vec::new();
-    let mut current: Option<crate::reconstruction::ConversationTurn<'a>> = None;
-    let mut current_turn_id: Option<String> = None;
-
-    let flush = |turn: Option<crate::reconstruction::ConversationTurn<'a>>,
-                 turns: &mut Vec<crate::reconstruction::ConversationTurn<'a>>| {
-        if let Some(t) = turn {
-            // Keep only turns with substance: a human prompt or assistant
-            // activity. Pure harness preambles are visible via messages,
-            // not as timeline turns.
-            if t.user_message.is_some() || t.assistant_message.is_some() || !t.tool_uses.is_empty()
-            {
-                turns.push(t);
-            }
-        }
-    };
-
-    for entry in conversation.main_thread_entries() {
-        let sem = entry
-            .uuid()
-            .and_then(|u| conversation.semantics_for_uuid(u));
-        let entry_turn = sem.and_then(|s| s.turn_id.clone());
-        let prompt = sem.and_then(|s| s.prompt);
-        let is_human = matches!(entry, LogEntry::User(_))
-            && prompt.is_some_and(|p| matches!(p.authorship, PromptAuthorship::Human));
-        // Only a TURN-BOUNDARY human prompt opens a turn; a MidTurn human
-        // prompt (steering) stays inside the current one (round-24: the
-        // normalizer's PromptDelivery axis must be honored here, not just
-        // authorship).
-        let is_human_boundary = is_human
-            && prompt.is_some_and(|p| {
-                matches!(p.delivery, crate::provider::PromptDelivery::TurnBoundary)
-            });
-
-        let turn_changed = match (&entry_turn, &current_turn_id) {
-            (Some(new), Some(old)) => new != old,
-            (Some(_), None) => current.is_some(),
-            _ => false,
-        };
-        if is_human_boundary || turn_changed {
-            flush(current.take(), &mut turns);
-        }
-        if entry_turn.is_some() {
-            current_turn_id = entry_turn;
-        }
-
-        let turn = current.get_or_insert_with(|| crate::reconstruction::ConversationTurn {
-            user_message: None,
-            assistant_message: None,
-            tool_uses: Vec::new(),
-            tool_results: Vec::new(),
-        });
-        match entry {
-            LogEntry::User(user) => {
-                if is_human && turn.user_message.is_none() {
-                    turn.user_message = Some(entry);
-                }
-                turn.tool_results.extend(user.message.tool_results());
-            }
-            LogEntry::Assistant(assistant) => {
-                turn.tool_uses.extend(assistant.message.tool_uses());
-                // The latest TEXT-bearing emission is the turn's answer
-                // (reasoning/tool-only entries never clobber it).
-                let has_text = assistant.message.content.iter().any(|b| {
-                    matches!(b, crate::model::ContentBlock::Text(t) if !t.text.trim().is_empty())
-                });
-                if has_text {
-                    turn.assistant_message = Some(entry);
-                }
-            }
-            _ => {}
-        }
-    }
-    flush(current, &mut turns);
-    turns
-}
-
 fn render(
     cli: &Cli,
     args: &TimelineArgs,
@@ -273,25 +182,24 @@ fn render(
     // adjacent user/assistant pairing would count every harness-injected
     // context message as a turn (round-22 blocker 3: a real one-task
     // session reported 77 turns). Claude sessions keep the classic pairing.
-    let turns = if ctx.semantic {
-        semantic_turns(conversation)
-    } else {
-        conversation.turns()
-    };
-
     let analytics = crate::analytics::SessionAnalytics::from_conversation(conversation);
     let start_time = analytics.start_time.map(|t| t.to_rfc3339());
     let end_time = analytics.end_time.map(|t| t.to_rfc3339());
     let span = analytics.duration_string();
 
-    let total_turns = turns.len();
-
     let opts = TimelineOptions {
         limit: args.limit,
         ..Default::default()
     };
-
-    let timeline = build_timeline(&turns, &opts);
+    let (total_turns, timeline) = if ctx.semantic {
+        let turns = semantic_turns(conversation);
+        let total = turns.len();
+        (total, build_semantic_timeline(&turns, &opts))
+    } else {
+        let turns = conversation.turns();
+        let total = turns.len();
+        (total, build_timeline(&turns, &opts))
+    };
 
     // Subagent markers: surface work spawned by Agent/Task calls (matching the
     // messages surface). Linked subagents carry the spawn description; present
@@ -342,6 +250,7 @@ fn render(
                         index: t.index,
                         timestamp: t.timestamp,
                         user_prompt: t.user_prompt,
+                        steering_prompts: t.steering_prompts,
                         assistant_summary: t.assistant_summary,
                         tools_used: t.tools_used,
                         files_touched: t.files_touched,
@@ -376,6 +285,10 @@ fn render(
 
                 if let Some(ref prompt) = turn.user_prompt {
                     println!("{marker} [{:>3}] User: {prompt}", turn.index);
+                }
+
+                for prompt in &turn.steering_prompts {
+                    println!("{marker} [{:>3}] Steering: {prompt}", turn.index);
                 }
 
                 if let Some(ref summary) = turn.assistant_summary {
