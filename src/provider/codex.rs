@@ -2992,12 +2992,30 @@ mod tests {
             })
         };
 
+        // Full source identity: the preferred artifact carries the native
+        // records, so an attributed token's expected RecordRef is
+        // `{preferred, ordinal}` — same-ordinal artifact swaps are caught
+        // (round-25).
+        let preferred = session
+            .descriptor
+            .preferred_artifact()
+            .expect("descriptor has a preferred artifact")
+            .snapshot
+            .id
+            .clone();
+        let expected_ref = |t: u64| crate::provider::RecordRef {
+            artifact: preferred.clone(),
+            ordinal: t,
+        };
+
         // Actual state, gathered but never used to decide EXPECTATIONS.
-        let disp_by_ord: std::collections::BTreeMap<u64, &RecordOutcome> = session
-            .record_dispositions
-            .iter()
-            .map(|d| (d.record.ordinal, &d.outcome))
-            .collect();
+        // Dispositions are keyed by FULL RecordRef.
+        let disp_by_ref: std::collections::BTreeMap<crate::provider::RecordRef, &RecordOutcome> =
+            session
+                .record_dispositions
+                .iter()
+                .map(|d| (d.record.clone(), &d.outcome))
+                .collect();
         let mut obs_by_token: std::collections::BTreeMap<
             u64,
             Vec<(crate::provider::EntryId, &crate::provider::UsageObservation)>,
@@ -3074,17 +3092,17 @@ mod tests {
                             ));
                         }
                     }
-                    match disp_by_ord.get(&t) {
+                    match disp_by_ref.get(&expected_ref(t)) {
                         Some(RecordOutcome::Mapped(ids))
                             if ids.as_slice() == [owner_id.clone()] => {}
                         _ => v.push(format!(
-                            "record #{t} disposition is not Mapped to owner {owner_id}"
+                            "record #{t} disposition is not Mapped to owner {owner_id} at the preferred artifact"
                         )),
                     }
                     match session.entry_origins.get(&owner_id) {
-                        Some(origins) if origins.iter().any(|r| r.ordinal == t) => {}
+                        Some(origins) if origins.contains(&expected_ref(t)) => {}
                         _ => v.push(format!(
-                            "owner {owner_id} origins do not include usage record #{t}"
+                            "owner {owner_id} origins do not include usage record #{t} at the preferred artifact"
                         )),
                     }
                     let call = obs
@@ -3123,10 +3141,15 @@ mod tests {
             }
         }
 
-        // Reconciliation: entry usage sum equals the deltas of records the
-        // NATIVE analysis expects to be attributed — never what the impl
-        // classified.
-        let mut expected_sum = (0u64, 0u64, 0u64);
+        // PER-OWNER canonical reconciliation (round-25): a global sum lets a
+        // broken impl move usage between assistants undetected. Expected
+        // canonical is accumulated onto each token's independently derived
+        // OWNER EntryId, then compared entry by entry — including the
+        // requirement that an entry with no expected usage carries none.
+        let mut expected_by_owner: std::collections::BTreeMap<
+            crate::provider::EntryId,
+            (u64, u64, u64),
+        > = std::collections::BTreeMap::new();
         let mut prev: Option<(u64, u64, u64)> = None;
         for &t in &token_ords {
             let total = triple(raw_by_ordinal[&t], "total_token_usage");
@@ -3145,31 +3168,47 @@ mod tests {
                 }
             };
             prev = Some(total);
-            if expected_owner(t).is_some() {
-                expected_sum.0 += delta.0;
-                expected_sum.1 += delta.1;
-                expected_sum.2 += delta.2;
+            if let Some(owner) = expected_owner(t) {
+                let e = expected_by_owner
+                    .entry(crate::provider::EntryId::deterministic(key, owner, 0))
+                    .or_default();
+                e.0 += delta.0;
+                e.1 += delta.1;
+                e.2 += delta.2;
             }
         }
-        let mut entry_sum = (0u64, 0u64, 0u64);
         for e in &session.entries {
             if let crate::model::LogEntry::Assistant(m) = &e.entry {
-                if let Some(u) = &m.message.usage {
-                    entry_sum.0 += u.input_tokens;
-                    entry_sum.1 += u.cache_read_input_tokens.unwrap_or(0);
-                    entry_sum.2 += u.output_tokens;
+                let actual = m.message.usage.as_ref().map_or((0, 0, 0), |u| {
+                    (
+                        u.input_tokens,
+                        u.cache_read_input_tokens.unwrap_or(0),
+                        u.output_tokens,
+                    )
+                });
+                let want = expected_by_owner.get(&e.id).copied().unwrap_or((0, 0, 0));
+                if actual != want {
+                    v.push(format!(
+                        "entry {} canonical usage {actual:?} does not match expected {want:?}",
+                        e.id
+                    ));
                 }
             }
-        }
-        if entry_sum != expected_sum {
-            v.push(format!(
-                "canonical usage {entry_sum:?} does not reconcile with source-derived {expected_sum:?}"
-            ));
         }
 
         // Per-observation verification against the native record.
         for (eid, sem) in &session.semantics {
             for obs in &sem.usage {
+                // Full-identity check: the source must be at the PREFERRED
+                // artifact (round-25 — a same-ordinal sibling swap must not
+                // pass just because the ordinal exists).
+                if obs.record.artifact != preferred {
+                    v.push(format!(
+                        "observation on {eid} record #{} names the wrong artifact",
+                        obs.record.ordinal
+                    ));
+                    continue;
+                }
                 let Some(src) = raw_by_ordinal.get(&obs.record.ordinal) else {
                     v.push(format!(
                         "observation on {eid} references missing record #{}",
@@ -3511,6 +3550,100 @@ mod tests {
             sem.usage.retain(|o| o.record.ordinal != 3);
         }
         assert_rejects(&parsed, &raw, "attributed=false, preserved=false");
+    }
+
+    #[test]
+    fn nc_observation_wrong_sibling_artifact_is_rejected() {
+        // A session with a plain rollout AND an archived copy has two
+        // SIBLING artifacts. Swapping an observation to the sibling keeps
+        // the ordinal (and passes descriptor membership), so only full-
+        // RecordRef identity can catch it — in the audit AND in the generic
+        // validator's origin-correspondence check.
+        let tmp = tempfile::tempdir().unwrap();
+        let content = allocation_fixture().join("\n") + "\n";
+        let file = format!("rollout-2026-07-16T23-38-33-{THREAD_A}.jsonl");
+        let day = tmp.path().join("sessions/2026/07/16");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(day.join(&file), &content).unwrap();
+        let arch = tmp.path().join("archived_sessions/2026/07/16");
+        std::fs::create_dir_all(&arch).unwrap();
+        std::fs::write(arch.join(&file), &content).unwrap();
+
+        let p = CodexProvider::new(tmp.path());
+        let mut parsed = p.parse(&key(THREAD_A)).unwrap();
+        let raw: Vec<(u64, serde_json::Value)> = allocation_fixture()
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (i as u64, serde_json::from_str(l).unwrap()))
+            .collect();
+        assert_eq!(
+            parsed.descriptor.artifacts.len(),
+            2,
+            "fixture must have a sibling artifact"
+        );
+        let preferred = parsed
+            .descriptor
+            .preferred_artifact()
+            .unwrap()
+            .snapshot
+            .id
+            .clone();
+        let sibling = parsed
+            .descriptor
+            .artifacts
+            .iter()
+            .map(|a| a.snapshot.id.clone())
+            .find(|id| *id != preferred)
+            .expect("a distinct sibling artifact");
+        assert!(parsed.validate_provenance().is_empty());
+
+        for o in parsed.semantics.get_mut(&eid(2)).unwrap().usage.iter_mut() {
+            if matches!(o.scope, crate::provider::UsageScope::Call) {
+                o.record.artifact = sibling.clone();
+            }
+        }
+        // The audit rejects on full identity...
+        assert_rejects(&parsed, &raw, "names the wrong artifact");
+        // ...and so does the generic validator (sibling record is not an
+        // origin of the annotated entry).
+        assert!(
+            parsed
+                .validate_provenance()
+                .iter()
+                .any(|m| m.contains("usage observation on entry")),
+            "validate_provenance must reject the sibling swap: {:?}",
+            parsed.validate_provenance()
+        );
+    }
+
+    #[test]
+    fn nc_canonical_usage_moved_between_assistants_is_rejected() {
+        // Move canonical usage from owner 2 to owner 6, leaving
+        // observations, dispositions, origins, and the GLOBAL sum unchanged.
+        // A global reconciliation would pass; per-owner must reject.
+        let (_t, mut parsed, raw) = parse_and_raw(&allocation_fixture());
+        let take_usage = |parsed: &mut crate::provider::ParsedSession,
+                          id: &crate::provider::EntryId| {
+            parsed
+                .entries
+                .iter_mut()
+                .find(|e| e.id == *id)
+                .and_then(|e| match &mut e.entry {
+                    crate::model::LogEntry::Assistant(m) => m.message.usage.take(),
+                    _ => None,
+                })
+        };
+        let moved = take_usage(&mut parsed, &eid(2)).expect("owner 2 has usage");
+        if let Some(e) = parsed.entries.iter_mut().find(|e| e.id == eid(6)) {
+            if let crate::model::LogEntry::Assistant(m) = &mut e.entry {
+                let u = m.message.usage.get_or_insert_with(Default::default);
+                u.input_tokens += moved.input_tokens;
+                u.output_tokens += moved.output_tokens;
+                let add = moved.cache_read_input_tokens.unwrap_or(0);
+                *u.cache_read_input_tokens.get_or_insert(0) += add;
+            }
+        }
+        assert_rejects(&parsed, &raw, "canonical usage");
     }
 
     #[test]

@@ -903,6 +903,27 @@ impl ParsedSession {
             ));
         }
 
+        // Usage observations name a FULL source RecordRef (round-25): its
+        // artifact must belong to the descriptor, and the record must be one
+        // of the annotated entry's origins — so a same-ordinal artifact swap
+        // (a sibling artifact) cannot slip past provenance validation.
+        for (eid, sem) in &self.semantics {
+            for obs in &sem.usage {
+                if !descriptor_artifacts.contains(&obs.record.artifact) {
+                    violations.push(format!(
+                        "usage observation on entry {eid} references an artifact outside the descriptor"
+                    ));
+                }
+                match self.entry_origins.get(eid) {
+                    Some(origins) if origins.contains(&obs.record) => {}
+                    _ => violations.push(format!(
+                        "usage observation on entry {eid} names record #{} which is not one of the entry's origins",
+                        obs.record.ordinal
+                    )),
+                }
+            }
+        }
+
         // Every entry must have provenance; every origin must be real.
         for e in &self.entries {
             match self.entry_origins.get(&e.id) {

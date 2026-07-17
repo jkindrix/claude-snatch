@@ -979,6 +979,25 @@ Mapping (each mapped record keeps its B1 id `(ordinal, 0)` — constraint 1):
   Claude-shaped adjacent-pairing/is_human_prompt heuristics mislabeled
   harness context (a one-task real session reported 77 turns; now 1).
 
+## Review round 26 (2026-07-17, same Codex agent — B3.1.3 audit: B3.1.4)
+
+Verdict: the preserve-all loophole is fixed and all ten controls are
+substantive, but two wrong-attribution contracts still escaped the
+ordinal-keyed audit. B3.1.4 (test + validator hardening): (1) the audit and
+the generic `validate_provenance` now enforce FULL RecordRef identity —
+usage observations must reference the preferred artifact and be an origin
+of the annotated entry, so a same-ordinal SIBLING-artifact swap is caught
+(new control `nc_observation_wrong_sibling_artifact_is_rejected` uses a real
+two-artifact session; the validator's origin-correspondence check also
+rejects it, membership alone would not); (2) canonical usage is reconciled
+PER OWNER EntryId, not as one global sum — expected canonical is
+accumulated onto each token's independently derived owner and compared
+entry by entry, with entries expecting none required to carry none (new
+control `nc_canonical_usage_moved_between_assistants_is_rejected` moves
+usage between two assistants leaving the global sum unchanged; a global
+check would pass, per-owner rejects). Twelve negative controls now;
+positive control and 226-session corpus green under the stricter audit.
+
 ## Review round 25 (2026-07-17, same Codex agent — B3.1.2 audit: B3.1.3)
 
 Verdict: production changes are materially correct, but the conformance
