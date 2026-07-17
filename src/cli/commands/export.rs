@@ -175,8 +175,18 @@ fn validate_raw_jsonl_compat(args: &ExportArgs) -> Result<()> {
 
 /// Run the export command.
 pub fn run(cli: &Cli, args: &ExportArgs) -> Result<()> {
-    // Handle --list-templates
+    // Handle --list-templates. It is an independent action; combining it
+    // with a provider selection would silently ignore the selection, so the
+    // combination is rejected (round-19).
     if args.list_templates {
+        if !args.provider.is_empty() {
+            return Err(SnatchError::InvalidArgument {
+                name: "--list-templates".to_string(),
+                reason: "cannot be combined with --provider (templates are an \
+                         independent action; the selection would be ignored)"
+                    .to_string(),
+            });
+        }
         return handle_list_templates(cli);
     }
 
@@ -2427,51 +2437,97 @@ fn render_entry(entry: &LogEntry, template: &ExportTemplate) -> String {
 /// streamed through the SourceProvider seam for any provider. Normalized
 /// formats for non-Claude sessions arrive with Phase B3.
 fn export_via_provider(cli: &Cli, args: &ExportArgs) -> Result<()> {
-    // COMPLETE argument classification (round-18): universal arguments are
-    // the session reference, --provider, -O/--out, -f/--format, and
-    // --overwrite. Fidelity tiers stream source data unmodified, so every
-    // content-shaping, filtering, presentation, security-transform, and
-    // delivery flag is refused when it deviates from its default — never
-    // silently ignored (--warn-pii/--redact-preview/--no-images included:
-    // a security option that silently does nothing is a hazard).
+    // COMPLETE argument classification: the struct is destructured WITHOUT
+    // `..`, so a new ExportArgs field must be classified here to compile
+    // (round-19 exhaustiveness). Universal: session, --provider, -O/--out,
+    // -f/--format, --overwrite (--list-templates is rejected against
+    // --provider in run()). Fidelity tiers stream source data unmodified,
+    // so every content-shaping, filtering, presentation, security-
+    // transform, and delivery flag is refused when it deviates from its
+    // default — never silently ignored (--warn-pii/--redact-preview/
+    // --no-images included: a security option that silently does nothing
+    // is a hazard).
+    let ExportArgs {
+        session: _,
+        provider: _,
+        output_file: _,
+        format: _,
+        all,
+        project,
+        since,
+        until,
+        subagents,
+        combine_agents,
+        resolve_tool_results,
+        thinking,
+        no_thinking,
+        tool_use,
+        no_tool_use,
+        tool_results,
+        no_tool_results,
+        images,
+        no_images,
+        system,
+        only,
+        timestamps,
+        usage,
+        metadata,
+        main_thread,
+        no_chain,
+        pretty,
+        full,
+        progress,
+        overwrite: _,
+        redact,
+        warn_pii,
+        redact_preview,
+        gist,
+        gist_public,
+        gist_description,
+        toc,
+        dark,
+        clipboard,
+        template,
+        list_templates: _,
+    } = args;
     super::helpers::refuse_unsupported_flags(
         "provider-routed exports (fidelity tiers stream source data unmodified)",
         &[
-            ("--all", args.all),
-            ("--project", args.project.is_some()),
-            ("--since", args.since.is_some()),
-            ("--until", args.until.is_some()),
-            ("--subagents", args.subagents),
-            ("--combine-agents", args.combine_agents),
-            ("--resolve-tool-results", args.resolve_tool_results),
-            ("--thinking=false", !args.thinking),
-            ("--no-thinking", args.no_thinking),
-            ("--tool-use=false", !args.tool_use),
-            ("--no-tool-use", args.no_tool_use),
-            ("--tool-results=false", !args.tool_results),
-            ("--no-tool-results", args.no_tool_results),
-            ("--images=false", !args.images),
-            ("--no-images", args.no_images),
-            ("--system", args.system),
-            ("--only", !args.only.is_empty()),
-            ("--timestamps=false", !args.timestamps),
-            ("--usage=false", !args.usage),
-            ("--metadata", args.metadata),
-            ("--main-thread", args.main_thread),
-            ("--no-chain", args.no_chain),
-            ("--pretty", args.pretty),
-            ("--full", args.full),
-            ("--progress", args.progress),
-            ("--redact", args.redact.is_some()),
-            ("--warn-pii", args.warn_pii),
-            ("--redact-preview", args.redact_preview),
-            ("--gist", args.gist),
-            ("--gist-public", args.gist_public),
-            ("--gist-description", args.gist_description.is_some()),
-            ("--toc", args.toc),
-            ("--dark", args.dark),
-            ("--clipboard", args.clipboard),
-            ("--template", args.template.is_some()),
+            ("--all", *all),
+            ("--project", project.is_some()),
+            ("--since", since.is_some()),
+            ("--until", until.is_some()),
+            ("--subagents", *subagents),
+            ("--combine-agents", *combine_agents),
+            ("--resolve-tool-results", *resolve_tool_results),
+            ("--thinking=false", !*thinking),
+            ("--no-thinking", *no_thinking),
+            ("--tool-use=false", !*tool_use),
+            ("--no-tool-use", *no_tool_use),
+            ("--tool-results=false", !*tool_results),
+            ("--no-tool-results", *no_tool_results),
+            ("--images=false", !*images),
+            ("--no-images", *no_images),
+            ("--system", *system),
+            ("--only", !only.is_empty()),
+            ("--timestamps=false", !*timestamps),
+            ("--usage=false", !*usage),
+            ("--metadata", *metadata),
+            ("--main-thread", *main_thread),
+            ("--no-chain", *no_chain),
+            ("--pretty", *pretty),
+            ("--full", *full),
+            ("--progress", *progress),
+            ("--redact", redact.is_some()),
+            ("--warn-pii", *warn_pii),
+            ("--redact-preview", *redact_preview),
+            ("--gist", *gist),
+            ("--gist-public", *gist_public),
+            ("--gist-description", gist_description.is_some()),
+            ("--toc", *toc),
+            ("--dark", *dark),
+            ("--clipboard", *clipboard),
+            ("--template", template.is_some()),
         ],
     )?;
 

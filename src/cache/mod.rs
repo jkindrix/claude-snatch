@@ -387,9 +387,12 @@ pub struct ParsedEntriesCache {
 impl ParsedEntriesCache {
     /// Create a new parsed entries cache.
     pub fn new(config: &CacheConfig) -> Self {
-        // Default: 100 sessions, 90% of cache for parsed entries
+        // 45% of the budget: the legacy parsed cache SHARES the parsed
+        // slice with the provider-bundle cache (45% + 45%), so the manager
+        // can never exceed its configured aggregate (round-19 blocker 1 —
+        // two independent 90% slices summed to ~190%).
         let max_entries = 100;
-        let max_size = (config.max_size * 9 / 10) as usize;
+        let max_size = (config.max_size * 45 / 100) as usize;
         Self {
             inner: RwLock::new(LruCache::new(max_entries, max_size)),
         }
@@ -468,9 +471,12 @@ pub struct ProviderParsedCache {
 
 impl ProviderParsedCache {
     /// Create a new provider-parsed session cache.
+    ///
+    /// 45% of the budget — the other half of the parsed slice shared with
+    /// the legacy entries cache (round-19 blocker 1).
     pub fn new(config: &CacheConfig) -> Self {
         let max_entries = 100;
-        let max_size = (config.max_size * 9 / 10) as usize;
+        let max_size = (config.max_size * 45 / 100) as usize;
         Self {
             inner: RwLock::new(LruCache::new(max_entries, max_size)),
         }
@@ -683,12 +689,12 @@ pub struct CacheManagerStats {
 impl CacheManagerStats {
     /// Get total entry count.
     pub fn total_entries(&self) -> usize {
-        self.metadata.entry_count + self.entries.entry_count
+        self.metadata.entry_count + self.entries.entry_count + self.provider_sessions.entry_count
     }
 
     /// Get total current size.
     pub fn total_size(&self) -> usize {
-        self.metadata.current_size + self.entries.current_size
+        self.metadata.current_size + self.entries.current_size + self.provider_sessions.current_size
     }
 }
 
@@ -1121,5 +1127,81 @@ mod tests {
 
         // Verify load succeeded (loaded count is valid, may be 0 or 1 depending on timing)
         assert!(loaded <= 1, "Expected at most 1 entry to be loaded");
+    }
+
+    // ========================================================================
+    // Aggregate budget (B2.10, round-19 blocker 1)
+    // ========================================================================
+
+    fn fake_bundle() -> Arc<crate::provider::ParsedSession> {
+        use crate::provider::fake::{multi_artifact_key, FakeProvider};
+        use crate::provider::SourceProvider as _;
+        Arc::new(FakeProvider.parse(&multi_artifact_key()).unwrap())
+    }
+
+    #[test]
+    fn filling_every_cache_stays_within_the_aggregate_budget() {
+        let config = crate::config::CacheConfig {
+            enabled: true,
+            max_size: 200_000,
+            ..Default::default()
+        };
+        let manager = CacheManager::new(&config);
+
+        // Flood the legacy parsed cache (path-keyed; files must exist for
+        // mtime-based keys).
+        let tmp = tempfile::tempdir().unwrap();
+        let entries: Vec<crate::model::LogEntry> = (0..100)
+            .map(|_| crate::model::LogEntry::Unknown(serde_json::json!({"k": "v"})))
+            .collect();
+        for i in 0..10 {
+            let path = tmp.path().join(format!("s{i}.jsonl"));
+            std::fs::write(&path, "x").unwrap();
+            manager.cache_entries(&path, entries.clone()); // ~102k each
+        }
+        // Flood the provider-bundle cache with distinct keys.
+        let bundle = fake_bundle();
+        for i in 0..30 {
+            let key = LogicalSessionKey {
+                provider: crate::provider::ProviderId("fake".into()),
+                namespace: crate::provider::SessionNamespace(format!("ns{i}")),
+                native_id: "42".into(),
+            };
+            manager
+                .provider_sessions
+                .insert_keyed(&key, "rev".into(), bundle.clone());
+        }
+
+        let stats = manager.stats();
+        let aggregate = stats.metadata.current_size
+            + stats.entries.current_size
+            + stats.provider_sessions.current_size;
+        assert!(aggregate > 0, "caches actually held data");
+        assert!(
+            aggregate <= config.max_size as usize,
+            "aggregate {} exceeds the configured budget {}",
+            aggregate,
+            config.max_size
+        );
+        assert_eq!(
+            stats.total_size(),
+            aggregate,
+            "totals must count all three caches"
+        );
+        assert_eq!(
+            stats.total_entries(),
+            stats.metadata.entry_count
+                + stats.entries.entry_count
+                + stats.provider_sessions.entry_count,
+            "entry totals must count all three caches"
+        );
+        assert!(stats.provider_sessions.entry_count > 0);
+
+        // clear() empties all three.
+        manager.clear();
+        let cleared = manager.stats();
+        assert_eq!(cleared.total_entries(), 0);
+        assert_eq!(cleared.total_size(), 0);
+        assert_eq!(cleared.provider_sessions.entry_count, 0);
     }
 }

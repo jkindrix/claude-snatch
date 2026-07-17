@@ -1298,3 +1298,86 @@ fn runtime_sessions_failure_is_atomic_under_explicit_selection() {
         .to_string();
     assert!(err.contains("index database is locked"), "got: {err}");
 }
+
+// ============================================================================
+// Centralized collection (B2.10, round-19 blocker 4)
+// ============================================================================
+
+use super::registry::Collected;
+
+#[test]
+fn collect_sessions_is_atomic_under_explicit_and_partial_under_all() {
+    let r = registry_with_flaky();
+
+    // Explicit: runtime failure is atomic even with a healthy sibling.
+    let sel = ProviderSelection::from_flags(&flags(&["flaky", "small"])).unwrap();
+    let err = r.collect_selected_sessions(&sel).err().unwrap().to_string();
+    assert!(err.contains("index database is locked"), "got: {err}");
+
+    // All: partial with the failure reported.
+    let Collected { items, skipped } = r
+        .collect_selected_sessions(&ProviderSelection::All)
+        .unwrap();
+    assert_eq!(items.len(), 4, "small's sessions survive");
+    assert!(items
+        .windows(2)
+        .all(|w| w[0].key <= w[1].key || w[0].key.provider != w[1].key.provider));
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].0.to_string(), "flaky");
+    assert!(skipped[0].1.contains("session scan failed"));
+}
+
+#[test]
+fn collect_sessions_with_zero_runtime_successes_errors() {
+    // Every provider constructs, every sessions() call fails: an empty
+    // success is a lie — `all` must error (round-19).
+    let mut r = ProviderRegistry::new();
+    r.register(RegisteredProvider {
+        id: ProviderId("flaky".into()),
+        root: None,
+        provider: Ok(Box::new(FailingSessionsProvider)),
+    })
+    .unwrap();
+    let err = r
+        .collect_selected_sessions(&ProviderSelection::All)
+        .err()
+        .expect("zero successes must error")
+        .to_string();
+    assert!(
+        err.contains("no provider could be scanned") && err.contains("flaky"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn collect_diagnostics_mirrors_the_contract() {
+    let r = registry_with_flaky();
+
+    // All: small has no dedicated diagnostics (None = success), flaky's
+    // failure is reported.
+    let Collected { items, skipped } = r
+        .collect_selected_diagnostics(&ProviderSelection::All)
+        .unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].0.to_string(), "small");
+    assert!(items[0].1.is_none());
+    assert_eq!(skipped.len(), 1);
+    assert!(skipped[0].1.contains("diagnostics failed"));
+
+    // Explicit: atomic.
+    let sel = ProviderSelection::from_flags(&flags(&["flaky"])).unwrap();
+    assert!(r.collect_selected_diagnostics(&sel).is_err());
+
+    // All with zero successes: error.
+    let mut only_flaky = ProviderRegistry::new();
+    only_flaky
+        .register(RegisteredProvider {
+            id: ProviderId("flaky".into()),
+            root: None,
+            provider: Ok(Box::new(FailingSessionsProvider)),
+        })
+        .unwrap();
+    assert!(only_flaky
+        .collect_selected_diagnostics(&ProviderSelection::All)
+        .is_err());
+}

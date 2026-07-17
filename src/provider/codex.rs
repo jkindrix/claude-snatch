@@ -252,11 +252,13 @@ const MAX_VOCAB_KEYS: usize = 64;
 const MAX_VOCAB_KEY_LEN: usize = 120;
 
 fn sanitize_vocab_key(raw: &str, truncated: &mut u64) -> String {
-    // The cap applies to the ESCAPED representation: escape_debug expands a
-    // control character up to ~10 chars, so counting raw characters would
-    // let hostile keys blow far past the promised bound (round-18).
+    // The cap applies to the ESCAPED representation (escape_debug expands a
+    // control character up to ~10 chars) and INCLUDES the truncation
+    // marker: the complete stored key never exceeds MAX_VOCAB_KEY_LEN
+    // characters (round-19 — the previous version permitted cap+1).
     let mut out = String::new();
     let mut len = 0usize;
+    let mut needs_marker = false;
     for c in raw.chars() {
         let piece: String = if c.is_control() {
             c.escape_debug().collect()
@@ -265,12 +267,19 @@ fn sanitize_vocab_key(raw: &str, truncated: &mut u64) -> String {
         };
         let piece_len = piece.chars().count();
         if len + piece_len > MAX_VOCAB_KEY_LEN {
-            out.push('…');
-            *truncated += 1;
+            needs_marker = true;
             break;
         }
         out.push_str(&piece);
         len += piece_len;
+    }
+    if needs_marker {
+        while len > MAX_VOCAB_KEY_LEN - 1 {
+            out.pop();
+            len -= 1;
+        }
+        out.push('…');
+        *truncated += 1;
     }
     out
 }
@@ -315,6 +324,13 @@ impl CodexProvider {
     /// cache token inputs, so a changed limit changes the token.
     #[must_use]
     pub fn tighten_limits(mut self, limit: u64) -> Self {
+        // Zero means "no additional user cap" — the guards treat 0 as
+        // unlimited, so min()-ing it in would DISABLE the default safety
+        // ceilings (round-19 blocker 2). Defense in depth with the
+        // registry-level normalization.
+        if limit == 0 {
+            return self;
+        }
         self.max_compressed = self.max_compressed.min(limit);
         self.max_decompressed = self.max_decompressed.min(limit);
         self
@@ -2409,8 +2425,8 @@ mod tests {
                 "stored key contains a raw control character: {key:?}"
             );
             assert!(
-                key.chars().count() <= MAX_VOCAB_KEY_LEN + 1,
-                "stored key exceeds the length cap (+1 for the truncation marker): {key:?}"
+                key.chars().count() <= MAX_VOCAB_KEY_LEN,
+                "stored key exceeds the length cap (marker included): {key:?}"
             );
         }
         // The escape sequence survives only in escaped form.
@@ -2433,12 +2449,33 @@ mod tests {
         let hostile: String = "\u{1}".repeat(300);
         let out = sanitize_vocab_key(&hostile, &mut truncated);
         assert!(
-            out.chars().count() <= MAX_VOCAB_KEY_LEN + 1,
+            out.chars().count() <= MAX_VOCAB_KEY_LEN,
             "escaped key exceeds cap: {} chars",
             out.chars().count()
         );
         assert_eq!(truncated, 1);
         assert!(!out.chars().any(char::is_control));
+    }
+
+    #[test]
+    fn zero_and_huge_limits_keep_default_caps_and_canonical_tokens() {
+        // Round-19 blocker 2: a zero user limit means "no additional cap" —
+        // it must NOT disable the default bomb guards, and zero/omitted/huge
+        // must all produce the identical provider state and cache token (no
+        // behaviorally redundant token variants).
+        let (tmp, p) = home_with(THREAD_A, session_a_content().as_bytes(), false);
+        let k = key(THREAD_A);
+        let default_token = p.parse_cache_token(&k).unwrap();
+
+        let zero = CodexProvider::new(tmp.path()).tighten_limits(0);
+        assert_eq!(zero.parse_cache_token(&k).unwrap(), default_token);
+        assert!(
+            zero.parse(&k).is_ok(),
+            "defaults still guard and still parse"
+        );
+
+        let huge = CodexProvider::new(tmp.path()).tighten_limits(u64::MAX);
+        assert_eq!(huge.parse_cache_token(&k).unwrap(), default_token);
     }
 
     #[test]

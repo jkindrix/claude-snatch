@@ -820,12 +820,55 @@ breath as any completion claim).
       prevent terminal/structured-output injection, emit no session
       ids/paths/field values by default.
 - [x] `codex` feature becomes default-on at release (round-11).
-- [ ] Compatibility promise from B2 on: backward-compatible inputs/semantics,
+- [x] Compatibility promise from B2 on: backward-compatible inputs/semantics,
       additive provider metadata permitted; Claude raw-jsonl byte-identical
-      permanently (invariant #8 phasing).
+      permanently (invariant #8 phasing). Honored through B2.10: flagless
+      CLI/MCP outputs unchanged, MCP response fields additive, MCP
+      `limit: 0` semantics preserved on provider routes (round-19
+      blocker 3). This is a STANDING promise, not a one-time deliverable —
+      it stays binding through B3+.
 - [x] Milestone (phase-plan original wording, restored round-17): list/info
       + native/raw export work on REAL Codex sessions — a real-session
       demonstration, not fixtures only.
+
+## Review round 19 (2026-07-17, same Codex agent — B2 re-audit: one bounded B2.10)
+
+Verdict: B2.7–B2.9 pass their main-path review; four exit blockers + smaller
+contract mismatches remain; land ONE bounded B2.10 closing amendment, then
+B3 without another architecture review. All fixed in B2.10:
+
+1. **Cache budget ~190%**: the two parsed caches each took 90% of
+   `max_size`. Now 45%/45% (metadata keeps 10%), `total_entries`/
+   `total_size` include provider bundles, and a test fills all three caches
+   and proves the aggregate stays within the configured budget and that
+   `clear()` empties everything.
+2. **`--max-file-size 0` disabled Codex bomb guards**: zero is normalized
+   to "no additional user cap" at the registry (and `tighten_limits(0)` is
+   a no-op as defense in depth), so the built-in compressed/decompressed
+   ceilings always stand; zero/omitted/huge produce identical provider
+   state and identical cache tokens (canonical, no redundant variants).
+   End-to-end CLI test: omitted and 0 parse; a small nonzero limit refuses.
+3. **MCP `limit: 0` regressed on provider routes**: provider listing now
+   ALWAYS truncates to the requested limit (0 = zero rows), with a parity
+   test comparing classic vs provider routes at limits 0/1/999. (CLI keeps
+   its own documented 0-is-unlimited convention on both routes.)
+4. **Runtime `all` centralized**: `collect_selected_sessions` /
+   `collect_selected_diagnostics` on the registry enforce
+   atomic-under-explicit, partial-under-`all`, and error-on-zero-runtime-
+   successes; CLI list, MCP list, and doctor are now thin renderers over
+   them, and the contract is tested once at the registry.
+
+Smaller items: `--context-length` added to the list refusal table;
+`export --list-templates` rejects `--provider` (independent action, the
+selection would be ignored); all four provider-route validators now
+DESTRUCTURE their argument structs without `..`, so any future field is a
+compile error until classified; the vocabulary cap now bounds the complete
+stored key at exactly 120 chars including the truncation marker; `snatch
+providers` reports `constructed`/`scan_ok`/`available` as three separate
+fields with text derived from the same facts. Checklist honesty: the
+production-routing item stays [~] DELIBERATELY — the remaining
+`api.rs`/flagless-path migration lands alongside B3's per-surface
+consumers, and B2 is not claimed fully complete while it remains.
 
 ## Review round 18 (2026-07-17, same Codex agent — B2 exit review: NOT ready)
 

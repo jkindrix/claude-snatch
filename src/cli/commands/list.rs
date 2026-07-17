@@ -1319,11 +1319,40 @@ fn list_provider_sessions(cli: &Cli, args: &ListArgs) -> Result<()> {
     use crate::provider::registry::ProviderSelection;
     use crate::provider::ArtifactForm;
 
-    // COMPLETE argument classification for this route (round-18): universal
-    // arguments are target=sessions, --provider, and -n/--limit; everything
-    // else is refused until normalization gives it provider-neutral meaning.
-    // (--context-length is dependent on --context and inert without it.)
-    if args.target != ListTarget::Sessions {
+    // COMPLETE argument classification for this route: the struct is
+    // destructured WITHOUT `..`, so adding a ListArgs field without
+    // classifying it here is a compile error (round-19 exhaustiveness).
+    // Universal: target=sessions, --provider, -n/--limit. --context-length
+    // is refused alongside --context (inert without it, but a set value
+    // must not be silently accepted).
+    let crate::cli::ListArgs {
+        target,
+        provider: _,
+        project,
+        subagents,
+        subagents_only,
+        active,
+        compacted,
+        sort,
+        limit: _,
+        full_ids,
+        sizes,
+        pager,
+        since,
+        until,
+        tag,
+        tags,
+        bookmarked,
+        outcome,
+        by_name,
+        min_size,
+        max_size,
+        context,
+        context_length,
+        hide_empty,
+        no_chain,
+    } = args;
+    if *target != ListTarget::Sessions {
         return Err(crate::error::SnatchError::InvalidArgument {
             name: "target".to_string(),
             reason: "only `list sessions` supports --provider".to_string(),
@@ -1332,27 +1361,28 @@ fn list_provider_sessions(cli: &Cli, args: &ListArgs) -> Result<()> {
     super::helpers::refuse_unsupported_flags(
         "list --provider (identity + artifacts until normalization lands)",
         &[
-            ("--project", args.project.is_some()),
-            ("--subagents", args.subagents),
-            ("--subagents-only", args.subagents_only),
-            ("--active", args.active),
-            ("--compacted", args.compacted),
-            ("--sort", args.sort != SortOrder::Modified),
-            ("--full-ids", args.full_ids),
-            ("--sizes", args.sizes),
-            ("--pager", args.pager),
-            ("--since", args.since.is_some()),
-            ("--until", args.until.is_some()),
-            ("--tag", args.tag.is_some()),
-            ("--tags", args.tags.is_some()),
-            ("--bookmarked", args.bookmarked),
-            ("--outcome", args.outcome.is_some()),
-            ("--by-name", args.by_name.is_some()),
-            ("--min-size", args.min_size.is_some()),
-            ("--max-size", args.max_size.is_some()),
-            ("--context", args.context),
-            ("--hide-empty", args.hide_empty),
-            ("--no-chain", args.no_chain),
+            ("--project", project.is_some()),
+            ("--subagents", *subagents),
+            ("--subagents-only", *subagents_only),
+            ("--active", *active),
+            ("--compacted", *compacted),
+            ("--sort", *sort != SortOrder::Modified),
+            ("--full-ids", *full_ids),
+            ("--sizes", *sizes),
+            ("--pager", *pager),
+            ("--since", since.is_some()),
+            ("--until", until.is_some()),
+            ("--tag", tag.is_some()),
+            ("--tags", tags.is_some()),
+            ("--bookmarked", *bookmarked),
+            ("--outcome", outcome.is_some()),
+            ("--by-name", by_name.is_some()),
+            ("--min-size", min_size.is_some()),
+            ("--max-size", max_size.is_some()),
+            ("--context", *context),
+            ("--context-length", *context_length != 100),
+            ("--hide-empty", *hide_empty),
+            ("--no-chain", *no_chain),
         ],
     )?;
 
@@ -1363,49 +1393,35 @@ fn list_provider_sessions(cli: &Cli, args: &ListArgs) -> Result<()> {
         }
     })?;
     let registry = super::helpers::provider_registry(cli);
-    let selected = registry.select(&selection)?;
-    // Runtime failures: atomic under an explicit selection, skipped-but-
-    // reported under `all` (round-18 blocker 2 — partial, never silent).
-    let atomic = matches!(selection, ProviderSelection::Explicit(_));
-    let mut skipped = selected.skipped.clone();
+    // Thin renderer: runtime-failure semantics (atomic vs partial, zero-
+    // success error) are enforced centrally in the registry (round-19).
+    let collected = registry.collect_selected_sessions(&selection)?;
+    let skipped = collected.skipped;
 
     let mut rows = Vec::new();
-    for provider in &selected.providers {
-        let mut descriptors = match provider.sessions() {
-            Ok(d) => d,
-            Err(e) if atomic => return Err(e.into()),
-            Err(e) => {
-                skipped.push((provider.id(), format!("session scan failed: {e}")));
-                continue;
-            }
-        };
-        // Deterministic cross-provider ordering: providers arrive in id
-        // order; sessions sort by qualified key within each provider.
-        descriptors.sort_by(|a, b| a.key.cmp(&b.key));
-        for d in descriptors {
-            let artifacts: Vec<serde_json::Value> = d
-                .artifacts
-                .iter()
-                .map(|a| {
-                    serde_json::json!({
-                        "locator": a.snapshot.id.locator,
-                        "form": match &a.form {
-                            ArtifactForm::PlainFile => "plain",
-                            ArtifactForm::CompressedFile => "compressed",
-                            ArtifactForm::Database => "database",
-                            ArtifactForm::Other(o) => o,
-                        },
-                        "archived": a.archived,
-                    })
+    for d in collected.items {
+        let artifacts: Vec<serde_json::Value> = d
+            .artifacts
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "locator": a.snapshot.id.locator,
+                    "form": match &a.form {
+                        ArtifactForm::PlainFile => "plain",
+                        ArtifactForm::CompressedFile => "compressed",
+                        ArtifactForm::Database => "database",
+                        ArtifactForm::Other(o) => o,
+                    },
+                    "archived": a.archived,
                 })
-                .collect();
-            rows.push(serde_json::json!({
-                "provider": d.key.provider.to_string(),
-                "qualified_id": d.key.to_string(),
-                "native_id": d.key.native_id,
-                "artifacts": artifacts,
-            }));
-        }
+            })
+            .collect();
+        rows.push(serde_json::json!({
+            "provider": d.key.provider.to_string(),
+            "qualified_id": d.key.to_string(),
+            "native_id": d.key.native_id,
+            "artifacts": artifacts,
+        }));
     }
     let total = rows.len();
     if args.limit > 0 {

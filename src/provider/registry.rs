@@ -78,6 +78,14 @@ impl ProviderRegistry {
     pub fn with_config(config: &RegistryConfig) -> Self {
         let mut registry = Self::new();
 
+        // `--max-file-size 0` means "no additional user cap" (the classic
+        // CLI's zero-is-unlimited convention). Normalize it to None HERE so
+        // providers keep their own built-in safety ceilings (round-19
+        // blocker 2: zero must never disable Codex's bomb guards) and so
+        // zero and omitted produce identical provider state — and identical
+        // parse cache tokens.
+        let max_file_size = config.max_file_size.filter(|&v| v != 0);
+
         let claude_dir = match &config.claude_root {
             Some(root) => ClaudeDirectory::from_path(root),
             None => ClaudeDirectory::discover(),
@@ -86,7 +94,7 @@ impl ProviderRegistry {
             Ok(dir) => (
                 Some(dir.root().to_path_buf()),
                 Ok(
-                    Box::new(ClaudeCodeProvider::new(dir).with_max_file_size(config.max_file_size))
+                    Box::new(ClaudeCodeProvider::new(dir).with_max_file_size(max_file_size))
                         as Box<dyn SourceProvider>,
                 ),
             ),
@@ -104,7 +112,7 @@ impl ProviderRegistry {
         {
             let (root, provider) = match super::codex::CodexProvider::discover() {
                 Ok(p) => {
-                    let p = match config.max_file_size {
+                    let p = match max_file_size {
                         Some(limit) => p.tighten_limits(limit),
                         None => p,
                     };
@@ -445,6 +453,95 @@ impl ProviderRegistry {
         };
         self.resolve_session(&selection, reference)
     }
+}
+
+/// One provider's diagnostics: `None` means the provider has no dedicated
+/// diagnostics (a success — the classic doctor covers it).
+pub type ProviderDiagnostics = (ProviderId, Option<serde_json::Value>);
+
+/// Result of collecting across a selection with the runtime-failure
+/// contract enforced centrally (round-19 blocker 4): surfaces render this,
+/// they do not re-implement the semantics.
+pub struct Collected<T> {
+    /// Successfully collected items, in deterministic provider/key order.
+    pub items: T,
+    /// Providers skipped under `all` (construction- or runtime-failed),
+    /// with reasons. Empty under an explicit selection (failures are
+    /// atomic there).
+    pub skipped: Vec<(ProviderId, String)>,
+}
+
+impl ProviderRegistry {
+    /// Collect session descriptors across a selection.
+    ///
+    /// Explicit selections are atomic over runtime `sessions()` failures;
+    /// `all` skips-and-reports them — but `all` with ZERO successfully
+    /// scanned providers is an error, mirroring the construction-time rule.
+    pub fn collect_selected_sessions(
+        &self,
+        selection: &ProviderSelection,
+    ) -> Result<Collected<Vec<super::SessionDescriptor>>, ProviderError> {
+        let selected = self.select(selection)?;
+        let atomic = matches!(selection, ProviderSelection::Explicit(_));
+        let mut skipped = selected.skipped.clone();
+        let mut items = Vec::new();
+        let mut scanned = 0usize;
+        for provider in &selected.providers {
+            match provider.sessions() {
+                Ok(mut descriptors) => {
+                    // Providers arrive in id order; keys sort within each.
+                    descriptors.sort_by(|a, b| a.key.cmp(&b.key));
+                    items.extend(descriptors);
+                    scanned += 1;
+                }
+                Err(e) if atomic => return Err(e),
+                Err(e) => skipped.push((provider.id(), format!("session scan failed: {e}"))),
+            }
+        }
+        if scanned == 0 {
+            return Err(no_provider_succeeded(&skipped));
+        }
+        Ok(Collected { items, skipped })
+    }
+
+    /// Collect provider diagnostics across a selection, same contract as
+    /// [`ProviderRegistry::collect_selected_sessions`]. `None` items are
+    /// providers without dedicated diagnostics (a success, not a failure).
+    pub fn collect_selected_diagnostics(
+        &self,
+        selection: &ProviderSelection,
+    ) -> Result<Collected<Vec<ProviderDiagnostics>>, ProviderError> {
+        let selected = self.select(selection)?;
+        let atomic = matches!(selection, ProviderSelection::Explicit(_));
+        let mut skipped = selected.skipped.clone();
+        let mut items = Vec::new();
+        let mut succeeded = 0usize;
+        for provider in &selected.providers {
+            match provider.diagnostics() {
+                Ok(value) => {
+                    items.push((provider.id(), value));
+                    succeeded += 1;
+                }
+                Err(e) if atomic => return Err(e),
+                Err(e) => skipped.push((provider.id(), format!("diagnostics failed: {e}"))),
+            }
+        }
+        if succeeded == 0 {
+            return Err(no_provider_succeeded(&skipped));
+        }
+        Ok(Collected { items, skipped })
+    }
+}
+
+fn no_provider_succeeded(skipped: &[(ProviderId, String)]) -> ProviderError {
+    ProviderError::Other(format!(
+        "no provider could be scanned: {}",
+        skipped
+            .iter()
+            .map(|(id, reason)| format!("{id}: {reason}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    ))
 }
 
 /// Parse a provider session with caching, retaining the COMPLETE bundle.

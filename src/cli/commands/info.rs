@@ -1156,19 +1156,30 @@ fn show_provider_session_info(
     use crate::provider::registry::cached_parsed_session;
     use crate::provider::ArtifactForm;
 
-    // COMPLETE argument classification (round-18): universal arguments are
-    // the target reference and --provider; every classic info view flag is
-    // refused until it has provider-neutral meaning.
+    // COMPLETE argument classification: the struct is destructured WITHOUT
+    // `..`, so a new InfoArgs field must be classified here to compile
+    // (round-19 exhaustiveness). Universal: target, --provider.
+    let InfoArgs {
+        target: _,
+        provider: _,
+        no_chain,
+        tree,
+        raw,
+        entry,
+        paths,
+        messages,
+        files,
+    } = args;
     super::helpers::refuse_unsupported_flags(
         "provider-routed info (identity, artifacts, provenance until normalization)",
         &[
-            ("--no-chain", args.no_chain),
-            ("--tree", args.tree),
-            ("--raw", args.raw),
-            ("--entry", args.entry.is_some()),
-            ("--paths", args.paths),
-            ("--messages", args.messages.is_some()),
-            ("--files", args.files),
+            ("--no-chain", *no_chain),
+            ("--tree", *tree),
+            ("--raw", *raw),
+            ("--entry", entry.is_some()),
+            ("--paths", *paths),
+            ("--messages", messages.is_some()),
+            ("--files", *files),
         ],
     )?;
 

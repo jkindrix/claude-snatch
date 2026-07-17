@@ -108,44 +108,35 @@ impl SnatchServer {
                 return ToolOutput::error(format!("Invalid provider selection: {reason}"))
             }
         };
+        // Thin renderer: runtime-failure semantics are enforced centrally
+        // in the registry (round-19 blocker 4).
         let registry = self.provider_registry();
-        let selected = match registry.select(&selection) {
-            Ok(s) => s,
+        let collected = match registry.collect_selected_sessions(&selection) {
+            Ok(c) => c,
             Err(e) => return ToolOutput::error(e.to_string()),
         };
 
-        // Runtime failures: atomic under an explicit selection, skipped-
-        // but-reported under `all` (round-18 blocker 2).
-        let atomic = matches!(selection, ProviderSelection::Explicit(_));
-        let mut skipped = selected.skipped.clone();
-        let mut rows = Vec::new();
-        for provider in &selected.providers {
-            let mut descriptors = match provider.sessions() {
-                Ok(d) => d,
-                Err(e) if atomic => return ToolOutput::error(format!("session scan failed: {e}")),
-                Err(e) => {
-                    skipped.push((provider.id(), format!("session scan failed: {e}")));
-                    continue;
-                }
-            };
-            descriptors.sort_by(|a, b| a.key.cmp(&b.key));
-            for d in descriptors {
-                rows.push(serde_json::json!({
+        let mut rows: Vec<serde_json::Value> = collected
+            .items
+            .iter()
+            .map(|d| {
+                serde_json::json!({
                     "provider": d.key.provider.to_string(),
                     "qualified_id": d.key.to_string(),
                     "native_id": d.key.native_id,
                     "artifacts": d.artifacts.len(),
-                }));
-            }
-        }
+                })
+            })
+            .collect();
         let total = rows.len();
-        if limit > 0 {
-            rows.truncate(limit);
-        }
+        // ALWAYS truncate to the requested limit — classic MCP semantics
+        // (`limit: 0` means zero rows, not unlimited; round-19 blocker 3).
+        rows.truncate(limit);
         let out = serde_json::json!({
             "sessions": rows,
             "total": total,
-            "skipped_providers": skipped
+            "skipped_providers": collected
+                .skipped
                 .iter()
                 .map(|(id, reason)| serde_json::json!({"provider": id.to_string(), "reason": reason}))
                 .collect::<Vec<_>>(),
@@ -4037,6 +4028,46 @@ mod tests {
             assert!(
                 msg.contains("refused rather than ignored"),
                 "scope arg must be refused, got: {msg}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_listing_limit_semantics_match_classic() {
+        // Round-19 blocker 3: `limit: 0` must mean ZERO rows on the
+        // provider route exactly as on the classic route — never unlimited.
+        let sid = "abcdabcd-2222-3333-4444-555566667777";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let server = make_server(&tmp);
+        for limit in [0usize, 1, 999] {
+            let classic = unwrap_output(
+                server
+                    .list_sessions(ListSessionsRequest {
+                        project: None,
+                        limit: Some(limit),
+                        include_subagents: None,
+                        provider: None,
+                    })
+                    .await,
+            );
+            let classic: serde_json::Value = serde_json::from_str(&classic).unwrap();
+            let classic_count = classic.as_array().unwrap().len();
+
+            let routed = unwrap_output(
+                server
+                    .list_sessions(ListSessionsRequest {
+                        project: None,
+                        limit: Some(limit),
+                        include_subagents: None,
+                        provider: Some(vec!["claude-code".to_string()]),
+                    })
+                    .await,
+            );
+            let routed: serde_json::Value = serde_json::from_str(&routed).unwrap();
+            let routed_count = routed["sessions"].as_array().unwrap().len();
+            assert_eq!(
+                classic_count, routed_count,
+                "limit {limit}: classic returned {classic_count}, provider route {routed_count}"
             );
         }
     }

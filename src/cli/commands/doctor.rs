@@ -177,15 +177,23 @@ fn print_human(report: &DoctorReport, failed: usize, since: Option<&str>) {
 fn provider_diagnostics(cli: &Cli, args: &DoctorArgs) -> Result<()> {
     use crate::provider::registry::ProviderSelection;
 
-    // COMPLETE argument classification (round-18): --all is universal here
-    // (provider diagnostics always scan the full corpus); project/date/
-    // subagent filters have no provider-diagnostics meaning and are refused.
+    // COMPLETE argument classification: destructured WITHOUT `..` so a new
+    // DoctorArgs field must be classified here to compile (round-19).
+    // --all is universal (provider diagnostics always scan the full
+    // corpus); project/date/subagent filters are refused.
+    let DoctorArgs {
+        project,
+        since,
+        all: _,
+        subagents,
+        provider: _,
+    } = args;
     helpers::refuse_unsupported_flags(
         "doctor --provider (full-corpus provider diagnostics)",
         &[
-            ("project", args.project.is_some()),
-            ("--since", args.since.is_some()),
-            ("--subagents", args.subagents),
+            ("project", project.is_some()),
+            ("--since", since.is_some()),
+            ("--subagents", *subagents),
         ],
     )?;
 
@@ -196,32 +204,26 @@ fn provider_diagnostics(cli: &Cli, args: &DoctorArgs) -> Result<()> {
         }
     })?;
     let registry = helpers::provider_registry(cli);
-    let selected = registry.select(&selection)?;
+    // Thin renderer: runtime-failure semantics (atomic vs partial, zero-
+    // success error) are enforced centrally in the registry (round-19).
+    // Unavailability and failure details are withheld here — doctor output
+    // promises no filesystem paths; `snatch providers` carries details.
+    let collected = registry.collect_selected_diagnostics(&selection)?;
 
-    // Runtime diagnostics failures: atomic under an explicit selection,
-    // reported per-provider under `all` (round-18 blocker 2). Unavailability
-    // and failure details are withheld here — doctor output promises no
-    // filesystem paths; `snatch providers` is the surface for those details.
-    let atomic = matches!(selection, ProviderSelection::Explicit(_));
     let mut reports = serde_json::Map::new();
-    for provider in &selected.providers {
-        let value = match provider.diagnostics() {
-            Ok(Some(v)) => v,
-            Ok(None) => serde_json::json!({
+    for (id, value) in collected.items {
+        let value = value.unwrap_or_else(|| {
+            serde_json::json!({
                 "note": "no dedicated provider diagnostics; the classic `snatch doctor` scan covers this provider"
-            }),
-            Err(e) if atomic => return Err(e.into()),
-            Err(_) => serde_json::json!({
-                "error": "diagnostics failed (details withheld; run `snatch providers`)"
-            }),
-        };
-        reports.insert(provider.id().to_string(), value);
+            })
+        });
+        reports.insert(id.to_string(), value);
     }
-    for (id, _) in &selected.skipped {
+    for (id, _) in &collected.skipped {
         reports.insert(
             id.to_string(),
             serde_json::json!({
-                "unavailable": "provider unavailable (details withheld; run `snatch providers`)"
+                "unavailable": "provider unavailable or diagnostics failed (details withheld; run `snatch providers`)"
             }),
         );
     }

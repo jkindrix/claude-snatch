@@ -117,8 +117,10 @@ pub struct Cli {
     #[arg(long, global = true, env = "SNATCH_CONFIG", hide_short_help = true)]
     pub config: Option<PathBuf>,
 
-    /// Maximum file size to parse in bytes (default: unlimited).
-    /// Set a limit to prevent memory exhaustion on very large files.
+    /// Maximum file size to parse in bytes (default: unlimited; 0 also
+    /// means unlimited). Set a limit to prevent memory exhaustion on very
+    /// large files. Provider-routed commands tighten each provider's own
+    /// safety caps with this value; zero never loosens built-in defaults.
     #[arg(
         long,
         global = true,

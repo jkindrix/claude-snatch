@@ -1646,6 +1646,35 @@ mod codex_provider_cli {
     }
 
     #[test]
+    fn max_file_size_reaches_codex_end_to_end() {
+        // Round-19 blocker 2, end to end through the CLI: omitted and zero
+        // limits keep the default caps (session parses); a small nonzero
+        // limit tightens them (parse refused).
+        let claude = setup_fixture_dir();
+        let (codex, _) = setup_codex_home();
+        let target = format!("codex:{CODEX_THREAD}");
+        for limit in [None, Some("0")] {
+            let mut cmd = snatch_cmd();
+            cmd.env("SNATCH_CLAUDE_DIR", claude.path())
+                .env("CODEX_HOME", codex.path());
+            if let Some(l) = limit {
+                cmd.args(["--max-file-size", l]);
+            }
+            cmd.args(["info", &target])
+                .assert()
+                .success()
+                .stdout(predicate::str::contains("Entries: 2"));
+        }
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["--max-file-size", "10", "info", &target])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("size limit"));
+    }
+
+    #[test]
     fn export_normalized_format_for_codex_is_refused_until_b3() {
         let claude = setup_fixture_dir();
         let (codex, _) = setup_codex_home();
@@ -1715,6 +1744,7 @@ fn provider_list_refuses_every_unsupported_flag_individually() {
         &["--min-size", "1k"],
         &["--max-size", "1m"],
         &["--context"],
+        &["--context-length", "200"],
         &["--hide-empty"],
         &["--no-chain"],
     ];
@@ -1911,4 +1941,17 @@ fn provider_export_preflight_never_creates_the_output_file() {
         !out_path.exists(),
         "preflight must reject before the file is created"
     );
+}
+
+#[test]
+fn export_list_templates_rejects_provider_selection() {
+    let tmp = setup_fixture_dir();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["export", "--list-templates", "--provider", "claude-code"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "cannot be combined with --provider",
+        ));
 }
