@@ -192,14 +192,11 @@ impl Conversation {
 
         loop {
             path.push(current.clone());
-            if let Some(node) = self.get_node(&current) {
-                if let Some(parent) = &node.parent_uuid {
-                    current = parent.clone();
-                } else {
-                    break;
-                }
+            let node = self.get_node(&current)?;
+            if let Some(parent) = &node.parent_uuid {
+                current = parent.clone();
             } else {
-                return None;
+                break;
             }
         }
 

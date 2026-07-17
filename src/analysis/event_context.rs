@@ -115,7 +115,8 @@ pub fn find_event_context(
                 .map(|u| u == msg_id || u.starts_with(msg_id))
                 .unwrap_or(false)
         })
-    } else if let Some(target_ts) = params.timestamp {
+    } else {
+        let target_ts = params.timestamp?;
         // Find closest entry by timestamp
         let mut best_idx = None;
         let mut best_diff = i64::MAX;
@@ -129,8 +130,6 @@ pub fn find_event_context(
             }
         }
         best_idx
-    } else {
-        return None;
     };
 
     let target_idx = target_idx?;
