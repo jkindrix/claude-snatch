@@ -1106,7 +1106,10 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    // Linux-only: APFS (macOS) rejects non-UTF-8 filenames at creation, so
+    // the scenario is unrepresentable there — not a platform behavior
+    // difference in the provider.
+    #[cfg(target_os = "linux")]
     #[test]
     fn non_utf8_codex_home_round_trips() {
         use std::ffi::OsStr;
