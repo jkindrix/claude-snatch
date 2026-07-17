@@ -9,9 +9,10 @@
 //! (`agent-*`) are only unique within their parent session (and workflow
 //! subdirectory), so their namespace is parent-qualified. A native id seen
 //! under several roots/projects becomes ONE logical descriptor with several
-//! artifacts. (Known inherited limitation: discovery deduplicates identical
-//! agent ids *within* one project keeping the most recent transcript, so
-//! same-project duplicates never reach the provider.)
+//! artifacts. Discovery deduplicates identical agent ids within one project
+//! (most-recent wins), so the provider additionally enumerates each parent's
+//! subagent links and merges them by parent-qualified key — same-project id
+//! collisions stay content-complete at this seam.
 //!
 //! Parsing: line-by-line with `LogEntry`'s tolerant deserializer so every
 //! physical line gets a true record ordinal and disposition; damaged lines
@@ -81,7 +82,9 @@ impl ClaudeCodeProvider {
             .filter_map(|c| c.as_os_str().to_str())
             .collect();
         comps.pop(); // file name
-        let sub_dirs = match comps.iter().position(|c| *c == "subagents") {
+                     // rposition: an ancestor directory may itself be named "subagents";
+                     // the transcript's own subagents dir is the LAST one on the path.
+        let sub_dirs = match comps.iter().rposition(|c| *c == "subagents") {
             Some(i) => comps[i + 1..].join("/"),
             None => String::new(),
         };
@@ -138,17 +141,44 @@ impl ClaudeCodeProvider {
     /// Group discovered sessions into logical descriptors: one descriptor
     /// per logical key, merging duplicate copies (e.g. the same session
     /// uuid under two project directories) into multiple artifacts.
+    /// Discovery deduplicates identical agent ids within one project
+    /// (most-recent wins), so subagents are additionally enumerated through
+    /// each parent's `subagent_links()` and merged by parent-qualified key —
+    /// same-project id collisions stay content-complete at this seam.
     fn descriptors(&self) -> Result<Vec<(SessionDescriptor, Vec<Session>)>, ProviderError> {
         let mut grouped: BTreeMap<LogicalSessionKey, (Vec<SessionArtifact>, Vec<Session>)> =
             BTreeMap::new();
-        for session in self.all_sessions()? {
-            let key = self.key_for_session(&session);
-            let artifact = self.artifact_for(&session);
+        let mut insert = |key: LogicalSessionKey, artifact: SessionArtifact, session: Session| {
             let slot = grouped.entry(key).or_default();
             if !slot.0.iter().any(|a| a.snapshot.id == artifact.snapshot.id) {
                 slot.0.push(artifact);
+                slot.1.push(session);
             }
-            slot.1.push(session);
+        };
+        let sessions = self.all_sessions()?;
+        for session in &sessions {
+            if session.is_subagent() {
+                continue;
+            }
+            // Recover same-project subagents that discovery's per-project
+            // id-dedup dropped, via the parent's sidecar links.
+            for link in session.subagent_links() {
+                let Ok(sub) = Session::from_path(&link.path, session.project_path()) else {
+                    continue; // pruned transcript: lineage keeps the edge
+                };
+                let key = LogicalSessionKey {
+                    provider: ProviderId::claude_code(),
+                    namespace: Self::subagent_namespace(session.session_id(), &link.path),
+                    native_id: link.agent_session_id.clone(),
+                };
+                let artifact = self.artifact_for(&sub);
+                insert(key, artifact, sub);
+            }
+        }
+        for session in sessions {
+            let key = self.key_for_session(&session);
+            let artifact = self.artifact_for(&session);
+            insert(key, artifact, session);
         }
         Ok(grouped
             .into_iter()
@@ -209,9 +239,7 @@ impl SourceProvider for ClaudeCodeProvider {
     fn parse(&self, key: &LogicalSessionKey) -> Result<ParsedSession, ProviderError> {
         let (descriptor, session) = self.resolve(key)?;
         if let Some(max) = self.max_file_size {
-            let len = std::fs::metadata(session.path())
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let len = std::fs::metadata(session.path())?.len();
             if max > 0 && len > max {
                 return Err(ProviderError::Other(format!(
                     "session file {} exceeds max_file_size ({len} > {max} bytes)",
@@ -233,7 +261,24 @@ impl SourceProvider for ClaudeCodeProvider {
                 artifact: artifact_id.clone(),
                 ordinal,
             };
-            let line = line?;
+            // Line-read errors (e.g. invalid UTF-8) skip the record and
+            // continue, mirroring the lenient parser — one corrupt line must
+            // not turn a working session into total failure.
+            let line = match line {
+                Ok(l) => l,
+                Err(e) => {
+                    diagnostics.unparseable += 1;
+                    record_dispositions.push(RecordDisposition {
+                        record,
+                        outcome: RecordOutcome::Unparseable {
+                            error: ParseDiagnostic {
+                                message: format!("I/O error: {e}"),
+                            },
+                        },
+                    });
+                    continue;
+                }
+            };
             if line.trim().is_empty() {
                 diagnostics.suppressed += 1;
                 record_dispositions.push(RecordDisposition {
@@ -361,9 +406,16 @@ impl SourceProvider for ClaudeCodeProvider {
         key: &LogicalSessionKey,
         out: &mut dyn Write,
     ) -> Result<(), ProviderError> {
-        // Lossless JSONL bundle: line 1 is the manifest, every subsequent
-        // line is a native record verbatim (streaming; no buffering).
-        let (descriptor, session) = self.resolve(key)?;
+        // Lossless framed multipart bundle: line 1 is the manifest carrying
+        // per-artifact byte lengths; the body is EVERY artifact's bytes
+        // concatenated in manifest order (streamed). Divergent duplicate
+        // copies are all preserved — archiving only one would silently drop
+        // the others' content.
+        let (descriptor, _) = self.resolve(key)?;
+        let mut lens = Vec::with_capacity(descriptor.artifacts.len());
+        for a in &descriptor.artifacts {
+            lens.push(std::fs::metadata(&a.snapshot.id.locator)?.len());
+        }
         let manifest = serde_json::json!({
             "manifest": {
                 "provider": self.id().0,
@@ -371,11 +423,13 @@ impl SourceProvider for ClaudeCodeProvider {
                 "artifacts": descriptor
                     .artifacts
                     .iter()
-                    .map(|a| serde_json::json!({
+                    .zip(&lens)
+                    .map(|(a, len)| serde_json::json!({
                         "instance": a.snapshot.id.provider_instance,
                         "locator": a.snapshot.id.locator,
                         "revision": a.snapshot.revision.0,
                         "archived": a.archived,
+                        "bytes": len,
                     }))
                     .collect::<Vec<_>>(),
             }
@@ -383,7 +437,17 @@ impl SourceProvider for ClaudeCodeProvider {
         serde_json::to_writer(&mut *out, &manifest)
             .map_err(|e| ProviderError::Other(format!("manifest serialization: {e}")))?;
         out.write_all(b"\n")?;
-        Self::stream_file(session.path(), out)
+        for (a, expected) in descriptor.artifacts.iter().zip(&lens) {
+            let mut file = File::open(&a.snapshot.id.locator)?;
+            let copied = std::io::copy(&mut file, out)?;
+            if copied != *expected {
+                return Err(ProviderError::Other(format!(
+                    "artifact {} changed while archiving ({copied} != {expected} bytes)",
+                    a.snapshot.id.locator
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn write_native(
@@ -426,6 +490,7 @@ mod tests {
     const SESSION_A: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
     const SESSION_B: &str = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
     const SESSION_GONE: &str = "99999999-9999-9999-9999-999999999999";
+    const SESSION_UTF8: &str = "e8e8e8e8-aaaa-bbbb-cccc-444444444444";
 
     fn user_line(uuid: &str, session: &str, text: &str) -> String {
         format!(
@@ -497,9 +562,31 @@ mod tests {
 
         write_subagent(&p1, SESSION_A, "agent-x1");
 
-        // P2: duplicate copy of session A + a different parent with the SAME
-        // agent id.
-        std::fs::write(p2.join(format!("{SESSION_A}.jsonl")), &a).unwrap();
+        // Same-project collision: a second parent in P1 with the SAME agent
+        // id (discovery's per-project dedup would hide one of them).
+        let session_d2 = "d2d2d2d2-aaaa-bbbb-cccc-333333333333";
+        std::fs::write(
+            p1.join(format!("{session_d2}.jsonl")),
+            user_line("u5", session_d2, "second parent") + "\n",
+        )
+        .unwrap();
+        write_subagent(&p1, session_d2, "agent-x1");
+
+        // A session containing an invalid-UTF-8 line between valid entries.
+        let mut utf8_bytes = Vec::new();
+        utf8_bytes.extend_from_slice(user_line("v1", SESSION_UTF8, "before").as_bytes());
+        utf8_bytes.extend_from_slice(b"\n\xff\xfe broken bytes \xff\n");
+        utf8_bytes.extend_from_slice(user_line("v2", SESSION_UTF8, "after").as_bytes());
+        utf8_bytes.push(b'\n');
+        std::fs::write(p1.join(format!("{SESSION_UTF8}.jsonl")), utf8_bytes).unwrap();
+
+        // P2: DIVERGENT duplicate copy of session A (extra trailing entry) +
+        // a different parent with the SAME agent id.
+        std::fs::write(
+            p2.join(format!("{SESSION_A}.jsonl")),
+            format!("{a}{}\n", user_line("u9", SESSION_A, "divergent extra")),
+        )
+        .unwrap();
         let session_d = "dddddddd-eeee-ffff-0000-111111111111";
         std::fs::write(
             p2.join(format!("{session_d}.jsonl")),
@@ -541,13 +628,25 @@ mod tests {
             .iter()
             .filter(|d| d.key.native_id == "agent-x1")
             .collect();
-        assert_eq!(agents.len(), 2, "same agent id under two parents");
-        assert_ne!(
-            agents[0].key, agents[1].key,
-            "parent-qualified namespaces must differ"
-        );
+        // Three parents (two in the SAME project — the case discovery's
+        // per-project id-dedup hides — plus one in the other project).
+        assert_eq!(agents.len(), 3, "same agent id under three parents");
+        let keys: std::collections::BTreeSet<_> = agents.iter().map(|d| &d.key).collect();
+        assert_eq!(keys.len(), 3, "parent-qualified namespaces must differ");
         for d in &agents {
             assert!(d.key.namespace.0.starts_with("subagent:"));
+            // Link-recovered subagents parse successfully too.
+            assert!(FakeCheck::parse_ok(&p, &d.key));
+        }
+    }
+
+    /// Helper: parse succeeds and validates for a key.
+    struct FakeCheck;
+    impl FakeCheck {
+        fn parse_ok(p: &ClaudeCodeProvider, key: &LogicalSessionKey) -> bool {
+            p.parse(key)
+                .map(|parsed| parsed.validate_provenance().is_empty())
+                .unwrap_or(false)
         }
     }
 
@@ -574,15 +673,18 @@ mod tests {
             );
         }
 
-        // Every physical line accounted for: 2 mapped, 1 blank suppressed,
-        // 1 garbage unparseable, 1 torn line recovered (salvage treats the
-        // damaged prefix as lost and recovers the clean tail entry —
-        // matching the established parser), 1 unknown-typed preserved.
-        assert_eq!(parsed.record_dispositions.len(), 6);
+        // Preferred artifact is the DIVERGENT P2 copy (stable ArtifactId
+        // tie-break: "-tmp-other" sorts before "-tmp-proj"), which carries
+        // one extra mapped entry. Every physical line accounted for:
+        // 3 mapped, 1 blank suppressed, 1 garbage unparseable, 1 torn line
+        // recovered (salvage treats the damaged prefix as lost and recovers
+        // the clean tail — matching the established parser), 1 unknown-typed
+        // preserved.
+        assert_eq!(parsed.record_dispositions.len(), 7);
         assert_eq!(
             parsed.diagnostics,
             IngestionDiagnostics {
-                mapped: 2,
+                mapped: 3,
                 suppressed: 1,
                 unknown: 1,
                 recovered: 1,
@@ -632,7 +734,7 @@ mod tests {
             .iter()
             .filter(|e| matches!(e.kind, LineageEdgeKind::Spawn { .. }))
             .collect();
-        assert_eq!(spawns.len(), 2);
+        assert_eq!(spawns.len(), 3);
         for s in &spawns {
             let LineageEdgeKind::Spawn {
                 agent_type,
@@ -646,7 +748,8 @@ mod tests {
             assert_eq!(description.as_deref(), Some("scan"));
             assert!(s.to.namespace.0.starts_with("subagent:"));
         }
-        assert_ne!(spawns[0].to, spawns[1].to, "spawn targets must not collide");
+        let targets: std::collections::BTreeSet<_> = spawns.iter().map(|s| &s.to).collect();
+        assert_eq!(targets.len(), 3, "spawn targets must not collide");
 
         // Deterministic output: sorted and deduplicated.
         let mut resorted = edges.clone();
@@ -670,20 +773,29 @@ mod tests {
         p.write_native(&artifact, &mut nat).unwrap();
         assert_eq!(nat, native, "native must be byte-faithful");
 
+        // Framed multipart archive: EVERY artifact's bytes are preserved,
+        // including divergent duplicate copies.
         let mut bundle = Vec::new();
         p.write_archive(&key(SESSION_A), &mut bundle).unwrap();
         let newline = bundle.iter().position(|b| *b == b'\n').unwrap();
         let manifest: serde_json::Value = serde_json::from_slice(&bundle[..newline]).unwrap();
         assert_eq!(manifest["manifest"]["provider"], "claude-code");
-        assert_eq!(
-            manifest["manifest"]["artifacts"].as_array().unwrap().len(),
-            2,
-            "both duplicate copies listed in the manifest"
-        );
-        assert_eq!(
-            &bundle[newline + 1..],
-            &native[..],
-            "archive body must carry native records verbatim"
+        let artifacts = manifest["manifest"]["artifacts"].as_array().unwrap();
+        assert_eq!(artifacts.len(), 2, "both copies listed in the manifest");
+        let mut offset = newline + 1;
+        let mut payloads = Vec::new();
+        for a in artifacts {
+            let len = a["bytes"].as_u64().unwrap() as usize;
+            let body = &bundle[offset..offset + len];
+            let on_disk = std::fs::read(a["locator"].as_str().unwrap()).unwrap();
+            assert_eq!(body, &on_disk[..], "artifact bytes must round-trip");
+            payloads.push(body.to_vec());
+            offset += len;
+        }
+        assert_eq!(offset, bundle.len(), "no trailing bytes beyond the frames");
+        assert_ne!(
+            payloads[0], payloads[1],
+            "fixture copies must actually diverge for this test to bite"
         );
     }
 
@@ -722,6 +834,21 @@ mod tests {
             p.write_native(&unknown, &mut sink),
             Err(ProviderError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn invalid_utf8_line_is_unparseable_not_fatal() {
+        let (_tmp, p) = fixture();
+        let parsed = p.parse(&key(SESSION_UTF8)).unwrap();
+        assert!(parsed.validate_provenance().is_empty());
+        assert_eq!(parsed.diagnostics.mapped, 2, "valid lines survive");
+        assert_eq!(parsed.diagnostics.unparseable, 1, "corrupt line recorded");
+
+        // Parity: the established lenient parser also yields the two valid
+        // entries rather than failing the session.
+        let (_, session) = p.resolve(&key(SESSION_UTF8)).unwrap();
+        let baseline = session.parse().unwrap();
+        assert_eq!(parsed.entries.len(), baseline.len());
     }
 
     #[test]

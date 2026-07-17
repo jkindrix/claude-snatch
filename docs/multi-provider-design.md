@@ -475,6 +475,25 @@ LineageEdgeKind::Spawn fields, and lineage output is sorted + deduplicated.
 discovery dedupes identical agent ids within one project (most-recent wins)
 before the provider sees them.
 
+## Review round 8 (2026-07-17, same Codex agent — milestone 1.5 re-review)
+
+Three adapter-hardening fixes before threading: (1) the archive is a framed
+multipart bundle — the manifest carries per-artifact byte lengths and the
+body concatenates EVERY artifact (divergent duplicate copies preserved;
+previously only the preferred copy was archived while the manifest claimed
+both; the fixture's copies now genuinely diverge so the test bites);
+(2) same-project subagent id collisions are content-complete: the provider
+enumerates each parent's subagent_links() and merges by parent-qualified
+key, recovering transcripts discovery's per-project id-dedup hides
+(tested with the same agent id under two parents in ONE project);
+subagent_namespace uses the LAST `subagents` path component (an ancestor
+dir may share the name); (3) lenient-parser parity on read errors: an
+invalid-UTF-8 line becomes an Unparseable disposition and parsing
+continues (previously it aborted the whole session — a strict regression
+vs the established parser; characterization test: valid → invalid UTF-8 →
+valid), and metadata errors in the max-size check propagate instead of
+reading as zero. 28 provider tests.
+
 ## Open questions (to settle in-phase)
 
 1. Two-stream dedup policy details (B3, empirical — under the emission-
