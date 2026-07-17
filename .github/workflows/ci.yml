@@ -23,26 +23,21 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Cache cargo registry
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+      # Toolchain- and lockfile-aware caching with target/ pruning; also sets
+      # CARGO_INCREMENTAL=0. Replaces actions/cache, whose Cargo.lock-only key
+      # kept restoring/saving caches the compiler couldn't reuse after every
+      # stable toolchain bump.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
   test:
     name: Test (${{ matrix.os }})
-    needs: check
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -64,26 +59,20 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Cache cargo registry
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-test-
-            ${{ runner.os }}-cargo-
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
 
-      - name: Build
-        run: cargo build --verbose
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
 
+      # --all-features --locked matches the local `just ci` gate (plain
+      # `cargo test` here left the mcp/mmap feature code untested in CI).
+      # nextest does not run doctests, hence the separate --doc step.
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo nextest run --all-features --locked
 
       - name: Run doc tests
-        run: cargo test --doc
+        run: cargo test --doc --all-features --locked
 
   build-release:
     name: Build Release (${{ matrix.target }})
@@ -121,20 +110,13 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - name: Cache cargo registry
-        uses: actions/cache@v6
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.target }}-cargo-release-
-            ${{ runner.os }}-cargo-
+          key: ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Create artifact directory
         run: mkdir -p dist
@@ -213,11 +195,18 @@ jobs:
         with:
           components: llvm-tools-preview
 
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+      # This job previously had no cache at all — every run paid a full
+      # instrumented rebuild of the dependency graph (~12 min).
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov and cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,nextest
 
       - name: Generate coverage report
-        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+        run: cargo llvm-cov nextest --all-features --workspace --locked --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
