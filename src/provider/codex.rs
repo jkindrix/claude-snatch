@@ -1678,6 +1678,8 @@ mod tests {
         let (mut parsed_ok, mut legacy, mut errors, mut violations) = (0u32, 0u32, 0u32, 0u32);
         let (mut count_mismatches, mut raced) = (0u32, 0u32);
         let (mut human_boundaries, mut human_midturn) = (0usize, 0usize);
+        let (mut compactions, mut replacement_items, mut world_full, mut world_patch, mut ghosts) =
+            (0usize, 0usize, 0usize, 0usize, 0usize);
         let mut expected_lineage: std::collections::BTreeSet<LineageEdge> =
             std::collections::BTreeSet::new();
         let mut inherited_sessions = 0usize;
@@ -1919,6 +1921,24 @@ mod tests {
                         "every native-derived midturn prompt must survive timeline rendering"
                     );
 
+                    // (d) Native-derived compaction/state audit: nested
+                    // replacement history must remain nested, boundaries
+                    // render exactly once, window links remain coherent, and
+                    // reconstruction checkpoints retain their exact native
+                    // record plus a correctly typed carrier. Mutation tests
+                    // below prove each class of corruption is rejected.
+                    let state_audit = audit_compaction_and_state(&d.key, &raw_records, &session);
+                    assert!(
+                        state_audit.violations.is_empty(),
+                        "compaction/state audit failed: {} violation(s)",
+                        state_audit.violations.len()
+                    );
+                    compactions += state_audit.compactions;
+                    replacement_items += state_audit.replacement_items;
+                    world_full += state_audit.world_full;
+                    world_patch += state_audit.world_patch;
+                    ghosts += state_audit.ghost_snapshots;
+
                     // physical record — compare against an independent count
                     // of the preferred artifact's records. Active sessions
                     // can append between the parse and the count; a mismatch
@@ -2020,7 +2040,9 @@ mod tests {
              {errors} errors, {violations} provenance violations, {edges} lineage edges \
              ({inherited_sessions} copied-history sessions), \
              {raced} raced, human prompts: {human_boundaries} boundary + \
-             {human_midturn} midturn, records: {totals:?}",
+             {human_midturn} midturn, compaction/state: {compactions} boundaries + \
+             {replacement_items} replacement items + {world_full} world full + \
+             {world_patch} world patch + {ghosts} ghost checkpoints, records: {totals:?}",
             n = sessions.len()
         );
         assert_eq!(errors, 0, "no session may fail outside the legacy contract");
@@ -3588,6 +3610,458 @@ mod tests {
             }
         }
         violations
+    }
+
+    #[derive(Default)]
+    struct CompactionStateAudit {
+        compactions: usize,
+        replacement_items: usize,
+        world_full: usize,
+        world_patch: usize,
+        ghost_snapshots: usize,
+        violations: Vec<String>,
+    }
+
+    /// Source-derived audit for compaction and reconstruction state. Native
+    /// records define the expected canonical entry/carrier; emitted output is
+    /// inspected only afterward. The audit also checks window-chain and
+    /// world-state-baseline invariants independently.
+    fn audit_compaction_and_state(
+        key: &LogicalSessionKey,
+        raw: &[(u64, serde_json::Value)],
+        session: &crate::provider::ParsedSession,
+    ) -> CompactionStateAudit {
+        use crate::provider::{CompactionKind, CompactionWindow, StateCheckpointKind};
+        let entries: std::collections::BTreeMap<_, _> =
+            session.entries.iter().map(|e| (&e.id, &e.entry)).collect();
+        let preferred_artifact = session
+            .descriptor
+            .preferred_artifact()
+            .expect("parsed Codex session has a preferred artifact")
+            .snapshot
+            .id
+            .clone();
+        let raw_by_ordinal: std::collections::BTreeMap<_, _> =
+            raw.iter().map(|(o, value)| (*o, value)).collect();
+        let mut audit = CompactionStateAudit::default();
+        let mut prior_window_id: Option<String> = None;
+        let mut first_window_id: Option<String> = None;
+        let mut prior_window_number: Option<u64> = None;
+        let mut has_world_full = false;
+
+        for (ordinal, value) in raw {
+            let id = EntryId::deterministic(key, *ordinal, 0);
+            let expected_record = RecordRef {
+                artifact: preferred_artifact.clone(),
+                ordinal: *ordinal,
+            };
+            if value["type"] == "compacted" {
+                audit.compactions += 1;
+                has_world_full = false;
+                let payload = &value["payload"];
+                let replacement_items = payload["replacement_history"]
+                    .as_array()
+                    .map_or(0, Vec::len);
+                audit.replacement_items += replacement_items;
+                let legacy_number = payload["window_id"].as_u64();
+                let expected_window = CompactionWindow {
+                    number: payload["window_number"].as_u64().or(legacy_number),
+                    first_id: payload["first_window_id"].as_str().map(str::to_string),
+                    previous_id: payload["previous_window_id"].as_str().map(str::to_string),
+                    id: payload["window_id"].as_str().map(str::to_string),
+                    legacy_numeric_id: legacy_number.is_some(),
+                };
+                let expected_count = payload["replacement_history"].as_array().map(Vec::len);
+                match entries.get(&id) {
+                    Some(crate::model::LogEntry::System(system)) => {
+                        if system.subtype != Some(crate::model::SystemSubtype::CompactBoundary) {
+                            audit.violations.push(format!(
+                                "compacted record #{ordinal} is not a compact boundary"
+                            ));
+                        }
+                        if system.content.as_deref() != payload["message"].as_str() {
+                            audit.violations.push(format!(
+                                "compacted record #{ordinal} summary differs from native message"
+                            ));
+                        }
+                        let native_extra = payload
+                            .as_object()
+                            .into_iter()
+                            .flat_map(|object| object.iter())
+                            .filter(|(name, _)| name.as_str() != "message")
+                            .collect::<std::collections::BTreeMap<_, _>>();
+                        let emitted_extra = system
+                            .extra
+                            .iter()
+                            .collect::<std::collections::BTreeMap<_, _>>();
+                        if emitted_extra != native_extra {
+                            audit.violations.push(format!(
+                                "compacted record #{ordinal} does not preserve its complete nested payload"
+                            ));
+                        }
+                    }
+                    _ => audit.violations.push(format!(
+                        "compacted record #{ordinal} is missing its system entry"
+                    )),
+                }
+                match session
+                    .semantics
+                    .get(&id)
+                    .and_then(|s| s.compaction.as_ref())
+                {
+                    Some(compaction)
+                        if compaction.kind == CompactionKind::Full
+                            && compaction.replacement_history_items == expected_count
+                            && compaction.window == expected_window => {}
+                    _ => audit.violations.push(format!(
+                        "compacted record #{ordinal} has incorrect semantic metadata"
+                    )),
+                }
+                match session
+                    .record_dispositions
+                    .iter()
+                    .find(|d| d.record == expected_record)
+                    .map(|d| &d.outcome)
+                {
+                    Some(RecordOutcome::Mapped(ids)) if ids.as_slice() == [id.clone()] => {}
+                    _ => audit.violations.push(format!(
+                        "compacted record #{ordinal} must map to exactly one boundary entry"
+                    )),
+                }
+                if session.entry_origins.get(&id).map(Vec::as_slice)
+                    != Some(std::slice::from_ref(&expected_record))
+                {
+                    audit.violations.push(format!(
+                        "compacted record #{ordinal} has incorrect origin correspondence"
+                    ));
+                }
+                if let Some(number) = expected_window.number {
+                    if let Some(previous) = prior_window_number {
+                        if number != previous.saturating_add(1) {
+                            audit.violations.push(format!(
+                                "compacted record #{ordinal} window number is not sequential"
+                            ));
+                        }
+                    }
+                    prior_window_number = Some(number);
+                }
+                if let Some(window_id) = &expected_window.id {
+                    if uuid::Uuid::parse_str(window_id)
+                        .ok()
+                        .is_none_or(|id| id.get_version_num() != 7)
+                    {
+                        audit.violations.push(format!(
+                            "compacted record #{ordinal} window id is not UUIDv7"
+                        ));
+                    }
+                    if let Some(previous) = &prior_window_id {
+                        if expected_window.previous_id.as_ref() != Some(previous) {
+                            audit.violations.push(format!(
+                                "compacted record #{ordinal} previous window id breaks the chain"
+                            ));
+                        }
+                    }
+                    if let Some(first) = &first_window_id {
+                        if expected_window.first_id.as_ref() != Some(first) {
+                            audit.violations.push(format!(
+                                "compacted record #{ordinal} first window id changed"
+                            ));
+                        }
+                    } else if let Some(first) = &expected_window.first_id {
+                        first_window_id = Some(first.clone());
+                    }
+                    prior_window_id = Some(window_id.clone());
+                }
+            } else if value["type"] == "world_state" {
+                let expected = match value["payload"]["full"].as_bool() {
+                    Some(true) => {
+                        audit.world_full += 1;
+                        has_world_full = true;
+                        Some(StateCheckpointKind::WorldStateFull)
+                    }
+                    Some(false) => {
+                        audit.world_patch += 1;
+                        if !has_world_full {
+                            audit.violations.push(format!(
+                                "world-state patch #{ordinal} has no full baseline after compaction"
+                            ));
+                        }
+                        Some(StateCheckpointKind::WorldStatePatch)
+                    }
+                    None => None,
+                };
+                match entries.get(&id) {
+                    Some(crate::model::LogEntry::Unknown(actual)) if actual == value => {}
+                    _ => audit.violations.push(format!(
+                        "world-state record #{ordinal} is not preserved verbatim"
+                    )),
+                }
+                if expected.is_some()
+                    && session.semantics.get(&id).and_then(|s| s.state_checkpoint) != expected
+                {
+                    audit.violations.push(format!(
+                        "world-state record #{ordinal} has the wrong checkpoint kind"
+                    ));
+                }
+                if session.entry_origins.get(&id).map(Vec::as_slice)
+                    != Some(std::slice::from_ref(&expected_record))
+                {
+                    audit.violations.push(format!(
+                        "world-state record #{ordinal} has incorrect origin correspondence"
+                    ));
+                }
+            } else if value["type"] == "response_item"
+                && value["payload"]["type"] == "ghost_snapshot"
+            {
+                audit.ghost_snapshots += 1;
+                match entries.get(&id) {
+                    Some(crate::model::LogEntry::Unknown(actual)) if actual == value => {}
+                    _ => audit.violations.push(format!(
+                        "ghost snapshot #{ordinal} is not preserved as non-model state"
+                    )),
+                }
+                if session.semantics.get(&id).and_then(|s| s.state_checkpoint)
+                    != Some(StateCheckpointKind::LegacyGhostSnapshot)
+                {
+                    audit.violations.push(format!(
+                        "ghost snapshot #{ordinal} has the wrong checkpoint kind"
+                    ));
+                }
+                if session.entry_origins.get(&id).map(Vec::as_slice)
+                    != Some(std::slice::from_ref(&expected_record))
+                {
+                    audit.violations.push(format!(
+                        "ghost snapshot #{ordinal} has incorrect origin correspondence"
+                    ));
+                }
+            }
+        }
+
+        for (id, semantics) in &session.semantics {
+            let raw = raw_by_ordinal.get(&id.ordinal);
+            if semantics.compaction.is_some() && !raw.is_some_and(|v| v["type"] == "compacted") {
+                audit.violations.push(format!(
+                    "unexpected compaction semantics on entry #{}",
+                    id.ordinal
+                ));
+            }
+            if semantics.state_checkpoint.is_some()
+                && !raw.is_some_and(|v| {
+                    v["type"] == "world_state"
+                        || (v["type"] == "response_item"
+                            && v["payload"]["type"] == "ghost_snapshot")
+                })
+            {
+                audit.violations.push(format!(
+                    "unexpected state-checkpoint semantics on entry #{}",
+                    id.ordinal
+                ));
+            }
+        }
+        audit
+    }
+
+    fn compaction_state_fixture() -> (
+        tempfile::TempDir,
+        crate::provider::ParsedSession,
+        Vec<(u64, serde_json::Value)>,
+    ) {
+        // Mined corpus shapes (226-session census): modern compacted records
+        // carry replacement_history + UUIDv7 window links, legacy records use
+        // a numeric window_id, world_state is full/merge-patch, and legacy
+        // ghost_snapshot items are non-model checkpoints. The replacement
+        // array deliberately contains all three observed nested state shapes.
+        let window_1 = "019f7000-0000-7000-8000-000000000001";
+        let window_2 = "019f7000-0000-7000-8000-000000000002";
+        parse_and_raw(&[
+            envelope_line(
+                "session_meta",
+                serde_json::json!({"id": THREAD_A, "cli_version": "0.144.5"}),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "before"}]}),
+            ),
+            envelope_line(
+                "compacted",
+                serde_json::json!({
+                    "message": "first summary",
+                    "replacement_history": [
+                        {"type": "message", "role": "user", "content": []},
+                        {"type": "ghost_snapshot", "ghost_commit": "abc"},
+                        {"type": "compaction", "encrypted_content": "opaque"}
+                    ],
+                    "window_number": 1,
+                    "first_window_id": window_1,
+                    "previous_window_id": "019f6000-0000-7000-8000-000000000000",
+                    "window_id": window_1
+                }),
+            ),
+            envelope_line(
+                "world_state",
+                serde_json::json!({"full": true, "state": {"skills": ["a"], "plugins": {}}}),
+            ),
+            envelope_line(
+                "world_state",
+                serde_json::json!({"full": false, "state": {"skills": null}}),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "ghost_snapshot", "ghost_commit": "def"}),
+            ),
+            envelope_line(
+                "compacted",
+                serde_json::json!({
+                    "message": "second summary",
+                    "window_number": 2,
+                    "first_window_id": window_1,
+                    "previous_window_id": window_1,
+                    "window_id": window_2
+                }),
+            ),
+            envelope_line(
+                "compacted",
+                serde_json::json!({"message": "legacy summary", "window_id": 3}),
+            ),
+        ])
+    }
+
+    fn assert_compaction_rejects(
+        parsed: &crate::provider::ParsedSession,
+        raw: &[(u64, serde_json::Value)],
+        needle: &str,
+    ) {
+        let audit = audit_compaction_and_state(&key(THREAD_A), raw, parsed);
+        assert!(
+            audit.violations.iter().any(|v| v.contains(needle)),
+            "expected violation containing {needle:?}, got {:?}",
+            audit.violations
+        );
+    }
+
+    #[test]
+    fn compaction_state_audit_accepts_lossless_non_expanding_fixture() {
+        let (_tmp, parsed, raw) = compaction_state_fixture();
+        assert!(parsed.validate_provenance().is_empty());
+        let audit = audit_compaction_and_state(&key(THREAD_A), &raw, &parsed);
+        assert!(audit.violations.is_empty(), "{:?}", audit.violations);
+        assert_eq!(
+            (
+                audit.compactions,
+                audit.replacement_items,
+                audit.world_full,
+                audit.world_patch,
+                audit.ghost_snapshots,
+            ),
+            (3, 3, 1, 1, 1)
+        );
+        let conversation =
+            crate::reconstruction::Conversation::from_parsed_session(std::sync::Arc::new(parsed))
+                .unwrap();
+        let events = crate::analysis::extraction::find_compaction_events(
+            &conversation.main_thread_entries(),
+        );
+        assert_eq!(events.len(), 3, "each native boundary renders once");
+        assert_eq!(events[0].1.as_deref(), Some("first summary"));
+    }
+
+    #[test]
+    fn nc_wrong_replacement_history_cardinality_is_rejected() {
+        let (_tmp, mut parsed, raw) = compaction_state_fixture();
+        let id = EntryId::deterministic(&key(THREAD_A), 2, 0);
+        parsed
+            .semantics
+            .get_mut(&id)
+            .unwrap()
+            .compaction
+            .as_mut()
+            .unwrap()
+            .replacement_history_items = Some(99);
+        assert_compaction_rejects(&parsed, &raw, "incorrect semantic metadata");
+    }
+
+    #[test]
+    fn nc_dropped_nested_replacement_history_is_rejected() {
+        let (_tmp, mut parsed, raw) = compaction_state_fixture();
+        let id = EntryId::deterministic(&key(THREAD_A), 2, 0);
+        let entry = parsed.entries.iter_mut().find(|e| e.id == id).unwrap();
+        let crate::model::LogEntry::System(system) = &mut entry.entry else {
+            panic!("fixture compacted entry is not system");
+        };
+        system.extra.shift_remove("replacement_history");
+        assert_compaction_rejects(&parsed, &raw, "complete nested payload");
+    }
+
+    #[test]
+    fn nc_expanded_replacement_item_is_rejected_even_with_valid_provenance() {
+        let (_tmp, mut parsed, raw) = compaction_state_fixture();
+        let boundary = EntryId::deterministic(&key(THREAD_A), 2, 0);
+        let expanded = EntryId::deterministic(&key(THREAD_A), 2, 1);
+        let record = parsed.entry_origins[&boundary][0].clone();
+        parsed.entries.push(crate::provider::IdentifiedEntry {
+            id: expanded.clone(),
+            entry: crate::model::LogEntry::Unknown(
+                raw[2].1["payload"]["replacement_history"][0].clone(),
+            ),
+        });
+        parsed
+            .entry_origins
+            .insert(expanded.clone(), vec![record.clone()]);
+        parsed
+            .semantics
+            .insert(expanded.clone(), crate::provider::EntrySemantics::default());
+        let disposition = parsed
+            .record_dispositions
+            .iter_mut()
+            .find(|d| d.record == record)
+            .unwrap();
+        let RecordOutcome::Mapped(ids) = &mut disposition.outcome else {
+            panic!("fixture compacted record is not mapped");
+        };
+        ids.push(expanded);
+        assert!(
+            parsed.validate_provenance().is_empty(),
+            "generic integrity alone intentionally permits one record to map 1:N"
+        );
+        assert_compaction_rejects(&parsed, &raw, "exactly one boundary entry");
+    }
+
+    #[test]
+    fn nc_wrong_world_state_kind_is_rejected() {
+        let (_tmp, mut parsed, raw) = compaction_state_fixture();
+        let id = EntryId::deterministic(&key(THREAD_A), 4, 0);
+        parsed.semantics.get_mut(&id).unwrap().state_checkpoint =
+            Some(crate::provider::StateCheckpointKind::WorldStateFull);
+        assert!(parsed.validate_provenance().is_empty());
+        assert_compaction_rejects(&parsed, &raw, "wrong checkpoint kind");
+    }
+
+    #[test]
+    fn generic_validator_rejects_semantic_carriers_on_wrong_entry_kinds() {
+        let (_tmp, mut parsed, _raw) = compaction_state_fixture();
+        let assistant = EntryId::deterministic(&key(THREAD_A), 1, 0);
+        let boundary = EntryId::deterministic(&key(THREAD_A), 2, 0);
+        let compaction = parsed.semantics[&boundary].compaction.clone();
+        parsed.semantics.get_mut(&assistant).unwrap().compaction = compaction;
+        parsed
+            .semantics
+            .get_mut(&boundary)
+            .unwrap()
+            .state_checkpoint = Some(crate::provider::StateCheckpointKind::WorldStateFull);
+        let violations = parsed.validate_provenance();
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("require a compact-boundary system entry")),
+            "{violations:?}"
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("require a preserved unknown entry")),
+            "{violations:?}"
+        );
     }
 
     /// Claim-once helper for independent twin matching.

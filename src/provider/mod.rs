@@ -24,8 +24,9 @@
 //!   content-complete promise survives schema drift. Fork-inherited history
 //!   is Mapped (it is part of the fork's content) and annotated
 //!   [`ActivityKind::InheritedHistory`] so cross-session analytics can
-//!   exclude it from "new work"; only compaction replacement snapshots are
-//!   suppressed.
+//!   exclude it from "new work". Compaction replacement snapshots remain
+//!   nested on their boundary entry and are never expanded into chronological
+//!   emissions.
 //! - **Export fidelity is capability-tiered and streaming**: the `archive`
 //!   tier is universal (lossless, provider-defined bundle written to a
 //!   caller-supplied writer); `native` (exact source bytes) and `raw-jsonl`
@@ -663,6 +664,13 @@ pub struct EntrySemantics {
     /// a Call/Delta and a Session/Cumulative side by side; each carries its
     /// own values so annotations stay paired with numbers).
     pub usage: Vec<UsageObservation>,
+    /// Compaction boundary metadata, when this entry is a chronological
+    /// compaction event. Replacement-history items are nested replay state,
+    /// not additional entries.
+    pub compaction: Option<CompactionSemantics>,
+    /// Provider state persisted for reconstruction/checkpointing rather than
+    /// a model-visible chronological emission.
+    pub state_checkpoint: Option<StateCheckpointKind>,
     /// The provider's turn identifier for the entry, when the provider has
     /// one (Codex `turn_id`). A separate carrier by contract — turn
     /// identity must never be modeled by repurposing message identity
@@ -703,8 +711,8 @@ pub struct LineageEdge {
     pub kind: LineageEdgeKind,
 }
 
-/// Kind of compaction event. Carrier for compaction window metadata is
-/// explicitly deferred to Phase B3/C.
+/// Kind of compaction event. Window identity is carried separately by
+/// [`CompactionWindow`]; presentation remains a Phase C concern.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompactionKind {
     /// Full context compaction.
@@ -713,6 +721,49 @@ pub enum CompactionKind {
     Micro,
     /// Provider-described variant.
     Other(String),
+}
+
+/// Provider-neutral context-window identity carried by a compaction event.
+///
+/// Old Codex rollouts serialized a numeric window position in `window_id`;
+/// adapters normalize that into `number` and mark `legacy_numeric_id` while
+/// preserving the native payload in the mapped entry itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompactionWindow {
+    /// Monotonic window position, when recorded.
+    pub number: Option<u64>,
+    /// Identity of the first window in this chain.
+    pub first_id: Option<String>,
+    /// Identity of the immediately previous window.
+    pub previous_id: Option<String>,
+    /// Identity of the new/current window.
+    pub id: Option<String>,
+    /// `true` when a legacy numeric `window_id` supplied `number`.
+    pub legacy_numeric_id: bool,
+}
+
+/// Semantics of one chronological compaction boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionSemantics {
+    /// Full/micro/provider-described compaction kind.
+    pub kind: CompactionKind,
+    /// Native replacement-history cardinality. `None` distinguishes legacy
+    /// compacted records that did not persist a replacement snapshot.
+    pub replacement_history_items: Option<usize>,
+    /// Context-window chain metadata.
+    pub window: CompactionWindow,
+}
+
+/// Non-chronological persisted provider state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateCheckpointKind {
+    /// Complete world-state baseline.
+    WorldStateFull,
+    /// RFC 7386 merge patch over a prior full world-state baseline.
+    WorldStatePatch,
+    /// Legacy Codex Git ghost-commit checkpoint, explicitly excluded from
+    /// model history by Codex's rollout loader.
+    LegacyGhostSnapshot,
 }
 
 // ============================================================================
@@ -993,6 +1044,30 @@ impl ParsedSession {
                     }
                 }
                 Some(_) => {}
+            }
+            if let Some(entry) = entry_by_id.get(id) {
+                if sem.compaction.is_some()
+                    && !matches!(
+                        entry,
+                        LogEntry::System(system)
+                            if system.subtype
+                                == Some(crate::model::SystemSubtype::CompactBoundary)
+                    )
+                {
+                    violations.push(format!(
+                        "compaction semantics on entry {id} require a compact-boundary system entry"
+                    ));
+                }
+                if sem.state_checkpoint.is_some() && !matches!(entry, LogEntry::Unknown(_)) {
+                    violations.push(format!(
+                        "state-checkpoint semantics on entry {id} require a preserved unknown entry"
+                    ));
+                }
+                if sem.compaction.is_some() && sem.state_checkpoint.is_some() {
+                    violations.push(format!(
+                        "entry {id} cannot be both a compaction boundary and a state checkpoint"
+                    ));
+                }
             }
         }
 

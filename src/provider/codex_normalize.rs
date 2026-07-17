@@ -1,4 +1,4 @@
-//! B3 slice 1: normalize Codex envelope records into the common model.
+//! B3 normalization: map Codex envelope records into the common model.
 //!
 //! Covers user/assistant content, reasoning summaries, tool calls/results
 //! (including `web_search_call`), and usage. The mapping is recorded in
@@ -24,14 +24,16 @@
 //!   if none ever arrives the record stays a preserved Unknown entry,
 //!   never lost.
 //!
-//! Everything outside the mapped vocabulary (session_meta, turn_context,
-//! world_state, ghost_snapshot, compacted, task events, ...) remains a
-//! preserved `Unknown` entry — consumed as normalization STATE where useful,
-//! with its disposition unchanged. The provider supplies a proven copied-
-//! history interval for old-format forks; this module treats its end as a
-//! hard matching/usage window boundary before the provider annotates copied
-//! entries as inherited. Compaction and world-state semantics are later B3
-//! slices; spawn lineage is provider-level metadata rather than an entry.
+//! A `compacted` record maps once as a chronological compact-boundary system
+//! entry; its replacement history remains nested reconstruction state and is
+//! never expanded into new activity. `world_state` and legacy
+//! `ghost_snapshot` records remain verbatim `Unknown` entries with typed state
+//! carriers because they are reconstruction checkpoints, not model-visible
+//! emissions. Other unmapped vocabulary stays preserved `Unknown`. The
+//! provider supplies a proven copied-history interval for old-format forks;
+//! this module treats its end as a hard matching/usage window boundary before
+//! the provider annotates copied entries as inherited. Spawn lineage is
+//! provider-level metadata rather than an entry.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -40,15 +42,16 @@ use serde_json::Value;
 
 use crate::model::usage::Usage;
 use crate::model::{
-    AssistantContent, AssistantMessage, ContentBlock, LogEntry, TextBlock, ThinkingBlock,
-    ToolResult, ToolResultContent, ToolUse, UserBlocksContent, UserContent, UserMessage,
+    AssistantContent, AssistantMessage, ContentBlock, LogEntry, SystemMessage, SystemSubtype,
+    TextBlock, ThinkingBlock, ToolResult, ToolResultContent, ToolUse, UserBlocksContent,
+    UserContent, UserMessage,
 };
 
 use super::{
-    ActivityKind, EntryId, EntrySemantics, IdentifiedEntry, IngestionDiagnostics,
-    LogicalSessionKey, PromptAuthorship, PromptDelivery, PromptSemantics, RecordDisposition,
-    RecordOutcome, RecordRef, SuppressionReason, ToolKind, ToolSemantics, UsageAggregation,
-    UsageObservation, UsageScope,
+    ActivityKind, CompactionKind, CompactionSemantics, CompactionWindow, EntryId, EntrySemantics,
+    IdentifiedEntry, IngestionDiagnostics, LogicalSessionKey, PromptAuthorship, PromptDelivery,
+    PromptSemantics, RecordDisposition, RecordOutcome, RecordRef, StateCheckpointKind,
+    SuppressionReason, ToolKind, ToolSemantics, UsageAggregation, UsageObservation, UsageScope,
 };
 
 /// Output of normalizing the parsed record stream.
@@ -410,6 +413,25 @@ pub(super) fn normalize(
         }
 
         match (envelope_type, payload_type) {
+            ("compacted", _) => {
+                normalize_compaction(payload, timestamp, key, record, &mut state, &mut out);
+            }
+            ("world_state", _) => {
+                let checkpoint = match payload.get("full").and_then(Value::as_bool) {
+                    Some(true) => Some(StateCheckpointKind::WorldStateFull),
+                    Some(false) => Some(StateCheckpointKind::WorldStatePatch),
+                    None => None,
+                };
+                let id = push_unknown(value.clone(), key, record, &mut out);
+                if let Some(checkpoint) = checkpoint {
+                    out.semantics.entry(id).or_default().state_checkpoint = Some(checkpoint);
+                }
+            }
+            ("response_item", "ghost_snapshot") => {
+                let id = push_unknown(value.clone(), key, record, &mut out);
+                out.semantics.entry(id).or_default().state_checkpoint =
+                    Some(StateCheckpointKind::LegacyGhostSnapshot);
+            }
             ("response_item", "message") => {
                 normalize_message(payload, timestamp, key, record, &plan, &mut state, &mut out);
             }
@@ -843,6 +865,101 @@ fn normalize_tool_output(
     }
 }
 
+/// A `compacted` envelope is one chronological system boundary. Its
+/// `replacement_history` is a nested reconstruction snapshot and therefore
+/// stays nested in `extra`; it is NEVER expanded into normalized entries or
+/// counted as new activity.
+fn normalize_compaction(
+    payload: &Value,
+    timestamp: DateTime<Utc>,
+    key: &LogicalSessionKey,
+    record: &RecordRef,
+    state: &mut WalkState,
+    out: &mut NormalizeOutput,
+) {
+    let previous = state.last_uuid.clone();
+    let mut extra = indexmap::IndexMap::new();
+    if let Some(object) = payload.as_object() {
+        for (name, value) in object {
+            if name != "message" {
+                extra.insert(name.clone(), value.clone());
+            }
+        }
+    }
+    let legacy_number = payload.get("window_id").and_then(Value::as_u64);
+    let window = CompactionWindow {
+        number: payload
+            .get("window_number")
+            .and_then(Value::as_u64)
+            .or(legacy_number),
+        first_id: payload
+            .get("first_window_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        previous_id: payload
+            .get("previous_window_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        id: payload
+            .get("window_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        legacy_numeric_id: legacy_number.is_some(),
+    };
+    let replacement_history_items = payload
+        .get("replacement_history")
+        .and_then(Value::as_array)
+        .map(Vec::len);
+    let entry = LogEntry::System(SystemMessage {
+        uuid: synthetic_uuid(key, record.ordinal),
+        parent_uuid: previous.clone(),
+        logical_parent_uuid: previous,
+        subtype: Some(SystemSubtype::CompactBoundary),
+        content: payload
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        level: Some("info".into()),
+        is_meta: Some(true),
+        timestamp,
+        session_id: Some(key.native_id.clone()),
+        version: Some(state.version.clone()),
+        cwd: state.cwd.clone(),
+        git_branch: None,
+        is_sidechain: None,
+        user_type: None,
+        compact_metadata: None,
+        error: None,
+        retry_in_ms: None,
+        retry_attempt: None,
+        max_retries: None,
+        cause: None,
+        hook_count: None,
+        hook_infos: Vec::new(),
+        has_output: None,
+        prevented_continuation: None,
+        stop_reason: None,
+        tool_use_id: None,
+        checkpoint_id: None,
+        target_uuid: None,
+        rewind_mode: None,
+        affected_files: Vec::new(),
+        new_name: None,
+        old_name: None,
+        extra,
+    });
+    let idx = push_mapped(entry, key, record, state, out);
+    let id = out.entries[idx].id.clone();
+    out.semantics
+        .get_mut(&id)
+        .expect("mapped compaction has semantics")
+        .compaction = Some(CompactionSemantics {
+        kind: CompactionKind::Full,
+        replacement_history_items,
+        window,
+    });
+}
+
 /// token_count: canonical usage from CUMULATIVE transitions (round-22
 /// blocker 2), attached to the current window's assistant emission or held
 /// for the next one.
@@ -1131,7 +1248,7 @@ fn push_unknown(
     key: &LogicalSessionKey,
     record: &RecordRef,
     out: &mut NormalizeOutput,
-) {
+) -> EntryId {
     let id = EntryId::deterministic(key, record.ordinal, 0);
     out.entry_origins.insert(id.clone(), vec![record.clone()]);
     out.diagnostics.unknown += 1;
@@ -1142,7 +1259,8 @@ fn push_unknown(
         },
     });
     out.entries.push(IdentifiedEntry {
-        id,
+        id: id.clone(),
         entry: LogEntry::Unknown(value),
     });
+    id
 }

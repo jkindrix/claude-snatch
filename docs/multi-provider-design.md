@@ -166,8 +166,8 @@ The enums below are illustrative, not frozen:
   can carry several calls with different classifications); usage
   observations carry **their own values** alongside scope+aggregation so
   annotations are never separated from the numbers they describe.
-- `CompactionKind` exists; the carrier for compaction window metadata is
-  explicitly deferred to Phase B3/C.
+- `CompactionKind` and `CompactionWindow` carry the typed boundary and window
+  metadata; provider-neutral presentation remains Phase C work.
 
 Provider identity remains available for reporting and exceptional cases, but
 is not the primary semantic switch. Two gates stay table-driven rather than
@@ -954,12 +954,13 @@ Mapping (each mapped record keeps its B1 id `(ordinal, 0)` — constraint 1):
   ambiguity recomputed independently; dedup twins verified STRUCTURALLY
   (type correspondence + exact extracted content, or exact fingerprint
   for event-to-event duplicates — no empty-text escape).
-- session_meta, turn_context, world_state, ghost_snapshot, compacted,
-  task_started/complete and all other types → remain Unknown entries
-  (preserved verbatim; consumed as normalization STATE — version, cwd,
-  model, turn_id — without changing their disposition). Fork-inherited
-  history, compaction, and spawn/fork semantics are later B3 slices
-  (constraint 4 noted, not violated: nothing is mis-marked).
+- session_meta, turn_context, task_started/complete and all other unmapped
+  types → remain Unknown entries (preserved verbatim; consumed as
+  normalization STATE — version, cwd, model, turn_id — without changing
+  their disposition). Slice 3 adds fork/spawn lineage and inherited-history
+  activity. Slice 4 maps each `compacted` record once as a system boundary
+  while keeping replacement history nested, and annotates verbatim
+  world_state/ghost_snapshot Unknown entries as reconstruction state.
 - turn_id → `EntrySemantics.turn_id` (new sidecar field — separate carrier,
   never message identity; constraint 2): ambient turn_context/task_started
   state, OVERRIDDEN per item by its own
@@ -1055,6 +1056,43 @@ controls flip one inherited entry to new and one new entry to inherited; both
 must fail. A separate fixture leaves copied usage pending at the boundary and
 proves it is preserved as inherited rather than attached to the fork's first
 new assistant.
+
+## B3 slice 4 — compaction and reconstruction state (2026-07-17)
+
+Official Codex reconstruction semantics, rather than normalized output,
+define this mapping. A `compacted` rollout item replaces model history from
+its optional `replacement_history`; it does not append each replacement item
+as new chronological activity. Window metadata carries a modern UUIDv7 chain
+(`first_window_id`, `previous_window_id`, `window_id`) plus a sequential
+window number; older rollouts encode the numeric position directly in
+`window_id`. A full `world_state` establishes a reconstruction baseline and a
+non-full item is an RFC 7386 merge patch. Legacy `ghost_snapshot` response
+items are filtered from model history by Codex's rollout loader. Sources:
+[Codex protocol at rust-v0.144.5](https://github.com/openai/codex/blob/rust-v0.144.5/codex-rs/protocol/src/protocol.rs)
+and
+[Codex rollout reconstruction at rust-v0.144.5](https://github.com/openai/codex/tree/rust-v0.144.5/codex-rs/core/src/rollout/).
+
+Implementation: each physical `compacted` record maps to exactly one
+`System/CompactBoundary` entry with its summary as content. Every other native
+payload field, including the complete `replacement_history`, remains nested
+in `SystemMessage.extra`; nested messages, ghost snapshots, and compaction
+markers are NEVER expanded into entries or counted as activity. Typed
+`CompactionSemantics` records replacement cardinality and the normalized
+`CompactionWindow` (including whether a numeric legacy id supplied the
+number). `world_state` and top-level `ghost_snapshot` stay exact
+`LogEntry::Unknown` values with typed `StateCheckpointKind` sidecars because
+they are persisted reconstruction state, not user/assistant emissions.
+
+The independent 226-session census now enforced by conformance finds 58
+boundaries, 951 nested replacement items, 42 full world-state baselines, one
+world-state patch, and 87 top-level legacy ghost checkpoints. It derives the
+expected entry, complete nested payload, carrier, cardinality, window chain,
+and origin from native records. Mutation controls prove rejection of a wrong
+replacement count, dropped nested history, illicit expansion of one nested
+item even when generic 1:N provenance remains valid, a wrong state kind, and
+semantic carriers placed on incompatible entry types. Exclusion: this slice
+preserves and types reconstruction state but does not render world-state
+contents or replacement items; compaction-window presentation remains Phase C.
 
 ## Review round 26 (2026-07-17, same Codex agent — B3.1.3 audit: B3.1.4)
 
@@ -1358,16 +1396,19 @@ Decisions taken in-implementation, FLAGGED FOR REVIEW:
       additions are Human/MidTurn and render once inside their existing turn.
       Queue has no observed native discriminator and remains an ordinary later
       turn boundary, matching Codex's documented next-turn semantics.
-- [ ] `world_state` / `ghost_snapshot` semantics — empirical.
+- [x] `world_state` / `ghost_snapshot` semantics — exact Unknown state
+      records with typed full/patch/legacy-ghost checkpoint carriers (B3
+      slice 4), source-derived and mutation-tested.
 - [x] Typed fork AND spawn lineage (phase-plan original wording, restored
       round-17): fork reconstruction via the embedded-second-meta heuristic
       (this corpus's forks predate forked_from_id — B1a observation) AND
       typed `Spawn` edges from Codex subagent `parent_thread_id`/source
       metadata — both as LineageEdge kinds, not fork alone. Slice 3 also
       proves copied parent prefixes and marks their entries InheritedHistory.
-- [ ] Compaction: `compacted` items with replacement_history not counted as
-      new chronological activity (invariant #4); window-metadata carrier
-      (deferred from A.0 round 5).
+- [x] Compaction: each `compacted` record maps once as a chronological system
+      boundary; replacement_history stays nested and is never counted as new
+      activity (invariant #4); typed modern/legacy window metadata ships (B3
+      slice 4), source-derived and mutation-tested.
 - [x] Semantic sidecar emission: prompt axes, per-call tools, turn ids,
       valued usage observations, and InheritedHistory for fork-copied
       records ship. Later state families may add their own typed carriers.
