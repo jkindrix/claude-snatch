@@ -1557,11 +1557,14 @@ Decisions taken in-implementation, FLAGGED FOR REVIEW:
 - [ ] Pricing: Codex stays unpriced by default; if ever added, label
       "API-equivalent cost", explicit pricing mode, never inferred from
       auth.json (round-3).
-- [ ] Reasoning availability + drift PRESENTATION tuning in doctor output
-      (era-bucketed, never aggregate-only). The report itself is already
-      exposed in B2 — C tunes semantics/presentation only (round-17
-      boundary).
-- [ ] Compaction-window presentation.
+- [x] Reasoning availability + drift PRESENTATION tuning in doctor output:
+      text and JSON preserve month/era buckets (never aggregate-only), with
+      an end-to-end March-present/April-absent regression fixture. Collection
+      remains bounded and path-safe under the B2 security contract.
+- [x] Compaction-window presentation (Phase C slice 2): provider timelines in
+      CLI JSON/text and MCP expose kind, replacement-history cardinality, and
+      modern/legacy window-chain identity. Replacement items remain metadata,
+      never chronological entries; classic flagless CLI JSON stays unchanged.
 
 #### Phase C status (2026-07-17)
 
@@ -1573,6 +1576,12 @@ chunk) from pre-boundary steering (preamble, never an invented chunk), and both
 shapes are executable tests. Provider-routed `messages --chunk`, `chunks`, and
 MCP chunk selection now share this contract; classic Claude routing remains on
 the established chunker.
+
+Slice 2 closes two presentation-only obligations that already had native
+collection underneath them. Doctor's reasoning-summary output is pinned across
+two eras in both text and JSON. Timeline compaction events now retain the typed
+sidecar through CLI and MCP, including replacement cardinality and the complete
+window link; classic events continue to serialize only timestamp/summary.
 
 ### Phase D — cross-provider UX
 - [ ] Unified project identity across providers (cwd/git), union views

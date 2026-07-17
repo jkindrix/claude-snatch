@@ -20,7 +20,7 @@
 use std::collections::HashSet;
 
 use crate::model::message::LogEntry;
-use crate::provider::{PromptAuthorship, PromptDelivery};
+use crate::provider::{CompactionKind, PromptAuthorship, PromptDelivery};
 use crate::reconstruction::{Conversation, ConversationTurn};
 
 use super::extraction::{
@@ -51,6 +51,46 @@ pub struct TimelineTurn {
     pub had_errors: bool,
 }
 
+/// Provider-neutral presentation of a chronological compaction boundary.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TimelineCompactionEvent {
+    /// Boundary timestamp (RFC 3339).
+    pub timestamp: String,
+    /// Persisted summary, when the provider retained one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// Semantic compaction kind. Absent for classic entries without a
+    /// semantic sidecar.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Number of nested replacement-history items. These are reconstruction
+    /// state, not additional chronological emissions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replacement_history_items: Option<usize>,
+    /// Provider context-window identity and chain metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<TimelineCompactionWindow>,
+}
+
+/// Presentation form of provider context-window identity.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TimelineCompactionWindow {
+    /// Monotonic native window position, when recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub number: Option<u64>,
+    /// First window in the compaction chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_id: Option<String>,
+    /// Immediately preceding window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_id: Option<String>,
+    /// New/current window identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Whether a legacy numeric `window_id` supplied `number`.
+    pub legacy_numeric_id: bool,
+}
+
 // ── Options ─────────────────────────────────────────────────────────────────
 
 /// Options controlling timeline construction.
@@ -72,6 +112,54 @@ impl Default for TimelineOptions {
             summary_max_len: 200,
         }
     }
+}
+
+/// Collect compaction boundaries with semantic window metadata when the
+/// conversation retains a provider bundle.
+#[must_use]
+pub fn compaction_events(conversation: &Conversation) -> Vec<TimelineCompactionEvent> {
+    conversation
+        .main_thread_entries()
+        .into_iter()
+        .filter_map(|entry| {
+            let LogEntry::System(system) = entry else {
+                return None;
+            };
+            if !matches!(
+                system.subtype,
+                Some(
+                    crate::model::SystemSubtype::CompactBoundary
+                        | crate::model::SystemSubtype::MicrocompactBoundary
+                )
+            ) {
+                return None;
+            }
+            let semantic = entry
+                .uuid()
+                .and_then(|uuid| conversation.semantics_for_uuid(uuid))
+                .and_then(|semantics| semantics.compaction.as_ref());
+            let kind = semantic.map(|compaction| match &compaction.kind {
+                CompactionKind::Full => "full".to_string(),
+                CompactionKind::Micro => "micro".to_string(),
+                CompactionKind::Other(native) => native.clone(),
+            });
+            let window = semantic.map(|compaction| TimelineCompactionWindow {
+                number: compaction.window.number,
+                first_id: compaction.window.first_id.clone(),
+                previous_id: compaction.window.previous_id.clone(),
+                id: compaction.window.id.clone(),
+                legacy_numeric_id: compaction.window.legacy_numeric_id,
+            });
+            Some(TimelineCompactionEvent {
+                timestamp: system.timestamp.to_rfc3339(),
+                summary: system.content.clone(),
+                kind,
+                replacement_history_items: semantic
+                    .and_then(|compaction| compaction.replacement_history_items),
+                window,
+            })
+        })
+        .collect()
 }
 
 // ── Core logic ──────────────────────────────────────────────────────────────

@@ -1843,7 +1843,9 @@ fn doctor_provider_codex_reports_capped_drift_diagnostics() {
     std::fs::write(
         day.join(format!("rollout-2026-07-16T10-00-00-{tid}.jsonl")),
         format!(
-            "{{\"timestamp\":\"2026-07-16T10:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{tid}\"}}}}\n"
+            "{{\"timestamp\":\"2026-07-16T10:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{tid}\"}}}}\n\
+             {{\"timestamp\":\"2026-03-15T10:00:00.000Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"reasoning\",\"summary\":[{{\"type\":\"summary_text\",\"text\":\"available\"}}],\"encrypted_content\":\"x\"}}}}\n\
+             {{\"timestamp\":\"2026-04-15T10:00:00.000Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"y\"}}}}\n"
         ),
     )
     .unwrap();
@@ -1855,8 +1857,32 @@ fn doctor_provider_codex_reports_capped_drift_diagnostics() {
         .success()
         .stdout(predicate::str::contains("sessions scanned: 1"))
         .stdout(predicate::str::contains(
+            "reasoning summary availability by month (with/total)",
+        ))
+        .stdout(predicate::str::contains("2026-03: 1/1"))
+        .stdout(predicate::str::contains("2026-04: 0/1"))
+        .stdout(predicate::str::contains(
             "vocabulary keys dropped at cap: 0",
         ));
+
+    let json = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", claude.path())
+        .env("CODEX_HOME", codex.path())
+        .args(["-o", "json", "doctor", "--provider", "codex"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(
+        report["codex"]["reasoning_by_month"]["2026-03"],
+        serde_json::json!([1, 1])
+    );
+    assert_eq!(
+        report["codex"]["reasoning_by_month"]["2026-04"],
+        serde_json::json!([1, 0])
+    );
 }
 
 // =============================================================================
@@ -2345,6 +2371,10 @@ mod codex_normalization_cli {
                 "payload": {"type": "token_count", "info": {
                     "last_token_usage": {"input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 25, "total_tokens": 125},
                     "total_token_usage": {"input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 25, "total_tokens": 125}}}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:08.000Z", "type": "compacted",
+                "payload": {"message": "context summary", "replacement_history": [],
+                    "window_number": 2, "first_window_id": "w1",
+                    "previous_window_id": "w1", "window_id": "w2"}}),
         ];
         let content = lines
             .iter()
@@ -2387,14 +2417,29 @@ mod codex_normalization_cli {
     fn timeline_renders_normalized_codex_turns() {
         let claude = setup_fixture_dir();
         let codex = slice_home();
-        snatch_cmd()
+        let output = snatch_cmd()
             .env("SNATCH_CLAUDE_DIR", claude.path())
             .env("CODEX_HOME", codex.path())
-            .args(["timeline", &format!("codex:{THREAD}")])
+            .args(["-o", "json", "timeline", &format!("codex:{THREAD}")])
             .assert()
             .success()
-            .stdout(predicate::str::contains("run the tests"))
-            .stdout(predicate::str::contains("All green."));
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["timeline"][0]["user_prompt"], "run the tests");
+        assert_eq!(value["timeline"][0]["assistant_summary"], "All green.");
+        assert_eq!(value["compaction_events"][0]["kind"], "full");
+        assert_eq!(
+            value["compaction_events"][0]["replacement_history_items"],
+            0
+        );
+        assert_eq!(value["compaction_events"][0]["window"]["number"], 2);
+        assert_eq!(value["compaction_events"][0]["window"]["id"], "w2");
+        assert_eq!(
+            value["compaction_events"][0]["window"]["legacy_numeric_id"],
+            false
+        );
     }
 
     #[test]
@@ -2698,6 +2743,20 @@ fn provider_routed_claude_messages_and_timeline_match_classic() {
     assert!(
         routed_turns.contains("User: Hello, Claude!"),
         "provider-routed timeline must keep the human turn: {routed_turns}"
+    );
+
+    let classic_json = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["-o", "json", "timeline", SESSION_ID])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let classic_json: serde_json::Value = serde_json::from_slice(&classic_json).unwrap();
+    assert!(
+        classic_json.get("compaction_events").is_none(),
+        "provider-only compaction metadata must not change flagless Claude JSON"
     );
 
     let classic_export = snatch_cmd()

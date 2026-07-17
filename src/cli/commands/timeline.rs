@@ -5,7 +5,8 @@
 
 use crate::analysis::subagents::{match_subagents, SubagentMatches};
 use crate::analysis::timeline::{
-    build_semantic_timeline, build_timeline, semantic_turns, TimelineOptions,
+    build_semantic_timeline, build_timeline, compaction_events, semantic_turns,
+    TimelineCompactionEvent, TimelineOptions,
 };
 use crate::cli::{Cli, OutputFormat, TimelineArgs};
 use crate::error::{Result, SnatchError};
@@ -36,6 +37,10 @@ struct TimelineOutput {
     span: Option<String>,
     total_turns: usize,
     timeline: Vec<TimelineTurnOutput>,
+    /// Provider compaction metadata. Omitted on the classic route so
+    /// flagless JSON remains byte-compatible.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compaction_events: Option<Vec<TimelineCompactionEvent>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     subagents: Vec<SubagentOutput>,
 }
@@ -200,6 +205,7 @@ fn render(
         let total = turns.len();
         (total, build_timeline(&turns, &opts))
     };
+    let compactions = ctx.semantic.then(|| compaction_events(conversation));
 
     // Subagent markers: surface work spawned by Agent/Task calls (matching the
     // messages surface). Linked subagents carry the spawn description; present
@@ -257,6 +263,7 @@ fn render(
                         had_errors: t.had_errors,
                     })
                     .collect(),
+                compaction_events: compactions,
                 subagents,
             };
             println!("{}", serde_json::to_string_pretty(&output)?);
@@ -304,6 +311,35 @@ fn render(
                 }
 
                 println!();
+            }
+
+            if let Some(compactions) = &compactions {
+                if !compactions.is_empty() {
+                    println!("Compactions:");
+                    for event in compactions {
+                        let kind = event.kind.as_deref().unwrap_or("unknown");
+                        let replacement = event
+                            .replacement_history_items
+                            .map(|count| format!(", {count} replacement items"))
+                            .unwrap_or_default();
+                        let window = event.window.as_ref().map_or_else(String::new, |window| {
+                            let identity = window
+                                .id
+                                .as_deref()
+                                .map_or_else(
+                                    || window.number.map(|n| n.to_string()),
+                                    |id| Some(id.to_string()),
+                                )
+                                .unwrap_or_else(|| "unknown".to_string());
+                            format!(", window {identity}")
+                        });
+                        println!("  {}: {kind}{window}{replacement}", event.timestamp);
+                        if let Some(summary) = &event.summary {
+                            println!("      {}", crate::util::truncate_text(summary, 200));
+                        }
+                    }
+                    println!();
+                }
             }
 
             if !subagents.is_empty() {

@@ -47,11 +47,11 @@ use helpers::{
     boundary_prompt_text, extract_assistant_summary, extract_error_preview,
     extract_files_from_tools, extract_image_placeholders, extract_result_preview,
     extract_thinking_text, extract_tool_input_summary, extract_tool_names,
-    extract_user_prompt_text, failed_tool_use_ids, find_compaction_events, get_claude_dir,
-    get_model, has_thinking, has_tool_errors, is_human_prompt, is_prompt_boundary,
-    main_thread_message_total, parse_timestamp_param, period_cutoff, queued_human_prompt,
-    render_attachment_content, resolve_project, resolve_session, resolve_session_with_chain,
-    search_entry_text, thinking_redaction_note, truncate_text,
+    extract_user_prompt_text, failed_tool_use_ids, get_claude_dir, get_model, has_thinking,
+    has_tool_errors, is_human_prompt, is_prompt_boundary, main_thread_message_total,
+    parse_timestamp_param, period_cutoff, queued_human_prompt, render_attachment_content,
+    resolve_project, resolve_session, resolve_session_with_chain, search_entry_text,
+    thinking_redaction_note, truncate_text,
 };
 use types::{
     ChangeEventEntry, ChunkBranchSummary, ChunkInfo, ChunkSummary, CompactionEvent,
@@ -1209,16 +1209,29 @@ impl SnatchServer {
 
         let limit = request.limit.unwrap_or(30);
 
-        // Detect compaction events from main thread
+        // Detect compaction events from the complete conversation so provider
+        // window metadata survives into the public response.
         let main_entries = resolved.conversation.main_thread_entries();
         let main_refs: Vec<&LogEntry> = main_entries.clone();
-        let compaction_events: Vec<CompactionEvent> = find_compaction_events(&main_refs)
-            .into_iter()
-            .map(|(ts, summary)| CompactionEvent {
-                timestamp: ts,
-                summary,
-            })
-            .collect();
+        let compaction_events: Vec<CompactionEvent> =
+            crate::analysis::timeline::compaction_events(&resolved.conversation)
+                .into_iter()
+                .map(|event| CompactionEvent {
+                    timestamp: event.timestamp,
+                    summary: event.summary,
+                    kind: event.kind,
+                    replacement_history_items: event.replacement_history_items,
+                    window: event
+                        .window
+                        .map(|window| crate::mcp_server::types::CompactionWindow {
+                            number: window.number,
+                            first_id: window.first_id,
+                            previous_id: window.previous_id,
+                            id: window.id,
+                            legacy_numeric_id: window.legacy_numeric_id,
+                        }),
+                })
+                .collect();
         let error_events: Vec<crate::mcp_server::types::ErrorEvent> =
             crate::analysis::extraction::find_error_events(&main_refs)
                 .into_iter()
@@ -3585,6 +3598,12 @@ mod tests {
             serde_json::json!(["also inspect tests"])
         );
         assert_eq!(timeline["compaction_events"].as_array().unwrap().len(), 1);
+        assert_eq!(timeline["compaction_events"][0]["kind"], "full");
+        assert_eq!(timeline["compaction_events"][0]["window"]["number"], 1);
+        assert_eq!(
+            timeline["compaction_events"][0]["window"]["legacy_numeric_id"],
+            true
+        );
 
         let chunked = unwrap_output(
             server

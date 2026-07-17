@@ -458,6 +458,26 @@ pub struct CompactionEvent {
     pub timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replacement_history_items: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<CompactionWindow>,
+}
+
+/// Provider context-window identity at a compaction boundary.
+#[derive(Debug, Serialize)]
+pub struct CompactionWindow {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub legacy_numeric_id: bool,
 }
 
 /// An error-level system event in the timeline (e.g. an API error).
