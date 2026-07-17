@@ -23,31 +23,54 @@ use crate::discovery::QuickSessionMetadata;
 use crate::error::Result;
 use crate::model::LogEntry;
 
-/// Cache key combining path and modification time.
+/// Provider-neutral cache key (Phase A threading T2): an opaque identity
+/// plus a revision source. Identity is a file path today; provider
+/// consumers key by their `LogicalSessionKey`/`ArtifactId` encodings and add
+/// their own `RevisionSource` variant when they arrive (Phase B).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CacheKey {
-    /// Path to the file.
-    path: PathBuf,
-    /// Modification time when cached.
-    mtime: SystemTime,
+    /// Opaque cache identity.
+    identity: String,
+    /// The revision observed at insert time and how to recompute it.
+    source: RevisionSource,
+}
+
+/// A cache entry's revision: the value captured at insert time plus what it
+/// derives from, so staleness can be re-checked.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum RevisionSource {
+    /// File-backed: revision is the file mtime — identical staleness
+    /// semantics (and on-disk persistence format) to the pre-provider
+    /// path+mtime key.
+    File {
+        /// The backing file.
+        path: PathBuf,
+        /// mtime at insert time.
+        mtime: SystemTime,
+    },
 }
 
 impl CacheKey {
-    /// Create a new cache key from a path.
+    /// Create a file-backed cache key (identity = path, revision = mtime).
     fn from_path(path: &Path) -> Option<Self> {
         let mtime = std::fs::metadata(path).ok()?.modified().ok()?;
         Some(Self {
-            path: path.to_path_buf(),
-            mtime,
+            identity: path.display().to_string(),
+            source: RevisionSource::File {
+                path: path.to_path_buf(),
+                mtime,
+            },
         })
     }
 
-    /// Check if this key is still valid (file hasn't changed).
+    /// Check if this key is still valid (revision unchanged).
     fn is_valid(&self) -> bool {
-        std::fs::metadata(&self.path)
-            .and_then(|m| m.modified())
-            .map(|mtime| mtime == self.mtime)
-            .unwrap_or(false)
+        match &self.source {
+            RevisionSource::File { path, mtime } => std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .map(|current| current == *mtime)
+                .unwrap_or(false),
+        }
     }
 }
 
@@ -65,8 +88,8 @@ struct CacheEntry<T> {
 /// Generic LRU cache with mtime-based invalidation.
 #[derive(Debug)]
 pub struct LruCache<T> {
-    /// Cache entries keyed by path.
-    entries: HashMap<PathBuf, (CacheKey, CacheEntry<T>)>,
+    /// Cache entries keyed by opaque identity (a file path today).
+    entries: HashMap<String, (CacheKey, CacheEntry<T>)>,
     /// Global access counter for LRU tracking.
     access_counter: u64,
     /// Maximum number of entries.
@@ -92,7 +115,7 @@ impl<T> LruCache<T> {
     /// Get an entry if it exists and is still valid.
     pub fn get(&mut self, path: &Path) -> Option<&T> {
         // Check if entry exists
-        if let Some((key, entry)) = self.entries.get_mut(path) {
+        if let Some((key, entry)) = self.entries.get_mut(&path.display().to_string()) {
             // Validate mtime
             if key.is_valid() {
                 // Update access order
@@ -115,7 +138,7 @@ impl<T> LruCache<T> {
         };
 
         // Remove old entry if exists
-        if let Some((_, old_entry)) = self.entries.remove(path) {
+        if let Some((_, old_entry)) = self.entries.remove(&path.display().to_string()) {
             self.current_size = self.current_size.saturating_sub(old_entry.size_estimate);
         }
 
@@ -125,7 +148,7 @@ impl<T> LruCache<T> {
         // Insert new entry
         self.access_counter += 1;
         self.entries.insert(
-            path.to_path_buf(),
+            path.display().to_string(),
             (
                 key,
                 CacheEntry {
@@ -158,14 +181,14 @@ impl<T> LruCache<T> {
         }
 
         // Find LRU entry
-        let lru_path = self
+        let lru_identity = self
             .entries
             .iter()
             .min_by_key(|(_, (_, entry))| entry.access_order)
-            .map(|(path, _)| path.clone());
+            .map(|(identity, _)| identity.clone());
 
-        if let Some(path) = lru_path {
-            if let Some((_, entry)) = self.entries.remove(&path) {
+        if let Some(identity) = lru_identity {
+            if let Some((_, entry)) = self.entries.remove(&identity) {
                 self.current_size = self.current_size.saturating_sub(entry.size_estimate);
             }
         }
@@ -173,22 +196,24 @@ impl<T> LruCache<T> {
 
     /// Remove an entry.
     pub fn remove(&mut self, path: &Path) {
-        if let Some((_, entry)) = self.entries.remove(path) {
+        if let Some((_, entry)) = self.entries.remove(&path.display().to_string()) {
             self.current_size = self.current_size.saturating_sub(entry.size_estimate);
         }
     }
 
     /// Invalidate stale entries.
     pub fn invalidate_stale(&mut self) {
-        let stale_paths: Vec<PathBuf> = self
+        let stale: Vec<String> = self
             .entries
             .iter()
             .filter(|(_, (key, _))| !key.is_valid())
-            .map(|(path, _)| path.clone())
+            .map(|(identity, _)| identity.clone())
             .collect();
 
-        for path in stale_paths {
-            self.remove(&path);
+        for identity in stale {
+            if let Some((_, entry)) = self.entries.remove(&identity) {
+                self.current_size = self.current_size.saturating_sub(entry.size_estimate);
+            }
         }
     }
 
@@ -562,9 +587,9 @@ impl CacheManager {
         let guard = self.metadata.inner.read();
         let mut persisted = PersistedCache::new();
 
-        for (path, (key, entry)) in guard.entries.iter() {
-            let mtime_secs = key
-                .mtime
+        for (key, entry) in guard.entries.values() {
+            let RevisionSource::File { path, mtime } = &key.source;
+            let mtime_secs = mtime
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
@@ -641,14 +666,17 @@ impl CacheManager {
                 let mtime =
                     SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(entry.mtime_secs);
                 let key = CacheKey {
-                    path: entry.path.clone(),
-                    mtime,
+                    identity: entry.path.display().to_string(),
+                    source: RevisionSource::File {
+                        path: entry.path.clone(),
+                        mtime,
+                    },
                 };
 
                 guard.access_counter += 1;
                 let access_order = guard.access_counter;
                 guard.entries.insert(
-                    entry.path,
+                    entry.path.display().to_string(),
                     (
                         key,
                         CacheEntry {
