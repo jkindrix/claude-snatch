@@ -368,6 +368,30 @@ fn validator_catches_broken_provenance() {
 }
 
 #[test]
+fn semantic_tool_calls_must_reference_actual_calls() {
+    let good = FakeProvider.parse(&multi_artifact_key()).unwrap();
+    // The fake's call-7/call-8 semantics reference real ToolUse blocks.
+    assert!(good.validate_provenance().is_empty());
+
+    // A semantic keyed by a call id the entry does not contain is caught.
+    let mut parsed = good;
+    let (id, sem) = parsed
+        .semantics
+        .iter()
+        .find(|(_, s)| !s.tools.is_empty())
+        .map(|(id, s)| (id.clone(), s.clone()))
+        .unwrap();
+    let mut sem = sem;
+    let tool = sem.tools.values().next().unwrap().clone();
+    sem.tools.insert("call-999".into(), tool);
+    parsed.semantics.insert(id, sem);
+    assert!(parsed
+        .validate_provenance()
+        .iter()
+        .any(|v| v.contains("call-999") && v.contains("does not contain")));
+}
+
+#[test]
 fn entry_ids_are_deterministic_and_stable() {
     let p1 = FakeProvider.parse(&multi_artifact_key()).unwrap();
     let p2 = FakeProvider.parse(&multi_artifact_key()).unwrap();

@@ -192,7 +192,29 @@ impl SourceProvider for FakeProvider {
             },
             IdentifiedEntry {
                 id: e(1, 0),
-                entry: LogEntry::Unknown(serde_json::json!({"kind": "merged_tool_call"})),
+                // A real assistant entry with two tool calls, so per-call
+                // semantics can be validated against actual call ids.
+                entry: serde_json::from_value(serde_json::json!({
+                    "type": "assistant",
+                    "uuid": "fake-a1",
+                    "parentUuid": null,
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "sessionId": "42",
+                    "version": "0.0.0",
+                    "message": {
+                        "id": "fake-m1",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "fake-model",
+                        "content": [
+                            {"type": "tool_use", "id": "call-7",
+                             "name": "fake_apply_patch", "input": {}},
+                            {"type": "tool_use", "id": "call-8",
+                             "name": "fake_exec", "input": {}}
+                        ]
+                    }
+                }))
+                .expect("valid assistant entry"),
             },
             IdentifiedEntry {
                 id: e(4, 0),

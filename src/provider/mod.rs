@@ -738,10 +738,34 @@ impl ParsedSession {
             }
         }
 
-        // Semantics may only describe existing entries.
-        for id in self.semantics.keys() {
-            if !entry_ids.contains(id) {
-                violations.push(format!("semantics names entry {} which does not exist", id));
+        // Semantics may only describe existing entries, and per-call tool
+        // semantics must reference tool calls the entry actually contains.
+        let entry_by_id: BTreeMap<&EntryId, &LogEntry> =
+            self.entries.iter().map(|e| (&e.id, &e.entry)).collect();
+        for (id, sem) in &self.semantics {
+            match entry_by_id.get(id) {
+                None => {
+                    violations.push(format!("semantics names entry {id} which does not exist"));
+                }
+                Some(entry) if !sem.tools.is_empty() => {
+                    let call_ids: BTreeSet<&str> = match entry {
+                        LogEntry::Assistant(a) => a
+                            .message
+                            .tool_uses()
+                            .iter()
+                            .map(|t| t.id.as_str())
+                            .collect(),
+                        _ => BTreeSet::new(),
+                    };
+                    for call in sem.tools.keys() {
+                        if !call_ids.contains(call.as_str()) {
+                            violations.push(format!(
+                                "semantics for entry {id} references tool call {call} which the entry does not contain"
+                            ));
+                        }
+                    }
+                }
+                Some(_) => {}
             }
         }
 
