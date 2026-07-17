@@ -397,7 +397,12 @@ pub struct RecordRef {
 pub enum SuppressionReason {
     /// The record duplicates content carried by another stream of the same
     /// source (e.g. Codex `event_msg` mirroring a `response_item`).
-    DuplicateStream,
+    DuplicateStream {
+        /// Ordinal of the authoritative twin record this duplicate was
+        /// matched against — every suppression carries its PROOF
+        /// (round-22: suppress only a proven one-to-one twin).
+        twin_ordinal: u64,
+    },
     /// The record is a compaction replacement snapshot: it replays context,
     /// it does not record new activity.
     CompactionReplacement,

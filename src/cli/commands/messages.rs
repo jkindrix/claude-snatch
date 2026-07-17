@@ -295,6 +295,25 @@ fn render(
     conversation: &Conversation,
     ctx: &RenderContext<'_>,
 ) -> Result<()> {
+    // Human-prompt predicate: provider sessions carry adapter-asserted
+    // PromptSemantics in the retained bundle — the Claude-shaped
+    // is_human_prompt heuristic would label harness-injected context
+    // (permissions, environment, developer instructions) as human
+    // (round-22 blocker 3). Claude sessions keep the classic heuristic.
+    let semantic = conversation.provider_bundle().is_some();
+    let human = |e: &LogEntry| -> bool {
+        if semantic {
+            matches!(e, LogEntry::User(_))
+                && e.uuid()
+                    .and_then(|u| conversation.semantics_for_uuid(u))
+                    .and_then(|s| s.prompt)
+                    .is_some_and(|p| {
+                        matches!(p.authorship, crate::provider::PromptAuthorship::Human)
+                    })
+        } else {
+            is_human_prompt(e)
+        }
+    };
     let detail = args.detail.as_str();
     let msg_type_filter = args.message_type.as_str();
     // 0 means unlimited, matching `list -n 0` (a literal take(0) returned
@@ -387,7 +406,7 @@ fn render(
 
     // Filter by message type
     match msg_type_filter {
-        "user" => main_entries.retain(|e| is_human_prompt(e)),
+        "user" => main_entries.retain(|e| human(e)),
         "assistant" => main_entries.retain(|e| matches!(e, LogEntry::Assistant(_))),
         "system" => main_entries.retain(|e| matches!(e, LogEntry::System(_))),
         _ => {}
@@ -432,11 +451,15 @@ fn render(
     // always match chunk indices.
     match detail {
         "overview" => {
-            main_entries.retain(|e| is_prompt_boundary(e));
+            if semantic {
+                main_entries.retain(|e| human(e));
+            } else {
+                main_entries.retain(|e| is_prompt_boundary(e));
+            }
         }
         "conversation" => {
             main_entries.retain(|e| match e {
-                LogEntry::User(_) => is_human_prompt(e),
+                LogEntry::User(_) => human(e),
                 LogEntry::Assistant(_) => extract_assistant_summary(e, 1).is_some(),
                 // Queued steering prompts are dialogue, not tool noise.
                 LogEntry::Attachment(_) => queued_human_prompt(e).is_some(),

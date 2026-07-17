@@ -2222,6 +2222,62 @@ mod codex_normalization_cli {
     }
 
     #[test]
+    fn timeline_reports_one_turn_for_one_human_prompt_amid_harness_context() {
+        // Round-22 blocker 3: developer/environment context must not count
+        // as human turns.
+        let tmp = TempDir::new().unwrap();
+        let day = tmp.path().join("sessions/2026/07/16");
+        std::fs::create_dir_all(&day).unwrap();
+        let lines = [
+            serde_json::json!({"timestamp": "2026-07-16T10:00:00.000Z", "type": "session_meta",
+                "payload": {"id": THREAD, "cwd": "/tmp/p", "cli_version": "0.9"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:01.000Z", "type": "response_item",
+                "payload": {"type": "message", "role": "developer",
+                            "content": [{"type": "input_text", "text": "<permissions instructions>"}]}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:01.100Z", "type": "response_item",
+                "payload": {"type": "message", "role": "user",
+                            "content": [{"type": "input_text", "text": "<environment_context>"}]}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:02.000Z", "type": "response_item",
+                "payload": {"type": "message", "role": "user",
+                            "content": [{"type": "input_text", "text": "do the thing"}]}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:02.500Z", "type": "event_msg",
+                "payload": {"type": "user_message", "message": "do the thing"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:03.000Z", "type": "response_item",
+                "payload": {"type": "message", "role": "assistant",
+                            "content": [{"type": "output_text", "text": "done"}]}}),
+        ];
+        let content = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(
+            day.join(format!("rollout-2026-07-16T10-00-00-{THREAD}.jsonl")),
+            content,
+        )
+        .unwrap();
+
+        let claude = setup_fixture_dir();
+        let out = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", tmp.path())
+            .args(["timeline", &format!("codex:{THREAD}")])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("(1 turns)"), "got: {text}");
+        assert!(text.contains("User: do the thing"), "got: {text}");
+        assert!(
+            !text.contains("<permissions") && !text.contains("<environment_context>"),
+            "harness context must not appear as a turn: {text}"
+        );
+    }
+
+    #[test]
     fn messages_refuses_claude_machinery_flags_on_codex_sessions() {
         let claude = setup_fixture_dir();
         let codex = slice_home();

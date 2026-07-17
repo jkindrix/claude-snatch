@@ -831,6 +831,31 @@ breath as any completion claim).
       + native/raw export work on REAL Codex sessions — a real-session
       demonstration, not fixtures only.
 
+## Slice exit protocol (standing, added round 22 — process countermeasure)
+
+The recurring review-cycle failure class was consistent: semantic claims
+shipped on confirmatory fixtures while the reviewer audited adversarially
+against the real corpus. The audit style now lives in OUR exit gate.
+Before claiming any normalization slice (or comparable semantic unit)
+complete:
+
+1. **Adversarial census first**: mine the corpus for the slice's FAILURE
+   shapes — not "does my rule's precondition hold" but "enumerate every
+   case my rule would misclassify". The census questions must attack the
+   rule, not confirm it.
+2. **Corpus-level invariant assertions**: every semantic rule ships with an
+   aggregate assertion over all real sessions inside the opt-in
+   conformance test (proven twins, reconciling sums, no-loss counts) — the
+   invariant is enforced on the corpus, not just on fixtures.
+3. **Fixtures are mined, not invented**: each fixture cites the observed
+   corpus shape it reproduces; an idealized fixture proves only itself.
+4. **Claims enumerate exclusions**: any "X is complete" names what is NOT
+   covered in the same sentence.
+5. **Reused machinery is re-audited**: before wiring existing analysis code
+   to a new provider, list its semantic assumptions and check each against
+   the new provider's data (the Claude-shaped turn pairing and
+   is_human_prompt failures were this class).
+
 ## B3 slice 1 — normalization mapping (empirical, corpus of 224 real sessions)
 
 Corpus facts the mapping rests on (2026-07-17 census): 202 dual-stream
@@ -863,18 +888,30 @@ Mapping (each mapped record keeps its B1 id `(ordinal, 0)` — constraint 1):
   `LogEntry::User` with ToolResult{tool_use_id: call_id, output text};
   PromptSemantics Tool/MidTurn.
 - event_msg user_message / agent_message / agent_reasoning /
-  agent_reasoning_raw_content → in dual-stream sessions
-  Suppressed{DuplicateStream} (emission identity: the response_item stream
-  is authoritative for content — constraint 3, never text equality); in a
-  hypothetical event-only session they map directly (fixture-tested; the
-  corpus has none).
-- event_msg token_count with info → Mapped INTO the most recent
-  assistant-authored entry (N:1 provenance): the entry's Usage accumulates
-  the DELTA (`last_token_usage`, fresh-input = input − cached, cached →
-  cache_read) so summing entry usage never double-counts, and TWO
-  UsageObservations attach (Call/Delta and Session/Cumulative, each with
-  its own numbers). `info: null` or no prior assistant emission →
-  Suppressed{Other} with reason.
+  agent_reasoning_raw_content → B3.1 (round-22): suppressed ONLY when a
+  one-to-one twin is PROVEN — matching is scoped to a turn window
+  (session_meta/turn_context/task_started/compacted boundaries), each
+  response_item (or reasoning SECTION — reasoning events are per-section)
+  is claimable once, content agreement confirms the positional pairing,
+  and the suppression records the twin's ordinal
+  (`DuplicateStream { twin_ordinal }`). Unmatched event content maps
+  directly (corpus: post-compaction "Compact task completed" notices,
+  reasoning before aborted turns — 380 such events were being discarded).
+  The matched `user_message` event marks exactly its twin Human (the
+  former LIFO claimant could mis-mark harness entries).
+- event_msg token_count with usage → B3.1 (round-22): canonical usage
+  derives from CUMULATIVE transitions on clamped per-component streams
+  (fresh = input−cached clamped; unchanged totals → zero; input/output
+  decrease → epoch reset whose new cumulative is the first delta) — NEVER
+  a blind `last_token_usage` sum (94/178 real sessions disproved that).
+  Records attach N:1 to the current window's assistant emission; events
+  arriving BEFORE their response are held for the next assistant; with no
+  assistant ever, the record stays a preserved Unknown entry (never
+  lost). Observations carry RAW pass-through numbers (input's
+  relationship to cached is era-dependent in the corpus — some eras
+  exclude cached from input). The conformance test replays the cumulative
+  stream independently from provenance and asserts entry sums reconcile
+  for every session.
 - session_meta, turn_context, world_state, ghost_snapshot, compacted,
   task_started/complete and all other types → remain Unknown entries
   (preserved verbatim; consumed as normalization STATE — version, cwd,
@@ -882,11 +919,42 @@ Mapping (each mapped record keeps its B1 id `(ordinal, 0)` — constraint 1):
   history, compaction, and spawn/fork semantics are later B3 slices
   (constraint 4 noted, not violated: nothing is mis-marked).
 - turn_id → `EntrySemantics.turn_id` (new sidecar field — separate carrier,
-  never message identity; constraint 2), from
-  turn_context/task_started/metadata passthrough.
-- Synthetic linear threading: mapped entries get deterministic
-  uuid `<native_id>:<ordinal>` with parent = previous mapped entry, giving
-  Conversation/messages/timeline a main thread without touching identity.
+  never message identity; constraint 2): ambient turn_context/task_started
+  state, OVERRIDDEN per item by its own
+  `internal_chat_message_metadata_passthrough`/`metadata` carrier (B3.1:
+  honored, not merely coincident with ambient).
+- Synthetic linear threading: mapped entries get the INJECTIVE EntryId
+  encoding as their uuid (provider+namespace+native+ordinal; B3.1 — a bare
+  `native:ordinal` would collide across providers/namespaces once exports
+  make it sticky), parent = previous mapped entry.
+- response_item web_search_call → assistant ToolUse (kind Web) — B3.1;
+  341 corpus records.
+- Surfaces (B3.1): provider timeline groups turns SEMANTICALLY (turn_id
+  transitions + Human prompt boundaries; harness preambles form no turn),
+  and provider messages uses PromptSemantics for its human predicate — the
+  Claude-shaped adjacent-pairing/is_human_prompt heuristics mislabeled
+  harness context (a one-task real session reported 77 turns; now 1).
+
+## Review round 22 (2026-07-17, same Codex agent — slice-1 audit: B3.1)
+
+Verdict: normalization strategy sound; several implementation claims
+DISPROVEN by the real corpus; one bounded B3.1 hardening unit, then re-run
+the semantic audit. All findings accepted and fixed (see the amended
+mapping bullets above): proven-twin dedup with twin ordinals in the
+suppressions (380 unique events were being discarded, and the LIFO human
+claimant could mis-mark harness entries); canonical usage from cumulative
+transitions with held attribution and preserved orphans (blind last-usage
+summing was wrong in 94/178 sessions; a further era with input-excluding-
+cached was caught by OUR new corpus reconciliation audit); semantic
+timeline turns + semantic human predicate (77-turn session → 1 turn);
+per-item turn carrier honored; web_search_call mapped; injective synthetic
+uuids. All seven demanded fixtures added (each citing its corpus shape),
+plus standing conformance assertions: every DuplicateStream suppression
+must point at a mapped twin, and canonical usage must reconcile against an
+independent replay of the cumulative stream — on every session, every run.
+Corpus after B3.1: 224/224, 0 violations, mapped 161,188 / suppressed
+30,131 / preserved 31,730 / unparseable 2. This round also produced the
+standing "Slice exit protocol" above.
 
 ## Review round 21 (2026-07-17, same Codex agent — B2 SIGN-OFF)
 

@@ -153,6 +153,87 @@ struct TimelineContext<'a> {
     session: Option<&'a crate::discovery::Session>,
 }
 
+/// Group a provider conversation into turns using the semantics sidecar:
+/// a new turn starts when the entry's `turn_id` changes to a different
+/// known id, or at a HUMAN-authored prompt. Harness context preceding the
+/// first human prompt forms no turn of its own unless it produced
+/// assistant activity.
+fn semantic_turns<'a>(
+    conversation: &'a Conversation,
+) -> Vec<crate::reconstruction::ConversationTurn<'a>> {
+    use crate::model::LogEntry;
+    use crate::provider::PromptAuthorship;
+
+    let mut turns: Vec<crate::reconstruction::ConversationTurn<'a>> = Vec::new();
+    let mut current: Option<crate::reconstruction::ConversationTurn<'a>> = None;
+    let mut current_turn_id: Option<String> = None;
+
+    let flush = |turn: Option<crate::reconstruction::ConversationTurn<'a>>,
+                 turns: &mut Vec<crate::reconstruction::ConversationTurn<'a>>| {
+        if let Some(t) = turn {
+            // Keep only turns with substance: a human prompt or assistant
+            // activity. Pure harness preambles are visible via messages,
+            // not as timeline turns.
+            if t.user_message.is_some() || t.assistant_message.is_some() || !t.tool_uses.is_empty()
+            {
+                turns.push(t);
+            }
+        }
+    };
+
+    for entry in conversation.main_thread_entries() {
+        let sem = entry
+            .uuid()
+            .and_then(|u| conversation.semantics_for_uuid(u));
+        let entry_turn = sem.and_then(|s| s.turn_id.clone());
+        let is_human = matches!(entry, LogEntry::User(_))
+            && sem
+                .and_then(|s| s.prompt)
+                .is_some_and(|p| matches!(p.authorship, PromptAuthorship::Human));
+
+        let turn_changed = match (&entry_turn, &current_turn_id) {
+            (Some(new), Some(old)) => new != old,
+            (Some(_), None) => current.is_some(),
+            _ => false,
+        };
+        if is_human || turn_changed {
+            flush(current.take(), &mut turns);
+        }
+        if entry_turn.is_some() {
+            current_turn_id = entry_turn;
+        }
+
+        let turn = current.get_or_insert_with(|| crate::reconstruction::ConversationTurn {
+            user_message: None,
+            assistant_message: None,
+            tool_uses: Vec::new(),
+            tool_results: Vec::new(),
+        });
+        match entry {
+            LogEntry::User(user) => {
+                if is_human && turn.user_message.is_none() {
+                    turn.user_message = Some(entry);
+                }
+                turn.tool_results.extend(user.message.tool_results());
+            }
+            LogEntry::Assistant(assistant) => {
+                turn.tool_uses.extend(assistant.message.tool_uses());
+                // The latest TEXT-bearing emission is the turn's answer
+                // (reasoning/tool-only entries never clobber it).
+                let has_text = assistant.message.content.iter().any(|b| {
+                    matches!(b, crate::model::ContentBlock::Text(t) if !t.text.trim().is_empty())
+                });
+                if has_text {
+                    turn.assistant_message = Some(entry);
+                }
+            }
+            _ => {}
+        }
+    }
+    flush(current, &mut turns);
+    turns
+}
+
 fn render(
     cli: &Cli,
     args: &TimelineArgs,
@@ -164,7 +245,16 @@ fn render(
             eprintln!("{notice}");
         }
     }
-    let turns = conversation.turns();
+    // Provider sessions group turns SEMANTICALLY: by the turn_id carrier
+    // and Human prompt boundaries from the retained bundle — the classic
+    // adjacent user/assistant pairing would count every harness-injected
+    // context message as a turn (round-22 blocker 3: a real one-task
+    // session reported 77 turns). Claude sessions keep the classic pairing.
+    let turns = if conversation.provider_bundle().is_some() {
+        semantic_turns(conversation)
+    } else {
+        conversation.turns()
+    };
 
     let analytics = crate::analytics::SessionAnalytics::from_conversation(conversation);
     let start_time = analytics.start_time.map(|t| t.to_rfc3339());

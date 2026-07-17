@@ -1337,6 +1337,138 @@ mod tests {
                     if !session.validate_provenance().is_empty() {
                         violations += 1;
                     }
+                    // Round-22 semantic audits, asserted for EVERY session:
+                    // (a) every DuplicateStream suppression carries a twin
+                    // whose record actually MAPPED — proof, not assumption.
+                    let mapped_ordinals: std::collections::BTreeSet<u64> = session
+                        .record_dispositions
+                        .iter()
+                        .filter(|d| matches!(d.outcome, RecordOutcome::Mapped(_)))
+                        .map(|d| d.record.ordinal)
+                        .collect();
+                    for d in &session.record_dispositions {
+                        if let RecordOutcome::Suppressed {
+                            reason:
+                                super::super::SuppressionReason::DuplicateStream { twin_ordinal },
+                        } = &d.outcome
+                        {
+                            assert!(
+                                mapped_ordinals.contains(twin_ordinal),
+                                "a DuplicateStream suppression must point at a mapped twin"
+                            );
+                        }
+                    }
+                    // (b) canonical usage reconciles: rebuild the FULL
+                    // cumulative stream from provenance — attached
+                    // observations (paired with their token-record ordinals
+                    // via entry_origins) plus PRESERVED unattached
+                    // token_count entries — then replay the normalizer's
+                    // transition rule independently. The canonical deltas of
+                    // attached events must equal the summed entry usage;
+                    // preserved events contribute to the baseline but not
+                    // the sums (they were never attributed — and never
+                    // lost).
+                    let mut stream: Vec<(u64, (u64, u64, u64), bool)> = Vec::new();
+                    for e in &session.entries {
+                        match &e.entry {
+                            crate::model::LogEntry::Assistant(_) => {
+                                if let Some(sem) = session.semantics.get(&e.id) {
+                                    let cumulative: Vec<(u64, u64, u64)> = sem
+                                        .usage
+                                        .iter()
+                                        .filter(|o| {
+                                            matches!(
+                                                o.aggregation,
+                                                crate::provider::UsageAggregation::Cumulative
+                                            )
+                                        })
+                                        .map(|o| {
+                                            // Observations are RAW
+                                            // pass-through: input as codex
+                                            // reported it.
+                                            (
+                                                o.usage.input_tokens,
+                                                o.usage.cache_read_input_tokens.unwrap_or(0),
+                                                o.usage.output_tokens,
+                                            )
+                                        })
+                                        .collect();
+                                    let tc_ordinals: Vec<u64> = session.entry_origins[&e.id][1..]
+                                        .iter()
+                                        .map(|r| r.ordinal)
+                                        .collect();
+                                    assert_eq!(
+                                        cumulative.len(),
+                                        tc_ordinals.len(),
+                                        "one cumulative observation per attached usage record"
+                                    );
+                                    for (ord, c) in tc_ordinals.into_iter().zip(cumulative) {
+                                        stream.push((ord, c, true));
+                                    }
+                                }
+                            }
+                            crate::model::LogEntry::Unknown(v)
+                                if v["payload"]["type"] == "token_count"
+                                    && v["payload"]["info"]["total_token_usage"].is_object() =>
+                            {
+                                let u = &v["payload"]["info"]["total_token_usage"];
+                                let g = |k: &str| u[k].as_u64().unwrap_or(0);
+                                stream.push((
+                                    e.id.ordinal,
+                                    (
+                                        g("input_tokens"),
+                                        g("cached_input_tokens"),
+                                        g("output_tokens"),
+                                    ),
+                                    false,
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                    stream.sort_by_key(|(ord, _, _)| *ord);
+                    // Replay the normalizer's exact rule: clamped
+                    // fresh/cached streams, reset on input/output decrease.
+                    let fresh_of = |c: &(u64, u64, u64)| c.0.saturating_sub(c.1);
+                    let mut expected = (0u64, 0u64, 0u64);
+                    let mut prev: Option<(u64, u64, u64)> = None;
+                    for (_, c, attached) in &stream {
+                        let delta = match prev {
+                            None => (fresh_of(c), c.1, c.2),
+                            Some(pv) => {
+                                if c.0 < pv.0 || c.2 < pv.2 {
+                                    (fresh_of(c), c.1, c.2)
+                                } else {
+                                    (
+                                        fresh_of(c).saturating_sub(fresh_of(&pv)),
+                                        c.1.saturating_sub(pv.1),
+                                        c.2 - pv.2,
+                                    )
+                                }
+                            }
+                        };
+                        prev = Some(*c);
+                        if *attached {
+                            expected.0 += delta.0;
+                            expected.1 += delta.1;
+                            expected.2 += delta.2;
+                        }
+                    }
+                    let mut entry_sum = (0u64, 0u64, 0u64);
+                    for e in &session.entries {
+                        if let crate::model::LogEntry::Assistant(m) = &e.entry {
+                            if let Some(u) = &m.message.usage {
+                                entry_sum.0 += u.input_tokens;
+                                entry_sum.1 += u.cache_read_input_tokens.unwrap_or(0);
+                                entry_sum.2 += u.output_tokens;
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        entry_sum, expected,
+                        "canonical usage must reconcile against an independent replay of \
+                         the cumulative stream"
+                    );
                     // Completeness: the parser must have reached every
                     // physical record — compare against an independent count
                     // of the preferred artifact's records. Active sessions
@@ -2655,7 +2787,7 @@ mod tests {
                 matches!(
                     &d.outcome,
                     RecordOutcome::Suppressed {
-                        reason: super::super::SuppressionReason::DuplicateStream
+                        reason: super::super::SuppressionReason::DuplicateStream { .. }
                     }
                 )
             })
@@ -2846,12 +2978,265 @@ mod tests {
         // (meta, turn_context) are uuid-less orphans by design.
         assert_eq!(conversation.len(), 4);
         assert_eq!(conversation.main_thread().len(), 4);
-        // Semantics reachable through the conversation for a mapped uuid.
-        let uuid = format!("{THREAD_A}:3");
+        // Semantics reachable through the conversation for a mapped uuid
+        // (the synthetic uuid IS the injective EntryId encoding).
+        let uuid = crate::provider::EntryId::deterministic(&key(THREAD_A), 3, 0).to_string();
         assert!(
             conversation.semantics_for_uuid(&uuid).is_some(),
             "tool-call entry semantics reachable via conversation"
         );
+    }
+
+    // ========================================================================
+    // B3.1 hardening (round-22): real corpus failure shapes
+    // ========================================================================
+
+    #[test]
+    fn unmatched_agent_message_after_compaction_is_mapped_not_discarded() {
+        // Corpus shape: "Compact task completed" arrives as an agent_message
+        // with NO response_item twin after a compaction boundary.
+        let (_tmp, p) = normalize_home(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line("compacted", serde_json::json!({"message": "..."})),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "agent_message", "message": "Compact task completed"}),
+            ),
+        ]);
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        assert!(parsed.validate_provenance().is_empty());
+        assert_eq!(parsed.diagnostics.suppressed, 0, "nothing may be discarded");
+        let mapped_text = parsed.entries.iter().any(|e| {
+            matches!(&e.entry, crate::model::LogEntry::Assistant(m)
+                if m.message.content.iter().any(|b| matches!(b, crate::model::ContentBlock::Text(t) if t.text == "Compact task completed")))
+        });
+        assert!(mapped_text, "unique event content must map");
+    }
+
+    #[test]
+    fn reasoning_before_aborted_turn_with_no_twin_is_mapped() {
+        // Corpus shape: agent_reasoning emitted, then turn_aborted — no
+        // response_item reasoning ever lands.
+        let (_tmp, p) = normalize_home(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "agent_reasoning", "text": "half-finished thought"}),
+            ),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "turn_aborted", "reason": "user"}),
+            ),
+        ]);
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        assert_eq!(parsed.diagnostics.suppressed, 0);
+        let mapped = parsed.entries.iter().any(|e| {
+            matches!(&e.entry, crate::model::LogEntry::Assistant(m)
+                if m.message.content.iter().any(|b| matches!(b, crate::model::ContentBlock::Thinking(t) if t.thinking == "half-finished thought")))
+        });
+        assert!(mapped, "pre-abort reasoning must survive as thinking");
+    }
+
+    #[test]
+    fn duplicate_user_message_events_cannot_claim_a_harness_entry() {
+        // Corpus shape: repeated user_message events; only one response twin
+        // exists. The second event must NOT claim the harness context entry
+        // (the old LIFO claimant did) — it maps as its own human entry.
+        let (_tmp, p) = normalize_home(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<environment_context>"}]}),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "same prompt"}]}),
+            ),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "user_message", "message": "same prompt"}),
+            ),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "user_message", "message": "same prompt"}),
+            ),
+        ]);
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        let auth = |ordinal| {
+            parsed
+                .semantics
+                .get(&crate::provider::EntryId::deterministic(
+                    &key(THREAD_A),
+                    ordinal,
+                    0,
+                ))
+                .and_then(|s| s.prompt)
+                .map(|p| p.authorship)
+        };
+        assert_eq!(
+            auth(1),
+            Some(crate::provider::PromptAuthorship::Harness),
+            "harness context must never be claimed human"
+        );
+        assert_eq!(auth(2), Some(crate::provider::PromptAuthorship::Human));
+        // One event suppressed (proven twin ordinal 2), the duplicate maps.
+        let twins: Vec<u64> = parsed
+            .record_dispositions
+            .iter()
+            .filter_map(|d| match &d.outcome {
+                RecordOutcome::Suppressed {
+                    reason: super::super::SuppressionReason::DuplicateStream { twin_ordinal },
+                } => Some(*twin_ordinal),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(twins, vec![2]);
+        assert_eq!(auth(4), Some(crate::provider::PromptAuthorship::Human));
+    }
+
+    #[test]
+    fn canonical_usage_from_cumulative_transitions() {
+        // Corpus shapes: usage BEFORE its response; repeated unchanged
+        // cumulative totals; a normal increment; a cumulative RESET.
+        let tc = |input: u64, cached: u64, output: u64| {
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "token_count", "info": {
+                "last_token_usage": {"input_tokens": input, "cached_input_tokens": cached, "output_tokens": output},
+                "total_token_usage": {"input_tokens": input, "cached_input_tokens": cached, "output_tokens": output}}}),
+            )
+        };
+        let assistant = |text: &str| {
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}),
+            )
+        };
+        let (_tmp, p) = normalize_home(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            // Usage arrives BEFORE any assistant record: held, not lost.
+            tc(100, 40, 10),
+            assistant("a"),
+            // Unchanged cumulative repeated (old-format shape): zero delta.
+            tc(100, 40, 10),
+            // Normal increment.
+            tc(250, 150, 30),
+            // RESET (new epoch): totals drop.
+            tc(50, 20, 5),
+            assistant("b"),
+        ]);
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        assert!(parsed.validate_provenance().is_empty());
+
+        let mut fresh = 0u64;
+        let mut cached = 0u64;
+        let mut output = 0u64;
+        for e in &parsed.entries {
+            if let crate::model::LogEntry::Assistant(m) = &e.entry {
+                if let Some(u) = &m.message.usage {
+                    fresh += u.input_tokens;
+                    cached += u.cache_read_input_tokens.unwrap_or(0);
+                    output += u.output_tokens;
+                }
+            }
+        }
+        // Epoch 1 final: 250/150/30 (fresh 100); epoch 2 final: 50/20/5
+        // (fresh 30). Canonical sums telescope to epoch finals — NOT the
+        // blind last-usage sum (which would be 100+100+250+50=500 input).
+        assert_eq!(
+            (fresh, cached, output),
+            (100 + 30, 150 + 20, 30 + 5),
+            "entry usage must equal the sum of epoch finals"
+        );
+        // The pre-response event was HELD and attached to the first
+        // assistant; the three later events in the same window attach
+        // backward to it as well (1 message + 4 usage records = 5 origins).
+        let first = crate::provider::EntryId::deterministic(&key(THREAD_A), 2, 0);
+        assert_eq!(
+            parsed.entry_origins[&first].len(),
+            5,
+            "held + backward usage events all attach with N:1 provenance"
+        );
+    }
+
+    #[test]
+    fn pending_usage_with_no_assistant_is_preserved_not_lost() {
+        let (_tmp, p) = normalize_home(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "token_count", "info": {
+                "total_token_usage": {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 1}}}),
+            ),
+        ]);
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        assert!(parsed.validate_provenance().is_empty());
+        let preserved = parsed.entries.iter().any(|e| {
+            matches!(&e.entry, crate::model::LogEntry::Unknown(v)
+                if v["payload"]["type"] == "token_count")
+        });
+        assert!(preserved, "orphan usage must remain a preserved entry");
+        assert_eq!(parsed.diagnostics.suppressed, 0);
+    }
+
+    #[test]
+    fn per_item_metadata_is_honored_over_stale_ambient_turn() {
+        let (_tmp, p) = normalize_home(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            // Ambient says turn-old (stale); the item carries turn-new.
+            envelope_line(
+                "turn_context",
+                serde_json::json!({"turn_id": "turn-old", "model": "m"}),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "x"}],
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn-new"}}),
+            ),
+            // Metadata-only carrier: no ambient source at all for turn-only.
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "function_call", "name": "shell",
+                "arguments": "{}", "call_id": "c1", "metadata": {"turn_id": "turn-new"}}),
+            ),
+        ]);
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        let turn = |ordinal| {
+            parsed
+                .semantics
+                .get(&crate::provider::EntryId::deterministic(
+                    &key(THREAD_A),
+                    ordinal,
+                    0,
+                ))
+                .and_then(|s| s.turn_id.clone())
+        };
+        assert_eq!(turn(2).as_deref(), Some("turn-new"));
+        assert_eq!(turn(3).as_deref(), Some("turn-new"));
+    }
+
+    #[test]
+    fn web_search_call_maps_as_web_tool_use() {
+        let (_tmp, p) = normalize_home(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "web_search_call", "status": "completed",
+                "action": {"type": "open_page", "url": "https://example.com"}}),
+            ),
+        ]);
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        let id = crate::provider::EntryId::deterministic(&key(THREAD_A), 1, 0);
+        let entry = parsed.entries.iter().find(|e| e.id == id).unwrap();
+        let is_web_tool = matches!(&entry.entry, crate::model::LogEntry::Assistant(m)
+            if m.message.content.iter().any(|b| matches!(b, crate::model::ContentBlock::ToolUse(t) if t.name == "web_search")));
+        assert!(is_web_tool);
+        let sem = parsed.semantics.get(&id).unwrap();
+        assert!(sem
+            .tools
+            .values()
+            .any(|t| matches!(t.kind, crate::provider::ToolKind::Web)));
     }
 
     #[test]

@@ -1,15 +1,28 @@
 //! B3 slice 1: normalize Codex envelope records into the common model.
 //!
-//! Covers user/assistant content, reasoning summaries, tool calls/results,
-//! and usage — the reviewer-set first checkpoint. The mapping is recorded
-//! in `docs/multi-provider-design.md` ("B3 slice 1 — normalization
-//! mapping") and rests on the 224-session corpus census. Binding
-//! constraints (round-21): mapped records keep their B1 deterministic ids
-//! `(ordinal, 0)`; `turn_id` rides the semantics sidecar, never message
-//! identity; deduplication is by emission identity (the `response_item`
-//! stream is authoritative for content; `event_msg` content records are
-//! its UI twin), never text equality; usage deltas accumulate onto
-//! entries so summing entry usage cannot double-count.
+//! Covers user/assistant content, reasoning summaries, tool calls/results
+//! (including `web_search_call`), and usage. The mapping is recorded in
+//! `docs/multi-provider-design.md` ("B3 slice 1 — normalization mapping",
+//! amended by B3.1) and rests on the 224-session corpus census plus the
+//! round-22 audit. Binding constraints (round-21):
+//!
+//! - Mapped records keep their B1 deterministic ids `(ordinal, 0)`.
+//! - `turn_id` rides the semantics sidecar (ambient `turn_context` /
+//!   `task_started` state, OVERRIDDEN by each item's own
+//!   `internal_chat_message_metadata_passthrough` / `metadata` carrier),
+//!   never message identity.
+//! - Deduplication suppresses only a PROVEN one-to-one twin: matching is
+//!   scoped to a turn window, claims each candidate at most once, and
+//!   records the twin's ordinal inside the suppression itself. Unmatched
+//!   event content (post-compaction notices, reasoning before an aborted
+//!   turn) maps directly — it never disappears (round-22 blocker 1).
+//! - Canonical usage derives from CUMULATIVE transitions: unchanged totals
+//!   contribute zero, decreases open a new epoch, and summed entry usage
+//!   telescopes to the sum of epoch finals — never a blind sum of
+//!   `last_token_usage` (round-22 blocker 2). Usage events arriving before
+//!   their response are held and attached to the NEXT assistant emission;
+//!   if none ever arrives the record stays a preserved Unknown entry,
+//!   never lost.
 //!
 //! Everything outside the slice (session_meta, turn_context, world_state,
 //! ghost_snapshot, compacted, task events, ...) remains a preserved
@@ -17,7 +30,7 @@
 //! its disposition unchanged. Fork-inherited history, compaction, and
 //! spawn lineage are later B3 slices.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -44,20 +57,223 @@ pub(super) struct NormalizeOutput {
     pub diagnostics: IngestionDiagnostics,
 }
 
+/// A record that starts a new matching window (turn/request boundary).
+fn is_window_boundary(envelope_type: &str, payload_type: &str) -> bool {
+    matches!(envelope_type, "session_meta" | "turn_context" | "compacted")
+        || (envelope_type == "event_msg" && payload_type == "task_started")
+}
+
+fn envelope_parts(value: &Value) -> (&str, &Value, &str) {
+    let envelope_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+    let payload = value.get("payload").unwrap_or(&Value::Null);
+    let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
+    (envelope_type, payload, payload_type)
+}
+
+/// Concatenated text parts of a response_item message content array.
+fn joined_text(payload: &Value) -> String {
+    payload
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|i| i.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default()
+}
+
+/// Pre-computed emission matching (round-22 blocker 1): within each turn
+/// window, each content-bearing `event_msg` claims at most one
+/// corresponding `response_item` (or one reasoning section) whose text
+/// agrees — a positional-and-content-confirmed twin. Events left unclaimed
+/// map directly later; response items left unclaimed simply have no twin.
+#[derive(Default)]
+struct MatchPlan {
+    /// event ordinal → proven twin response ordinal.
+    suppressed_events: BTreeMap<u64, u64>,
+    /// response_item user-message ordinals claimed by a `user_message`
+    /// event → HUMAN-authored prompts.
+    human_responses: BTreeSet<u64>,
+}
+
+struct Candidate {
+    ordinal: u64,
+    text: String,
+    claimed: bool,
+}
+
+fn claim(pool: &mut [Candidate], text: &str) -> Option<u64> {
+    pool.iter_mut()
+        .find(|c| !c.claimed && c.text == text)
+        .map(|c| {
+            c.claimed = true;
+            c.ordinal
+        })
+}
+
+fn plan_matches(records: &[(RecordRef, Value)]) -> MatchPlan {
+    let mut plan = MatchPlan::default();
+    let mut window_start = 0usize;
+    let mut i = 0usize;
+    loop {
+        let at_boundary = i == records.len() || {
+            let (et, _, pt) = envelope_parts(&records[i].1);
+            is_window_boundary(et, pt)
+        };
+        if at_boundary && i > window_start {
+            plan_window(&records[window_start..i], &mut plan);
+            window_start = i;
+        }
+        if i == records.len() {
+            break;
+        }
+        i += 1;
+    }
+    plan
+}
+
+fn plan_window(window: &[(RecordRef, Value)], plan: &mut MatchPlan) {
+    let mut users: Vec<Candidate> = Vec::new();
+    let mut agents: Vec<Candidate> = Vec::new();
+    let mut sections: Vec<Candidate> = Vec::new();
+    for (record, value) in window {
+        let (et, payload, pt) = envelope_parts(value);
+        if et != "response_item" {
+            continue;
+        }
+        match pt {
+            "message" => {
+                let role = payload.get("role").and_then(Value::as_str).unwrap_or("");
+                let candidate = Candidate {
+                    ordinal: record.ordinal,
+                    text: joined_text(payload),
+                    claimed: false,
+                };
+                if role == "user" {
+                    users.push(candidate);
+                } else if role == "assistant" {
+                    agents.push(candidate);
+                }
+            }
+            "reasoning" => {
+                for list in ["summary", "content"] {
+                    if let Some(items) = payload.get(list).and_then(Value::as_array) {
+                        for item in items {
+                            if let Some(text) = item.get("text").and_then(Value::as_str) {
+                                sections.push(Candidate {
+                                    ordinal: record.ordinal,
+                                    text: text.to_string(),
+                                    claimed: false,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for (record, value) in window {
+        let (et, payload, pt) = envelope_parts(value);
+        if et != "event_msg" {
+            continue;
+        }
+        let twin = match pt {
+            "user_message" => {
+                let text = payload.get("message").and_then(Value::as_str).unwrap_or("");
+                let twin = claim(&mut users, text);
+                if let Some(t) = twin {
+                    plan.human_responses.insert(t);
+                }
+                twin
+            }
+            "agent_message" => {
+                let text = payload.get("message").and_then(Value::as_str).unwrap_or("");
+                claim(&mut agents, text)
+            }
+            "agent_reasoning" | "agent_reasoning_raw_content" => {
+                let text = payload.get("text").and_then(Value::as_str).unwrap_or("");
+                claim(&mut sections, text)
+            }
+            _ => None,
+        };
+        if let Some(twin_ordinal) = twin {
+            plan.suppressed_events.insert(record.ordinal, twin_ordinal);
+        }
+    }
+}
+
+/// Raw cumulative usage triple straight from a codex usage object.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct RawUsage {
+    input: u64,
+    cached: u64,
+    output: u64,
+}
+
+impl RawUsage {
+    fn read(v: Option<&Value>) -> Self {
+        let get = |k: &str| {
+            v.and_then(|u| u.get(k))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        };
+        RawUsage {
+            input: get("input_tokens"),
+            cached: get("cached_input_tokens"),
+            output: get("output_tokens"),
+        }
+    }
+
+    /// RAW pass-through for observations: `input_tokens` carries codex's
+    /// own input number unmodified (its relationship to `cached` is
+    /// era-dependent — the corpus contains sessions where cumulative cached
+    /// outgrows cumulative input, i.e. input EXCLUDES cached), so replaying
+    /// the stream from observations is exact.
+    fn raw_observation(self) -> Usage {
+        Usage {
+            input_tokens: self.input,
+            output_tokens: self.output,
+            cache_read_input_tokens: Some(self.cached),
+            ..Default::default()
+        }
+    }
+
+    /// The clamped cumulative FRESH-input stream value (era-safe: never
+    /// negative regardless of whether input includes cached).
+    fn fresh(self) -> u64 {
+        self.input.saturating_sub(self.cached)
+    }
+}
+
+/// A usage event waiting for its assistant emission (round-22: token
+/// events may precede the response records they describe).
+struct PendingUsage {
+    record: RecordRef,
+    value: Value,
+    canonical: Usage,
+    last_raw: Usage,
+    total_raw: Usage,
+}
+
 /// Session-level state threaded through the linear walk.
 struct WalkState {
     version: String,
     cwd: Option<String>,
     model: String,
     turn_id: Option<String>,
-    /// Index (into `entries`) of the most recent assistant-authored entry —
-    /// the attachment point for `token_count` usage.
-    last_assistant: Option<usize>,
-    /// Indices of user-role entries not yet claimed by a `user_message`
-    /// event (claim marks them human-authored).
-    unclaimed_user_entries: Vec<usize>,
-    /// `user_message` events seen before their user entry (order-robust).
-    pending_human_claims: usize,
+    /// Current window index (increments at every window boundary).
+    window: u64,
+    /// Most recent assistant-authored entry and the window it was born in.
+    last_assistant: Option<(usize, u64)>,
+    /// Previous cumulative usage totals (None before the first observation;
+    /// re-seeded across epoch resets).
+    prev_total: Option<RawUsage>,
+    /// Usage events awaiting the next assistant emission.
+    pending_usage: Vec<PendingUsage>,
     /// Previous mapped entry's synthetic uuid (linear threading).
     last_uuid: Option<String>,
 }
@@ -73,34 +289,31 @@ pub(super) fn normalize(
         semantics: BTreeMap::new(),
         diagnostics: IngestionDiagnostics::default(),
     };
-    // Emission-identity dedup precondition: the response_item stream is
-    // authoritative whenever it exists at all. The corpus has zero
-    // event-only sessions; the single-stream path exists for correctness
-    // and is fixture-tested.
-    let dual_stream = records
-        .iter()
-        .any(|(_, v)| v.get("type").and_then(Value::as_str) == Some("response_item"));
+    let plan = plan_matches(records);
 
     let mut state = WalkState {
         version: "unknown".into(),
         cwd: None,
         model: "unknown".into(),
         turn_id: None,
+        window: 0,
         last_assistant: None,
-        unclaimed_user_entries: Vec::new(),
-        pending_human_claims: 0,
+        prev_total: None,
+        pending_usage: Vec::new(),
         last_uuid: None,
     };
 
     for (record, value) in records {
-        let envelope_type = value.get("type").and_then(Value::as_str).unwrap_or("");
-        let payload = value.get("payload").unwrap_or(&Value::Null);
-        let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
+        let (envelope_type, payload, payload_type) = envelope_parts(value);
         let timestamp = value
             .get("timestamp")
             .and_then(Value::as_str)
             .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
             .map_or_else(|| DateTime::<Utc>::UNIX_EPOCH, |t| t.with_timezone(&Utc));
+
+        if is_window_boundary(envelope_type, payload_type) {
+            state.window += 1;
+        }
 
         // State updates from records that stay Unknown.
         match envelope_type {
@@ -128,23 +341,33 @@ pub(super) fn normalize(
                     state.turn_id = Some(t.to_string());
                 }
             }
+            "response_item" => {
+                // The per-item carrier OVERRIDES ambient state (round-22:
+                // the documented metadata passthrough must be honored, not
+                // merely happen to agree with ambient turn context).
+                if let Some(t) = item_turn_id(payload) {
+                    state.turn_id = Some(t);
+                }
+            }
             _ => {}
         }
 
-        let mapped = match (envelope_type, payload_type) {
+        match (envelope_type, payload_type) {
             ("response_item", "message") => {
-                normalize_message(payload, timestamp, key, record, &mut state, &mut out)
+                normalize_message(payload, timestamp, key, record, &plan, &mut state, &mut out);
             }
-            ("response_item", "reasoning") => Some(push_assistant(
-                vec![reasoning_block(payload)],
-                timestamp,
-                key,
-                record,
-                &mut state,
-                &mut out,
-            )),
+            ("response_item", "reasoning") => {
+                push_assistant(
+                    vec![reasoning_block(payload)],
+                    timestamp,
+                    key,
+                    record,
+                    &mut state,
+                    &mut out,
+                );
+            }
             ("response_item", "function_call") | ("response_item", "custom_tool_call") => {
-                Some(normalize_tool_call(
+                normalize_tool_call(
                     payload,
                     payload_type,
                     timestamp,
@@ -152,144 +375,178 @@ pub(super) fn normalize(
                     record,
                     &mut state,
                     &mut out,
-                ))
+                );
+            }
+            ("response_item", "web_search_call") => {
+                normalize_web_search(payload, timestamp, key, record, &mut state, &mut out);
             }
             ("response_item", "function_call_output")
-            | ("response_item", "custom_tool_call_output") => Some(normalize_tool_output(
-                payload, timestamp, key, record, &mut state, &mut out,
-            )),
-            ("event_msg", "user_message") => {
-                if dual_stream {
-                    // The response_item stream carries this prompt's durable
-                    // content; the event marks it HUMAN-authored.
-                    if let Some(idx) = state.unclaimed_user_entries.pop() {
-                        let id = out.entries[idx].id.clone();
-                        if let Some(sem) = out.semantics.get_mut(&id) {
-                            sem.prompt = Some(PromptSemantics {
-                                authorship: PromptAuthorship::Human,
-                                delivery: PromptDelivery::TurnBoundary,
-                            });
-                        }
-                    } else {
-                        state.pending_human_claims += 1;
-                    }
-                    suppress_duplicate(record, &mut out);
-                    None
+            | ("response_item", "custom_tool_call_output") => {
+                normalize_tool_output(payload, timestamp, key, record, &mut state, &mut out);
+            }
+            ("event_msg", "user_message")
+            | ("event_msg", "agent_message")
+            | ("event_msg", "agent_reasoning")
+            | ("event_msg", "agent_reasoning_raw_content") => {
+                if let Some(twin) = plan.suppressed_events.get(&record.ordinal) {
+                    out.diagnostics.suppressed += 1;
+                    out.record_dispositions.push(RecordDisposition {
+                        record: record.clone(),
+                        outcome: RecordOutcome::Suppressed {
+                            reason: SuppressionReason::DuplicateStream {
+                                twin_ordinal: *twin,
+                            },
+                        },
+                    });
                 } else {
-                    let text = payload
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    let idx = push_user(
-                        vec![ContentBlock::Text(TextBlock {
-                            text,
-                            extra: indexmap::IndexMap::default(),
-                        })],
-                        "user",
+                    // Unmatched event content is unique — map it (round-22:
+                    // post-compaction notices, pre-abort reasoning).
+                    map_unmatched_event(
+                        payload_type,
+                        payload,
                         timestamp,
                         key,
                         record,
                         &mut state,
                         &mut out,
                     );
-                    let id = out.entries[idx].id.clone();
-                    if let Some(sem) = out.semantics.get_mut(&id) {
-                        sem.prompt = Some(PromptSemantics {
-                            authorship: PromptAuthorship::Human,
-                            delivery: PromptDelivery::TurnBoundary,
-                        });
-                    }
-                    Some(idx)
-                }
-            }
-            ("event_msg", "agent_message") => {
-                if dual_stream {
-                    suppress_duplicate(record, &mut out);
-                    None
-                } else {
-                    let text = payload
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    Some(push_assistant(
-                        vec![ContentBlock::Text(TextBlock {
-                            text,
-                            extra: indexmap::IndexMap::default(),
-                        })],
-                        timestamp,
-                        key,
-                        record,
-                        &mut state,
-                        &mut out,
-                    ))
-                }
-            }
-            ("event_msg", "agent_reasoning") | ("event_msg", "agent_reasoning_raw_content") => {
-                if dual_stream {
-                    suppress_duplicate(record, &mut out);
-                    None
-                } else {
-                    let text = payload
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    Some(push_assistant(
-                        vec![ContentBlock::Thinking(ThinkingBlock {
-                            thinking: text,
-                            signature: String::new(),
-                            extra: indexmap::IndexMap::default(),
-                        })],
-                        timestamp,
-                        key,
-                        record,
-                        &mut state,
-                        &mut out,
-                    ))
                 }
             }
             ("event_msg", "token_count") => {
-                attach_usage(payload, record, &mut state, &mut out);
-                None
+                handle_token_count(payload, value, record, &mut state, &mut out);
             }
             // Everything else: preserved, honestly unmodeled — a later
             // slice's business.
             _ => {
                 push_unknown(value.clone(), key, record, &mut out);
-                None
             }
-        };
-        let _ = mapped;
+        }
     }
+
+    // Usage events whose assistant emission never arrived stay PRESERVED —
+    // never lost (round-22).
+    let leftovers: Vec<PendingUsage> = std::mem::take(&mut state.pending_usage);
+    for pending in leftovers {
+        push_unknown(pending.value, key, &pending.record, &mut out);
+    }
+    // Canonical entry order = record order (late-attached leftovers above
+    // would otherwise trail out of place).
+    out.entries.sort_by_key(|e| (e.id.ordinal, e.id.subindex));
     out
 }
 
-/// response_item `message`: role decides the side of the conversation.
-fn normalize_message(
+/// The per-item turn carrier: `internal_chat_message_metadata_passthrough`
+/// (bulk of the corpus) or `metadata` (function_call era).
+fn item_turn_id(payload: &Value) -> Option<String> {
+    for carrier in ["internal_chat_message_metadata_passthrough", "metadata"] {
+        if let Some(t) = payload
+            .get(carrier)
+            .and_then(|m| m.get("turn_id"))
+            .and_then(Value::as_str)
+        {
+            return Some(t.to_string());
+        }
+    }
+    None
+}
+
+/// An unmatched content-bearing event maps directly.
+fn map_unmatched_event(
+    payload_type: &str,
     payload: &Value,
     timestamp: DateTime<Utc>,
     key: &LogicalSessionKey,
     record: &RecordRef,
     state: &mut WalkState,
     out: &mut NormalizeOutput,
-) -> Option<usize> {
+) {
+    match payload_type {
+        "user_message" => {
+            let text = payload
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let idx = push_user(
+                vec![ContentBlock::Text(TextBlock {
+                    text,
+                    extra: indexmap::IndexMap::default(),
+                })],
+                "user",
+                timestamp,
+                key,
+                record,
+                state,
+                out,
+            );
+            let id = out.entries[idx].id.clone();
+            if let Some(sem) = out.semantics.get_mut(&id) {
+                sem.prompt = Some(PromptSemantics {
+                    authorship: PromptAuthorship::Human,
+                    delivery: PromptDelivery::TurnBoundary,
+                });
+            }
+        }
+        "agent_message" => {
+            let text = payload
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            push_assistant(
+                vec![ContentBlock::Text(TextBlock {
+                    text,
+                    extra: indexmap::IndexMap::default(),
+                })],
+                timestamp,
+                key,
+                record,
+                state,
+                out,
+            );
+        }
+        _ => {
+            let text = payload
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            push_assistant(
+                vec![ContentBlock::Thinking(ThinkingBlock {
+                    thinking: text,
+                    signature: String::new(),
+                    extra: indexmap::IndexMap::default(),
+                })],
+                timestamp,
+                key,
+                record,
+                state,
+                out,
+            );
+        }
+    }
+}
+
+/// response_item `message`: role decides the side; a `user_message` event
+/// twin (pre-computed plan) marks the prompt HUMAN.
+fn normalize_message(
+    payload: &Value,
+    timestamp: DateTime<Utc>,
+    key: &LogicalSessionKey,
+    record: &RecordRef,
+    plan: &MatchPlan,
+    state: &mut WalkState,
+    out: &mut NormalizeOutput,
+) {
     let role = payload.get("role").and_then(Value::as_str).unwrap_or("");
     let blocks = content_blocks(payload.get("content"), role == "assistant");
     if role == "assistant" {
-        Some(push_assistant(blocks, timestamp, key, record, state, out))
+        push_assistant(blocks, timestamp, key, record, state, out);
     } else {
         let idx = push_user(blocks, role, timestamp, key, record, state, out);
         let id = out.entries[idx].id.clone();
-        let authorship = if role == "user" {
-            if state.pending_human_claims > 0 {
-                state.pending_human_claims -= 1;
-                PromptAuthorship::Human
-            } else {
-                state.unclaimed_user_entries.push(idx);
-                PromptAuthorship::Harness
-            }
+        let authorship = if plan.human_responses.contains(&record.ordinal) {
+            PromptAuthorship::Human
         } else {
             PromptAuthorship::Harness
         };
@@ -299,7 +556,6 @@ fn normalize_message(
                 delivery: PromptDelivery::TurnBoundary,
             });
         }
-        Some(idx)
     }
 }
 
@@ -373,7 +629,7 @@ fn normalize_tool_call(
     record: &RecordRef,
     state: &mut WalkState,
     out: &mut NormalizeOutput,
-) -> usize {
+) {
     let name = payload
         .get("name")
         .and_then(Value::as_str)
@@ -419,7 +675,46 @@ fn normalize_tool_call(
             },
         );
     }
-    idx
+}
+
+/// web_search_call → assistant ToolUse (round-22: 341 corpus records were
+/// left Unknown while the tool-call claim said "complete").
+fn normalize_web_search(
+    payload: &Value,
+    timestamp: DateTime<Utc>,
+    key: &LogicalSessionKey,
+    record: &RecordRef,
+    state: &mut WalkState,
+    out: &mut NormalizeOutput,
+) {
+    let call_id = payload
+        .get("call_id")
+        .and_then(Value::as_str)
+        .map_or_else(|| format!("ws_{}", record.ordinal), str::to_string);
+    let input = payload.get("action").cloned().unwrap_or(Value::Null);
+    let idx = push_assistant(
+        vec![ContentBlock::ToolUse(ToolUse {
+            id: call_id.clone(),
+            name: "web_search".into(),
+            input,
+            extra: indexmap::IndexMap::default(),
+        })],
+        timestamp,
+        key,
+        record,
+        state,
+        out,
+    );
+    let id = out.entries[idx].id.clone();
+    if let Some(sem) = out.semantics.get_mut(&id) {
+        sem.tools.insert(
+            call_id,
+            ToolSemantics {
+                kind: ToolKind::Web,
+                native_name: "web_search".into(),
+            },
+        );
+    }
 }
 
 /// Canonical tool classification from Codex native tool names.
@@ -443,7 +738,7 @@ fn normalize_tool_output(
     record: &RecordRef,
     state: &mut WalkState,
     out: &mut NormalizeOutput,
-) -> usize {
+) {
     let call_id = payload
         .get("call_id")
         .and_then(Value::as_str)
@@ -475,54 +770,94 @@ fn normalize_tool_output(
             delivery: PromptDelivery::MidTurn,
         });
     }
-    idx
 }
 
-/// token_count → Mapped INTO the most recent assistant entry (N:1
-/// provenance). The entry's Usage accumulates the DELTA so summing entry
-/// usage never double-counts; both observations attach with their axes.
-fn attach_usage(
+/// token_count: canonical usage from CUMULATIVE transitions (round-22
+/// blocker 2), attached to the current window's assistant emission or held
+/// for the next one.
+fn handle_token_count(
     payload: &Value,
+    value: &Value,
     record: &RecordRef,
     state: &mut WalkState,
     out: &mut NormalizeOutput,
 ) {
-    let info = payload.get("info");
-    let (Some(info), Some(idx)) = (info.filter(|i| i.is_object()), state.last_assistant) else {
-        let reason = if state.last_assistant.is_none() {
-            "token_count with no attributable assistant emission"
-        } else {
-            "token_count heartbeat without usage info"
-        };
+    let info = payload
+        .get("info")
+        .filter(|i| i.is_object() && i.get("total_token_usage").is_some());
+    let Some(info) = info else {
+        // Heartbeat without usage numbers: nothing to account for.
         out.diagnostics.suppressed += 1;
         out.record_dispositions.push(RecordDisposition {
             record: record.clone(),
             outcome: RecordOutcome::Suppressed {
-                reason: SuppressionReason::Other(reason.into()),
+                reason: SuppressionReason::Other("token_count heartbeat without usage info".into()),
             },
         });
         return;
     };
-    let delta = usage_from(info.get("last_token_usage"));
-    let total = usage_from(info.get("total_token_usage"));
-    let id = out.entries[idx].id.clone();
+    let total = RawUsage::read(info.get("total_token_usage"));
+    let last = RawUsage::read(info.get("last_token_usage"));
+    // Cumulative transition, per component on clamped streams (era-safe):
+    // unchanged → zero; a decrease in input or output → epoch reset (the
+    // new cumulative IS the epoch's first delta); otherwise differences of
+    // the fresh/cached/output streams.
+    let canonical = match state.prev_total {
+        None => Usage {
+            input_tokens: total.fresh(),
+            output_tokens: total.output,
+            cache_read_input_tokens: Some(total.cached),
+            ..Default::default()
+        },
+        Some(prev) => {
+            if total.input < prev.input || total.output < prev.output {
+                Usage {
+                    input_tokens: total.fresh(),
+                    output_tokens: total.output,
+                    cache_read_input_tokens: Some(total.cached),
+                    ..Default::default()
+                }
+            } else {
+                Usage {
+                    input_tokens: total.fresh().saturating_sub(prev.fresh()),
+                    output_tokens: total.output - prev.output,
+                    cache_read_input_tokens: Some(total.cached.saturating_sub(prev.cached)),
+                    ..Default::default()
+                }
+            }
+        }
+    };
+    state.prev_total = Some(total);
 
-    // N:1 provenance: this record maps into the existing assistant entry.
+    let pending = PendingUsage {
+        record: record.clone(),
+        value: value.clone(),
+        canonical,
+        last_raw: last.raw_observation(),
+        total_raw: total.raw_observation(),
+    };
+    match state.last_assistant {
+        Some((idx, window)) if window == state.window => attach_usage(pending, idx, out),
+        _ => state.pending_usage.push(pending),
+    }
+}
+
+fn attach_usage(pending: PendingUsage, idx: usize, out: &mut NormalizeOutput) {
+    let id = out.entries[idx].id.clone();
     out.entry_origins
         .get_mut(&id)
         .expect("assistant entry has origins")
-        .push(record.clone());
+        .push(pending.record.clone());
     out.diagnostics.mapped += 1;
     out.record_dispositions.push(RecordDisposition {
-        record: record.clone(),
+        record: pending.record,
         outcome: RecordOutcome::Mapped(vec![id.clone()]),
     });
-
     if let LogEntry::Assistant(msg) = &mut out.entries[idx].entry {
         let usage = msg.message.usage.get_or_insert_with(Usage::default);
-        usage.input_tokens += delta.input_tokens;
-        usage.output_tokens += delta.output_tokens;
-        if let Some(c) = delta.cache_read_input_tokens {
+        usage.input_tokens += pending.canonical.input_tokens;
+        usage.output_tokens += pending.canonical.output_tokens;
+        if let Some(c) = pending.canonical.cache_read_input_tokens {
             *usage.cache_read_input_tokens.get_or_insert(0) += c;
         }
     }
@@ -530,49 +865,20 @@ fn attach_usage(
         sem.usage.push(UsageObservation {
             scope: UsageScope::Call,
             aggregation: UsageAggregation::Delta,
-            usage: delta,
+            usage: pending.last_raw,
         });
         sem.usage.push(UsageObservation {
             scope: UsageScope::Session,
             aggregation: UsageAggregation::Cumulative,
-            usage: total,
+            usage: pending.total_raw,
         });
     }
 }
 
-/// Map Codex usage numbers into the model's [`Usage`]: Codex
-/// `input_tokens` INCLUDES cached tokens, the model's `input_tokens` is
-/// fresh input — so fresh = input − cached, cached → cache_read.
-fn usage_from(v: Option<&Value>) -> Usage {
-    let get = |k: &str| {
-        v.and_then(|u| u.get(k))
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-    };
-    let input = get("input_tokens");
-    let cached = get("cached_input_tokens");
-    Usage {
-        input_tokens: input.saturating_sub(cached),
-        output_tokens: get("output_tokens"),
-        cache_read_input_tokens: Some(cached),
-        ..Default::default()
-    }
-}
-
-fn suppress_duplicate(record: &RecordRef, out: &mut NormalizeOutput) {
-    out.diagnostics.suppressed += 1;
-    out.record_dispositions.push(RecordDisposition {
-        record: record.clone(),
-        outcome: RecordOutcome::Suppressed {
-            reason: SuppressionReason::DuplicateStream,
-        },
-    });
-}
-
 /// Shared mapped-entry plumbing: id at `(ordinal, 0)` (constraint 1),
-/// synthetic linear-thread uuid, origins, disposition, base semantics with
-/// the current turn id.
-#[allow(clippy::too_many_arguments)]
+/// synthetic uuid = the INJECTIVE EntryId encoding (round-22: never a bare
+/// `native:ordinal` that omits provider and namespace), origins,
+/// disposition, base semantics with the current turn id.
 fn push_mapped(
     entry: LogEntry,
     key: &LogicalSessionKey,
@@ -595,13 +901,13 @@ fn push_mapped(
             ..Default::default()
         },
     );
+    state.last_uuid = Some(id.to_string());
     out.entries.push(IdentifiedEntry { id, entry });
-    state.last_uuid = Some(synthetic_uuid(key, record.ordinal));
     out.entries.len() - 1
 }
 
 fn synthetic_uuid(key: &LogicalSessionKey, ordinal: u64) -> String {
-    format!("{}:{ordinal}", key.native_id)
+    EntryId::deterministic(key, ordinal, 0).to_string()
 }
 
 fn push_assistant(
@@ -644,11 +950,15 @@ fn push_assistant(
         extra: indexmap::IndexMap::default(),
     });
     let idx = push_mapped(entry, key, record, state, out);
-    state.last_assistant = Some(idx);
+    state.last_assistant = Some((idx, state.window));
+    // Usage events that arrived before this emission attach now.
+    let pending: Vec<PendingUsage> = std::mem::take(&mut state.pending_usage);
+    for p in pending {
+        attach_usage(p, idx, out);
+    }
     idx
 }
 
-#[allow(clippy::too_many_arguments)]
 fn push_user(
     blocks: Vec<ContentBlock>,
     role: &str,

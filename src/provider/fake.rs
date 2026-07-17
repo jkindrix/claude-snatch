@@ -261,7 +261,7 @@ impl SourceProvider for FakeProvider {
             RecordDisposition {
                 record: rec(3),
                 outcome: RecordOutcome::Suppressed {
-                    reason: SuppressionReason::DuplicateStream,
+                    reason: SuppressionReason::DuplicateStream { twin_ordinal: 0 },
                 },
             },
             RecordDisposition {
