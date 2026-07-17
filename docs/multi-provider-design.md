@@ -575,6 +575,28 @@ lines (matching the original census). Observation for B3: this corpus's
 fork files carry no forked_from_id in their first meta (field postdates
 them) — fork lineage needs the embedded-second-meta heuristic.
 
+## Review round 12 (2026-07-17, same Codex agent — B1a hardening)
+
+Five gaps folded into B1b, each with a test built to fail pre-fix:
+(1) bounded decompression completed — compressed-input cap added,
+LimitedReader EOF-probes so a stream exactly at the limit is valid
+(exact/one-short tested), window_log_max lowered from the 2 GiB format
+ceiling to zstd's practical 128 MiB refusal default (2^27), corrupt-frame
+streams surface as dispositions; (2) byte-level record reading
+(read_until + from_slice) so invalid UTF-8 mid-stream no longer loses
+later records, plain and compressed both tested; (3) inventory preserves
+authoritative PathBufs (locator strings are display-only — non-UTF-8
+CODEX_HOME round-trips through parse/native/archive, tested) and the walk
+has a deliberate no-follow symlink policy (cycle + external-file symlink
+tested); (4) sniffing is envelope-SHAPE based (string timestamp + string
+type + payload), forward-compatible with unknown first-record types
+(tested), with an explicit Undetermined policy documented; (5) artifacts
+sort by stable identity (determinism test) and the corpus conformance test
+compares disposition totals against an independent per-artifact record
+count and emits aggregate-only output. Re-run on the real corpus: 224/224
+parsed, 0 errors, 0 violations, 0 count mismatches, 222,192 records,
+2 unparseable. 17 codex tests + 1 opt-in conformance.
+
 ## Open questions (to settle in-phase)
 
 1. Two-stream dedup policy details (B3, empirical — under the emission-

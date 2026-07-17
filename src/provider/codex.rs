@@ -31,31 +31,23 @@ use super::{
 };
 use crate::model::LogEntry;
 
-/// Top-level envelope types of the rollout format (rust-v0.144.5 vocabulary;
-/// unknown types are still preserved — they surface in diagnostics).
-const ENVELOPE_TYPES: [&str; 8] = [
-    "session_meta",
-    "response_item",
-    "event_msg",
-    "turn_context",
-    "compacted",
-    "world_state",
-    "inter_agent_communication",
-    "inter_agent_communication_metadata",
-];
-
 /// Default cap on decompressed bytes per session (decompression-bomb guard).
 const DEFAULT_MAX_DECOMPRESSED: u64 = 1 << 32; // 4 GiB
 
-/// zstd window_log_max: caps decoder memory (2^31 = the format maximum
-/// ordinary streams use; anything larger is refused).
-const WINDOW_LOG_MAX: u32 = 31;
+/// Default cap on compressed input bytes per session file.
+const DEFAULT_MAX_COMPRESSED: u64 = 1 << 30; // 1 GiB
+
+/// zstd window_log_max: a PRACTICAL decoder-memory guard (2^27 = 128 MiB —
+/// zstd's own default refusal threshold), not the 2 GiB format ceiling.
+const WINDOW_LOG_MAX: u32 = 27;
 
 /// OpenAI Codex CLI sessions behind the provider seam.
 pub struct CodexProvider {
     codex_home: PathBuf,
     /// Cap on decompressed bytes per compressed session file.
     max_decompressed: u64,
+    /// Cap on compressed input bytes per session file.
+    max_compressed: u64,
 }
 
 /// What the first record of a rollout file says about its format family.
@@ -75,6 +67,7 @@ impl CodexProvider {
         CodexProvider {
             codex_home: codex_home.into(),
             max_decompressed: DEFAULT_MAX_DECOMPRESSED,
+            max_compressed: DEFAULT_MAX_COMPRESSED,
         }
     }
 
@@ -91,6 +84,13 @@ impl CodexProvider {
     #[must_use]
     pub fn with_max_decompressed(mut self, max: u64) -> Self {
         self.max_decompressed = max;
+        self
+    }
+
+    /// Configure the compressed-input cap (bytes).
+    #[must_use]
+    pub fn with_max_compressed(mut self, max: u64) -> Self {
+        self.max_compressed = max;
         self
     }
 
@@ -152,7 +152,7 @@ impl CodexProvider {
         &self,
         root: &Path,
         archived: bool,
-        out: &mut BTreeMap<LogicalSessionKey, Vec<SessionArtifact>>,
+        out: &mut BTreeMap<LogicalSessionKey, Vec<(SessionArtifact, PathBuf)>>,
     ) -> Result<(), ProviderError> {
         if !root.exists() {
             return Ok(());
@@ -161,8 +161,15 @@ impl CodexProvider {
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir)? {
                 let entry = entry?;
+                // Deliberate no-follow symlink policy: symlinked directories
+                // (cycle/traversal risk) and files (external content) are
+                // skipped entirely.
+                let file_type = entry.file_type()?;
+                if file_type.is_symlink() {
+                    continue;
+                }
                 let path = entry.path();
-                if path.is_dir() {
+                if file_type.is_dir() {
                     stack.push(path);
                     continue;
                 }
@@ -180,26 +187,54 @@ impl CodexProvider {
                 let key = self.key_for(thread_id);
                 let artifact = self.artifact_for(&path, archived);
                 let slot = out.entry(key).or_default();
-                if !slot.iter().any(|a| a.snapshot.id == artifact.snapshot.id) {
-                    slot.push(artifact);
+                if !slot
+                    .iter()
+                    .any(|(a, _)| a.snapshot.id == artifact.snapshot.id)
+                {
+                    slot.push((artifact, path));
                 }
             }
         }
         Ok(())
     }
 
-    fn descriptors(&self) -> Result<Vec<SessionDescriptor>, ProviderError> {
-        let mut grouped: BTreeMap<LogicalSessionKey, Vec<SessionArtifact>> = BTreeMap::new();
+    /// Full inventory: descriptors (artifacts sorted by stable identity, so
+    /// manifests and future cache tokens are deterministic regardless of
+    /// filesystem read order) plus the authoritative artifact-to-path map.
+    /// Paths are preserved as `PathBuf` — locator strings are display forms
+    /// and cannot round-trip a non-UTF-8 `CODEX_HOME`.
+    #[allow(clippy::type_complexity)]
+    fn inventory(
+        &self,
+    ) -> Result<(Vec<SessionDescriptor>, BTreeMap<ArtifactId, PathBuf>), ProviderError> {
+        let mut grouped: BTreeMap<LogicalSessionKey, Vec<(SessionArtifact, PathBuf)>> =
+            BTreeMap::new();
         self.walk_tree(&self.codex_home.join("sessions"), false, &mut grouped)?;
         self.walk_tree(
             &self.codex_home.join("archived_sessions"),
             true,
             &mut grouped,
         )?;
-        Ok(grouped
+        let mut paths = BTreeMap::new();
+        let descriptors = grouped
             .into_iter()
-            .map(|(key, artifacts)| SessionDescriptor { key, artifacts })
-            .collect())
+            .map(|(key, mut pairs)| {
+                pairs.sort_by(|(a, _), (b, _)| a.snapshot.id.cmp(&b.snapshot.id));
+                let artifacts = pairs
+                    .into_iter()
+                    .map(|(artifact, path)| {
+                        paths.insert(artifact.snapshot.id.clone(), path);
+                        artifact
+                    })
+                    .collect();
+                SessionDescriptor { key, artifacts }
+            })
+            .collect();
+        Ok((descriptors, paths))
+    }
+
+    fn descriptors(&self) -> Result<Vec<SessionDescriptor>, ProviderError> {
+        Ok(self.inventory()?.0)
     }
 
     fn resolve(
@@ -209,15 +244,18 @@ impl CodexProvider {
         if key.provider != ProviderId::codex() || key.namespace != SessionNamespace::global() {
             return Err(ProviderError::NotFound(key.to_string()));
         }
-        let descriptor = self
-            .descriptors()?
+        let (descriptors, paths) = self.inventory()?;
+        let descriptor = descriptors
             .into_iter()
             .find(|d| d.key == *key)
             .ok_or_else(|| ProviderError::NotFound(key.to_string()))?;
         let preferred = descriptor
             .preferred_artifact()
             .ok_or_else(|| ProviderError::Other(format!("descriptor {key} has no artifacts")))?;
-        let path = PathBuf::from(&preferred.snapshot.id.locator);
+        let path = paths
+            .get(&preferred.snapshot.id)
+            .cloned()
+            .ok_or_else(|| ProviderError::NotFound(key.to_string()))?;
         Ok((descriptor, path))
     }
 
@@ -227,6 +265,14 @@ impl CodexProvider {
     fn open_records(&self, path: &Path) -> Result<Box<dyn BufRead>, ProviderError> {
         let file = File::open(path)?;
         if path.extension().and_then(|e| e.to_str()) == Some("zst") {
+            let compressed_len = std::fs::metadata(path)?.len();
+            if self.max_compressed > 0 && compressed_len > self.max_compressed {
+                return Err(ProviderError::Other(format!(
+                    "compressed input {} exceeds max_compressed ({compressed_len} > {} bytes)",
+                    path.display(),
+                    self.max_compressed
+                )));
+            }
             let mut decoder = zstd::stream::read::Decoder::new(file)
                 .map_err(|e| ProviderError::Other(format!("zstd init: {e}")))?;
             decoder
@@ -242,29 +288,36 @@ impl CodexProvider {
     }
 
     /// Sniff a rollout file's format family from its first non-blank record.
+    ///
+    /// Detection is by envelope SHAPE (string `timestamp`, string `type`, a
+    /// `payload` member), independent of the known type vocabulary — a
+    /// future envelope whose first record carries a new type must not be
+    /// misclassified as legacy. Explicit `Undetermined` policy: empty or
+    /// undecodable-first-record files proceed through envelope parsing,
+    /// where every record still lands as a preserved-Unknown or Unparseable
+    /// disposition — nothing is silently dropped either way.
     pub fn sniff_format(&self, path: &Path) -> Result<FormatFamily, ProviderError> {
         let mut reader = self.open_records(path)?;
-        let mut line = String::new();
+        let mut line = Vec::new();
         loop {
             line.clear();
-            let n = match reader.read_line(&mut line) {
+            let n = match reader.read_until(b'\n', &mut line) {
                 Ok(n) => n,
                 Err(_) => return Ok(FormatFamily::Undetermined),
             };
             if n == 0 {
                 return Ok(FormatFamily::Undetermined);
             }
-            if line.trim().is_empty() {
+            if line.iter().all(|b| b.is_ascii_whitespace()) {
                 continue;
             }
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&line) else {
                 return Ok(FormatFamily::Undetermined);
             };
-            let has_envelope_type = value
-                .get("type")
-                .and_then(|t| t.as_str())
-                .is_some_and(|t| ENVELOPE_TYPES.contains(&t));
-            return Ok(if has_envelope_type && value.get("payload").is_some() {
+            let envelope_shape = value.get("timestamp").is_some_and(|t| t.is_string())
+                && value.get("type").is_some_and(|t| t.is_string())
+                && value.get("payload").is_some();
+            return Ok(if envelope_shape {
                 FormatFamily::Envelope
             } else {
                 FormatFamily::Legacy
@@ -283,9 +336,16 @@ struct LimitedReader<R> {
 impl<R: Read> Read for LimitedReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.remaining == 0 {
-            return Err(std::io::Error::other(
-                "decompressed output exceeds the configured limit",
-            ));
+            // A stream whose decompressed size is EXACTLY the limit is
+            // valid: probe one byte for EOF before declaring the limit
+            // crossed.
+            let mut probe = [0u8; 1];
+            return match self.inner.read(&mut probe)? {
+                0 => Ok(0),
+                _ => Err(std::io::Error::other(
+                    "decompressed output exceeds the configured limit",
+                )),
+            };
         }
         let cap = usize::try_from(self.remaining.min(buf.len() as u64)).unwrap_or(usize::MAX);
         let n = self.inner.read(&mut buf[..cap])?;
@@ -324,24 +384,27 @@ impl SourceProvider for CodexProvider {
             provider_instance: self.codex_home.display().to_string(),
             locator: path.display().to_string(),
         };
-        let reader = self.open_records(&path)?;
+        let mut reader = self.open_records(&path)?;
         let mut entries = Vec::new();
         let mut entry_origins = BTreeMap::new();
         let mut record_dispositions = Vec::new();
         let mut diagnostics = IngestionDiagnostics::default();
 
-        for (ordinal, line) in reader.lines().enumerate() {
-            let ordinal = ordinal as u64;
+        // Byte-level records: content-level damage (invalid UTF-8, bad JSON)
+        // in one record must not lose later records — only unrecoverable
+        // decoder I/O errors stop the stream (a compressed stream cannot be
+        // resynchronized past a bad frame).
+        let mut buf: Vec<u8> = Vec::new();
+        let mut ordinal: u64 = 0;
+        loop {
             let record = RecordRef {
                 artifact: artifact_id.clone(),
                 ordinal,
             };
-            let line = match line {
-                Ok(l) => l,
+            buf.clear();
+            let n = match reader.read_until(b'\n', &mut buf) {
+                Ok(n) => n,
                 Err(e) => {
-                    // Read/decode error (invalid UTF-8, truncated frame,
-                    // limit crossing): record and stop — a compressed stream
-                    // cannot be resynchronized past a bad frame.
                     diagnostics.unparseable += 1;
                     record_dispositions.push(RecordDisposition {
                         record,
@@ -354,7 +417,11 @@ impl SourceProvider for CodexProvider {
                     break;
                 }
             };
-            if line.trim().is_empty() {
+            if n == 0 {
+                break;
+            }
+            ordinal += 1;
+            if buf.iter().all(|b| b.is_ascii_whitespace()) {
                 diagnostics.suppressed += 1;
                 record_dispositions.push(RecordDisposition {
                     record,
@@ -364,12 +431,12 @@ impl SourceProvider for CodexProvider {
                 });
                 continue;
             }
-            match serde_json::from_str::<serde_json::Value>(&line) {
+            match serde_json::from_slice::<serde_json::Value>(&buf) {
                 Ok(value) => {
                     // B1: envelope records are preserved, honestly unmodeled.
                     // Normalization (B3) flips these to Mapped with the same
                     // deterministic ids.
-                    let id = EntryId::deterministic(key, ordinal, 0);
+                    let id = EntryId::deterministic(key, record.ordinal, 0);
                     entries.push(IdentifiedEntry {
                         id: id.clone(),
                         entry: LogEntry::Unknown(value),
@@ -420,11 +487,13 @@ impl SourceProvider for CodexProvider {
                 Ok(r) => r,
                 Err(_) => continue,
             };
-            let mut line = String::new();
-            if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
+            let mut line: Vec<u8> = Vec::new();
+            if reader.read_until(b'\n', &mut line).is_err()
+                || line.iter().all(|b| b.is_ascii_whitespace())
+            {
                 continue;
             }
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&line) else {
                 continue;
             };
             let payload = &value["payload"];
@@ -461,9 +530,15 @@ impl SourceProvider for CodexProvider {
         // manifest with per-artifact byte lengths, then every artifact's
         // exact bytes in manifest order.
         let (descriptor, _) = self.resolve(key)?;
+        let (_, paths) = self.inventory()?;
+        let artifact_path = |id: &ArtifactId| -> Result<&PathBuf, ProviderError> {
+            paths
+                .get(id)
+                .ok_or_else(|| ProviderError::NotFound(format!("artifact {}", id.locator)))
+        };
         let mut lens = Vec::with_capacity(descriptor.artifacts.len());
         for a in &descriptor.artifacts {
-            lens.push(std::fs::metadata(&a.snapshot.id.locator)?.len());
+            lens.push(std::fs::metadata(artifact_path(&a.snapshot.id)?)?.len());
         }
         let manifest = serde_json::json!({
             "manifest": {
@@ -487,7 +562,7 @@ impl SourceProvider for CodexProvider {
             .map_err(|e| ProviderError::Other(format!("manifest serialization: {e}")))?;
         out.write_all(b"\n")?;
         for (a, expected) in descriptor.artifacts.iter().zip(&lens) {
-            let mut file = File::open(&a.snapshot.id.locator)?;
+            let mut file = File::open(artifact_path(&a.snapshot.id)?)?;
             let copied = std::io::copy(&mut file, out)?;
             if copied != *expected {
                 return Err(ProviderError::Other(format!(
@@ -504,20 +579,20 @@ impl SourceProvider for CodexProvider {
         artifact: &ArtifactId,
         out: &mut dyn Write,
     ) -> Result<(), ProviderError> {
-        // Resolve against discovered artifacts; stream the stored path only.
-        for descriptor in self.descriptors()? {
-            for a in &descriptor.artifacts {
-                if a.snapshot.id == *artifact {
-                    let mut file = File::open(&a.snapshot.id.locator)?;
-                    std::io::copy(&mut file, out)?;
-                    return Ok(());
-                }
+        // Resolve against discovered artifacts; stream the stored PathBuf —
+        // never a locator string (lossy on non-UTF-8 homes).
+        let (_, paths) = self.inventory()?;
+        match paths.get(artifact) {
+            Some(path) => {
+                let mut file = File::open(path)?;
+                std::io::copy(&mut file, out)?;
+                Ok(())
             }
+            None => Err(ProviderError::NotFound(format!(
+                "artifact {}",
+                artifact.locator
+            ))),
         }
-        Err(ProviderError::NotFound(format!(
-            "artifact {}",
-            artifact.locator
-        )))
     }
 
     fn write_raw_jsonl(
@@ -656,15 +731,36 @@ mod tests {
         };
         let mut totals = IngestionDiagnostics::default();
         let (mut parsed_ok, mut legacy, mut errors, mut violations) = (0u32, 0u32, 0u32, 0u32);
+        let mut count_mismatches = 0u32;
         for d in &sessions {
-            assert!(d.validate().is_empty(), "invalid descriptor {}", d.key);
+            assert!(d.validate().is_empty(), "invalid descriptor");
             match p.parse(&d.key) {
                 Ok(session) => {
                     parsed_ok += 1;
-                    let v = session.validate_provenance();
-                    if !v.is_empty() {
+                    // Aggregate-only: no session keys in output.
+                    if !session.validate_provenance().is_empty() {
                         violations += 1;
-                        eprintln!("provenance violations in {}: {}", d.key, v.len());
+                    }
+                    // Completeness: the parser must have reached every
+                    // physical record — compare against an independent count
+                    // of the preferred artifact's records.
+                    let (_, path) = p.resolve(&d.key).unwrap();
+                    let mut reader = p.open_records(&path).unwrap();
+                    let mut independent = 0usize;
+                    let mut buf = Vec::new();
+                    loop {
+                        buf.clear();
+                        match reader.read_until(b'\n', &mut buf) {
+                            Ok(0) => break,
+                            Ok(_) => independent += 1,
+                            Err(_) => {
+                                independent += 1;
+                                break;
+                            }
+                        }
+                    }
+                    if session.record_dispositions.len() != independent {
+                        count_mismatches += 1;
                     }
                     totals.mapped += session.diagnostics.mapped;
                     totals.suppressed += session.diagnostics.suppressed;
@@ -673,10 +769,7 @@ mod tests {
                     totals.unparseable += session.diagnostics.unparseable;
                 }
                 Err(ProviderError::Unsupported { .. }) => legacy += 1,
-                Err(e) => {
-                    errors += 1;
-                    eprintln!("parse error for {}: {e}", d.key);
-                }
+                Err(_) => errors += 1,
             }
         }
         let edges = p.lineage().map(|e| e.len()).unwrap_or(0);
@@ -688,6 +781,10 @@ mod tests {
         );
         assert_eq!(errors, 0, "no session may fail outside the legacy contract");
         assert_eq!(violations, 0, "provenance must validate corpus-wide");
+        assert_eq!(
+            count_mismatches, 0,
+            "every physical record must be reached and dispositioned"
+        );
     }
 
     #[test]
@@ -857,6 +954,188 @@ mod tests {
         let on_disk = std::fs::read(&art.locator).unwrap();
         assert_eq!(native, on_disk);
         assert!(native.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]), "zstd magic");
+    }
+
+    #[test]
+    fn decompressed_size_exactly_at_limit_is_valid() {
+        let content = session_a_content();
+        let tmp = tempfile::tempdir().unwrap();
+        let day = tmp.path().join("sessions/2026/07/16");
+        std::fs::create_dir_all(&day).unwrap();
+        let z = zstd::stream::encode_all(content.as_bytes(), 3).unwrap();
+        std::fs::write(
+            day.join(format!("rollout-2026-07-16T23-38-33-{THREAD_A}.jsonl.zst")),
+            z,
+        )
+        .unwrap();
+        // Exactly the limit: parses completely.
+        let p = CodexProvider::new(tmp.path()).with_max_decompressed(content.len() as u64);
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        assert_eq!(parsed.diagnostics.unknown, 4);
+        assert_eq!(parsed.diagnostics.unparseable, 0);
+        // One byte short: the limit crossing is recorded, later data is cut.
+        let p = CodexProvider::new(tmp.path()).with_max_decompressed(content.len() as u64 - 1);
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        assert!(parsed.diagnostics.unparseable >= 1);
+    }
+
+    #[test]
+    fn compressed_input_limit_is_enforced() {
+        let (_tmp, p) = fixture();
+        let p = p.with_max_compressed(4);
+        let err = p.parse(&key(THREAD_B)).unwrap_err();
+        assert!(err.to_string().contains("max_compressed"), "{err}");
+    }
+
+    #[test]
+    fn corrupt_zst_stream_is_recorded_not_fatal() {
+        let content = session_a_content();
+        let tmp = tempfile::tempdir().unwrap();
+        let day = tmp.path().join("sessions/2026/07/16");
+        std::fs::create_dir_all(&day).unwrap();
+        let mut z = zstd::stream::encode_all(content.as_bytes(), 3).unwrap();
+        // Corrupt a byte in the middle of the frame body.
+        let mid = z.len() / 2;
+        z[mid] ^= 0xFF;
+        std::fs::write(
+            day.join(format!("rollout-2026-07-16T23-38-33-{THREAD_A}.jsonl.zst")),
+            z,
+        )
+        .unwrap();
+        let p = CodexProvider::new(tmp.path());
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        assert!(
+            parsed.diagnostics.unparseable >= 1,
+            "decoder failure must surface as a disposition: {:?}",
+            parsed.diagnostics
+        );
+        assert!(parsed.validate_provenance().is_empty());
+    }
+
+    #[test]
+    fn invalid_utf8_record_does_not_lose_later_records() {
+        // valid -> invalid UTF-8 -> valid, in BOTH plain and compressed form.
+        let head = envelope_line("session_meta", serde_json::json!({"id": THREAD_A}));
+        let tail = envelope_line("event_msg", serde_json::json!({"type": "token_count"}));
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(head.as_bytes());
+        bytes.extend_from_slice(b"\n\xff\xfe broken \xff\n");
+        bytes.extend_from_slice(tail.as_bytes());
+        bytes.push(b'\n');
+
+        for compress in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let day = tmp.path().join("sessions/2026/07/16");
+            std::fs::create_dir_all(&day).unwrap();
+            let name = format!(
+                "rollout-2026-07-16T23-38-33-{THREAD_A}.jsonl{}",
+                if compress { ".zst" } else { "" }
+            );
+            if compress {
+                let z = zstd::stream::encode_all(&bytes[..], 3).unwrap();
+                std::fs::write(day.join(name), z).unwrap();
+            } else {
+                std::fs::write(day.join(name), &bytes).unwrap();
+            }
+            let p = CodexProvider::new(tmp.path());
+            let parsed = p.parse(&key(THREAD_A)).unwrap();
+            assert_eq!(
+                parsed.diagnostics.unknown, 2,
+                "the record AFTER the corrupt line must survive (compress={compress})"
+            );
+            assert_eq!(parsed.diagnostics.unparseable, 1);
+            assert!(parsed.validate_provenance().is_empty());
+        }
+    }
+
+    #[test]
+    fn sniffing_is_shape_based_not_vocabulary_based() {
+        // First record carries a FUTURE envelope type: still envelope-era.
+        let tmp = tempfile::tempdir().unwrap();
+        let day = tmp.path().join("sessions/2026/07/16");
+        std::fs::create_dir_all(&day).unwrap();
+        let path = day.join(format!("rollout-2026-07-16T23-38-33-{THREAD_A}.jsonl"));
+        std::fs::write(
+            &path,
+            envelope_line("hologram_state_v12", serde_json::json!({"future": true})) + "\n",
+        )
+        .unwrap();
+        let p = CodexProvider::new(tmp.path());
+        assert_eq!(p.sniff_format(&path).unwrap(), FormatFamily::Envelope);
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        assert_eq!(parsed.diagnostics.unknown, 1);
+    }
+
+    #[test]
+    fn artifacts_are_sorted_by_stable_identity() {
+        let (_tmp, p) = fixture();
+        for d in p.sessions().unwrap() {
+            let ids: Vec<_> = d.artifacts.iter().map(|a| &a.snapshot.id).collect();
+            let mut sorted = ids.clone();
+            sorted.sort();
+            assert_eq!(ids, sorted, "artifact order must not follow read_dir");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_never_followed() {
+        use std::os::unix::fs::symlink;
+        let (tmp, p) = fixture();
+        let day = tmp.path().join("sessions/2026/07/16");
+        // A directory symlink cycle and an external-file symlink.
+        symlink(tmp.path().join("sessions"), day.join("loop")).unwrap();
+        let outside = tmp.path().join("outside.jsonl");
+        std::fs::write(&outside, session_a_content()).unwrap();
+        symlink(
+            &outside,
+            day.join(format!("rollout-2026-07-16T01-01-01-{THREAD_FORK}.jsonl")),
+        )
+        .ok();
+        // Discovery completes (no cycle hang) and neither symlink target is
+        // discovered as a new artifact.
+        let before = p.sessions().unwrap();
+        let fork = before
+            .iter()
+            .find(|d| d.key.native_id == THREAD_FORK)
+            .unwrap();
+        assert_eq!(
+            fork.artifacts.len(),
+            1,
+            "external symlinked file must not become an artifact"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_codex_home_round_trips() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let weird = tmp.path().join(OsStr::from_bytes(b"codex-\xff-home"));
+        let day = weird.join("sessions/2026/07/16");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(
+            day.join(format!("rollout-2026-07-16T23-38-33-{THREAD_A}.jsonl")),
+            session_a_content(),
+        )
+        .unwrap();
+        let p = CodexProvider::new(&weird);
+        let sessions = p.sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        // Parse and native export work despite the lossy locator display —
+        // resolution goes through the preserved PathBuf, never the string.
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        assert_eq!(parsed.diagnostics.unknown, 4);
+        let art = sessions[0]
+            .preferred_artifact()
+            .unwrap()
+            .snapshot
+            .id
+            .clone();
+        let mut native = Vec::new();
+        p.write_native(&art, &mut native).unwrap();
+        assert_eq!(native, session_a_content().as_bytes());
     }
 
     #[test]
