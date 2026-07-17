@@ -597,6 +597,30 @@ count and emits aggregate-only output. Re-run on the real corpus: 224/224
 parsed, 0 errors, 0 violations, 0 count mismatches, 222,192 records,
 2 unparseable. 17 codex tests + 1 opt-in conformance.
 
+## Review round 13 (2026-07-17, same Codex agent — round-12 follow-up)
+
+Four corrections folded into the remaining-B1 unit: (1) locators are now an
+injective, reversible byte encoding (percent-escaped native path bytes) —
+distinct non-UTF-8 sibling paths whose display strings collide keep
+distinct ArtifactIds (Linux test), and lineage() obtains paths from the
+inventory map instead of reopening the lossy locator string; the non-UTF-8
+round-trip test now asserts the archive tier too (making the earlier doc
+claim true). (2) The walker accepts regular files only (a matching FIFO
+could block indefinitely — tested via mkfifo), and the symlink policy is
+now explicit: the tree ROOT may be a symlink (relocated storage,
+tested-supported), nothing within the tree is ever followed. (3) The
+real-corpus completeness check is race-resilient: a count mismatch with a
+changed artifact revision retries once and then counts as an aggregate
+"raced" result rather than a correctness failure. (4) Compression
+acceptance is fixture-proven: a committed external .zst (system zstd CLI
+v1.5.4, XXH64 checksum) decodes identically to its plain twin; corrupting
+its trailing checksum is rejected; a committed windowLog=28 frame (286 MiB
+declared, 9 KiB on disk) is refused by the window guard before any
+decompression. Fixture corpus at tests/fixtures/codex/ with manifest.json
+per the round-11 policy (synthetic envelope + spec-synthesized legacy +
+two external-CLI zst fixtures). Corpus re-run: 224/224, 0 errors,
+0 violations, 0 count mismatches, 0 raced. 24 codex tests + conformance.
+
 ## Open questions (to settle in-phase)
 
 1. Two-stream dedup policy details (B3, empirical — under the emission-

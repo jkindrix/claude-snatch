@@ -1,0 +1,8 @@
+{"timestamp":"2026-07-16T23:39:21.575Z","type":"session_meta","payload":{"id":"019f6d4b-d408-7260-98b2-bf385f3a9763","cwd":"/tmp/fixture-project","cli_version":"0.144.5","originator":"codex-tui","source":"cli"}}
+{"timestamp":"2026-07-16T23:39:22.000Z","type":"turn_context","payload":{"turn_id":"019f6d4b-aaaa-7000-8000-000000000001","cwd":"/tmp/fixture-project","model":"gpt-5.5","approval_policy":"never"}}
+{"timestamp":"2026-07-16T23:39:23.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"synthetic fixture prompt"}]}}
+{"timestamp":"2026-07-16T23:39:24.000Z","type":"response_item","payload":{"type":"function_call","id":"fc_1","name":"exec_command","arguments":"{\"cmd\":\"true\"}","call_id":"call_fixture_1"}}
+{"timestamp":"2026-07-16T23:39:25.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_fixture_1","output":"ok"}}
+{"timestamp":"2026-07-16T23:39:26.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15},"last_token_usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}},"nested_future_field":{"deeply":{"unknown":true}}}}
+{"timestamp":"2026-07-16T23:39:27.000Z","type":"event_msg","payload":{"type":"agent_message","message":"synthetic fixture reply"}}
+{"timestamp":"2026-07-16T23:39:27.500Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"synthetic fixture reply"}]}}

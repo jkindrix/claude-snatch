@@ -1,0 +1,33 @@
+{
+  "policy": "Synthetic, PII-free fixtures per docs/multi-provider-design.md round-11 fixture policy. No real transcript content.",
+  "fixtures": [
+    {
+      "file": "envelope_session.jsonl",
+      "format_family": "envelope",
+      "codex_version_family": ">=0.32.0 (rust-v0.144.5 vocabulary)",
+      "method": "synthetic (hand-authored to the rollout envelope shape)",
+      "expected": {"records": 8, "unknown_nested_fields": "event_msg token_count carries nested_future_field"}
+    },
+    {
+      "file": "envelope_session.jsonl.zst",
+      "format_family": "envelope",
+      "codex_version_family": ">=0.137 (.zst cold rollouts)",
+      "method": "external: system Zstandard CLI v1.5.4 (`zstd --check -19`), NOT this crate's bundled encoder",
+      "expected": {"decodes_identically_to": "envelope_session.jsonl", "content_checksum": "XXH64 present; corrupting the trailing checksum must be rejected"}
+    },
+    {
+      "file": "legacy_session.jsonl",
+      "format_family": "legacy",
+      "codex_version_family": "<=0.31.0 (pre-envelope; bare meta + ResponseItem + record_type state marker)",
+      "method": "spec-synthesized from codex-rs rust-v0.30.0 recorder source (no real capture)",
+      "expected": {"sniff": "Legacy", "parse": "Unsupported (normalization refused); native/raw export available"}
+    },
+    {
+      "file": "window28.bin.zst",
+      "format_family": "n/a (decompression-guard fixture; content is zeros, not JSONL)",
+      "codex_version_family": "n/a",
+      "method": "external: system Zstandard CLI v1.5.4 (`head -c 300000000 /dev/zero | zstd --long=28 -19`)",
+      "expected": {"frame_window_log": 28, "provider_behavior": "refused by window_log_max=27 before any decompression; 286 MiB never materializes"}
+    }
+  ]
+}

@@ -41,6 +41,33 @@ const DEFAULT_MAX_COMPRESSED: u64 = 1 << 30; // 1 GiB
 /// zstd's own default refusal threshold), not the 2 GiB format ceiling.
 const WINDOW_LOG_MAX: u32 = 27;
 
+/// Encode a path's native bytes as an injective, reversible locator string.
+///
+/// Distinct paths MUST produce distinct locators even when their lossy
+/// display strings collide (non-UTF-8 components render as replacement
+/// characters). Unix: printable ASCII passes through, `%` and every other
+/// byte percent-encode. Windows paths are Unicode; the same escaping is
+/// applied to their UTF-8 form.
+fn encode_locator(path: &Path) -> String {
+    #[cfg(unix)]
+    let bytes: Vec<u8> = {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str().as_bytes().to_vec()
+    };
+    #[cfg(not(unix))]
+    let bytes: Vec<u8> = path.to_string_lossy().into_owned().into_bytes();
+
+    let mut out = String::with_capacity(bytes.len());
+    for b in bytes {
+        match b {
+            b'%' => out.push_str("%25"),
+            0x20..=0x7e => out.push(b as char),
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
 /// OpenAI Codex CLI sessions behind the provider seam.
 pub struct CodexProvider {
     codex_home: PathBuf,
@@ -133,8 +160,8 @@ impl CodexProvider {
         SessionArtifact {
             snapshot: ArtifactSnapshot {
                 id: ArtifactId {
-                    provider_instance: self.codex_home.display().to_string(),
-                    locator: path.display().to_string(),
+                    provider_instance: encode_locator(&self.codex_home),
+                    locator: encode_locator(path),
                 },
                 revision: ArtifactRevision(format!("mtime={mtime};len={len}")),
             },
@@ -161,9 +188,11 @@ impl CodexProvider {
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir)? {
                 let entry = entry?;
-                // Deliberate no-follow symlink policy: symlinked directories
-                // (cycle/traversal risk) and files (external content) are
-                // skipped entirely.
+                // Symlink policy: the tree ROOT itself may be a symlink
+                // (relocated storage is legitimate); within the tree nothing
+                // is followed, and only regular files are accepted — a
+                // matching FIFO/socket/device node could block indefinitely
+                // on open.
                 let file_type = entry.file_type()?;
                 if file_type.is_symlink() {
                     continue;
@@ -171,6 +200,9 @@ impl CodexProvider {
                 let path = entry.path();
                 if file_type.is_dir() {
                     stack.push(path);
+                    continue;
+                }
+                if !file_type.is_file() {
                     continue;
                 }
                 let name = match path.file_name().and_then(|n| n.to_str()) {
@@ -478,12 +510,15 @@ impl SourceProvider for CodexProvider {
         // Fork/spawn edges come from each file's first session_meta payload
         // (forked_from_id / parent_thread_id). Dangling endpoints are kept.
         let mut edges = Vec::new();
-        for descriptor in self.descriptors()? {
+        let (descriptors, paths) = self.inventory()?;
+        for descriptor in descriptors {
             let Some(preferred) = descriptor.preferred_artifact() else {
                 continue;
             };
-            let path = PathBuf::from(&preferred.snapshot.id.locator);
-            let mut reader = match self.open_records(&path) {
+            let Some(path) = paths.get(&preferred.snapshot.id) else {
+                continue;
+            };
+            let mut reader = match self.open_records(path) {
                 Ok(r) => r,
                 Err(_) => continue,
             };
@@ -731,7 +766,7 @@ mod tests {
         };
         let mut totals = IngestionDiagnostics::default();
         let (mut parsed_ok, mut legacy, mut errors, mut violations) = (0u32, 0u32, 0u32, 0u32);
-        let mut count_mismatches = 0u32;
+        let (mut count_mismatches, mut raced) = (0u32, 0u32);
         for d in &sessions {
             assert!(d.validate().is_empty(), "invalid descriptor");
             match p.parse(&d.key) {
@@ -743,24 +778,47 @@ mod tests {
                     }
                     // Completeness: the parser must have reached every
                     // physical record — compare against an independent count
-                    // of the preferred artifact's records.
+                    // of the preferred artifact's records. Active sessions
+                    // can append between the parse and the count; a mismatch
+                    // with a CHANGED revision is a raced result, not a
+                    // correctness failure (retried once).
                     let (_, path) = p.resolve(&d.key).unwrap();
-                    let mut reader = p.open_records(&path).unwrap();
-                    let mut independent = 0usize;
-                    let mut buf = Vec::new();
-                    loop {
-                        buf.clear();
-                        match reader.read_until(b'\n', &mut buf) {
-                            Ok(0) => break,
-                            Ok(_) => independent += 1,
-                            Err(_) => {
-                                independent += 1;
-                                break;
+                    let count_records = || {
+                        let mut reader = p.open_records(&path).unwrap();
+                        let mut independent = 0usize;
+                        let mut buf = Vec::new();
+                        loop {
+                            buf.clear();
+                            match reader.read_until(b'\n', &mut buf) {
+                                Ok(0) => break,
+                                Ok(_) => independent += 1,
+                                Err(_) => {
+                                    independent += 1;
+                                    break;
+                                }
                             }
                         }
-                    }
-                    if session.record_dispositions.len() != independent {
-                        count_mismatches += 1;
+                        independent
+                    };
+                    let revision = || {
+                        std::fs::metadata(&path)
+                            .map(|m| (m.len(), m.modified().ok()))
+                            .ok()
+                    };
+                    let rev_a = revision();
+                    let mut mismatched = session.record_dispositions.len() != count_records();
+                    if mismatched {
+                        // Retry once against a fresh parse.
+                        if let Ok(fresh) = p.parse(&d.key) {
+                            mismatched = fresh.record_dispositions.len() != count_records();
+                        }
+                        if mismatched {
+                            if rev_a != revision() {
+                                raced += 1;
+                            } else {
+                                count_mismatches += 1;
+                            }
+                        }
                     }
                     totals.mapped += session.diagnostics.mapped;
                     totals.suppressed += session.diagnostics.suppressed;
@@ -776,7 +834,7 @@ mod tests {
         eprintln!(
             "codex corpus: {n} sessions, {parsed_ok} parsed, {legacy} legacy-refused, \
              {errors} errors, {violations} provenance violations, {edges} lineage edges, \
-             records: {totals:?}",
+             {raced} raced, records: {totals:?}",
             n = sessions.len()
         );
         assert_eq!(errors, 0, "no session may fail outside the legacy contract");
@@ -1139,8 +1197,182 @@ mod tests {
         let mut native = Vec::new();
         p.write_native(&art, &mut native).unwrap();
         assert_eq!(native, session_a_content().as_bytes());
+        let mut bundle = Vec::new();
+        p.write_archive(&key(THREAD_A), &mut bundle).unwrap();
+        let newline = bundle.iter().position(|b| *b == b'\n').unwrap();
+        assert_eq!(
+            &bundle[newline + 1..],
+            session_a_content().as_bytes(),
+            "archive works under a non-UTF-8 home"
+        );
     }
 
+    fn fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/codex")
+            .join(name)
+    }
+
+    fn home_with(name: &str, bytes: &[u8], compressed: bool) -> (tempfile::TempDir, CodexProvider) {
+        let tmp = tempfile::tempdir().unwrap();
+        let day = tmp.path().join("sessions/2026/07/16");
+        std::fs::create_dir_all(&day).unwrap();
+        let file = format!(
+            "rollout-2026-07-16T23-38-33-{name}.jsonl{}",
+            if compressed { ".zst" } else { "" }
+        );
+        std::fs::write(day.join(file), bytes).unwrap();
+        let p = CodexProvider::new(tmp.path());
+        (tmp, p)
+    }
+
+    #[test]
+    fn external_zst_fixture_decodes_identically_to_plain() {
+        // Interop: the .zst was produced by the SYSTEM zstd CLI, not this
+        // crate's bundled encoder (fixture manifest records provenance).
+        let plain_bytes = std::fs::read(fixture_path("envelope_session.jsonl")).unwrap();
+        let zst_bytes = std::fs::read(fixture_path("envelope_session.jsonl.zst")).unwrap();
+        let (_t1, plain) = home_with(THREAD_A, &plain_bytes, false);
+        let (_t2, compressed) = home_with(THREAD_A, &zst_bytes, true);
+        let a = plain.parse(&key(THREAD_A)).unwrap();
+        let b = compressed.parse(&key(THREAD_A)).unwrap();
+        assert_eq!(a.entries.len(), 8);
+        assert_eq!(a.entries.len(), b.entries.len());
+        for (x, y) in a.entries.iter().zip(b.entries.iter()) {
+            assert_eq!(x.id, y.id);
+            assert_eq!(
+                serde_json::to_value(&x.entry).unwrap(),
+                serde_json::to_value(&y.entry).unwrap()
+            );
+        }
+        assert_eq!(a.diagnostics, b.diagnostics);
+    }
+
+    #[test]
+    fn corrupted_content_checksum_is_rejected() {
+        // The external fixture carries an XXH64 content checksum; corrupting
+        // its trailing checksum bytes must surface as a rejected stream, not
+        // a silent success.
+        let mut zst = std::fs::read(fixture_path("envelope_session.jsonl.zst")).unwrap();
+        let last = zst.len() - 1;
+        zst[last] ^= 0xFF;
+        let (_t, p) = home_with(THREAD_A, &zst, true);
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        assert!(
+            parsed.diagnostics.unparseable >= 1,
+            "checksum failure must be recorded: {:?}",
+            parsed.diagnostics
+        );
+    }
+
+    #[test]
+    fn frame_window_above_guard_is_refused_cheaply() {
+        // window28.bin.zst declares windowLog=28 (286 MiB decompressed);
+        // the provider's window_log_max=27 must refuse it before any
+        // meaningful decompression happens.
+        let zst = std::fs::read(fixture_path("window28.bin.zst")).unwrap();
+        let (_t, p) = home_with(THREAD_A, &zst, true);
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        assert_eq!(parsed.entries.len(), 0, "nothing may decode");
+        assert!(parsed.diagnostics.unparseable >= 1);
+    }
+
+    #[test]
+    fn legacy_fixture_sniffs_and_refuses_per_contract() {
+        let bytes = std::fs::read(fixture_path("legacy_session.jsonl")).unwrap();
+        let (_t, p) = home_with(THREAD_LEGACY, &bytes, false);
+        let (_, path) = p.resolve(&key(THREAD_LEGACY)).unwrap();
+        assert_eq!(p.sniff_format(&path).unwrap(), FormatFamily::Legacy);
+        assert!(matches!(
+            p.parse(&key(THREAD_LEGACY)),
+            Err(ProviderError::Unsupported { .. })
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn colliding_non_utf8_sibling_paths_stay_distinct() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("sessions/2026/07");
+        let d1 = base.join(OsStr::from_bytes(b"day-\xff"));
+        let d2 = base.join(OsStr::from_bytes(b"day-\xfe"));
+        std::fs::create_dir_all(&d1).unwrap();
+        std::fs::create_dir_all(&d2).unwrap();
+        // Their display strings collide (replacement characters)...
+        assert_eq!(d1.display().to_string(), d2.display().to_string());
+        std::fs::write(
+            d1.join(format!("rollout-2026-07-16T01-00-00-{THREAD_A}.jsonl")),
+            session_a_content(),
+        )
+        .unwrap();
+        std::fs::write(
+            d2.join(format!("rollout-2026-07-16T02-00-00-{THREAD_B}.jsonl")),
+            session_a_content(),
+        )
+        .unwrap();
+        let p = CodexProvider::new(tmp.path());
+        let sessions = p.sessions().unwrap();
+        assert_eq!(sessions.len(), 2, "both non-UTF-8 siblings discovered");
+        // ...but their encoded locators must NOT.
+        let locators: std::collections::BTreeSet<_> = sessions
+            .iter()
+            .map(|d| d.preferred_artifact().unwrap().snapshot.id.locator.clone())
+            .collect();
+        assert_eq!(locators.len(), 2, "locator encoding must stay injective");
+        // Parse, lineage, and archive all work through the preserved paths.
+        for d in &sessions {
+            assert!(p.parse(&d.key).unwrap().validate_provenance().is_empty());
+        }
+        p.lineage().unwrap();
+        let mut bundle = Vec::new();
+        p.write_archive(&key(THREAD_A), &mut bundle).unwrap();
+        assert!(!bundle.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn special_files_are_skipped() {
+        let (tmp, p) = fixture();
+        let day = tmp.path().join("sessions/2026/07/16");
+        let fifo = day.join(format!("rollout-2026-07-16T09-09-09-{THREAD_FORK}.jsonl"));
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo available on linux");
+        assert!(status.success());
+        // Discovery completes without blocking, and the FIFO is not an
+        // artifact (the fork session keeps exactly its one regular file).
+        let sessions = p.sessions().unwrap();
+        let fork = sessions
+            .iter()
+            .find(|d| d.key.native_id == THREAD_FORK)
+            .unwrap();
+        assert_eq!(fork.artifacts.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_tree_root_is_supported() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real-store/2026/07/16");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(
+            real.join(format!("rollout-2026-07-16T23-38-33-{THREAD_A}.jsonl")),
+            session_a_content(),
+        )
+        .unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        symlink(tmp.path().join("real-store"), home.join("sessions")).unwrap();
+        let p = CodexProvider::new(&home);
+        assert_eq!(p.sessions().unwrap().len(), 1, "root symlink is followed");
+    }
+
+    // Extend the non-UTF-8 round-trip with the archive tier (the design doc
+    // claims it; make it true).
     #[test]
     fn archive_frames_all_artifacts() {
         let (_tmp, p) = fixture();
