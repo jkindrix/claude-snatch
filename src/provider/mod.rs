@@ -807,8 +807,10 @@ pub trait SourceProvider {
     fn sessions(&self) -> Result<Vec<SessionDescriptor>, ProviderError>;
 
     /// Typed session-lineage edges across this provider's corpus
-    /// (continuations, forks, spawns). Endpoints are logical keys returned
-    /// by [`SourceProvider::sessions`].
+    /// (continuations, forks, spawns). Endpoints are normally keys returned
+    /// by [`SourceProvider::sessions`], but dangling endpoints are allowed —
+    /// real corpora reference deleted or unavailable parents, and the edge
+    /// is still information worth keeping.
     fn lineage(&self) -> Result<Vec<LineageEdge>, ProviderError>;
 
     /// Parse one session into identified entries with full provenance and
@@ -837,6 +839,8 @@ pub trait SourceProvider {
         out: &mut dyn Write,
     ) -> Result<(), ProviderError>;
 }
+
+pub mod claude_code;
 
 #[cfg(test)]
 mod fake;

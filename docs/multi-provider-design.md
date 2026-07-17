@@ -300,6 +300,10 @@ directory walks.
   JSONL would not test the seam honestly). Provider-selection UX is
   *designed* here (flags, qualified ids). Acceptance: full suite + snapshot
   exports byte-identical; Claude CLI/MCP/library behavior unchanged.
+  Round-6 guardrails for this phase: the fake's multi-tool entry becomes a
+  real assistant entry with two ToolUse blocks, and semantic call ids are
+  validated against actual calls; lineage tolerates dangling endpoints
+  (real corpora reference deleted/unavailable parents — keep the edge).
 - **Phase B1 — Codex inventory & decoding.** Discovery of plain, archived,
   compressed (`.zst`, with decompressed-size limits), active/truncated, and
   legacy (pre-envelope) files; envelope parser; native diagnostics. Legacy
@@ -308,12 +312,16 @@ directory walks.
   documented fixtures justify a parser. Defer `state_5.sqlite` acceleration
   until profiling proves need.
 - **Phase B2 — provider UX.** `--provider claude-code|codex|all` (repeatable),
-  qualified ids (`codex:<uuid>`; unqualified prefixes allowed when unique),
+  qualified ids (`codex:<uuid>`; unqualified prefixes allowed when unique;
+  round-6 guardrail: FromStr/decoding + round-trip tests for the escaped
+  qualified-id encoding BEFORE ids become CLI/MCP inputs),
   `snatch providers` (roots, session counts, format families, diagnostics),
   MCP requests gain optional `provider`, responses always carry provider +
   qualified session id. Default remains Claude-only until Phase D.
   Milestone: list/info + native/raw export work on real Codex sessions.
-- **Phase B3 — normalization.** Deterministic entry ids, two-stream
+- **Phase B3 — normalization.** Round-6 guardrail: a turn_id carrier must
+  exist before normalization (the design promises its preservation).
+  Deterministic entry ids, two-stream
   reconciliation under invariant #3's emission-identity rule, typed fork/spawn
   lineage, steered-prompt and `world_state`/`ghost_snapshot` semantics settled
   empirically. Milestone: messages/timeline/normalized exports.
@@ -436,6 +444,15 @@ carrier: LineageEdge { from, to, kind } + SourceProvider::lineage(). Cleanup:
 the validator rejects duplicate entry ids within a producing outcome and
 duplicate record refs within an origin list. CompactionKind window-metadata
 carrier explicitly deferred to B3/C. 18 contract tests (was 15).
+
+## Review round 6 (2026-07-17, same Codex agent — A.0 sign-off)
+
+No remaining architectural or type blockers; Phase A greenlit with
+byte-identical Claude behavior as the gate. Four non-blocking guardrails
+folded into the phase checklists above: real multi-ToolUse fake entry +
+call-id validation (A), dangling lineage endpoints allowed (A), qualified-id
+FromStr/round-trip before CLI/MCP input use (B2), turn_id carrier before
+normalization (B3).
 
 ## Open questions (to settle in-phase)
 
