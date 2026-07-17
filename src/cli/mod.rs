@@ -506,6 +506,12 @@ pub struct ListArgs {
     #[arg(default_value = "sessions")]
     pub target: ListTarget,
 
+    /// Route through a session-log provider (repeatable; "all" = every
+    /// installed provider). Provider-neutral listing: qualified ids +
+    /// artifacts. Without this flag, the classic Claude-only listing.
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
+
     /// Filter by project path (substring match).
     #[arg(short = 'p', long)]
     pub project: Option<String>,
@@ -690,9 +696,16 @@ pub struct GrabArgs {
 /// Arguments for the export command.
 #[derive(Debug, Parser)]
 pub struct ExportArgs {
-    /// Session ID to export (supports short prefixes like "780893e4").
+    /// Session ID to export (supports short prefixes like "780893e4" and
+    /// provider-qualified ids like "codex:0198c5c1").
     /// Optional with --all flag.
     pub session: Option<String>,
+
+    /// Route through a session-log provider (repeatable; "all" = every
+    /// installed provider). Provider exports support raw-jsonl, native,
+    /// and archive formats.
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
 
     /// Output file path (stdout if not specified).
     #[arg(short = 'O', long = "out")]
@@ -905,6 +918,12 @@ pub enum ExportFormatArg {
     Html,
     /// SQLite database.
     Sqlite,
+    /// native: exact bytes of the session's preferred source artifact,
+    /// streamed through the provider seam (any provider).
+    Native,
+    /// archive: lossless provider bundle (manifest + framed artifacts)
+    /// covering every artifact of the session (any provider).
+    Archive,
 }
 
 /// Redaction level for sensitive data.
@@ -940,6 +959,9 @@ impl From<ExportFormatArg> for ExportFormat {
             ExportFormatArg::Csv => ExportFormat::Csv,
             ExportFormatArg::Html => ExportFormat::Html,
             ExportFormatArg::Sqlite => ExportFormat::Sqlite,
+            // Native/Archive are provider-routed in the export command and
+            // never reach the exporter framework; harmless fallback.
+            ExportFormatArg::Native | ExportFormatArg::Archive => ExportFormat::Text,
         }
     }
 }
@@ -1196,8 +1218,14 @@ pub struct StatsArgs {
 #[derive(Debug, Parser)]
 pub struct InfoArgs {
     /// Session ID or project path to show info for.
-    /// Session IDs support short prefixes like "780893e4".
+    /// Session IDs support short prefixes like "780893e4" and
+    /// provider-qualified ids like "codex:0198c5c1".
     pub target: Option<String>,
+
+    /// Route through a session-log provider (repeatable; "all" = every
+    /// installed provider). Provider-neutral session info.
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
 
     /// Suppress the chain-totals block for a resumed session. The existing
     /// single-file fields are unaffected; this only hides the aggregate block.

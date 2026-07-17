@@ -180,6 +180,26 @@ pub fn run(cli: &Cli, args: &ExportArgs) -> Result<()> {
         return handle_list_templates(cli);
     }
 
+    // Provider-routed export: engaged by --provider, a provider-tier format
+    // (native/archive), or a session reference qualified with a registered
+    // provider's name. The flagless Claude path below stays byte-identical.
+    let provider_tier = matches!(
+        args.format,
+        ExportFormatArg::Native | ExportFormatArg::Archive
+    );
+    if !args.provider.is_empty()
+        || provider_tier
+        || args.session.as_deref().is_some_and(|s| {
+            s.contains(':')
+                && crate::provider::registry::ProviderRegistry::with_claude_root(
+                    cli.claude_dir.as_deref(),
+                )
+                .looks_qualified(s)
+        })
+    {
+        return export_via_provider(cli, args);
+    }
+
     // Validate raw-jsonl compatibility before any external checks (e.g. the
     // `gh` availability probe for --gist), so an incompatible-flag combination
     // reports the clear raw-jsonl error rather than an unrelated tooling error.
@@ -645,6 +665,13 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
         let mut output = std::io::BufWriter::new(atomic.writer());
 
         match args.format {
+            ExportFormatArg::Native | ExportFormatArg::Archive => {
+                return Err(SnatchError::ConfigError {
+                    message: "native/archive are provider-routed formats; handled before the \
+                              exporter framework"
+                        .to_string(),
+                });
+            }
             ExportFormatArg::Markdown | ExportFormatArg::Md => {
                 let exporter = MarkdownExporter::new();
                 exporter.export_conversation(&conversation, &mut output, &options)?;
@@ -698,6 +725,13 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
         let mut output: Box<dyn Write> = Box::new(io::stdout());
 
         match args.format {
+            ExportFormatArg::Native | ExportFormatArg::Archive => {
+                return Err(SnatchError::ConfigError {
+                    message: "native/archive are provider-routed formats; handled before the \
+                              exporter framework"
+                        .to_string(),
+                });
+            }
             ExportFormatArg::Markdown | ExportFormatArg::Md => {
                 let exporter = MarkdownExporter::new();
                 exporter.export_conversation(&conversation, &mut output, &options)?;
@@ -1705,6 +1739,13 @@ fn export_session(
         let mut writer = std::io::BufWriter::new(atomic.writer());
 
         match args.format {
+            ExportFormatArg::Native | ExportFormatArg::Archive => {
+                return Err(SnatchError::ConfigError {
+                    message: "native/archive are provider-routed formats; handled before the \
+                              exporter framework"
+                        .to_string(),
+                });
+            }
             ExportFormatArg::Markdown | ExportFormatArg::Md => {
                 let exporter = MarkdownExporter::new();
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
@@ -1760,6 +1801,13 @@ fn export_session(
         let mut writer: Box<dyn Write> = Box::new(io::stdout().lock());
 
         match args.format {
+            ExportFormatArg::Native | ExportFormatArg::Archive => {
+                return Err(SnatchError::ConfigError {
+                    message: "native/archive are provider-routed formats; handled before the \
+                              exporter framework"
+                        .to_string(),
+                });
+            }
             ExportFormatArg::Markdown | ExportFormatArg::Md => {
                 let exporter = MarkdownExporter::new();
                 exporter.export_conversation(&conversation, &mut writer, &options)?;
@@ -1817,6 +1865,10 @@ fn get_format_extension(format: ExportFormatArg) -> &'static str {
         ExportFormatArg::Csv => "csv",
         ExportFormatArg::Html => "html",
         ExportFormatArg::Sqlite => "db",
+        // Provider-routed tiers: native keeps the source artifact's own
+        // format (unknowable here), archive is the framed bundle.
+        ExportFormatArg::Native => "bin",
+        ExportFormatArg::Archive => "archive",
     }
 }
 
@@ -2036,6 +2088,9 @@ fn export_to_string(
         }
         ExportFormatArg::RawJsonl => {
             unreachable!("raw-jsonl is rejected with --template in run()")
+        }
+        ExportFormatArg::Native | ExportFormatArg::Archive => {
+            unreachable!("native/archive are provider-routed in run()")
         }
         ExportFormatArg::Csv => {
             let exporter = CsvExporter::new();
@@ -2370,6 +2425,112 @@ fn render_entry(entry: &LogEntry, template: &ExportTemplate) -> String {
         }
         _ => String::new(),
     }
+}
+
+/// Provider-routed export: raw-jsonl / native / archive fidelity tiers
+/// streamed through the SourceProvider seam for any provider. Normalized
+/// formats for non-Claude sessions arrive with Phase B3.
+fn export_via_provider(cli: &Cli, args: &ExportArgs) -> Result<()> {
+    use crate::provider::registry::ProviderRegistry;
+
+    if args.all {
+        return Err(SnatchError::ConfigError {
+            message: "--all is not supported with provider-routed exports; export one session"
+                .to_string(),
+        });
+    }
+    // Content-shaping and delivery flags have no meaning for fidelity-tier
+    // streams; refuse rather than silently ignore.
+    for (flag, set) in [
+        ("--since", args.since.is_some()),
+        ("--until", args.until.is_some()),
+        ("--only", !args.only.is_empty()),
+        ("--no-thinking", args.no_thinking),
+        ("--no-tool-use", args.no_tool_use),
+        ("--no-tool-results", args.no_tool_results),
+        ("--combine-agents", args.combine_agents),
+        ("--main-thread", args.main_thread),
+        ("--template", args.template.is_some()),
+        ("--redact", args.redact.is_some()),
+        ("--gist", args.gist),
+        ("--clipboard", args.clipboard),
+    ] {
+        if set {
+            return Err(SnatchError::InvalidArgument {
+                name: flag.to_string(),
+                reason: "not supported with provider-routed exports (fidelity tiers stream \
+                         source data unmodified)"
+                    .to_string(),
+            });
+        }
+    }
+
+    let reference = args
+        .session
+        .as_ref()
+        .ok_or_else(|| SnatchError::ConfigError {
+            message: "provider-routed export needs a session reference".to_string(),
+        })?;
+    let registry = ProviderRegistry::with_claude_root(cli.claude_dir.as_deref());
+    let resolution = registry.resolve_with_default_policy(&args.provider, reference)?;
+    let provider = resolution.provider;
+    let key = &resolution.key;
+
+    let mut sink: Box<dyn std::io::Write> = match &args.output_file {
+        Some(path) => {
+            if path.exists() && !args.overwrite {
+                return Err(SnatchError::ConfigError {
+                    message: format!(
+                        "output file {} exists (use --overwrite to replace)",
+                        path.display()
+                    ),
+                });
+            }
+            Box::new(std::io::BufWriter::new(std::fs::File::create(path)?))
+        }
+        None => Box::new(std::io::stdout().lock()),
+    };
+
+    match args.format {
+        ExportFormatArg::RawJsonl => provider.write_raw_jsonl(key, &mut sink)?,
+        ExportFormatArg::Archive => provider.write_archive(key, &mut sink)?,
+        ExportFormatArg::Native => {
+            let descriptor = provider
+                .sessions()?
+                .into_iter()
+                .find(|d| d.key == *key)
+                .ok_or_else(|| SnatchError::SessionNotFound {
+                    session_id: key.to_string(),
+                })?;
+            let artifact = descriptor
+                .preferred_artifact()
+                .ok_or_else(|| SnatchError::ConfigError {
+                    message: format!("session {key} has no artifacts"),
+                })?
+                .snapshot
+                .id
+                .clone();
+            provider.write_native(&artifact, &mut sink)?;
+        }
+        _ => {
+            return Err(SnatchError::ConfigError {
+                message: format!(
+                    "format '{:?}' is not available through provider routing yet \
+                     (normalized formats for non-Claude sessions arrive with Phase B3); \
+                     available: raw-jsonl, native, archive",
+                    args.format
+                ),
+            });
+        }
+    }
+    sink.flush()?;
+
+    if !cli.quiet {
+        if let Some(path) = &args.output_file {
+            eprintln!("Exported {key} to {}", path.display());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

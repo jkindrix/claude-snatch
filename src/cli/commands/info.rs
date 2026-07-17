@@ -15,6 +15,24 @@ use super::get_claude_dir;
 
 /// Run the info command.
 pub fn run(cli: &Cli, args: &InfoArgs) -> Result<()> {
+    // Provider routing: an explicit --provider flag, or a target qualified
+    // with a registered provider's name ("codex:...", "claude-code:...").
+    // Targets that merely contain ':' (Windows paths, project filters) do
+    // not match a registered provider and stay on the classic path.
+    if let Some(target) = &args.target {
+        let registry = crate::provider::registry::ProviderRegistry::with_claude_root(
+            cli.claude_dir.as_deref(),
+        );
+        if !args.provider.is_empty() || registry.looks_qualified(target) {
+            return show_provider_session_info(cli, args, &registry, target);
+        }
+    } else if !args.provider.is_empty() {
+        return Err(SnatchError::InvalidArgument {
+            name: "--provider".to_string(),
+            reason: "requires a session reference target".to_string(),
+        });
+    }
+
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
 
     if let Some(target) = &args.target {
@@ -1125,6 +1143,138 @@ struct DirectoryInfoOutput {
     total_size_human: String,
     has_file_history: bool,
     backup_file_count: usize,
+}
+
+/// Provider-neutral session info: identity, artifacts, capabilities, and
+/// parsed entry counts through the SourceProvider seam. Pre-normalization
+/// (B2) this shows structure and honest type counts, not conversation
+/// content — that arrives with Phase B3.
+fn show_provider_session_info(
+    cli: &Cli,
+    args: &InfoArgs,
+    registry: &crate::provider::registry::ProviderRegistry,
+    target: &str,
+) -> Result<()> {
+    use crate::provider::registry::cached_session_entries;
+    use crate::provider::ArtifactForm;
+
+    let resolution = registry.resolve_with_default_policy(&args.provider, target)?;
+    let provider = resolution.provider;
+    let key = &resolution.key;
+
+    let descriptor = provider
+        .sessions()?
+        .into_iter()
+        .find(|d| d.key == *key)
+        .ok_or_else(|| SnatchError::SessionNotFound {
+            session_id: key.to_string(),
+        })?;
+
+    let entries = cached_session_entries(crate::cache::global_cache(), provider, key)?;
+    let mut type_counts: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
+    for entry in entries.iter() {
+        *type_counts.entry(entry_type_name(entry)).or_default() += 1;
+    }
+
+    let capabilities = provider.capabilities();
+    let report = serde_json::json!({
+        "qualified_id": key.to_string(),
+        "provider": key.provider.to_string(),
+        "namespace": key.namespace.0,
+        "native_id": key.native_id,
+        "artifacts": descriptor
+            .artifacts
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "locator": a.snapshot.id.locator,
+                    "form": match &a.form {
+                        ArtifactForm::PlainFile => "plain",
+                        ArtifactForm::CompressedFile => "compressed",
+                        ArtifactForm::Database => "database",
+                        ArtifactForm::Other(o) => o.as_str(),
+                    },
+                    "archived": a.archived,
+                })
+            })
+            .collect::<Vec<_>>(),
+        "entries": entries.len(),
+        "entry_types": type_counts,
+        "capabilities": {
+            "native_export": capabilities.native_export,
+            "raw_jsonl": capabilities.raw_jsonl,
+        },
+    });
+
+    if cli.effective_output() == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("Session: {}", report["qualified_id"].as_str().unwrap());
+    println!("Provider: {}", report["provider"].as_str().unwrap());
+    println!("Namespace: {}", report["namespace"].as_str().unwrap());
+    println!("Entries: {}", report["entries"]);
+    let types = report["entry_types"]
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| format!("{k} ×{v}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    if !types.is_empty() {
+        println!("Entry types: {types}");
+    }
+    println!("Artifacts:");
+    for a in report["artifacts"].as_array().unwrap() {
+        println!(
+            "  {} ({}{})",
+            a["locator"].as_str().unwrap(),
+            a["form"].as_str().unwrap(),
+            if a["archived"] == true {
+                ", archived"
+            } else {
+                ""
+            },
+        );
+    }
+    println!(
+        "Export tiers: archive, normalized{}{}",
+        if capabilities.native_export {
+            ", native"
+        } else {
+            ""
+        },
+        if capabilities.raw_jsonl {
+            ", raw-jsonl"
+        } else {
+            ""
+        },
+    );
+    Ok(())
+}
+
+/// Human-readable variant name for provider-neutral entry-type counts.
+fn entry_type_name(entry: &LogEntry) -> &'static str {
+    match entry {
+        LogEntry::Assistant(_) => "assistant",
+        LogEntry::User(_) => "user",
+        LogEntry::System(_) => "system",
+        LogEntry::Summary(_) => "summary",
+        LogEntry::FileHistorySnapshot(_) => "file-history-snapshot",
+        LogEntry::QueueOperation(_) => "queue-operation",
+        LogEntry::TurnEnd(_) => "turn-end",
+        LogEntry::Progress(_) => "progress",
+        LogEntry::Attachment(_) => "attachment",
+        LogEntry::LastPrompt(_) => "last-prompt",
+        LogEntry::Mode(_) => "mode",
+        LogEntry::PermissionMode(_) => "permission-mode",
+        LogEntry::AiTitle(_) => "ai-title",
+        LogEntry::Unknown(_) => "unknown",
+    }
 }
 
 #[cfg(test)]

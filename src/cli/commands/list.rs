@@ -16,6 +16,10 @@ use super::{get_claude_dir, parse_size};
 
 /// Run the list command.
 pub fn run(cli: &Cli, args: &ListArgs) -> Result<()> {
+    if !args.provider.is_empty() {
+        return list_provider_sessions(cli, args);
+    }
+
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
 
     // Create a writer that optionally uses a pager
@@ -1305,4 +1309,108 @@ impl LogicalSessionInfo {
             bookmarked: meta.map(|m| m.bookmarked).unwrap_or(false),
         }
     }
+}
+
+/// Provider-neutral session listing (`list sessions --provider ...`):
+/// qualified ids + artifact summaries through the SourceProvider seam.
+/// Pre-normalization (B2) this intentionally shows identity and artifacts,
+/// not titles/timestamps — those arrive with Phase B3.
+fn list_provider_sessions(cli: &Cli, args: &ListArgs) -> Result<()> {
+    use crate::provider::registry::{ProviderRegistry, ProviderSelection};
+    use crate::provider::ArtifactForm;
+
+    // Claude-specific filters have no provider-neutral meaning yet; refuse
+    // rather than silently ignore.
+    for (flag, set) in [
+        ("--project", args.project.is_some()),
+        ("--subagents", args.subagents),
+        ("--subagents-only", args.subagents_only),
+        ("--active", args.active),
+        ("--compacted", args.compacted),
+    ] {
+        if set {
+            return Err(crate::error::SnatchError::InvalidArgument {
+                name: flag.to_string(),
+                reason: "not supported with --provider (provider-neutral listing is \
+                         identity + artifacts until normalization lands)"
+                    .to_string(),
+            });
+        }
+    }
+
+    let selection = ProviderSelection::from_flags(&args.provider).map_err(|reason| {
+        crate::error::SnatchError::InvalidArgument {
+            name: "--provider".to_string(),
+            reason,
+        }
+    })?;
+    let registry = ProviderRegistry::with_claude_root(cli.claude_dir.as_deref());
+    let selected = registry.select(&selection)?;
+
+    let mut rows = Vec::new();
+    for provider in &selected.providers {
+        let mut descriptors = provider.sessions()?;
+        // Deterministic cross-provider ordering: providers arrive in id
+        // order; sessions sort by qualified key within each provider.
+        descriptors.sort_by(|a, b| a.key.cmp(&b.key));
+        for d in descriptors {
+            let artifacts: Vec<serde_json::Value> = d
+                .artifacts
+                .iter()
+                .map(|a| {
+                    serde_json::json!({
+                        "locator": a.snapshot.id.locator,
+                        "form": match &a.form {
+                            ArtifactForm::PlainFile => "plain",
+                            ArtifactForm::CompressedFile => "compressed",
+                            ArtifactForm::Database => "database",
+                            ArtifactForm::Other(o) => o,
+                        },
+                        "archived": a.archived,
+                    })
+                })
+                .collect();
+            rows.push(serde_json::json!({
+                "provider": d.key.provider.to_string(),
+                "qualified_id": d.key.to_string(),
+                "native_id": d.key.native_id,
+                "artifacts": artifacts,
+            }));
+        }
+    }
+    let total = rows.len();
+    if args.limit > 0 {
+        rows.truncate(args.limit);
+    }
+
+    if cli.effective_output() == crate::cli::OutputFormat::Json {
+        let out = serde_json::json!({
+            "sessions": rows,
+            "total": total,
+            "skipped_providers": selected
+                .skipped
+                .iter()
+                .map(|(id, reason)| serde_json::json!({"provider": id.to_string(), "reason": reason}))
+                .collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    for row in &rows {
+        let arts = row["artifacts"].as_array().unwrap();
+        let archived = arts.iter().filter(|a| a["archived"] == true).count();
+        let mut summary = format!("{} artifact(s)", arts.len());
+        if archived > 0 {
+            summary.push_str(&format!(", {archived} archived"));
+        }
+        println!("{}  [{}]", row["qualified_id"].as_str().unwrap(), summary);
+    }
+    if rows.len() < total {
+        println!("... and {} more (raise -n/--limit)", total - rows.len());
+    }
+    for (id, reason) in &selected.skipped {
+        eprintln!("warning: provider '{id}' skipped: {reason}");
+    }
+    Ok(())
 }

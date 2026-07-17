@@ -353,6 +353,42 @@ impl ProviderRegistry {
     }
 }
 
+impl ProviderRegistry {
+    /// Whether a CLI/MCP reference is a qualified id addressed to a
+    /// REGISTERED provider (its first escaped segment names one). Used to
+    /// separate qualified ids from legacy references that legitimately
+    /// contain `:` (Windows paths, project filters) without ever
+    /// misrouting `provider:...` to the legacy Claude path.
+    pub fn looks_qualified(&self, reference: &str) -> bool {
+        reference
+            .split(':')
+            .next()
+            .is_some_and(|first| self.entry(&ProviderId(first.to_string())).is_some())
+    }
+
+    /// Resolve with the B2 default policy: with no `--provider` flags an
+    /// UNQUALIFIED reference stays Claude-only (the phase-plan default until
+    /// Phase D), while a QUALIFIED id is itself an explicit provider request
+    /// and resolves against exactly the provider it names. With flags, the
+    /// full selection matrix applies. No path ever falls back to a provider
+    /// the user did not name.
+    pub fn resolve_with_default_policy(
+        &self,
+        provider_flags: &[String],
+        reference: &str,
+    ) -> Result<Resolution<'_>, ProviderError> {
+        let selection = if !provider_flags.is_empty() {
+            ProviderSelection::from_flags(provider_flags).map_err(ProviderError::Other)?
+        } else if reference.contains(':') {
+            let key: LogicalSessionKey = reference.parse().map_err(ProviderError::Other)?;
+            ProviderSelection::Explicit(vec![key.provider])
+        } else {
+            ProviderSelection::Explicit(vec![ProviderId::claude_code()])
+        };
+        self.resolve_session(&selection, reference)
+    }
+}
+
 /// Parse a provider session with caching.
 ///
 /// The first production consumer of [`SourceProvider::parse_cache_token`]

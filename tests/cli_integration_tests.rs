@@ -1467,3 +1467,189 @@ fn test_providers_missing_codex_home_is_visible_not_dropped() {
         "diagnostic should say the home was not found: {codex}"
     );
 }
+
+// =============================================================================
+// provider-routed list / info / export (B2)
+// =============================================================================
+
+#[test]
+fn test_provider_flag_unknown_provider_is_refused_with_known_set() {
+    let tmp = setup_fixture_dir();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["list", "sessions", "--provider", "gemini"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("gemini"))
+        .stderr(predicate::str::contains("claude-code"));
+}
+
+#[test]
+fn test_provider_all_mixed_with_explicit_is_refused() {
+    let tmp = setup_fixture_dir();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "list",
+            "sessions",
+            "--provider",
+            "all",
+            "--provider",
+            "claude-code",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be combined"));
+}
+
+#[cfg(feature = "codex")]
+mod codex_provider_cli {
+    use super::*;
+
+    const CODEX_THREAD: &str = "0198aaaa-bbbb-7ccc-8ddd-eeeeffff0001";
+
+    /// Minimal real-shape codex home: one envelope session.
+    fn setup_codex_home() -> (TempDir, String) {
+        let tmp = TempDir::new().expect("tempdir");
+        let day = tmp.path().join("sessions/2026/07/16");
+        std::fs::create_dir_all(&day).unwrap();
+        let content = format!(
+            concat!(
+                "{{\"timestamp\":\"2026-07-16T10:00:00.000Z\",\"type\":\"session_meta\",",
+                "\"payload\":{{\"id\":\"{id}\",\"cwd\":\"/tmp/p\"}}}}\n",
+                "{{\"timestamp\":\"2026-07-16T10:00:01.000Z\",\"type\":\"response_item\",",
+                "\"payload\":{{\"type\":\"message\",\"role\":\"user\",",
+                "\"content\":[{{\"type\":\"input_text\",\"text\":\"hello codex\"}}]}}}}\n",
+            ),
+            id = CODEX_THREAD
+        );
+        std::fs::write(
+            day.join(format!("rollout-2026-07-16T10-00-00-{CODEX_THREAD}.jsonl")),
+            &content,
+        )
+        .unwrap();
+        (tmp, content)
+    }
+
+    #[test]
+    fn list_provider_codex_shows_qualified_ids() {
+        let claude = setup_fixture_dir();
+        let (codex, _) = setup_codex_home();
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["list", "sessions", "--provider", "codex"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(format!("codex:{CODEX_THREAD}")));
+    }
+
+    #[test]
+    fn list_provider_all_spans_both_providers() {
+        let claude = setup_fixture_dir();
+        let (codex, _) = setup_codex_home();
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["list", "sessions", "--provider", "all"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(format!("codex:{CODEX_THREAD}")))
+            .stdout(predicate::str::contains(format!(
+                "claude-code:{SESSION_ID}"
+            )));
+    }
+
+    #[test]
+    fn info_resolves_qualified_prefix_without_provider_flag() {
+        let claude = setup_fixture_dir();
+        let (codex, _) = setup_codex_home();
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["info", "codex:0198aaaa"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(format!("codex:{CODEX_THREAD}")))
+            .stdout(predicate::str::contains("Provider: codex"))
+            .stdout(predicate::str::contains("Entries: 2"));
+    }
+
+    #[test]
+    fn qualified_id_outside_explicit_selection_is_refused() {
+        let claude = setup_fixture_dir();
+        let (codex, _) = setup_codex_home();
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["info", "codex:0198aaaa", "--provider", "claude-code"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "outside the current provider selection",
+            ));
+    }
+
+    #[test]
+    fn export_raw_jsonl_is_byte_identical_to_source() {
+        let claude = setup_fixture_dir();
+        let (codex, content) = setup_codex_home();
+        let out = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "export",
+                &format!("codex:{CODEX_THREAD}"),
+                "-f",
+                "raw-jsonl",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        assert_eq!(String::from_utf8_lossy(&out), content);
+    }
+
+    #[test]
+    fn export_native_streams_exact_artifact_bytes() {
+        let claude = setup_fixture_dir();
+        let (codex, content) = setup_codex_home();
+        let out = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["export", &format!("codex:{CODEX_THREAD}"), "-f", "native"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        assert_eq!(out, content.as_bytes());
+    }
+
+    #[test]
+    fn export_archive_carries_manifest() {
+        let claude = setup_fixture_dir();
+        let (codex, _) = setup_codex_home();
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["export", &format!("codex:{CODEX_THREAD}"), "-f", "archive"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("\"provider\":\"codex\""));
+    }
+
+    #[test]
+    fn export_normalized_format_for_codex_is_refused_until_b3() {
+        let claude = setup_fixture_dir();
+        let (codex, _) = setup_codex_home();
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["export", &format!("codex:{CODEX_THREAD}"), "-f", "markdown"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("raw-jsonl, native, archive"));
+    }
+}
