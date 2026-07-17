@@ -194,8 +194,18 @@ pub struct CodexDriftReport {
     /// Unknown NESTED field paths (e.g.
     /// `event_msg/token_count/nested_future_field`), evaluated against
     /// curated per-payload-type key baselines; types without a baseline are
-    /// not evaluated (absence of a baseline is not drift).
+    /// not evaluated (absence of a baseline is not drift) and are counted in
+    /// `unbaselined_payload_types` so partial coverage is machine-visible —
+    /// "zero unknown paths" alone must never be read as full coverage.
     pub unknown_field_paths: BTreeMap<String, u64>,
+    /// Records whose payload keys WERE checked against a baseline.
+    pub field_schema_checked_records: u64,
+    /// Payload variants seen but not baselined ("kind/type" -> count):
+    /// the machine-visible complement of `field_schema_checked_records`.
+    pub unbaselined_payload_types: BTreeMap<String, u64>,
+    /// response_item/event_msg records whose payload `type` discriminator is
+    /// missing or not a string (the envelope counter does not cover these).
+    pub missing_payload_discriminators: u64,
     /// reasoning response items seen.
     pub reasoning_items: u64,
     /// reasoning items carrying a non-empty plaintext summary.
@@ -539,6 +549,41 @@ impl CodexProvider {
                 "text_elements",
                 "kind",
             ]),
+            // "memory_citation" and "phase" discovered by the corpus run
+            // after this baseline landed (2,992 occurrences) — same
+            // instrument-discovery provenance as the metadata fields.
+            ("event_msg", "agent_message") => {
+                Some(&["type", "message", "memory_citation", "phase"])
+            }
+            ("event_msg", "agent_reasoning") => Some(&["type", "text"]),
+            ("event_msg", "agent_reasoning_raw_content") => Some(&["type", "text"]),
+            ("event_msg", "thread_rolled_back") => Some(&["type", "num_turns"]),
+            ("response_item", "custom_tool_call") => Some(&[
+                "type",
+                "id",
+                "status",
+                "call_id",
+                "name",
+                "input",
+                "metadata",
+                "internal_chat_message_metadata_passthrough",
+            ]),
+            ("response_item", "custom_tool_call_output") => Some(&[
+                "type",
+                "id",
+                "call_id",
+                "output",
+                "metadata",
+                "internal_chat_message_metadata_passthrough",
+            ]),
+            ("response_item", "web_search_call") => Some(&[
+                "type",
+                "id",
+                "status",
+                "action",
+                "metadata",
+                "internal_chat_message_metadata_passthrough",
+            ]),
             // NOTE: "metadata" and reasoning's passthrough field were
             // DISCOVERED by this instrument's first real-corpus run (2,339
             // occurrences) — vocabulary the rust-v0.144.5 source research
@@ -617,6 +662,7 @@ impl CodexProvider {
                 }
             };
             report.sessions += 1;
+            let preferred_archived = preferred.archived;
             let mut buf: Vec<u8> = Vec::new();
             loop {
                 buf.clear();
@@ -633,11 +679,12 @@ impl CodexProvider {
                 }
                 report.records += 1;
                 // read_until only omits the trailing newline at EOF: an
-                // unterminated final record is an ACTIVE session's partial
-                // tail — transient by contract, never permanent drift.
+                // unterminated final record of an ACTIVE artifact is a
+                // transient tail. An ARCHIVED file is finalized — the same
+                // damage there is permanent corruption, not a tail.
                 let is_final_unterminated = !buf.ends_with(b"\n");
                 let Ok(value) = serde_json::from_slice::<serde_json::Value>(&buf) else {
-                    if is_final_unterminated {
+                    if is_final_unterminated && !preferred_archived {
                         report.active_tails += 1;
                     } else {
                         report.unparseable += 1;
@@ -673,13 +720,19 @@ impl CodexProvider {
                     .map(|t| t.chars().take(7).collect::<String>())
                     .unwrap_or_else(|| "unknown".into());
                 let payload = value.get("payload");
+                let requires_payload_type = matches!(kind.as_str(), "response_item" | "event_msg");
                 let payload_type = payload
                     .and_then(|p| p.get("type"))
                     .and_then(|t| t.as_str())
                     .map(str::to_string);
+                if requires_payload_type && payload_type.is_none() {
+                    report.missing_payload_discriminators += 1;
+                }
                 if let (Some(payload), Some(pt)) = (payload, payload_type.as_deref()) {
-                    // Nested-field drift against curated baselines.
+                    // Nested-field drift against curated baselines, with
+                    // coverage made machine-visible either way.
                     if let Some(baseline) = Self::payload_key_baseline(&kind, pt) {
+                        report.field_schema_checked_records += 1;
                         if let Some(obj) = payload.as_object() {
                             for k in obj.keys() {
                                 if !baseline.contains(&k.as_str()) {
@@ -690,6 +743,11 @@ impl CodexProvider {
                                 }
                             }
                         }
+                    } else if requires_payload_type {
+                        *report
+                            .unbaselined_payload_types
+                            .entry(format!("{kind}/{pt}"))
+                            .or_default() += 1;
                     }
                     match kind.as_str() {
                         "response_item" => {
@@ -1213,17 +1271,23 @@ mod tests {
             drift.reasoning_items
         );
         eprintln!(
-            "codex drift detail: {} unknown field paths {:?}, {} months, active_tails={}, \
-             missing_types={}, unreadable={}",
+            "codex drift detail: no nested drift among {} CHECKED records \
+             ({} unknown paths {:?}); {} unbaselined variants ({} records) NOT checked; \
+             {} months, active_tails={}, missing_types={}, missing_payload_types={}, \
+             unreadable={}",
+            drift.field_schema_checked_records,
             drift.unknown_field_paths.len(),
             drift
                 .unknown_field_paths
                 .iter()
                 .take(10)
                 .collect::<Vec<_>>(),
+            drift.unbaselined_payload_types.len(),
+            drift.unbaselined_payload_types.values().sum::<u64>(),
             drift.reasoning_by_month.len(),
             drift.active_tails,
             drift.missing_type_discriminators,
+            drift.missing_payload_discriminators,
             drift.unreadable_sessions
         );
         eprintln!(
@@ -1930,6 +1994,77 @@ mod tests {
     }
 
     #[test]
+    fn archived_malformed_tail_is_permanent_corruption_not_transient() {
+        let content = format!(
+            "{}\n{}",
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            r#"{"timestamp":"2026-07-16T23:59:59.000Z","type":"response_item","payload":{"type":"mess"#
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let day = tmp.path().join("archived_sessions/2026/07/16");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(
+            day.join(format!("rollout-2026-07-16T23-38-33-{THREAD_A}.jsonl")),
+            content,
+        )
+        .unwrap();
+        let p = CodexProvider::new(tmp.path());
+        let report = p.drift_report().unwrap();
+        // An archived file is finalized: identical damage is corruption.
+        assert_eq!(report.active_tails, 0, "{report:?}");
+        assert_eq!(report.unparseable, 1, "{report:?}");
+    }
+
+    #[test]
+    fn drift_counts_missing_payload_discriminators() {
+        let content = [
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": 42, "oops": true}),
+            ),
+            envelope_line("event_msg", serde_json::json!({"no_type_at_all": 1})),
+        ]
+        .join("\n")
+            + "\n";
+        let (_t, p) = home_with(THREAD_A, content.as_bytes(), false);
+        let report = p.drift_report().unwrap();
+        assert_eq!(report.missing_payload_discriminators, 2, "{report:?}");
+        // The envelope discriminators were fine.
+        assert_eq!(report.missing_type_discriminators, 0);
+    }
+
+    #[test]
+    fn drift_coverage_is_machine_visible() {
+        let content = [
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            // Baselined: checked.
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "token_count", "info": {}}),
+            ),
+            // Known vocabulary but NOT baselined: must appear as unbaselined,
+            // never as silent "zero drift".
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "web_search_end", "query": "q"}),
+            ),
+        ]
+        .join("\n")
+            + "\n";
+        let (_t, p) = home_with(THREAD_A, content.as_bytes(), false);
+        let report = p.drift_report().unwrap();
+        assert_eq!(report.field_schema_checked_records, 1);
+        assert_eq!(
+            report
+                .unbaselined_payload_types
+                .get("event_msg/web_search_end"),
+            Some(&1),
+            "{report:?}"
+        );
+    }
+
+    #[test]
     fn drift_buckets_reasoning_availability_by_era() {
         // March (summaries present) vs April (encrypted-only): the aggregate
         // ratio must not be the only signal — the exact original research
@@ -1958,15 +2093,23 @@ mod tests {
             session_a_content(),
         )
         .unwrap();
-        // Garbage bytes masquerading as a .zst artifact: opening fails.
+        // A compressed artifact whose OPEN fails (compressed-input cap):
+        // the genuine unreadable path. (Garbage .zst bytes do NOT trigger
+        // it — libzstd errors lazily on first read, so those sessions are
+        // scanned and show up as unparseable records instead; either way
+        // nothing is silently skipped.)
         std::fs::write(
             day.join(format!("rollout-2026-07-16T22-00-00-{THREAD_B}.jsonl.zst")),
             b"this is not a zstd frame at all",
         )
         .unwrap();
-        let p = CodexProvider::new(tmp.path());
+        let p = CodexProvider::new(tmp.path()).with_max_compressed(4);
         let report = p.drift_report().unwrap();
         assert!(report.sessions >= 1, "healthy session must be reported");
+        assert_eq!(
+            report.unreadable_sessions, 1,
+            "the unopenable session must be COUNTED, not silently skipped: {report:?}"
+        );
         assert!(
             report.envelope_types.contains_key("session_meta"),
             "healthy content present: {report:?}"
@@ -1996,12 +2139,12 @@ mod tests {
         let t1 = p.parse_cache_token(&k).unwrap();
         let t2 = p.parse_cache_token(&k).unwrap();
         assert_eq!(t1, t2);
-        // Policy inputs change the token even with identical artifacts —
-        // two configurations with different safety limits must never share
-        // a cached parse.
-        let (_tmp2, p2) = fixture();
-        let p2 = p2.with_max_decompressed(1234);
-        assert_ne!(t1, p2.parse_cache_token(&k).unwrap());
+        // Policy inputs change the token with the SAME storage root — the
+        // only changed input is the limit, so this genuinely proves policy
+        // participation (a second fixture would differ for root/locator
+        // reasons alone).
+        let strict = CodexProvider::new(p.codex_home.clone()).with_max_decompressed(1234);
+        assert_ne!(t1, strict.parse_cache_token(&k).unwrap());
     }
 
     #[test]
@@ -2052,10 +2195,11 @@ mod tests {
             cache.get_keyed(&k, &p.parse_cache_token(&k).unwrap()),
             Some(&parsed_len)
         );
-        // Stricter limits => different token => the cached parse from the
-        // laxer configuration is NOT shared.
-        let (_tmp2, strict) = fixture();
-        let strict = strict.with_max_decompressed(16);
+        // Stricter limits over the SAME root => different token => the
+        // cached parse from the laxer configuration is NOT shared. (Same
+        // root is essential: a second fixture's token would differ for
+        // root/locator reasons and prove nothing about the policy.)
+        let strict = CodexProvider::new(p.codex_home.clone()).with_max_decompressed(16);
         assert_eq!(
             cache.get_keyed(&k, &strict.parse_cache_token(&k).unwrap()),
             None,

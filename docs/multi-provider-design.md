@@ -686,6 +686,37 @@ complete while delivering type counts plus one aggregate ratio; this round
 restores the documented scope and the re-phasing above states what remains
 honestly. 66 provider tests.
 
+## Review round 16 (2026-07-17, same Codex agent — B1 closing amendment)
+
+Three fixes: (1) archived-artifact malformed tails are permanent corruption,
+not transient active tails — classification now requires the preferred
+artifact be non-archived (identical damage tested under sessions/ vs
+archived_sessions/). (2) Drift coverage is machine-visible: "zero unknown
+nested paths" was overstating a six-variant baseline — the report now
+carries field_schema_checked_records, unbaselined_payload_types (kind/type
+counts), and missing_payload_discriminators (payload-level `type`
+missing/non-string for response_item/event_msg — the envelope counter did
+not cover these), with baselines expanded to 14 variants where the source
+schema is stable and the conformance output phrased as "no drift among X
+checked; Y variants (Z records) NOT checked". The expanded run immediately
+discovered two more real fields (agent_message memory_citation + phase,
+2,992 occurrences) — absorbed with instrument-discovery provenance;
+corpus now: 0 unknown paths among 190,826 checked records, 11 unbaselined
+variants (1,240 records) honestly excluded. (3) The cache-policy tests were
+hollow — the "strict" provider used a second fixture whose token differed
+for root/locator reasons alone; both tests now construct the strict
+provider over the SAME codex_home so the only changed input is the policy,
+and the unreadable-session test asserts the count exactly (which exposed
+that garbage .zst bytes error lazily on first read — such sessions are
+scanned-with-unparseable-records, while open-time failures like the
+compressed-input cap are the genuine unreadable path; both documented in
+the test).
+
+B2 guardrail recorded: unknown field names are native, attacker-controlled
+strings — before `snatch doctor` prints them, cap distinct-path cardinality
+and path length, track overflow counts, and emit no session ids, paths, or
+field values by default.
+
 ## Open questions (to settle in-phase)
 
 1. Two-stream dedup policy details (B3, empirical — under the emission-
