@@ -96,6 +96,7 @@ pub mod index;
 pub mod model;
 pub mod notes;
 pub mod parser;
+pub mod provider;
 pub mod reconstruction;
 pub mod tags;
 pub mod util;
