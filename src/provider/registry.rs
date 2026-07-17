@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 
-use super::{ProviderError, ProviderId, SourceProvider};
+use super::{LogicalSessionKey, ProviderError, ProviderId, SourceProvider};
 use crate::discovery::ClaudeDirectory;
 use crate::provider::claude_code::ClaudeCodeProvider;
 
@@ -159,5 +159,251 @@ impl ProviderRegistry {
 impl Default for ProviderRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ============================================================================
+// Provider selection + session resolution (the B2 resolution matrix)
+// ============================================================================
+
+/// Which providers a command operates on, from repeated `--provider` flags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderSelection {
+    /// `--provider all`: every installed provider that is working.
+    All,
+    /// Explicitly named providers (deduplicated, order-independent).
+    Explicit(Vec<ProviderId>),
+}
+
+impl ProviderSelection {
+    /// Interpret repeated `--provider` flag values. Repeats of the same name
+    /// are idempotent; mixing `all` with explicit names is an error (the
+    /// intent is contradictory — `all` already includes them). Names are NOT
+    /// validated here; [`ProviderRegistry::select`] does that against the
+    /// installed set.
+    pub fn from_flags(flags: &[String]) -> Result<Self, String> {
+        let has_all = flags.iter().any(|f| f == "all");
+        let explicit: Vec<ProviderId> = {
+            let mut ids: Vec<ProviderId> = flags
+                .iter()
+                .filter(|f| *f != "all")
+                .map(|f| ProviderId(f.clone()))
+                .collect();
+            ids.sort();
+            ids.dedup();
+            ids
+        };
+        match (has_all, explicit.is_empty()) {
+            (true, false) => Err(format!(
+                "--provider all cannot be combined with explicit providers ({})",
+                explicit
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            (true, true) => Ok(ProviderSelection::All),
+            (false, _) => Ok(ProviderSelection::Explicit(explicit)),
+        }
+    }
+}
+
+/// Outcome of applying a [`ProviderSelection`] to the registry.
+pub struct Selected<'a> {
+    /// Working providers in deterministic id order.
+    pub providers: Vec<&'a dyn SourceProvider>,
+    /// Providers skipped under `all` because they were unavailable
+    /// (id, reason). Callers surface these as diagnostics — partial results
+    /// under `all` are permitted but never silent.
+    pub skipped: Vec<(ProviderId, String)>,
+}
+
+/// A resolved session reference: which provider owns it and its full key.
+pub struct Resolution<'a> {
+    /// The provider that owns the session.
+    pub provider: &'a dyn SourceProvider,
+    /// The session's complete logical key.
+    pub key: LogicalSessionKey,
+}
+
+impl ProviderRegistry {
+    /// Apply a selection. Availability semantics (tested, deliberate):
+    /// explicitly named providers are ATOMIC — any named provider that is
+    /// missing or unavailable fails the whole call; `all` is PARTIAL —
+    /// unavailable providers are skipped but reported in
+    /// [`Selected::skipped`]. `all` with zero working providers is an error.
+    pub fn select(&self, selection: &ProviderSelection) -> Result<Selected<'_>, ProviderError> {
+        match selection {
+            ProviderSelection::Explicit(ids) => {
+                let mut providers = Vec::with_capacity(ids.len());
+                for id in ids {
+                    providers.push(self.get(id)?);
+                }
+                Ok(Selected {
+                    providers,
+                    skipped: Vec::new(),
+                })
+            }
+            ProviderSelection::All => {
+                let mut providers = Vec::new();
+                let mut skipped = Vec::new();
+                for entry in &self.entries {
+                    match &entry.provider {
+                        Ok(p) => providers.push(p.as_ref()),
+                        Err(reason) => skipped.push((entry.id.clone(), reason.clone())),
+                    }
+                }
+                if providers.is_empty() {
+                    return Err(ProviderError::Other(format!(
+                        "no providers available: {}",
+                        skipped
+                            .iter()
+                            .map(|(id, reason)| format!("{id}: {reason}"))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    )));
+                }
+                Ok(Selected { providers, skipped })
+            }
+        }
+    }
+
+    /// Resolve a session reference against a selection.
+    ///
+    /// A reference containing `:` is a QUALIFIED id (the escaped
+    /// [`LogicalSessionKey`] form); the named provider must be inside the
+    /// selection — a qualified id never widens or overrides `--provider`,
+    /// and resolution never falls back to a different provider. Anything
+    /// else is an UNQUALIFIED native-id prefix searched across the selected
+    /// providers: one exact native-id match wins over longer prefix matches;
+    /// otherwise the match must be unique, and ambiguity is an error listing
+    /// qualified candidates.
+    pub fn resolve_session(
+        &self,
+        selection: &ProviderSelection,
+        reference: &str,
+    ) -> Result<Resolution<'_>, ProviderError> {
+        let selected = self.select(selection)?;
+
+        if reference.contains(':') {
+            let key: LogicalSessionKey = reference
+                .parse()
+                .map_err(|e: String| ProviderError::Other(e))?;
+            if !selected.providers.iter().any(|p| p.id() == key.provider) {
+                // Precise refusal, never a fallback: an installed-but-broken
+                // provider reports its reason; an installed-but-unselected
+                // one points at the selection; anything else is unknown.
+                return Err(match self.entry(&key.provider) {
+                    Some(entry) => match &entry.provider {
+                        Err(reason) => ProviderError::Other(format!(
+                            "qualified id '{reference}' names provider '{}', which is \
+                             unavailable: {reason}",
+                            key.provider
+                        )),
+                        Ok(_) => ProviderError::Other(format!(
+                            "qualified id '{reference}' names provider '{}', which is \
+                             outside the current provider selection",
+                            key.provider
+                        )),
+                    },
+                    None => ProviderError::NotFound(format!(
+                        "qualified id '{reference}' names unknown provider '{}'",
+                        key.provider
+                    )),
+                });
+            }
+            // Registry order is deterministic, so this find is too.
+            let provider = *selected
+                .providers
+                .iter()
+                .find(|p| p.id() == key.provider)
+                .expect("membership just checked");
+            // The native-id part of a qualified reference may still be a
+            // prefix; the provider is fixed, prefix rules unchanged.
+            let candidates: Vec<LogicalSessionKey> = provider
+                .sessions()?
+                .into_iter()
+                .map(|d| d.key)
+                .filter(|k| k.namespace == key.namespace && k.native_id.starts_with(&key.native_id))
+                .collect();
+            let key = pick_unique(reference, candidates, &key.native_id, &[])?;
+            Ok(Resolution { provider, key })
+        } else {
+            let mut candidates = Vec::new();
+            let mut per_provider: Vec<(&dyn SourceProvider, usize)> = Vec::new();
+            for provider in &selected.providers {
+                let before = candidates.len();
+                candidates.extend(
+                    provider
+                        .sessions()?
+                        .into_iter()
+                        .map(|d| d.key)
+                        .filter(|k| k.native_id.starts_with(reference)),
+                );
+                per_provider.push((*provider, candidates.len() - before));
+            }
+            let key = pick_unique(reference, candidates, reference, &selected.skipped)?;
+            let provider = per_provider
+                .iter()
+                .find(|(p, _)| p.id() == key.provider)
+                .map(|(p, _)| *p)
+                .expect("winning key came from a selected provider");
+            Ok(Resolution { provider, key })
+        }
+    }
+}
+
+/// Uniqueness rule shared by qualified-prefix and unqualified resolution:
+/// exactly one EXACT native-id match wins outright; otherwise the candidate
+/// set must have exactly one member. Ambiguity errors list qualified ids
+/// (capped) so the user can retry unambiguously.
+fn pick_unique(
+    reference: &str,
+    candidates: Vec<LogicalSessionKey>,
+    native_prefix: &str,
+    skipped: &[(ProviderId, String)],
+) -> Result<LogicalSessionKey, ProviderError> {
+    let exact: Vec<&LogicalSessionKey> = candidates
+        .iter()
+        .filter(|k| k.native_id == native_prefix)
+        .collect();
+    if exact.len() == 1 {
+        return Ok(exact[0].clone());
+    }
+    match candidates.len() {
+        1 => Ok(candidates.into_iter().next().expect("len checked")),
+        0 => {
+            let mut msg = format!("no session matching '{reference}'");
+            if !skipped.is_empty() {
+                msg.push_str(&format!(
+                    " (not searched — unavailable: {})",
+                    skipped
+                        .iter()
+                        .map(|(id, reason)| format!("{id}: {reason}"))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ));
+            }
+            Err(ProviderError::NotFound(msg))
+        }
+        n => {
+            const SHOW: usize = 5;
+            let mut shown: Vec<String> = candidates
+                .iter()
+                .take(SHOW)
+                .map(ToString::to_string)
+                .collect();
+            shown.sort();
+            let more = if n > SHOW {
+                format!(" and {} more", n - SHOW)
+            } else {
+                String::new()
+            };
+            Err(ProviderError::Other(format!(
+                "'{reference}' is ambiguous: {n} sessions match ({}{more}) — use a longer \
+                 prefix or a qualified id",
+                shown.join(", ")
+            )))
+        }
     }
 }

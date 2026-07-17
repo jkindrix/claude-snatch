@@ -724,3 +724,258 @@ fn registry_get_never_falls_back_to_another_provider() {
     // The working provider is still reachable by its own id.
     assert_eq!(r.get(&FakeProvider.id()).unwrap().id(), FakeProvider.id());
 }
+
+// ============================================================================
+// Provider selection + session resolution matrix (B2, round-17 guardrails)
+// ============================================================================
+
+use super::registry::{ProviderSelection, Selected};
+
+/// Minimal second provider so cross-provider resolution is testable:
+/// id "small", global namespace, native ids "421", "5", "56".
+struct SmallProvider;
+
+impl SmallProvider {
+    fn key(native: &str) -> LogicalSessionKey {
+        LogicalSessionKey {
+            provider: ProviderId("small".into()),
+            namespace: SessionNamespace::global(),
+            native_id: native.into(),
+        }
+    }
+}
+
+impl SourceProvider for SmallProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId("small".into())
+    }
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::default()
+    }
+    fn sessions(&self) -> Result<Vec<SessionDescriptor>, ProviderError> {
+        Ok(["421", "5", "56"]
+            .iter()
+            .map(|n| SessionDescriptor {
+                key: Self::key(n),
+                artifacts: vec![],
+            })
+            .collect())
+    }
+    fn lineage(&self) -> Result<Vec<LineageEdge>, ProviderError> {
+        Ok(vec![])
+    }
+    fn parse(&self, key: &LogicalSessionKey) -> Result<ParsedSession, ProviderError> {
+        Err(ProviderError::NotFound(key.to_string()))
+    }
+    fn parse_cache_token(&self, key: &LogicalSessionKey) -> Result<String, ProviderError> {
+        Err(ProviderError::NotFound(key.to_string()))
+    }
+    fn write_archive(
+        &self,
+        key: &LogicalSessionKey,
+        _out: &mut dyn std::io::Write,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::NotFound(key.to_string()))
+    }
+    fn write_native(
+        &self,
+        _artifact: &ArtifactId,
+        _out: &mut dyn std::io::Write,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::Unsupported {
+            capability: "native export",
+        })
+    }
+    fn write_raw_jsonl(
+        &self,
+        _key: &LogicalSessionKey,
+        _out: &mut dyn std::io::Write,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::Unsupported {
+            capability: "raw-jsonl export",
+        })
+    }
+}
+
+fn matrix_registry() -> ProviderRegistry {
+    let mut r = ProviderRegistry::new();
+    r.register(fake_entry()).unwrap();
+    r.register(RegisteredProvider {
+        id: ProviderId("small".into()),
+        root: None,
+        provider: Ok(Box::new(SmallProvider)),
+    })
+    .unwrap();
+    r.register(RegisteredProvider {
+        id: ProviderId("broken".into()),
+        root: None,
+        provider: Err("home not found".into()),
+    })
+    .unwrap();
+    r
+}
+
+fn flags(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn selection_flags_dedupe_and_reject_all_mixed_with_explicit() {
+    assert_eq!(
+        ProviderSelection::from_flags(&flags(&["small", "small"])).unwrap(),
+        ProviderSelection::Explicit(vec![ProviderId("small".into())])
+    );
+    assert_eq!(
+        ProviderSelection::from_flags(&flags(&["all"])).unwrap(),
+        ProviderSelection::All
+    );
+    let err = ProviderSelection::from_flags(&flags(&["all", "small"])).unwrap_err();
+    assert!(err.contains("cannot be combined"), "got: {err}");
+}
+
+#[test]
+fn explicit_selection_is_atomic_over_unavailable_and_unknown() {
+    let r = matrix_registry();
+    // A working provider named alongside a broken one does not soften the
+    // failure.
+    let err = r
+        .select(&ProviderSelection::from_flags(&flags(&["small", "broken"])).unwrap())
+        .err()
+        .expect("atomic failure")
+        .to_string();
+    assert!(
+        err.contains("broken") && err.contains("home not found"),
+        "got: {err}"
+    );
+
+    let err = r
+        .select(&ProviderSelection::from_flags(&flags(&["nope"])).unwrap())
+        .err()
+        .expect("unknown provider")
+        .to_string();
+    assert!(err.contains("nope") && err.contains("small"), "got: {err}");
+}
+
+#[test]
+fn all_selection_is_partial_but_never_silent() {
+    let r = matrix_registry();
+    let Selected { providers, skipped } = r.select(&ProviderSelection::All).unwrap();
+    let ids: Vec<String> = providers.iter().map(|p| p.id().to_string()).collect();
+    assert_eq!(ids, ["fake", "small"]);
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].0.to_string(), "broken");
+    assert!(skipped[0].1.contains("home not found"));
+}
+
+#[test]
+fn all_selection_with_nothing_working_errors() {
+    let mut r = ProviderRegistry::new();
+    r.register(RegisteredProvider {
+        id: ProviderId("broken".into()),
+        root: None,
+        provider: Err("gone".into()),
+    })
+    .unwrap();
+    let err = r.select(&ProviderSelection::All).err().unwrap().to_string();
+    assert!(err.contains("no providers available"), "got: {err}");
+}
+
+#[test]
+fn qualified_id_outside_selection_is_refused_not_widened() {
+    let r = matrix_registry();
+    let sel = ProviderSelection::from_flags(&flags(&["small"])).unwrap();
+    let err = r
+        .resolve_session(&sel, "fake:install-a:42")
+        .err()
+        .expect("refusal")
+        .to_string();
+    assert!(
+        err.contains("outside the current provider selection"),
+        "got: {err}"
+    );
+
+    // Same reference resolves fine once the selection includes its provider.
+    let sel = ProviderSelection::from_flags(&flags(&["fake"])).unwrap();
+    let res = r.resolve_session(&sel, "fake:install-a:42").unwrap();
+    assert_eq!(res.key, multi_artifact_key());
+    assert_eq!(res.provider.id().to_string(), "fake");
+}
+
+#[test]
+fn qualified_id_naming_unavailable_or_unknown_provider_is_precise() {
+    let r = matrix_registry();
+    let err = r
+        .resolve_session(&ProviderSelection::All, "broken:xyz")
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        err.contains("unavailable") && err.contains("home not found"),
+        "got: {err}"
+    );
+
+    let err = r
+        .resolve_session(&ProviderSelection::All, "ghost:xyz")
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(err.contains("unknown provider"), "got: {err}");
+}
+
+#[test]
+fn unqualified_ambiguity_errors_with_qualified_candidates() {
+    let r = matrix_registry();
+    // "42" matches fake:install-a:42, fake:install-b:42 (both exact) and
+    // small:421 — two exact matches cannot break the tie.
+    let err = r
+        .resolve_session(&ProviderSelection::All, "42")
+        .err()
+        .expect("ambiguous")
+        .to_string();
+    assert!(
+        err.contains("ambiguous")
+            && err.contains("install-a")
+            && err.contains("install-b")
+            && err.contains("small:421"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn unqualified_unique_prefix_resolves_across_providers() {
+    let r = matrix_registry();
+    let res = r.resolve_session(&ProviderSelection::All, "421").unwrap();
+    assert_eq!(res.key, SmallProvider::key("421"));
+    assert_eq!(res.provider.id().to_string(), "small");
+}
+
+#[test]
+fn one_exact_match_beats_longer_prefix_matches() {
+    let r = matrix_registry();
+    // "5" prefixes both small:5 and small:56, but is an exact id for one.
+    let res = r.resolve_session(&ProviderSelection::All, "5").unwrap();
+    assert_eq!(res.key, SmallProvider::key("5"));
+}
+
+#[test]
+fn not_found_under_all_names_unsearched_providers() {
+    let r = matrix_registry();
+    let err = r
+        .resolve_session(&ProviderSelection::All, "zzz")
+        .err()
+        .expect("not found")
+        .to_string();
+    assert!(
+        err.contains("no session matching") && err.contains("broken"),
+        "skipped providers must be named so 'not found' is honest: {err}"
+    );
+}
+
+#[test]
+fn qualified_reference_supports_native_prefix_within_its_provider() {
+    let r = matrix_registry();
+    let res = r
+        .resolve_session(&ProviderSelection::All, "small:4")
+        .unwrap();
+    assert_eq!(res.key, SmallProvider::key("421"));
+}
