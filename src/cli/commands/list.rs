@@ -1311,10 +1311,9 @@ impl LogicalSessionInfo {
     }
 }
 
-/// Provider-neutral session listing (`list sessions --provider ...`):
-/// qualified ids + artifact summaries through the SourceProvider seam.
-/// Pre-normalization (B2) this intentionally shows identity and artifacts,
-/// not titles/timestamps — those arrive with Phase B3.
+/// Provider-neutral project/session listing. Phase D groups sessions by
+/// credential-free git identity, local git root, or cwd (in that order) and
+/// uses the same groups for project rows and session `--project` filtering.
 fn list_provider_sessions(cli: &Cli, args: &ListArgs) -> Result<()> {
     use crate::provider::registry::ProviderSelection;
     use crate::provider::ArtifactForm;
@@ -1322,9 +1321,9 @@ fn list_provider_sessions(cli: &Cli, args: &ListArgs) -> Result<()> {
     // COMPLETE argument classification for this route: the struct is
     // destructured WITHOUT `..`, so adding a ListArgs field without
     // classifying it here is a compile error (round-19 exhaustiveness).
-    // Universal: target=sessions, --provider, -n/--limit. --context-length
-    // is refused alongside --context (inert without it, but a set value
-    // must not be silently accepted).
+    // Universal: target, --provider, --project, --sort, -n/--limit, --sizes.
+    // --context-length is refused alongside --context (inert without it, but
+    // a set value must not be silently accepted).
     let crate::cli::ListArgs {
         target,
         provider: _,
@@ -1352,23 +1351,14 @@ fn list_provider_sessions(cli: &Cli, args: &ListArgs) -> Result<()> {
         hide_empty,
         no_chain,
     } = args;
-    if *target != ListTarget::Sessions {
-        return Err(crate::error::SnatchError::InvalidArgument {
-            name: "target".to_string(),
-            reason: "only `list sessions` supports --provider".to_string(),
-        });
-    }
     super::helpers::refuse_unsupported_flags(
-        "list --provider (identity + artifacts until normalization lands)",
+        "list --provider",
         &[
-            ("--project", project.is_some()),
             ("--subagents", *subagents),
             ("--subagents-only", *subagents_only),
             ("--active", *active),
             ("--compacted", *compacted),
-            ("--sort", *sort != SortOrder::Modified),
             ("--full-ids", *full_ids),
-            ("--sizes", *sizes),
             ("--pager", *pager),
             ("--since", since.is_some()),
             ("--until", until.is_some()),
@@ -1393,68 +1383,224 @@ fn list_provider_sessions(cli: &Cli, args: &ListArgs) -> Result<()> {
         }
     })?;
     let registry = super::helpers::provider_registry(cli);
-    // Thin renderer: runtime-failure semantics (atomic vs partial, zero-
-    // success error) are enforced centrally in the registry (round-19).
-    let collected = registry.collect_selected_sessions(&selection)?;
+    // Thin renderer: provider failures, project-evidence fallback, and
+    // deterministic grouping are enforced centrally in the registry.
+    let collected = registry.collect_unified_projects(&selection)?;
     let skipped = collected.skipped;
+    let warnings = collected.context_warnings;
+    let mut projects = collected.projects;
+    if let Some(filter) = project {
+        projects.retain(|candidate| candidate.matches(filter));
+    }
 
-    let mut rows = Vec::new();
-    for d in collected.items {
-        let artifacts: Vec<serde_json::Value> = d
-            .artifacts
-            .iter()
-            .map(|a| {
-                serde_json::json!({
-                    "locator": a.snapshot.id.locator,
-                    "form": match &a.form {
-                        ArtifactForm::PlainFile => "plain",
-                        ArtifactForm::CompressedFile => "compressed",
-                        ArtifactForm::Database => "database",
-                        ArtifactForm::Other(o) => o,
-                    },
-                    "archived": a.archived,
-                })
-            })
-            .collect();
-        rows.push(serde_json::json!({
-            "provider": d.key.provider.to_string(),
-            "qualified_id": d.key.to_string(),
-            "native_id": d.key.native_id,
-            "artifacts": artifacts,
-        }));
+    match sort {
+        SortOrder::Modified => projects.sort_by(|a, b| {
+            b.latest_modified()
+                .cmp(&a.latest_modified())
+                .then_with(|| a.identity.cmp(&b.identity))
+        }),
+        SortOrder::Oldest => projects.sort_by(|a, b| {
+            a.latest_modified()
+                .cmp(&b.latest_modified())
+                .then_with(|| a.identity.cmp(&b.identity))
+        }),
+        SortOrder::Size => projects.sort_by(|a, b| {
+            b.total_bytes()
+                .cmp(&a.total_bytes())
+                .then_with(|| a.identity.cmp(&b.identity))
+        }),
+        SortOrder::Name => projects.sort_by(|a, b| a.identity.cmp(&b.identity)),
     }
-    let total = rows.len();
+
+    let project_total = projects.len();
+    let project_rows = projects.iter().map(|project| {
+        serde_json::json!({
+            "project_key": project.identity.to_string(),
+            "identity_basis": project.identity.basis.as_str(),
+            "path": project.display_path,
+            "cwd_variants": project.cwd_variants,
+            "git_repository": project.git_repository,
+            "providers": project.providers.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "session_count": project.sessions.len(),
+            "total_size": project.total_bytes(),
+            "modified": project.latest_modified().map(|value| value.to_rfc3339()),
+        })
+    });
+    let mut project_rows: Vec<serde_json::Value> = project_rows.collect();
     if args.limit > 0 {
-        rows.truncate(args.limit);
+        project_rows.truncate(args.limit);
     }
+
+    let mut session_rows = Vec::new();
+    for project in &projects {
+        for session in &project.sessions {
+            let descriptor = &session.descriptor;
+            let artifacts: Vec<serde_json::Value> = descriptor
+                .artifacts
+                .iter()
+                .map(|artifact| {
+                    serde_json::json!({
+                        "locator": artifact.snapshot.id.locator,
+                        "form": match &artifact.form {
+                            ArtifactForm::PlainFile => "plain",
+                            ArtifactForm::CompressedFile => "compressed",
+                            ArtifactForm::Database => "database",
+                            ArtifactForm::Other(other) => other,
+                        },
+                        "archived": artifact.archived,
+                    })
+                })
+                .collect();
+            session_rows.push(serde_json::json!({
+                "provider": descriptor.key.provider.to_string(),
+                "qualified_id": descriptor.key.to_string(),
+                "native_id": descriptor.key.native_id,
+                "project_key": project.identity.to_string(),
+                "project_path": project.display_path,
+                "git_repository": project.git_repository,
+                "git_branch": session.context.git_branch,
+                "modified": session.context.modified_at.map(|value| value.to_rfc3339()),
+                "size": session.context.artifact_bytes,
+                "artifacts": artifacts,
+            }));
+        }
+    }
+    session_rows.sort_by(|a, b| match sort {
+        SortOrder::Modified => b["modified"]
+            .as_str()
+            .cmp(&a["modified"].as_str())
+            .then_with(|| a["qualified_id"].as_str().cmp(&b["qualified_id"].as_str())),
+        SortOrder::Oldest => a["modified"]
+            .as_str()
+            .cmp(&b["modified"].as_str())
+            .then_with(|| a["qualified_id"].as_str().cmp(&b["qualified_id"].as_str())),
+        SortOrder::Size => b["size"]
+            .as_u64()
+            .cmp(&a["size"].as_u64())
+            .then_with(|| a["qualified_id"].as_str().cmp(&b["qualified_id"].as_str())),
+        SortOrder::Name => a["qualified_id"].as_str().cmp(&b["qualified_id"].as_str()),
+    });
+    let session_total = session_rows.len();
+    if args.limit > 0 {
+        session_rows.truncate(args.limit);
+    }
+
+    let skipped_json = skipped
+        .iter()
+        .map(|(id, reason)| serde_json::json!({"provider": id.to_string(), "reason": reason}))
+        .collect::<Vec<_>>();
+    let warning_json = warnings
+        .iter()
+        .map(|warning| {
+            serde_json::json!({
+                "qualified_id": warning.key.to_string(),
+                "reason": "project metadata unavailable; session retained in its own project",
+            })
+        })
+        .collect::<Vec<_>>();
 
     if cli.effective_output() == crate::cli::OutputFormat::Json {
-        let out = serde_json::json!({
-            "sessions": rows,
-            "total": total,
-            "skipped_providers": skipped
-                .iter()
-                .map(|(id, reason)| serde_json::json!({"provider": id.to_string(), "reason": reason}))
-                .collect::<Vec<_>>(),
-        });
+        let out = match target {
+            ListTarget::Projects => serde_json::json!({
+                "projects": project_rows,
+                "total": project_total,
+                "skipped_providers": skipped_json,
+                "project_warnings": warning_json,
+            }),
+            ListTarget::Sessions => serde_json::json!({
+                "sessions": session_rows,
+                "total": session_total,
+                "skipped_providers": skipped_json,
+                "project_warnings": warning_json,
+            }),
+            ListTarget::All => serde_json::json!({
+                "projects": project_rows,
+                "project_total": project_total,
+                "sessions": session_rows,
+                "session_total": session_total,
+                "skipped_providers": skipped_json,
+                "project_warnings": warning_json,
+            }),
+        };
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
 
-    for row in &rows {
-        let arts = row["artifacts"].as_array().unwrap();
-        let archived = arts.iter().filter(|a| a["archived"] == true).count();
-        let mut summary = format!("{} artifact(s)", arts.len());
-        if archived > 0 {
-            summary.push_str(&format!(", {archived} archived"));
+    if matches!(target, ListTarget::Projects | ListTarget::All) {
+        println!("Projects ({} found):", project_total);
+        for row in &project_rows {
+            let path = row["path"].as_str().unwrap_or("(project path unavailable)");
+            print!(
+                "{}  [{} session(s); {}]",
+                path,
+                row["session_count"].as_u64().unwrap_or(0),
+                row["providers"]
+                    .as_array()
+                    .map(|providers| providers
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", "))
+                    .unwrap_or_default()
+            );
+            if *sizes {
+                print!(
+                    " ({})",
+                    crate::discovery::format_size(row["total_size"].as_u64().unwrap_or(0))
+                );
+            }
+            println!("\n  {}", row["project_key"].as_str().unwrap());
         }
-        println!("{}  [{}]", row["qualified_id"].as_str().unwrap(), summary);
+        if project_rows.len() < project_total {
+            println!(
+                "... and {} more projects (raise -n/--limit)",
+                project_total - project_rows.len()
+            );
+        }
+        if *target == ListTarget::All {
+            println!();
+        }
     }
-    if rows.len() < total {
-        println!("... and {} more (raise -n/--limit)", total - rows.len());
+
+    if matches!(target, ListTarget::Sessions | ListTarget::All) {
+        for row in &session_rows {
+            let artifacts = row["artifacts"].as_array().expect("built as array");
+            let archived = artifacts
+                .iter()
+                .filter(|artifact| artifact["archived"] == true)
+                .count();
+            let mut summary = format!("{} artifact(s)", artifacts.len());
+            if archived > 0 {
+                summary.push_str(&format!(", {archived} archived"));
+            }
+            if *sizes {
+                summary.push_str(&format!(
+                    ", {}",
+                    crate::discovery::format_size(row["size"].as_u64().unwrap_or(0))
+                ));
+            }
+            println!(
+                "{}  [{}]\n  Project: {}",
+                row["qualified_id"].as_str().unwrap(),
+                summary,
+                row["project_path"].as_str().unwrap_or("(unavailable)")
+            );
+        }
+        if session_rows.len() < session_total {
+            println!(
+                "... and {} more sessions (raise -n/--limit)",
+                session_total - session_rows.len()
+            );
+        }
     }
     for (id, reason) in &skipped {
         eprintln!("warning: provider '{id}' skipped: {reason}");
+    }
+    if !warnings.is_empty() {
+        eprintln!(
+            "warning: {} session(s) lacked project metadata and were retained separately",
+            warnings.len()
+        );
     }
     Ok(())
 }

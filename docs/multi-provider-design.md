@@ -1622,14 +1622,33 @@ negative controls establish its error boundaries without claiming subjective
 ground truth.
 
 ### Phase D — cross-provider UX
-- [ ] Unified project identity across providers (cwd/git), union views
-      (absorbs the long-deferred union-view item, note #4).
+- [~] Unified project identity across providers (cwd/git), union views
+      (Phase D slice 1 foundation + CLI listing): providers expose cheap
+      native project evidence; grouping prefers a credential-free normalized
+      git remote, then local git root, then normalized cwd. A cwd reused for
+      conflicting remotes never bridges them, and missing metadata retains the
+      session in a session-identity fallback project. `list projects|sessions|
+      all --provider ...` and session `--project` filtering share the same
+      deterministic groups. MCP project history and cross-session lessons are
+      the remaining consumers before this item is complete (absorbs the
+      long-deferred union-view item, note #4).
 - [ ] Default-provider switch to `all` considered only here.
 - [ ] Registry storage: goals/notes/decisions live under Claude-owned
       project storage — scope those MCP ops per-provider or migrate storage
       BEFORE claiming unified projects (round-3 hidden scope).
 - [ ] Candidate export targets: ATIF, OTel GenAI (landscape verdict: export
       targets only, never the internal model).
+
+#### Phase D status (2026-07-17)
+
+Slice 1 establishes project identity as a provider-neutral type rather than a
+Claude directory-name convention. Git URLs are normalized without credentials;
+same-repository worktrees unite across cwd/provider, same cwd without git
+unites, and a reused cwd with two different remotes deliberately yields three
+groups when a metadata-less session is also present (it cannot safely choose).
+Provider-context failure never drops a session. The CLI's provider project and
+session listings now expose the project key/evidence and use it for filtering,
+while flagless Claude output remains on the unchanged classic path.
 
 ### Standing constraints (all phases)
 - [ ] The 8 acceptance invariants (above) gate "Codex supported".

@@ -478,6 +478,31 @@ pub struct Collected<T> {
     pub skipped: Vec<(ProviderId, String)>,
 }
 
+/// One session whose project metadata could not be read. The session remains
+/// visible in a session-identity fallback project; this warning explains why
+/// it could not be unified by cwd/git evidence.
+#[derive(Debug, Clone)]
+pub struct ProjectContextWarning {
+    /// Qualified session identity.
+    pub key: LogicalSessionKey,
+    /// Provider error (renderers may replace it with a fixed safe message).
+    pub reason: String,
+}
+
+/// Cross-provider project collection.
+///
+/// Uses the same partial-vs-atomic provider scan semantics as [`Collected`].
+/// Project-context failure never drops a session: it produces a
+/// session-identity fallback plus a warning.
+pub struct CollectedProjects {
+    /// Deterministically grouped projects.
+    pub projects: Vec<super::project::UnifiedProject>,
+    /// Providers skipped under an `all` selection.
+    pub skipped: Vec<(ProviderId, String)>,
+    /// Sessions retained without project evidence.
+    pub context_warnings: Vec<ProjectContextWarning>,
+}
+
 impl ProviderRegistry {
     /// Collect session descriptors across a selection.
     ///
@@ -537,6 +562,89 @@ impl ProviderRegistry {
             return Err(no_provider_succeeded(&skipped));
         }
         Ok(Collected { items, skipped })
+    }
+
+    /// Collect and group project evidence across selected providers.
+    ///
+    /// Provider inventory failures follow the established selection contract:
+    /// explicit selections are atomic; `all` is partial-but-reported and must
+    /// have at least one successful provider scan. A single unreadable
+    /// session's project metadata does not erase that session from the union;
+    /// it receives a session-key fallback identity and a warning.
+    pub fn collect_unified_projects(
+        &self,
+        selection: &ProviderSelection,
+    ) -> Result<CollectedProjects, ProviderError> {
+        let selected = self.select(selection)?;
+        let atomic = matches!(selection, ProviderSelection::Explicit(_));
+        let mut skipped = selected.skipped.clone();
+        let mut context_warnings = Vec::new();
+        let mut project_sessions = Vec::new();
+        let mut scanned = 0_usize;
+        let mut local_git_cache: std::collections::HashMap<
+            String,
+            super::project::SessionProjectContext,
+        > = std::collections::HashMap::new();
+
+        for provider in &selected.providers {
+            let mut descriptors = match provider.sessions() {
+                Ok(descriptors) => descriptors,
+                Err(error) if atomic => return Err(error),
+                Err(error) => {
+                    skipped.push((provider.id(), format!("session scan failed: {error}")));
+                    continue;
+                }
+            };
+            scanned += 1;
+            descriptors.sort_by(|a, b| a.key.cmp(&b.key));
+            for descriptor in descriptors {
+                let mut context = match provider.project_context(&descriptor.key) {
+                    Ok(context) => context,
+                    Err(error) => {
+                        context_warnings.push(ProjectContextWarning {
+                            key: descriptor.key.clone(),
+                            reason: error.to_string(),
+                        });
+                        super::project::SessionProjectContext::default()
+                    }
+                };
+
+                if let Some(cwd) = context.cwd.clone() {
+                    let local = local_git_cache.entry(cwd.clone()).or_insert_with(|| {
+                        let mut local = super::project::SessionProjectContext {
+                            cwd: Some(cwd),
+                            ..Default::default()
+                        };
+                        super::project::enrich_from_local_git(&mut local);
+                        local
+                    });
+                    if context.git_root.is_none() {
+                        context.git_root.clone_from(&local.git_root);
+                    }
+                    if context.git_repository_url.is_none() {
+                        context
+                            .git_repository_url
+                            .clone_from(&local.git_repository_url);
+                    }
+                    if context.git_branch.is_none() {
+                        context.git_branch.clone_from(&local.git_branch);
+                    }
+                }
+                project_sessions.push(super::project::ProjectSession {
+                    descriptor,
+                    context,
+                });
+            }
+        }
+        if scanned == 0 {
+            return Err(no_provider_succeeded(&skipped));
+        }
+        context_warnings.sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(CollectedProjects {
+            projects: super::project::group_sessions(project_sessions),
+            skipped,
+            context_warnings,
+        })
     }
 }
 

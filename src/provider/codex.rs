@@ -1102,6 +1102,50 @@ impl SourceProvider for CodexProvider {
         self.descriptors()
     }
 
+    fn project_context(
+        &self,
+        key: &LogicalSessionKey,
+    ) -> Result<super::project::SessionProjectContext, ProviderError> {
+        let (_, path) = self.resolve(key)?;
+        let metadata = std::fs::metadata(&path)?;
+        let modified_at = metadata.modified().ok().map(chrono::DateTime::from);
+        let mut context = super::project::SessionProjectContext {
+            modified_at,
+            artifact_bytes: metadata.len(),
+            ..Default::default()
+        };
+        // The child session's own session_meta is first even for the older
+        // embedded-history fork format. Read a bounded prefix so a harmless
+        // metadata prelude does not force a full transcript parse.
+        for value in self.initial_records(&path, 32) {
+            let Some(payload) = session_meta_payload(&value) else {
+                continue;
+            };
+            context.cwd = payload
+                .get("cwd")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            context.started_at = value
+                .get("timestamp")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
+                .map(|timestamp| timestamp.with_timezone(&chrono::Utc));
+            if let Some(git) = payload.get("git") {
+                context.git_repository_url = git
+                    .get("repository_url")
+                    .or_else(|| git.get("repositoryUrl"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                context.git_branch = git
+                    .get("branch")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+            }
+            break;
+        }
+        Ok(context)
+    }
+
     fn diagnostics(&self) -> Result<Option<serde_json::Value>, ProviderError> {
         let report = self.drift_report()?;
         serde_json::to_value(&report)

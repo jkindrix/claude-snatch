@@ -253,6 +253,29 @@ impl SourceProvider for ClaudeCodeProvider {
         Ok(self.descriptors()?.into_iter().map(|(d, _)| d).collect())
     }
 
+    fn project_context(
+        &self,
+        key: &LogicalSessionKey,
+    ) -> Result<super::project::SessionProjectContext, ProviderError> {
+        let (_, session) = self.resolve(key)?;
+        let metadata = session
+            .quick_metadata_cached()
+            .map_err(|error| ProviderError::Other(error.to_string()))?;
+        Ok(super::project::SessionProjectContext {
+            cwd: Some(
+                metadata
+                    .extracted_cwd
+                    .unwrap_or_else(|| session.project_path().to_string()),
+            ),
+            git_branch: metadata.git_branch,
+            started_at: metadata.start_time,
+            ended_at: metadata.end_time,
+            modified_at: Some(session.modified_datetime()),
+            artifact_bytes: session.file_size(),
+            ..Default::default()
+        })
+    }
+
     fn parse_cache_token(&self, key: &LogicalSessionKey) -> Result<String, ProviderError> {
         let (descriptor, _) = self.resolve(key)?;
         Ok(format!(

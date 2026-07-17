@@ -1511,19 +1511,20 @@ mod codex_provider_cli {
     const CODEX_THREAD: &str = "0198aaaa-bbbb-7ccc-8ddd-eeeeffff0001";
 
     /// Minimal real-shape codex home: one envelope session.
-    fn setup_codex_home() -> (TempDir, String) {
+    fn setup_codex_home_with_cwd(cwd: &str) -> (TempDir, String) {
         let tmp = TempDir::new().expect("tempdir");
         let day = tmp.path().join("sessions/2026/07/16");
         std::fs::create_dir_all(&day).unwrap();
         let content = format!(
             concat!(
                 "{{\"timestamp\":\"2026-07-16T10:00:00.000Z\",\"type\":\"session_meta\",",
-                "\"payload\":{{\"id\":\"{id}\",\"cwd\":\"/tmp/p\"}}}}\n",
+                "\"payload\":{{\"id\":\"{id}\",\"cwd\":\"{cwd}\"}}}}\n",
                 "{{\"timestamp\":\"2026-07-16T10:00:01.000Z\",\"type\":\"response_item\",",
                 "\"payload\":{{\"type\":\"message\",\"role\":\"user\",",
                 "\"content\":[{{\"type\":\"input_text\",\"text\":\"hello codex user@example.com\"}}]}}}}\n",
             ),
-            id = CODEX_THREAD
+            id = CODEX_THREAD,
+            cwd = cwd,
         );
         std::fs::write(
             day.join(format!("rollout-2026-07-16T10-00-00-{CODEX_THREAD}.jsonl")),
@@ -1531,6 +1532,10 @@ mod codex_provider_cli {
         )
         .unwrap();
         (tmp, content)
+    }
+
+    fn setup_codex_home() -> (TempDir, String) {
+        setup_codex_home_with_cwd("/tmp/p")
     }
 
     #[test]
@@ -1560,6 +1565,57 @@ mod codex_provider_cli {
             .stdout(predicate::str::contains(format!(
                 "claude-code:{SESSION_ID}"
             )));
+    }
+
+    #[test]
+    fn list_provider_projects_unifies_same_cwd_and_filters_the_session_union() {
+        let claude = setup_fixture_dir();
+        let (codex, _) = setup_codex_home_with_cwd(PROJECT_PATH);
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "list", "projects", "--provider", "all"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["total"], 1);
+        assert_eq!(value["projects"][0]["session_count"], 2);
+        assert_eq!(
+            value["projects"][0]["providers"],
+            serde_json::json!(["claude-code", "codex"])
+        );
+        assert_eq!(value["projects"][0]["path"], PROJECT_PATH);
+
+        let sessions = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "-o",
+                "json",
+                "list",
+                "sessions",
+                "--provider",
+                "all",
+                "--project",
+                "test-project",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&sessions).unwrap();
+        assert_eq!(value["total"], 2);
+        let providers: std::collections::BTreeSet<_> = value["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|session| session["provider"].as_str().unwrap())
+            .collect();
+        assert_eq!(providers, ["claude-code", "codex"].into_iter().collect());
     }
 
     #[test]
@@ -1895,14 +1951,11 @@ fn doctor_provider_codex_reports_capped_drift_diagnostics() {
 fn provider_list_refuses_every_unsupported_flag_individually() {
     let tmp = setup_fixture_dir();
     let cases: &[&[&str]] = &[
-        &["-p", "x"],
         &["--subagents"],
         &["--subagents-only"],
         &["--active"],
         &["--compacted"],
-        &["-s", "name"],
         &["--full-ids"],
-        &["--sizes"],
         &["--pager"],
         &["--since", "1d"],
         &["--until", "1d"],
@@ -1928,13 +1981,6 @@ fn provider_list_refuses_every_unsupported_flag_individually() {
             .failure()
             .stderr(predicate::str::contains("not supported with"));
     }
-    // Non-session list targets are refused too.
-    snatch_cmd()
-        .env("SNATCH_CLAUDE_DIR", tmp.path())
-        .args(["list", "projects", "--provider", "claude-code"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("only `list sessions`"));
 }
 
 #[test]

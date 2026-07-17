@@ -1276,6 +1276,18 @@ pub trait SourceProvider {
     /// semantics.
     fn parse(&self, key: &LogicalSessionKey) -> Result<ParsedSession, ProviderError>;
 
+    /// Project evidence for a session. Providers should override this with a
+    /// cheap native metadata read when available; the default parses the
+    /// complete bundle and derives cwd/git evidence without dropping unknown
+    /// native metadata.
+    fn project_context(
+        &self,
+        key: &LogicalSessionKey,
+    ) -> Result<project::SessionProjectContext, ProviderError> {
+        let parsed = self.parse(key)?;
+        Ok(project::SessionProjectContext::from_parsed(&parsed))
+    }
+
     /// Aggregate revision token for caching this session's parse (round-11
     /// guardrail; round-14 scope): covers the full sorted descriptor state
     /// (via [`descriptor_state_token`]) AND every parse-policy input (size
@@ -1312,6 +1324,7 @@ pub mod claude_code;
 pub mod codex;
 #[cfg(feature = "codex")]
 mod codex_normalize;
+pub mod project;
 pub mod registry;
 
 #[cfg(test)]
