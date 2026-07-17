@@ -24,12 +24,20 @@ pub struct ListSessionsRequest {
 
     /// Include subagent sessions in results.
     pub include_subagents: Option<bool>,
+
+    /// Route through session-log providers (e.g. `["codex"]`, `["all"]`).
+    /// Absent/empty = the classic Claude-only listing.
+    pub provider: Option<Vec<String>>,
 }
 
 /// Session summary for list responses.
 #[derive(Debug, Serialize)]
 pub struct SessionSummary {
     pub session_id: String,
+    /// Owning provider ("claude-code", "codex", ...).
+    pub provider: String,
+    /// Provider-qualified session id (`claude-code:<uuid>`).
+    pub qualified_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
     pub project_path: String,
@@ -52,14 +60,23 @@ pub struct SessionSummary {
 /// Request to get session info.
 #[derive(Debug, Deserialize, ToolInput)]
 pub struct GetSessionInfoRequest {
-    /// Session ID to get info for (can use prefix).
+    /// Session ID to get info for (can use prefix; provider-qualified ids
+    /// like "codex:0198c5c1" are routed to their provider).
     pub session_id: String,
+
+    /// Route through session-log providers (e.g. `["codex"]`). Absent =
+    /// Claude unless session_id is provider-qualified.
+    pub provider: Option<Vec<String>>,
 }
 
 /// Session info response.
 #[derive(Debug, Serialize)]
 pub struct SessionInfoResponse {
     pub session_id: String,
+    /// Owning provider ("claude-code", "codex", ...).
+    pub provider: String,
+    /// Provider-qualified session id (`claude-code:<uuid>`).
+    pub qualified_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
     /// Root session ID if this session is part of a chain.

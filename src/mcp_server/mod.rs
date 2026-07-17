@@ -96,6 +96,120 @@ impl SnatchServer {
     }
 
     /// Get the Claude directory.
+    /// Provider-neutral session listing for `list_sessions` with `provider`
+    /// set: qualified ids + artifact summaries via the registry's selection
+    /// matrix (B2; titles/timestamps arrive with normalization in B3).
+    fn provider_sessions_output(&self, flags: &[String], limit: usize) -> ToolOutput {
+        use crate::provider::registry::{ProviderRegistry, ProviderSelection};
+
+        let selection = match ProviderSelection::from_flags(flags) {
+            Ok(s) => s,
+            Err(reason) => {
+                return ToolOutput::error(format!("Invalid provider selection: {reason}"))
+            }
+        };
+        let registry = ProviderRegistry::with_claude_root(self.claude_dir.as_deref());
+        let selected = match registry.select(&selection) {
+            Ok(s) => s,
+            Err(e) => return ToolOutput::error(e.to_string()),
+        };
+
+        let mut rows = Vec::new();
+        for provider in &selected.providers {
+            let mut descriptors = match provider.sessions() {
+                Ok(d) => d,
+                Err(e) => return ToolOutput::error(format!("session scan failed: {e}")),
+            };
+            descriptors.sort_by(|a, b| a.key.cmp(&b.key));
+            for d in descriptors {
+                rows.push(serde_json::json!({
+                    "provider": d.key.provider.to_string(),
+                    "qualified_id": d.key.to_string(),
+                    "native_id": d.key.native_id,
+                    "artifacts": d.artifacts.len(),
+                }));
+            }
+        }
+        let total = rows.len();
+        if limit > 0 {
+            rows.truncate(limit);
+        }
+        let out = serde_json::json!({
+            "sessions": rows,
+            "total": total,
+            "skipped_providers": selected
+                .skipped
+                .iter()
+                .map(|(id, reason)| serde_json::json!({"provider": id.to_string(), "reason": reason}))
+                .collect::<Vec<_>>(),
+        });
+        match ToolOutput::json(&out) {
+            Ok(o) => o,
+            Err(e) => ToolOutput::error(format!("JSON serialization error: {e}")),
+        }
+    }
+
+    /// Provider-neutral session info for `get_session_info` with `provider`
+    /// set or a provider-qualified session id.
+    fn provider_session_info_output(
+        &self,
+        registry: &crate::provider::registry::ProviderRegistry,
+        flags: &[String],
+        reference: &str,
+    ) -> ToolOutput {
+        use crate::provider::registry::cached_session_entries;
+        use crate::provider::ArtifactForm;
+
+        let resolution = match registry.resolve_with_default_policy(flags, reference) {
+            Ok(r) => r,
+            Err(e) => return ToolOutput::error(e.to_string()),
+        };
+        let provider = resolution.provider;
+        let key = &resolution.key;
+
+        let descriptor = match provider.sessions() {
+            Ok(descriptors) => match descriptors.into_iter().find(|d| d.key == *key) {
+                Some(d) => d,
+                None => return ToolOutput::error(format!("Session not found: {key}")),
+            },
+            Err(e) => return ToolOutput::error(format!("session scan failed: {e}")),
+        };
+        let entries = match cached_session_entries(crate::cache::global_cache(), provider, key) {
+            Ok(e) => e,
+            Err(e) => return ToolOutput::error(format!("Failed to parse session: {e}")),
+        };
+        let capabilities = provider.capabilities();
+        let out = serde_json::json!({
+            "qualified_id": key.to_string(),
+            "provider": key.provider.to_string(),
+            "namespace": key.namespace.0,
+            "native_id": key.native_id,
+            "entries": entries.len(),
+            "artifacts": descriptor
+                .artifacts
+                .iter()
+                .map(|a| serde_json::json!({
+                    "locator": a.snapshot.id.locator,
+                    "form": match &a.form {
+                        ArtifactForm::PlainFile => "plain",
+                        ArtifactForm::CompressedFile => "compressed",
+                        ArtifactForm::Database => "database",
+                        ArtifactForm::Other(o) => o.as_str(),
+                    },
+                    "archived": a.archived,
+                }))
+                .collect::<Vec<_>>(),
+            "capabilities": {
+                "native_export": capabilities.native_export,
+                "raw_jsonl": capabilities.raw_jsonl,
+            },
+        });
+        match ToolOutput::json(&out) {
+            Ok(o) => o,
+            Err(e) => ToolOutput::error(format!("JSON serialization error: {e}")),
+        }
+    }
+
     pub(crate) fn get_claude_dir(&self) -> Result<ClaudeDirectory, String> {
         let result = if let Some(ref path) = self.claude_dir {
             ClaudeDirectory::from_path(path.clone())
@@ -115,6 +229,10 @@ impl SnatchServer {
     /// List Claude Code sessions with optional filtering.
     #[tool(description = "List Claude Code sessions with optional filtering by project")]
     async fn list_sessions(&self, request: ListSessionsRequest) -> ToolOutput {
+        if let Some(flags) = request.provider.as_ref().filter(|f| !f.is_empty()) {
+            return self.provider_sessions_output(flags, request.limit.unwrap_or(50));
+        }
+
         let claude_dir = match self.get_claude_dir() {
             Ok(dir) => dir,
             Err(e) => return ToolOutput::error(e),
@@ -155,8 +273,11 @@ impl SnatchServer {
                     .map(|m| (m.duration_human(), m.compaction_count, m.slug.clone()))
                     .unwrap_or((None, 0, None));
                 let chain_info = chain_lookup.get(s.session_id());
+                let key = crate::provider::claude_code::logical_key(s);
                 SessionSummary {
                     session_id: s.session_id().to_string(),
+                    provider: key.provider.to_string(),
+                    qualified_id: key.to_string(),
                     slug,
                     project_path: s.display_project_path(),
                     is_subagent: s.is_subagent(),
@@ -180,6 +301,20 @@ impl SnatchServer {
     /// Get detailed information about a specific Claude Code session.
     #[tool(description = "Get detailed information about a specific Claude Code session")]
     async fn get_session_info(&self, request: GetSessionInfoRequest) -> ToolOutput {
+        let provider_flags = request.provider.clone().unwrap_or_default();
+        if !provider_flags.is_empty() || request.session_id.contains(':') {
+            let registry = crate::provider::registry::ProviderRegistry::with_claude_root(
+                self.claude_dir.as_deref(),
+            );
+            if !provider_flags.is_empty() || registry.looks_qualified(&request.session_id) {
+                return self.provider_session_info_output(
+                    &registry,
+                    &provider_flags,
+                    &request.session_id,
+                );
+            }
+        }
+
         let claude_dir = match self.get_claude_dir() {
             Ok(dir) => dir,
             Err(e) => return ToolOutput::error(e),
@@ -256,8 +391,11 @@ impl SnatchServer {
             .collect();
         subagents.sort_by(|a, b| a.agent_session_id.cmp(&b.agent_session_id));
 
+        let key = crate::provider::claude_code::logical_key(&session);
         let info = SessionInfoResponse {
             session_id: session.session_id().to_string(),
+            provider: key.provider.to_string(),
+            qualified_id: key.to_string(),
             slug,
             chain_id,
             chain_members,
@@ -3159,6 +3297,7 @@ mod tests {
                     project: None,
                     limit: None,
                     include_subagents: None,
+                    provider: None,
                 })
                 .await,
         );
@@ -3176,6 +3315,7 @@ mod tests {
                     project: Some("test-project".to_string()),
                     limit: None,
                     include_subagents: None,
+                    provider: None,
                 })
                 .await,
         );
@@ -3191,6 +3331,7 @@ mod tests {
             server
                 .get_session_info(GetSessionInfoRequest {
                     session_id: sid.to_string(),
+                    provider: None,
                 })
                 .await,
         );
@@ -3206,6 +3347,7 @@ mod tests {
             server
                 .get_session_info(GetSessionInfoRequest {
                     session_id: "ffffffff-ffff-ffff-ffff-ffffffffffff".to_string(),
+                    provider: None,
                 })
                 .await,
         );
@@ -3724,5 +3866,105 @@ mod tests {
             td.get("result_preview").is_none() || td["result_preview"].is_null(),
             "result_preview should be deduped when subagent preview is present"
         );
+    }
+
+    // ========================================================================
+    // Provider routing (B2)
+    // ========================================================================
+
+    #[tokio::test]
+    async fn classic_list_sessions_carries_provider_and_qualified_id() {
+        let sid = "abcdabcd-1111-2222-3333-444455556666";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let server = make_server(&tmp);
+        let text = unwrap_output(
+            server
+                .list_sessions(ListSessionsRequest {
+                    project: None,
+                    limit: None,
+                    include_subagents: None,
+                    provider: None,
+                })
+                .await,
+        );
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let row = v.as_array().unwrap().first().expect("one session").clone();
+        assert_eq!(row["provider"], "claude-code");
+        assert_eq!(row["qualified_id"], format!("claude-code:{sid}"));
+    }
+
+    #[tokio::test]
+    async fn provider_list_sessions_neutral_rows_and_unknown_provider_error() {
+        let sid = "abcdabcd-aaaa-bbbb-cccc-444455556666";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let server = make_server(&tmp);
+        let text = unwrap_output(
+            server
+                .list_sessions(ListSessionsRequest {
+                    project: None,
+                    limit: None,
+                    include_subagents: None,
+                    provider: Some(vec!["claude-code".to_string()]),
+                })
+                .await,
+        );
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let rows = v["sessions"].as_array().unwrap();
+        assert!(rows
+            .iter()
+            .any(|r| r["qualified_id"] == format!("claude-code:{sid}")));
+
+        // Unknown provider: an error naming the known set, never a fallback.
+        let err = server
+            .list_sessions(ListSessionsRequest {
+                project: None,
+                limit: None,
+                include_subagents: None,
+                provider: Some(vec!["gemini".to_string()]),
+            })
+            .await;
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("gemini") && msg.contains("claude-code"),
+            "got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn classic_get_session_info_carries_qualified_id() {
+        let sid = "abcdabcd-1234-5678-9abc-def012345678";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let server = make_server(&tmp);
+        let text = unwrap_output(
+            server
+                .get_session_info(GetSessionInfoRequest {
+                    session_id: sid.to_string(),
+                    provider: None,
+                })
+                .await,
+        );
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["provider"], "claude-code");
+        assert_eq!(v["qualified_id"], format!("claude-code:{sid}"));
+    }
+
+    #[tokio::test]
+    async fn qualified_get_session_info_routes_to_provider_neutral_view() {
+        let sid = "abcdabcd-9999-8888-7777-def012345678";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let server = make_server(&tmp);
+        let text = unwrap_output(
+            server
+                .get_session_info(GetSessionInfoRequest {
+                    session_id: format!("claude-code:{sid}"),
+                    provider: None,
+                })
+                .await,
+        );
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["provider"], "claude-code");
+        assert_eq!(v["qualified_id"], format!("claude-code:{sid}"));
+        assert!(v["entries"].as_u64().unwrap() > 0);
+        assert!(v["capabilities"]["raw_jsonl"].as_bool().unwrap());
     }
 }
