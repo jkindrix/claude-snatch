@@ -34,6 +34,17 @@ impl Default for PriorityParams {
     }
 }
 
+/// Clip a string to at most `n` chars (char-safe), appending `…` when cut.
+fn clip(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(n).collect();
+        out.push('…');
+        out
+    }
+}
+
 /// Source of evidence for a priority item.
 #[derive(Debug, Clone)]
 pub enum PrioritySource {
@@ -45,6 +56,10 @@ pub enum PrioritySource {
         count: usize,
         /// Number of sessions affected.
         sessions: usize,
+        /// Representative error text for the cluster.
+        pattern: String,
+        /// How the error was last resolved, when a fix followed it.
+        last_fix: Option<String>,
     },
     /// High-churn file.
     FileChurn {
@@ -82,11 +97,21 @@ impl std::fmt::Display for PrioritySource {
                 tool,
                 count,
                 sessions,
+                pattern,
+                last_fix,
             } => {
+                let fix = last_fix
+                    .as_deref()
+                    .map(|r| format!("; last fix: {}", clip(r, 100)))
+                    .unwrap_or_default();
                 write!(
                     f,
-                    "tool failure: [{}] {}x across {} sessions",
-                    tool, count, sessions
+                    "tool failure: [{}] {}x across {} sessions; pattern: {}{}",
+                    tool,
+                    count,
+                    sessions,
+                    clip(pattern, 120),
+                    fix
                 )
             }
             PrioritySource::FileChurn {
@@ -175,6 +200,8 @@ pub fn suggest_priorities(
                 tool: error.tool_name.clone(),
                 count: error.count,
                 sessions: session_count,
+                pattern: error.error_pattern.clone(),
+                last_fix: error.example_resolution.clone(),
             }],
         });
     }

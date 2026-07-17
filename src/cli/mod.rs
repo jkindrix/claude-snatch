@@ -284,10 +284,6 @@ pub enum Commands {
     #[command(display_order = 24)]
     Priorities(PrioritiesArgs),
 
-    /// Surface on-demand cross-session insights (recurring errors).
-    #[command(display_order = 24)]
-    Monitor(MonitorArgs),
-
     /// Diagnose schema drift: unmodeled entry types, degraded features.
     #[command(display_order = 24)]
     Doctor(DoctorArgs),
@@ -2230,29 +2226,6 @@ pub struct ThreadArgs {
     pub summary: bool,
 }
 
-/// Arguments for the monitor command.
-#[derive(Debug, Parser)]
-pub struct MonitorArgs {
-    /// Project path filter (substring match). Required.
-    pub project: String,
-
-    /// Filter to sessions since this date (bounds the scan).
-    #[arg(long)]
-    pub since: Option<String>,
-
-    /// Minimum occurrences for an error to count as recurring.
-    #[arg(long, default_value = "3")]
-    pub min_occurrences: usize,
-
-    /// Exclude subagent sessions.
-    #[arg(long)]
-    pub no_subagents: bool,
-
-    /// Maximum insights to surface.
-    #[arg(long, default_value = "10")]
-    pub top: usize,
-}
-
 /// Arguments for the doctor command.
 #[derive(Debug, Parser)]
 pub struct DoctorArgs {
@@ -2808,7 +2781,6 @@ pub fn run() -> Result<()> {
         Some(Commands::Notes(args)) => commands::notes::run(&cli, args),
         Some(Commands::Decisions(args)) => commands::decisions::run(&cli, args),
         Some(Commands::Thread(args)) => commands::thread::run(&cli, args),
-        Some(Commands::Monitor(args)) => commands::monitor::run(&cli, args),
         Some(Commands::Doctor(args)) => commands::doctor::run(&cli, args),
         Some(Commands::Health(args)) => commands::health::run(&cli, args),
         Some(Commands::FileEvolution(args)) => commands::file_evolution::run(&cli, args),

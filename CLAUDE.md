@@ -36,7 +36,7 @@ and machine loss (add a private remote to the backup repo for that).
 
 ## Session History Recall (snatch MCP)
 
-This project provides an MCP server (`snatch serve-mcp`) that exposes 21 tools for querying Claude Code session history. When you need to recall what happened in previous sessions or understand the narrative of past work, use these tools:
+This project provides an MCP server (`snatch serve-mcp`) that exposes 20 tools for querying Claude Code session history. When you need to recall what happened in previous sessions or understand the narrative of past work, use these tools:
 
 | Need | Tool | Example |
 |------|------|---------|
@@ -62,7 +62,6 @@ This project provides an MCP server (`snatch serve-mcp`) that exposes 21 tools f
 | Context around an event | `get_event_context` | session_id="abc123", message_id="uuid" |
 | Why did this file change? | `explain_file_evolution` | file_pattern="mod.rs", project="snatch" |
 | What should we work on next? | `suggest_priorities` | project="snatch", period="7d" |
-| What should I watch out for? | `monitor_project` | project="snatch", period="7d" |
 | Usage statistics | `get_stats` | project="claude-snatch" |
 
 ### Detail Levels for get_session_messages

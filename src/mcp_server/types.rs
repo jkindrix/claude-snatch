@@ -1054,48 +1054,6 @@ pub struct ThreadTopicResponse {
 }
 
 // ============================================================================
-// Active Monitor
-// ============================================================================
-
-/// Request for proactive cross-session insights.
-#[derive(Debug, Deserialize, ToolInput)]
-pub struct MonitorProjectRequest {
-    /// Project path filter (substring match). Required.
-    pub project: String,
-
-    /// Time period: "24h", "7d", "30d", "all". Default: "7d".
-    pub period: Option<String>,
-
-    /// Minimum occurrences for an error to count as recurring. Default: 3.
-    pub min_occurrences: Option<usize>,
-
-    /// Exclude subagent sessions. Default: true.
-    pub no_subagents: Option<bool>,
-
-    /// Maximum insights to return. Default: 10.
-    pub limit: Option<usize>,
-}
-
-/// A single ranked insight.
-#[derive(Debug, Serialize)]
-pub struct MonitorInsightEntry {
-    pub kind: String,
-    pub title: String,
-    pub evidence: String,
-    pub severity: u32,
-    pub fingerprint: String,
-}
-
-/// Response for monitor_project.
-#[derive(Debug, Serialize)]
-pub struct MonitorProjectResponse {
-    pub project_path: String,
-    pub period: String,
-    pub count: usize,
-    pub insights: Vec<MonitorInsightEntry>,
-}
-
-// ============================================================================
 // Project Health
 // ============================================================================
 

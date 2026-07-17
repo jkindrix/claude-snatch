@@ -5,8 +5,7 @@
 //! and identifies recurring patterns.
 //!
 //! Internal aggregator: the `project-lessons` command and `get_project_lessons`
-//! MCP tool were removed; `recurring_errors` is now consumed by `priorities`
-//! and `monitor`.
+//! MCP tool were removed; `recurring_errors` is now consumed by `priorities`.
 
 use std::collections::HashMap;
 
@@ -41,7 +40,6 @@ pub struct RecurringError {
     pub error_pattern: String,
     pub count: usize,
     pub sessions: Vec<String>,
-    pub last_seen: Option<String>,
     pub example_resolution: Option<String>,
 }
 
@@ -49,7 +47,7 @@ pub struct RecurringError {
 ///
 /// Only `recurring_errors` is retained: the corrections/summary aggregation was
 /// dropped when the `project-lessons` command and `get_project_lessons` MCP tool
-/// were removed. `priorities` and `monitor` consume only recurring errors.
+/// were removed. `priorities` consumes only recurring errors.
 #[derive(Debug)]
 #[allow(missing_docs)]
 pub struct ProjectLessonsResult {
@@ -138,7 +136,6 @@ pub fn aggregate_project_lessons(
             let mut sessions: Vec<String> = entries.iter().map(|(_, sid)| sid.clone()).collect();
             sessions.sort();
             sessions.dedup();
-            let last_seen = entries.first().and_then(|(p, _)| p.timestamp.clone());
             let example_resolution = entries
                 .first()
                 .and_then(|(p, _)| p.resolution_summary.clone());
@@ -158,15 +155,14 @@ pub fn aggregate_project_lessons(
                 error_pattern,
                 count,
                 sessions,
-                last_seen,
                 example_resolution,
             }
         })
         .collect();
 
     // Drop extraction noise (successful Read/build/test output the extractor
-    // mis-flags as errors) at the source, so every consumer — monitor,
-    // priorities — sees the same cleaned recurring-error set.
+    // mis-flags as errors) at the source, so priorities sees a cleaned
+    // recurring-error set.
     recurring_errors.retain(|e| !is_extraction_noise(&e.tool_name, &e.error_pattern));
     recurring_errors.sort_by_key(|b| std::cmp::Reverse(b.count));
     recurring_errors.truncate(params.limit);

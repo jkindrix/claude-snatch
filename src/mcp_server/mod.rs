@@ -63,8 +63,7 @@ use types::{
     GetSessionLessonsRequest, GetSessionMessagesRequest, GetSessionTimelineRequest,
     GetStatsRequest, GetToolCallsRequest, GoalEntry, HotspotFileEntry, LessonsSummary,
     ListSessionsRequest, ManageDecisionsRequest, ManageDecisionsResponse, ManageGoalsRequest,
-    ManageGoalsResponse, ManageNotesRequest, ManageNotesResponse, MessageEntry,
-    MonitorInsightEntry, MonitorProjectRequest, MonitorProjectResponse, NoteEntry,
+    ManageGoalsResponse, ManageNotesRequest, ManageNotesResponse, MessageEntry, NoteEntry,
     PriorityItemEntry, PrioritySourceEntry, ProjectAggregate, ProjectHistoryResponse,
     ProjectSessionEntry, ReworkFileEntry, SearchMatch, SearchSessionsRequest,
     SearchSessionsResponse, SessionDigestResponse, SessionHealthEntry, SessionInfoResponse,
@@ -2487,71 +2486,6 @@ impl SnatchServer {
             session_count: result.session_count,
             total_matches: result.total_matches,
             exchanges,
-        };
-
-        match ToolOutput::json(&response) {
-            Ok(output) => output,
-            Err(e) => ToolOutput::error(format!("JSON error: {e}")),
-        }
-    }
-
-    // ========================================================================
-    // New Tool: monitor_project
-    // ========================================================================
-
-    /// Proactive cross-session insights: recurring error patterns.
-    #[tool(
-        description = "Surface ranked cross-session insights for a project on demand: recurring error patterns, each scored by an attention level (0-100). Answers 'what should I be watching out for in this project right now?'. Read-only."
-    )]
-    async fn monitor_project(&self, request: MonitorProjectRequest) -> ToolOutput {
-        use crate::analysis::monitor::{insights_from, rank, MonitorParams};
-
-        let claude_dir = match self.get_claude_dir() {
-            Ok(dir) => dir,
-            Err(e) => return ToolOutput::error(e),
-        };
-
-        let period = request.period.as_deref().unwrap_or("7d");
-        let cutoff = match period_cutoff(period) {
-            Ok(c) => c,
-            Err(e) => return ToolOutput::error(format!("Invalid period: {e}")),
-        };
-
-        let mut sessions = match claude_dir.all_sessions() {
-            Ok(s) => s,
-            Err(e) => return ToolOutput::error(format!("Failed to list sessions: {e}")),
-        };
-        sessions.retain(|s| s.project_path().contains(request.project.as_str()));
-        if request.no_subagents.unwrap_or(true) {
-            sessions.retain(|s| !s.is_subagent());
-        }
-        if let Some(cutoff_dt) = cutoff {
-            let cutoff_systime = std::time::SystemTime::from(cutoff_dt);
-            sessions.retain(|s| s.modified_time() >= cutoff_systime);
-        }
-
-        let params = MonitorParams {
-            min_occurrences: request.min_occurrences.unwrap_or(3),
-        };
-        let all = insights_from(&sessions, &params, self.max_file_size);
-        let top = rank(all, request.limit.unwrap_or(10));
-
-        let insights: Vec<MonitorInsightEntry> = top
-            .into_iter()
-            .map(|i| MonitorInsightEntry {
-                kind: i.kind.as_str().to_string(),
-                title: i.title,
-                evidence: i.evidence,
-                severity: i.severity,
-                fingerprint: i.fingerprint,
-            })
-            .collect();
-
-        let response = MonitorProjectResponse {
-            project_path: request.project,
-            period: period.to_string(),
-            count: insights.len(),
-            insights,
         };
 
         match ToolOutput::json(&response) {
