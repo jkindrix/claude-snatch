@@ -174,6 +174,7 @@ impl SourceProvider for FakeProvider {
                     record: rec,
                     outcome: RecordOutcome::Mapped(vec![e]),
                 }],
+                field_derivations: Vec::new(),
                 semantics: BTreeMap::new(),
                 diagnostics: IngestionDiagnostics {
                     mapped: 1,
@@ -353,6 +354,7 @@ impl SourceProvider for FakeProvider {
             entries,
             entry_origins,
             record_dispositions,
+            field_derivations: Vec::new(),
             semantics,
             diagnostics: IngestionDiagnostics {
                 mapped: 4,

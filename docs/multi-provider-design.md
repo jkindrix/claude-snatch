@@ -1144,6 +1144,78 @@ midturn steering, compaction reporting, qualified identity, and refusal of a
 Claude-only chunk request. Classic requests remain on their existing path and
 the full suite pins compatibility.
 
+## B3 slice 7 — exported derivation metadata (2026-07-17)
+
+The B3 exit audit caught one acceptance-invariant gap despite the green corpus:
+normalized JSON/JSONL carried synthesized Claude-shaped linkage fields but did
+not yet tell downstream machines which fields were adapter-derived. That would
+leave consumers free to mistake Codex ordering links for native causality.
+
+`ParsedSession` now declares typed session-level `FieldDerivation`s. Codex
+marks `uuid` and `message.id` as deterministic EntryId encodings, and
+`parentUuid`/`logicalParentUuid` as links to the previous normalized emission
+(stable ordering, explicitly not native causality); Claude declares none.
+Normalized JSON adds an optional versioned `provider` envelope containing the
+qualified identity, those derivations, record-accounting totals, and each
+rendered entry's deterministic id + native origins. JSONL uses a versioned
+metadata header followed by wrapped entry lines carrying the same per-entry
+derivation. Classic flagless exports have no ParsedSession bundle and retain
+their established shapes.
+
+Artifact paths are intentionally absent: origins use deterministic export-local
+labels (`artifact-0`, ...) so provenance remains useful without leaking source
+locators or smuggling native content around redaction. Uuid-less exact Unknown
+state records are correlated by the parsed-session bridge's parallel orphan-id
+vector, never by content equality. Production acquisition validates the full
+provenance graph before caching, and JSON/JSONL refuse invalid or unidentified
+provider entries. Integration coverage proves derived-field declarations,
+entry/origin completeness (including a uuid-less record), versioned JSONL
+wrappers, locator non-disclosure, and redaction with metadata retained.
+
+## Phase B3 exit audit (2026-07-17)
+
+**Result: B3 complete; C/D deliberately remain open.** The consolidated B3
+checklist was re-read against its original wording after slice 7, not inferred
+from aggregate green tests. Each item has a production consumer and biting
+coverage: mapped content + exact deterministic ids; ambient/per-item turn ids;
+emission-identity dedup and source-derived usage allocation; turn-boundary vs
+midturn prompt delivery; typed fork/spawn lineage and inherited-history
+projection; compaction/state carriers; complete-bundle CLI/MCP/API routes; all
+normalized export formats; and machine-readable JSON/JSONL derivation.
+
+The exit evidence is:
+
+- Full `just ci`: 922 unit tests, 75 CLI integration tests, corpus/property/
+  snapshot suites, clippy, doc tests, and rustdoc all green. Existing flagless
+  Claude snapshots remain unchanged; Claude raw-jsonl remains byte-identical.
+- Opt-in native conformance: 226/226 sessions parsed; zero errors, provenance
+  violations, count mismatches, or raced sessions. Record accounting:
+  163,886 mapped, 30,251 intentionally suppressed, 32,087 preserved Unknown,
+  0 recovered, 2 unparseable.
+- Semantic census: 1,707 boundary prompts + 2 midturn steering prompts; 16
+  copied-history/fork-lineage sessions; 59 compaction boundaries with 989
+  nested replacement items; 43 full + 1 patch world states; 87 legacy ghost
+  checkpoints. All allowed preserved-Unknown families are enumerated by the
+  conformance gate; any new unclassified family fails it.
+- Drift coverage states its boundary: zero unknown nested paths among 194,313
+  checked records; 12 unbaselined variants (1,456 records) explicitly not
+  checked; nine era buckets; zero active tails, missing discriminators, or
+  unreadable sessions.
+
+Acceptance invariants 1-3 and 5-8 are executable now. Invariant 4's
+single-session pieces are executable (replacement history never expands;
+inherited history has a new-work projection), while its actual cross-session
+non-double-count claim remains intentionally gated on D's union view rather
+than being claimed against a surface that does not exist yet.
+
+Explicit non-B3 work, carried forward rather than evaporated: semantic prompt
+chunking, lessons tuning, usage-observation consumers, reasoning/drift and
+compaction-window presentation, and the unpriced policy are Phase C; unified
+projects, default-provider policy, registry storage, and optional interchange
+exports are Phase D. Pre-envelope parsing remains unsupported by decision;
+legacy recognition/diagnostics/fidelity export are tested with the documented
+synthetic fixture because this live corpus contains no legacy session.
+
 ## Review round 26 (2026-07-17, same Codex agent — B3.1.3 audit: B3.1.4)
 
 Verdict: the preserve-all loophole is fixed and all ten controls are
@@ -1504,11 +1576,8 @@ Decisions taken in-implementation, FLAGGED FOR REVIEW:
 
 ## Open questions (to settle in-phase)
 
-1. Two-stream dedup policy details (B3, empirical — under the emission-
-   identity rule of invariant #3).
-2. Steered/queued prompt persisted shape (B3, empirical — inferred from
-   inject.rs code paths only).
-3. `world_state` / `ghost_snapshot` semantics (B3).
-4. Twin precedence + duplicate detection rules across roots (A.0).
-5. Annotation carrier field placements per semantic type (A.0).
-6. Default-provider switch to `all` (D, with union view).
+Resolved in their assigned phases: two-stream dedup, steering persistence,
+world-state/ghost semantics (B3); twin precedence and annotation carrier
+placement (A.0). The remaining product-policy question is deliberately D-only:
+whether the default provider switches to `all` once a truthful union view and
+provider-neutral registry storage exist.

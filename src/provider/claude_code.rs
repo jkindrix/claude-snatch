@@ -377,6 +377,7 @@ impl SourceProvider for ClaudeCodeProvider {
             entries,
             entry_origins,
             record_dispositions,
+            field_derivations: Vec::new(),
             semantics: BTreeMap::new(),
             diagnostics,
         })

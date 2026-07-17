@@ -356,6 +356,23 @@ fn validator_catches_broken_provenance() {
         .iter()
         .any(|v| v.contains("do not match disposition tallies")));
 
+    // A normalized field cannot have two contradictory derivation rules.
+    let mut parsed = good.clone();
+    parsed.field_derivations = vec![
+        FieldDerivation {
+            field: NormalizedField::Uuid,
+            method: FieldDerivationMethod::DeterministicEntryId,
+        },
+        FieldDerivation {
+            field: NormalizedField::Uuid,
+            method: FieldDerivationMethod::PreviousNormalizedEmission,
+        },
+    ];
+    assert!(parsed
+        .validate_provenance()
+        .iter()
+        .any(|v| v.contains("more than one derivation declaration")));
+
     // Semantics naming a nonexistent entry.
     let mut parsed = good;
     parsed.semantics.insert(
@@ -1178,6 +1195,71 @@ fn cached_parsed_session_preserves_bundle_across_miss_and_hit() {
     // The hit still builds a conversation with reachable semantics.
     let conversation = crate::reconstruction::Conversation::from_parsed_session(hit).unwrap();
     assert!(conversation.provider_bundle().is_some());
+}
+
+/// A provider whose parser returns a structurally invalid bundle. Production
+/// acquisition must reject it before it can enter the complete-bundle cache.
+struct InvalidProvenanceProvider;
+
+impl SourceProvider for InvalidProvenanceProvider {
+    fn id(&self) -> ProviderId {
+        FakeProvider.id()
+    }
+    fn capabilities(&self) -> ProviderCapabilities {
+        FakeProvider.capabilities()
+    }
+    fn sessions(&self) -> Result<Vec<SessionDescriptor>, ProviderError> {
+        FakeProvider.sessions()
+    }
+    fn lineage(&self) -> Result<Vec<LineageEdge>, ProviderError> {
+        FakeProvider.lineage()
+    }
+    fn parse(&self, key: &LogicalSessionKey) -> Result<ParsedSession, ProviderError> {
+        let mut parsed = FakeProvider.parse(key)?;
+        parsed
+            .record_dispositions
+            .push(parsed.record_dispositions[0].clone());
+        Ok(parsed)
+    }
+    fn parse_cache_token(&self, key: &LogicalSessionKey) -> Result<String, ProviderError> {
+        FakeProvider.parse_cache_token(key)
+    }
+    fn write_archive(
+        &self,
+        key: &LogicalSessionKey,
+        out: &mut dyn std::io::Write,
+    ) -> Result<(), ProviderError> {
+        FakeProvider.write_archive(key, out)
+    }
+    fn write_native(
+        &self,
+        artifact: &ArtifactId,
+        out: &mut dyn std::io::Write,
+    ) -> Result<(), ProviderError> {
+        FakeProvider.write_native(artifact, out)
+    }
+    fn write_raw_jsonl(
+        &self,
+        key: &LogicalSessionKey,
+        out: &mut dyn std::io::Write,
+    ) -> Result<(), ProviderError> {
+        FakeProvider.write_raw_jsonl(key, out)
+    }
+}
+
+#[test]
+fn cached_parsed_session_rejects_invalid_provider_output_before_caching() {
+    use super::registry::cached_parsed_session;
+    let cache = crate::cache::CacheManager::new(&crate::config::CacheConfig {
+        enabled: true,
+        ..Default::default()
+    });
+    let key = multi_artifact_key();
+    let error = cached_parsed_session(&cache, &InvalidProvenanceProvider, &key)
+        .expect_err("invalid provider bundle must be refused")
+        .to_string();
+    assert!(error.contains("invalid normalized provenance"), "{error}");
+    assert_eq!(cache.provider_sessions.stats().entry_count, 0);
 }
 
 // ============================================================================

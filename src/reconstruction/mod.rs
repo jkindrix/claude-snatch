@@ -131,6 +131,10 @@ pub struct Conversation {
     ///
     /// [`EntryId`]: crate::provider::EntryId
     entry_ids_by_uuid: HashMap<String, crate::provider::EntryId>,
+    /// Deterministic ids for `orphan_entries`, in the same order. Populated
+    /// only by `from_parsed_session`; this preserves provenance for exact
+    /// Unknown/state records that intentionally carry no synthesized uuid.
+    orphan_entry_ids: Vec<crate::provider::EntryId>,
 }
 
 /// A dropped duplicate-UUID entry, kept for diagnostics.
@@ -573,6 +577,7 @@ impl Conversation {
             source: None,
             bundle: None,
             entry_ids_by_uuid: HashMap::new(),
+            orphan_entry_ids: Vec::new(),
         })
     }
 
@@ -618,6 +623,12 @@ impl Conversation {
             }
         }
         conversation.entry_ids_by_uuid = by_uuid;
+        conversation.orphan_entry_ids = parsed
+            .entries
+            .iter()
+            .filter(|entry| entry.entry.uuid().is_none())
+            .map(|entry| entry.id.clone())
+            .collect();
         conversation.bundle = Some(parsed);
         Ok(conversation)
     }
@@ -775,6 +786,37 @@ impl Conversation {
             entries.extend(self.main_thread_entries());
         } else {
             entries.extend(self.chronological_entries());
+        }
+        entries
+    }
+
+    /// Entries for export paired with deterministic provider ids when this
+    /// conversation retains a [`crate::provider::ParsedSession`]. Ordering is identical to
+    /// [`Conversation::entries_for_export`].
+    ///
+    /// Uuid-less entries use the parallel orphan-id vector populated by the
+    /// parsed-session bridge; uuid-bearing entries use the keep-first node
+    /// correlation. This avoids content-equality matching, which is ambiguous
+    /// for legitimately repeated native emissions.
+    #[must_use]
+    pub fn identified_entries_for_export(
+        &self,
+        main_thread_only: bool,
+    ) -> Vec<(&LogEntry, Option<&crate::provider::EntryId>)> {
+        let mut entries = Vec::new();
+        for (index, entry) in self.orphan_entries.iter().enumerate() {
+            entries.push((entry, self.orphan_entry_ids.get(index)));
+        }
+        let thread = if main_thread_only {
+            self.main_thread_entries()
+        } else {
+            self.chronological_entries()
+        };
+        for entry in thread {
+            let id = entry
+                .uuid()
+                .and_then(|uuid| self.entry_ids_by_uuid.get(uuid));
+            entries.push((entry, id));
         }
         entries
     }

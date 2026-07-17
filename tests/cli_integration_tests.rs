@@ -1726,6 +1726,108 @@ mod codex_provider_cli {
             .unwrap();
         assert!(messages > 0, "SQLite normalized export contains entries");
     }
+
+    #[test]
+    fn normalized_json_exports_machine_readable_derivation_without_source_paths() {
+        let claude = setup_fixture_dir();
+        let (codex, _) = setup_codex_home();
+        let target = format!("codex:{CODEX_THREAD}");
+
+        let json = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["export", &target, "-f", "json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let json_text = String::from_utf8(json).unwrap();
+        assert!(
+            !json_text.contains(&codex.path().to_string_lossy().to_string()),
+            "normalized provenance must not leak the source locator"
+        );
+        let value: serde_json::Value = serde_json::from_str(&json_text).unwrap();
+        let provider = &value["provider"];
+        assert_eq!(provider["format_version"], 1);
+        assert_eq!(provider["id"], "codex");
+        assert_eq!(provider["qualified_session_id"], target);
+        assert_eq!(provider["unidentified_entry_count"], 0);
+        let fields: Vec<_> = provider["field_derivations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["field"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            fields,
+            ["uuid", "parentUuid", "logicalParentUuid", "message.id"]
+        );
+        let derivations = provider["entries"].as_array().unwrap();
+        assert_eq!(
+            derivations.len(),
+            value["entries"].as_array().unwrap().len()
+        );
+        assert!(derivations.iter().all(|entry| {
+            entry["entry_id"].as_str().is_some()
+                && entry["origins"]
+                    .as_array()
+                    .is_some_and(|origins| !origins.is_empty())
+        }));
+        assert!(derivations
+            .iter()
+            .flat_map(|entry| {
+                entry["origins"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|origin| origin["artifact"].as_str().unwrap())
+            })
+            .all(|artifact| artifact.starts_with("artifact-")));
+
+        let jsonl = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["export", &format!("codex:{CODEX_THREAD}"), "-f", "jsonl"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let jsonl_text = String::from_utf8(jsonl).unwrap();
+        assert!(!jsonl_text.contains(&codex.path().to_string_lossy().to_string()));
+        let lines: Vec<serde_json::Value> = jsonl_text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines[0]["type"], "snatch_normalized_metadata");
+        assert_eq!(lines[0]["provider"]["id"], "codex");
+        assert!(lines[1..].iter().all(|line| {
+            line["type"] == "snatch_normalized_entry"
+                && line["derivation"]["entry_id"].as_str().is_some()
+                && line["entry"].is_object()
+        }));
+
+        let redacted = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "export",
+                &format!("codex:{CODEX_THREAD}"),
+                "-f",
+                "json",
+                "--redact",
+                "all",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let redacted = String::from_utf8(redacted).unwrap();
+        assert!(redacted.contains("\"id\":\"codex\""));
+        assert!(!redacted.contains("user@example.com"));
+    }
 }
 
 #[cfg(feature = "codex")]

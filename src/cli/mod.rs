@@ -909,7 +909,8 @@ pub enum ExportFormatArg {
     Text,
     /// JSONL: normalized, content-preserving round-trip from snatch's parsed
     /// model. Complete and structured, but not byte-for-byte (fields may be
-    /// reordered; orphan entries are emitted first).
+    /// reordered; orphan entries are emitted first). Provider-routed sessions
+    /// use a versioned metadata header and entry wrappers carrying derivation.
     Jsonl,
     /// raw-jsonl: byte-faithful passthrough of the session's original JSONL
     /// record stream, any provider (no parsing, filtering, redaction, or

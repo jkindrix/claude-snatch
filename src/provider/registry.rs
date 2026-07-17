@@ -566,7 +566,20 @@ pub fn cached_parsed_session(
     key: &LogicalSessionKey,
 ) -> crate::error::Result<std::sync::Arc<super::ParsedSession>> {
     let token = provider.parse_cache_token(key)?;
-    cache.get_or_parse_provider_session(key, &token, || Ok(provider.parse(key)?))
+    cache.get_or_parse_provider_session(key, &token, || {
+        let parsed = provider.parse(key)?;
+        let violations = parsed.validate_provenance();
+        if !violations.is_empty() {
+            return Err(ProviderError::Other(format!(
+                "provider '{}' returned invalid normalized provenance ({} violation{})",
+                provider.id(),
+                violations.len(),
+                if violations.len() == 1 { "" } else { "s" }
+            ))
+            .into());
+        }
+        Ok(parsed)
+    })
 }
 
 /// Uniqueness rule shared by qualified-prefix and unqualified resolution:

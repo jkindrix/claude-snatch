@@ -7,13 +7,14 @@
 //! content-preserving rather than strictly lossless. Suitable for archival
 //! and programmatic processing.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::analytics::SessionAnalytics;
-use crate::error::Result;
+use crate::error::{Result, SnatchError};
 use crate::model::LogEntry;
 use crate::reconstruction::Conversation;
 
@@ -107,17 +108,32 @@ impl Exporter for JsonExporter {
         options: &ExportOptions,
     ) -> Result<()> {
         if self.use_envelope {
+            validate_provider_export_bundle(conversation)?;
             let mut export = ConversationExport::from_conversation(
                 conversation,
                 options,
                 self.include_analytics,
                 self.include_tree_metadata,
             );
+            if export
+                .provider
+                .as_ref()
+                .is_some_and(|provider| provider.unidentified_entry_count != 0)
+            {
+                return Err(SnatchError::export(
+                    "provider-normalized JSON contains an entry without deterministic identity",
+                ));
+            }
             export.chain = self.chain.clone();
 
             let value = serde_json::to_value(&export)?;
             self.write_json(writer, &value)?;
         } else {
+            if conversation.provider_bundle().is_some() {
+                return Err(SnatchError::export(
+                    "provider-normalized JSON requires the versioned envelope so derivation metadata is not lost",
+                ));
+            }
             // Export entries directly as array
             let entries = conversation.entries_for_export(options.main_thread_only);
 
@@ -141,6 +157,21 @@ impl Exporter for JsonExporter {
         self.write_json(writer, &value)?;
         Ok(())
     }
+}
+
+fn validate_provider_export_bundle(conversation: &Conversation) -> Result<()> {
+    let Some(bundle) = conversation.provider_bundle() else {
+        return Ok(());
+    };
+    let violations = bundle.validate_provenance();
+    if violations.is_empty() {
+        return Ok(());
+    }
+    Err(SnatchError::export(format!(
+        "provider-normalized export has invalid provenance ({} violation{})",
+        violations.len(),
+        if violations.len() == 1 { "" } else { "s" }
+    )))
 }
 
 /// Check if an entry should be included based on options.
@@ -241,6 +272,11 @@ pub struct ConversationExport {
     /// Resume-chain metadata, present only when a multi-file chain was merged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chain: Option<ChainExportMeta>,
+    /// Provider-qualified identity and per-entry derivation/provenance for
+    /// conversations normalized through a SourceProvider. Absent on classic
+    /// Claude paths, preserving their established envelope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderExportMetadata>,
     /// Analytics summary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub analytics: Option<ExportAnalytics>,
@@ -249,6 +285,187 @@ pub struct ConversationExport {
     pub tree: Option<TreeInfo>,
     /// The conversation entries.
     pub entries: Vec<FilteredEntry>,
+}
+
+/// Machine-readable provider and derivation metadata for normalized exports.
+///
+/// Artifact references are opaque export-local labels rather than source
+/// locators: provenance remains useful without leaking filesystem paths or
+/// duplicating native content into a redacted normalized export.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderExportMetadata {
+    /// Version of this normalized provider-metadata envelope.
+    pub format_version: u32,
+    /// Stable provider id (`claude-code`, `codex`, ...).
+    pub id: String,
+    /// Reversible provider-qualified logical session identity.
+    pub qualified_session_id: String,
+    /// Export-local artifact labels and non-sensitive structural attributes.
+    pub artifacts: Vec<ExportArtifactRef>,
+    /// Claude-shaped fields synthesized by the adapter, if any.
+    pub field_derivations: Vec<ExportFieldDerivation>,
+    /// Native-record accounting from the complete parsed bundle.
+    pub record_accounting: ExportRecordAccounting,
+    /// Entries in the rendered view that unexpectedly lacked deterministic
+    /// identity. Valid provider bundles must report zero.
+    pub unidentified_entry_count: usize,
+    /// Per-rendered-entry identity and source-record derivation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<EntryDerivationExport>,
+}
+
+/// Non-sensitive export-local reference to one source artifact.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportArtifactRef {
+    /// Export-local opaque label (`artifact-0`, ...).
+    pub reference: String,
+    /// Provider-neutral physical form.
+    pub form: String,
+    /// Whether the provider classified this artifact as archived.
+    pub archived: bool,
+}
+
+/// One normalized field synthesized by an adapter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportFieldDerivation {
+    /// Serialized normalized field path.
+    pub field: String,
+    /// Stable derivation method identifier.
+    pub method: String,
+}
+
+/// Aggregate native-record disposition counts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportRecordAccounting {
+    /// Records normalized into entries.
+    pub mapped: usize,
+    /// Records intentionally suppressed with a reason.
+    pub suppressed: usize,
+    /// Parseable-but-unmodeled records retained as Unknown entries.
+    pub unknown: usize,
+    /// Damaged records from which entries were recovered.
+    pub recovered: usize,
+    /// Records that could not be parsed or recovered.
+    pub unparseable: usize,
+}
+
+/// One normalized entry's deterministic identity and native origins.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntryDerivationExport {
+    /// Reversible deterministic normalized entry identity.
+    pub entry_id: String,
+    /// Native records that produced the entry.
+    pub origins: Vec<ExportRecordRef>,
+}
+
+/// Export-local reference to a native record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportRecordRef {
+    /// Export-local artifact label.
+    pub artifact: String,
+    /// Zero-based native record ordinal within that artifact.
+    pub ordinal: u64,
+}
+
+impl ProviderExportMetadata {
+    fn from_conversation(
+        conversation: &Conversation,
+        main_thread_only: bool,
+        options: Option<&ExportOptions>,
+    ) -> Option<Self> {
+        let bundle = conversation.provider_bundle()?;
+        let mut artifacts: Vec<_> = bundle.descriptor.artifacts.iter().collect();
+        artifacts.sort_by_key(|artifact| &artifact.snapshot.id);
+        let artifact_labels: BTreeMap<_, _> = artifacts
+            .iter()
+            .enumerate()
+            .map(|(index, artifact)| (artifact.snapshot.id.clone(), format!("artifact-{index}")))
+            .collect();
+        let artifacts = artifacts
+            .into_iter()
+            .enumerate()
+            .map(|(index, artifact)| ExportArtifactRef {
+                reference: format!("artifact-{index}"),
+                form: match &artifact.form {
+                    crate::provider::ArtifactForm::PlainFile => "plain_file".to_string(),
+                    crate::provider::ArtifactForm::CompressedFile => "compressed_file".to_string(),
+                    crate::provider::ArtifactForm::Database => "database".to_string(),
+                    crate::provider::ArtifactForm::Other(_) => "other".to_string(),
+                },
+                archived: artifact.archived,
+            })
+            .collect();
+
+        let field_derivations = bundle
+            .field_derivations
+            .iter()
+            .map(|derivation| ExportFieldDerivation {
+                field: match derivation.field {
+                    crate::provider::NormalizedField::Uuid => "uuid",
+                    crate::provider::NormalizedField::ParentUuid => "parentUuid",
+                    crate::provider::NormalizedField::LogicalParentUuid => "logicalParentUuid",
+                    crate::provider::NormalizedField::MessageId => "message.id",
+                }
+                .to_string(),
+                method: match derivation.method {
+                    crate::provider::FieldDerivationMethod::DeterministicEntryId => {
+                        "deterministic_entry_id"
+                    }
+                    crate::provider::FieldDerivationMethod::PreviousNormalizedEmission => {
+                        "previous_normalized_emission"
+                    }
+                }
+                .to_string(),
+            })
+            .collect();
+
+        let mut entries = Vec::new();
+        let mut unidentified_entry_count = 0;
+        for (entry, id) in conversation.identified_entries_for_export(main_thread_only) {
+            if options.is_some_and(|options| !should_include_entry(entry, options)) {
+                continue;
+            }
+            let Some(id) = id else {
+                unidentified_entry_count += 1;
+                continue;
+            };
+            let origins = bundle
+                .entry_origins
+                .get(id)
+                .into_iter()
+                .flatten()
+                .map(|record| ExportRecordRef {
+                    artifact: artifact_labels
+                        .get(&record.artifact)
+                        .cloned()
+                        .unwrap_or_else(|| "unlisted-artifact".to_string()),
+                    ordinal: record.ordinal,
+                })
+                .collect();
+            entries.push(EntryDerivationExport {
+                entry_id: id.to_string(),
+                origins,
+            });
+        }
+
+        let diagnostics = &bundle.diagnostics;
+        Some(Self {
+            format_version: 1,
+            id: bundle.descriptor.key.provider.to_string(),
+            qualified_session_id: bundle.descriptor.key.to_string(),
+            artifacts,
+            field_derivations,
+            record_accounting: ExportRecordAccounting {
+                mapped: diagnostics.mapped,
+                suppressed: diagnostics.suppressed,
+                unknown: diagnostics.unknown,
+                recovered: diagnostics.recovered,
+                unparseable: diagnostics.unparseable,
+            },
+            unidentified_entry_count,
+            entries,
+        })
+    }
 }
 
 impl ConversationExport {
@@ -329,6 +546,11 @@ impl ConversationExport {
             metadata,
             // Set by the exporter (it knows whether a chain was merged).
             chain: None,
+            provider: ProviderExportMetadata::from_conversation(
+                conversation,
+                options.main_thread_only,
+                Some(options),
+            ),
             analytics,
             tree,
             entries: filtered_entries,
@@ -573,6 +795,11 @@ impl StreamingJsonExporter {
         writer: &mut W,
         options: &ExportOptions,
     ) -> Result<()> {
+        if conversation.provider_bundle().is_some() {
+            return Err(SnatchError::export(
+                "streaming JSON arrays cannot represent provider derivation metadata; use JsonExporter or JSONL",
+            ));
+        }
         let entries = if options.main_thread_only {
             conversation.main_thread_entries()
         } else {
@@ -670,7 +897,12 @@ pub fn entries_to_jsonl<W: Write>(entries: &[LogEntry], writer: &mut W) -> Resul
     Ok(())
 }
 
-/// Export conversation to JSONL format (one entry per line).
+/// Export conversation to JSONL format.
+///
+/// Classic conversations remain one native-shaped normalized entry per line.
+/// Provider-bundle conversations use a versioned metadata header followed by
+/// versioned entry wrappers so provider identity and derivation are
+/// machine-readable (acceptance invariant #7).
 pub fn conversation_to_jsonl<W: Write>(
     conversation: &Conversation,
     writer: &mut W,
@@ -680,11 +912,43 @@ pub fn conversation_to_jsonl<W: Write>(
     // entries (compaction summaries and, after retention, file-history-snapshot
     // / last-prompt / mode / ai-title / permission-mode / queue-operation /
     // turn-end) survive the round-trip instead of being silently dropped.
-    let entries = conversation.entries_for_export(main_thread_only);
-
-    for entry in entries {
-        let json = serde_json::to_string(entry)?;
-        writeln!(writer, "{json}")?;
+    validate_provider_export_bundle(conversation)?;
+    if let Some(mut metadata) =
+        ProviderExportMetadata::from_conversation(conversation, main_thread_only, None)
+    {
+        if metadata.unidentified_entry_count != 0 {
+            return Err(SnatchError::export(
+                "provider-normalized JSONL contains an entry without deterministic identity",
+            ));
+        }
+        let derivations: BTreeMap<_, _> = metadata
+            .entries
+            .iter()
+            .cloned()
+            .map(|entry| (entry.entry_id.clone(), entry))
+            .collect();
+        metadata.entries.clear();
+        let header = serde_json::json!({
+            "type": "snatch_normalized_metadata",
+            "provider": metadata,
+        });
+        writeln!(writer, "{}", serde_json::to_string(&header)?)?;
+        for (entry, id) in conversation.identified_entries_for_export(main_thread_only) {
+            let derivation = id.and_then(|id| derivations.get(&id.to_string()));
+            let wrapped = serde_json::json!({
+                "type": "snatch_normalized_entry",
+                "format_version": 1,
+                "derivation": derivation,
+                "entry": entry,
+            });
+            writeln!(writer, "{}", serde_json::to_string(&wrapped)?)?;
+        }
+    } else {
+        let entries = conversation.entries_for_export(main_thread_only);
+        for entry in entries {
+            let json = serde_json::to_string(entry)?;
+            writeln!(writer, "{json}")?;
+        }
     }
     Ok(())
 }
@@ -816,6 +1080,14 @@ impl JsonlDiff {
 mod tests {
     use super::*;
 
+    fn fake_provider_conversation() -> Conversation {
+        use crate::provider::SourceProvider as _;
+        let parsed = crate::provider::fake::FakeProvider
+            .parse(&crate::provider::fake::multi_artifact_key())
+            .unwrap();
+        Conversation::from_parsed_session(std::sync::Arc::new(parsed)).unwrap()
+    }
+
     #[test]
     fn test_json_exporter_builder() {
         let exporter = JsonExporter::new()
@@ -826,6 +1098,32 @@ mod tests {
         assert!(exporter.pretty);
         assert!(!exporter.include_analytics);
         assert!(!exporter.use_envelope);
+    }
+
+    #[test]
+    fn provider_json_refuses_metadata_stripping_export_modes() {
+        let conversation = fake_provider_conversation();
+        let options = ExportOptions::default();
+        let mut out = Vec::new();
+        let direct = JsonExporter::new()
+            .with_envelope(false)
+            .export_conversation(&conversation, &mut out, &options)
+            .expect_err("direct arrays would strip provider derivation")
+            .to_string();
+        assert!(
+            direct.contains("requires the versioned envelope"),
+            "{direct}"
+        );
+
+        let mut streaming = StreamingJsonExporter::new();
+        let error = streaming
+            .stream_conversation(&conversation, &mut out, &options)
+            .expect_err("streaming arrays would strip provider derivation")
+            .to_string();
+        assert!(
+            error.contains("cannot represent provider derivation"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -23,10 +23,11 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use super::{
-    ActivityKind, ArtifactForm, ArtifactId, ArtifactRevision, ArtifactSnapshot,
-    IngestionDiagnostics, LineageEdge, LineageEdgeKind, LogicalSessionKey, ParseDiagnostic,
-    ParsedSession, ProviderCapabilities, ProviderError, ProviderId, RecordDisposition,
-    RecordOutcome, RecordRef, SessionArtifact, SessionDescriptor, SessionNamespace, SourceProvider,
+    ActivityKind, ArtifactForm, ArtifactId, ArtifactRevision, ArtifactSnapshot, FieldDerivation,
+    FieldDerivationMethod, IngestionDiagnostics, LineageEdge, LineageEdgeKind, LogicalSessionKey,
+    NormalizedField, ParseDiagnostic, ParsedSession, ProviderCapabilities, ProviderError,
+    ProviderId, RecordDisposition, RecordOutcome, RecordRef, SessionArtifact, SessionDescriptor,
+    SessionNamespace, SourceProvider,
 };
 
 /// Default cap on decompressed bytes per session (decompression-bomb guard).
@@ -1260,6 +1261,24 @@ impl SourceProvider for CodexProvider {
             entries: normalized.entries,
             entry_origins: normalized.entry_origins,
             record_dispositions,
+            field_derivations: vec![
+                FieldDerivation {
+                    field: NormalizedField::Uuid,
+                    method: FieldDerivationMethod::DeterministicEntryId,
+                },
+                FieldDerivation {
+                    field: NormalizedField::ParentUuid,
+                    method: FieldDerivationMethod::PreviousNormalizedEmission,
+                },
+                FieldDerivation {
+                    field: NormalizedField::LogicalParentUuid,
+                    method: FieldDerivationMethod::PreviousNormalizedEmission,
+                },
+                FieldDerivation {
+                    field: NormalizedField::MessageId,
+                    method: FieldDerivationMethod::DeterministicEntryId,
+                },
+            ],
             semantics: normalized.semantics,
             diagnostics,
         })
@@ -3424,6 +3443,7 @@ mod tests {
 
         let first = cached_parsed_session(&cache, &p, &key(THREAD_A)).unwrap();
         let n = first.entries.len();
+        let original_ids: Vec<_> = first.entries.iter().map(|entry| entry.id.clone()).collect();
         assert_eq!(n, 3, "meta + brand-new preserved, user message mapped");
         assert_eq!(
             first.record_dispositions.len(),
@@ -3464,6 +3484,16 @@ mod tests {
             after.entries.len(),
             n + 1,
             "reparse must see the appended record"
+        );
+        assert_eq!(
+            after
+                .entries
+                .iter()
+                .take(original_ids.len())
+                .map(|entry| &entry.id)
+                .collect::<Vec<_>>(),
+            original_ids.iter().collect::<Vec<_>>(),
+            "append-only growth must not renumber existing normalized ids"
         );
         assert_eq!(
             after.record_dispositions.len(),

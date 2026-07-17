@@ -487,6 +487,43 @@ pub struct IngestionDiagnostics {
     pub unparseable: usize,
 }
 
+/// Canonical field in a normalized [`LogEntry`] whose value was synthesized
+/// by an adapter rather than copied from a native provider record.
+///
+/// This is deliberately machine-readable: normalized JSON consumers must not
+/// have to infer whether Claude-shaped linkage fields represent native
+/// causality or adapter-derived ordering (acceptance invariant #7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NormalizedField {
+    /// Top-level `uuid`.
+    Uuid,
+    /// Top-level `parentUuid`.
+    ParentUuid,
+    /// Top-level `logicalParentUuid`.
+    LogicalParentUuid,
+    /// Nested assistant `message.id`.
+    MessageId,
+}
+
+/// How a normalized field was derived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FieldDerivationMethod {
+    /// The reversible, provider-qualified deterministic [`EntryId`] encoding.
+    DeterministicEntryId,
+    /// The preceding normalized emission, used only to impose stable ordering;
+    /// it is not a native causal relationship.
+    PreviousNormalizedEmission,
+}
+
+/// One adapter-declared synthesized field and its derivation rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FieldDerivation {
+    /// Which normalized field is synthesized.
+    pub field: NormalizedField,
+    /// The deterministic rule used to synthesize it.
+    pub method: FieldDerivationMethod,
+}
+
 // ============================================================================
 // Semantic annotations (provider-neutral axes; adapters emit these)
 // ============================================================================
@@ -785,6 +822,9 @@ pub struct ParsedSession {
     pub entry_origins: BTreeMap<EntryId, Vec<RecordRef>>,
     /// Exactly one disposition per native record.
     pub record_dispositions: Vec<RecordDisposition>,
+    /// Session-level declaration of normalized fields synthesized by this
+    /// adapter. Empty means the adapter preserved those fields natively.
+    pub field_derivations: Vec<FieldDerivation>,
     /// Adapter-asserted semantics, keyed by entry id.
     pub semantics: BTreeMap<EntryId, EntrySemantics>,
     /// Ingestion counters (cross-checked against dispositions).
@@ -805,6 +845,16 @@ impl ParsedSession {
     /// disposition tallies.
     pub fn validate_provenance(&self) -> Vec<String> {
         let mut violations = self.descriptor.validate();
+
+        let mut declared_fields = BTreeSet::new();
+        for derivation in &self.field_derivations {
+            if !declared_fields.insert(derivation.field) {
+                violations.push(format!(
+                    "normalized field {:?} has more than one derivation declaration",
+                    derivation.field
+                ));
+            }
+        }
 
         // Entry ids: unique, and the authoritative id set.
         let mut entry_ids: BTreeSet<&EntryId> = BTreeSet::new();
