@@ -338,7 +338,8 @@ impl ParsedSession {
         let mut violations = Vec::new();
 
         let mut mapped_records: BTreeMap<&RecordRef, &Vec<EntryId>> = BTreeMap::new();
-        let mut seen: std::collections::BTreeSet<&RecordRef> = Default::default();
+        let mut seen: std::collections::BTreeSet<&RecordRef> =
+            std::collections::BTreeSet::default();
         for d in &self.record_dispositions {
             if !seen.insert(&d.record) {
                 violations.push(format!(
