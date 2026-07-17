@@ -889,6 +889,8 @@ pub trait SourceProvider {
 }
 
 pub mod claude_code;
+#[cfg(feature = "codex")]
+pub mod codex;
 
 #[cfg(test)]
 pub(crate) mod fake;

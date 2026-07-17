@@ -321,7 +321,25 @@ directory walks.
   consumers arrive, a centralized Conversation::from_parsed_session(...)
   path is preferred so provenance, semantics, and source cannot be
   independently forgotten.
-- **Phase B1 — Codex inventory & decoding.** Discovery of plain, archived,
+- **Phase B1 — Codex inventory & decoding.** Opening guardrails (round 11):
+  the provider cache token must cover the selected ArtifactId +
+  ArtifactRevision (or an aggregate provider snapshot token over every
+  artifact affecting parsing) BEFORE B1's first production cache consumer —
+  a changed preferred artifact with a coincidentally identical revision
+  string must not hit stale content (test required). zstd 0.13.3
+  (default-features off) behind `codex = ["dep:zstd"]` gating the WHOLE
+  provider — no configuration may silently ignore compressed sessions;
+  codex enabled by default at release. Decode through a streaming reader
+  with compressed-input and decompressed-output limits plus window_log_max
+  (never decode_all); test limit crossing, truncation, checksum failure,
+  and plain/.zst normalization equivalence. Fixture policy: synthetic and
+  PII-free with a manifest (Codex version/format family, sanitization or
+  synthesis method, expected diagnostics); at least one sanitized .zst
+  generated EXTERNALLY (interop must not be tested solely against this
+  library's own encoder); fixtures for active truncation, unknown nested
+  fields, duplicate streams, legacy detection, and decompression limits; a
+  separate opt-in real-corpus conformance test emitting aggregate results
+  only, never in public CI. Discovery of plain, archived,
   compressed (`.zst`, with decompressed-size limits), active/truncated, and
   legacy (pre-envelope) files; envelope parser; native diagnostics. Legacy
   files: recognized, inventoried, diagnosable, native/raw-exportable;
@@ -527,6 +545,35 @@ explicitly moved to B2/B3 (recorded above). (3) The construction-site
 deferral inventory now includes MCP and library/API sites, with a
 centralized from_parsed_session(...) path preferred when consumers arrive.
 18 cache tests (was 16), 28 provider tests.
+
+## Review round 11 (2026-07-17, same Codex agent — B1 greenlight)
+
+Phase B1 greenlit; no further architecture cycle. Adopted as B1 opening
+guardrails (recorded in the Phase B1 section): aggregate cache revision
+token before the first production cache consumer; zstd 0.13.3
+(default-features off, verified on crates.io: 330M downloads) behind a
+whole-provider `codex` feature, default-on at release; streaming decode
+with input/output limits and window_log_max; the expanded fixture policy
+(manifest, external .zst, truncation/drift/duplicate/legacy/limit
+fixtures, opt-in aggregate-only real-corpus conformance). Next checkpoint:
+after Codex discovery, decoding, diagnostics, and sanitized fixtures exist.
+
+## Phase B1a shipped (2026-07-17)
+
+CodexProvider (feature `codex`, zstd 0.13.3 default-features-off):
+discovery across sessions/ + archived_sessions/ with plain/.zst twin
+merging and filename thread-id parsing; envelope-vs-legacy format sniffing;
+B1-honest parse (envelope records preserved as LogEntry::Unknown with
+Unknown dispositions — normalization is B3); legacy files inventoried and
+native/raw-exportable but refused for normalization; streaming zstd decode
+with window_log_max=31 and a decompressed-output cap (limit-crossing,
+truncation, twin-equivalence tested); framed multipart archive; fork/spawn
+lineage from first-meta fields; opt-in aggregate-only real-corpus
+conformance test (never in CI). Real-corpus run: 224/224 sessions parsed,
+0 errors, 0 provenance violations, 222,108 records preserved, 2 unparseable
+lines (matching the original census). Observation for B3: this corpus's
+fork files carry no forked_from_id in their first meta (field postdates
+them) — fork lineage needs the embedded-second-meta heuristic.
 
 ## Open questions (to settle in-phase)
 

@@ -58,6 +58,10 @@ similar = "3.1"
 # JSON Schema
 jsonschema = { version = "0.47", default-features = false }
 
+# Codex provider: streaming zstd decode of cold rollout files (compiled only
+# with the `codex` feature; default features off per review round 11).
+zstd = { version = "0.13.3", default-features = false, optional = true }
+
 # MCP Server (Model Context Protocol)
 mcpkit = { version = "0.6", optional = true }
 
@@ -125,6 +129,7 @@ default = []
 tracing = []
 mmap = ["dep:memmap2"]  # Memory-mapped file parsing for very large JSONL files
 mcp = ["dep:mcpkit"]  # MCP server mode for AI model integration
+codex = ["dep:zstd"]  # OpenAI Codex CLI provider (rollout ingestion; default-on at release)
 
 [lints.rust]
 # Use deny instead of forbid to allow targeted unsafe in mmap feature
