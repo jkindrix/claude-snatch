@@ -126,9 +126,13 @@ ordering, never native causality**.
 - The parse cache (currently keyed by path+mtime, src/cache/mod.rs) is re-keyed
   by `LogicalSessionKey` + a provider-supplied revision token (path/size/mtime for
   files; row/index revision for databases).
-- Normalized entry ids are deterministic, unique, and derived from the full
-  logical key (namespace always included, for injectivity):
-  `<provider>:<namespace>:<native-id>:<record-ordinal>:<subindex>`. `turn_id` is retained as
+- Normalized entry ids are deterministic, unique, and **structured**
+  (`EntryId { session: LogicalSessionKey, ordinal, subindex }`) — identity
+  never depends on string encoding. The external encoding escapes segments
+  (`%`→`%25`, `:`→`%3A`) and always includes the namespace, so hostile
+  delimiters cannot make distinct keys render identically; the qualified
+  display form of session keys escapes the same way. Every entry id must
+  belong to its session's descriptor key (validated). `turn_id` is retained as
   its own canonical field — it is NOT mapped onto `message.id`, which snatch
   uses to group streaming chunks and count assistant messages (overloading it
   would silently redefine "assistant message" as "turn").
@@ -153,11 +157,17 @@ The enums below are illustrative, not frozen:
 - Usage semantics need **scope and aggregation as separate dimensions**:
   Codex `token_count` events carry both last-call usage and
   session-cumulative usage side by side.
-- `LineageEdgeKind::{Continuation, Fork, Spawn}` — session lineage is a typed
-  graph, not a generic "chain": CC resume chains are Continuation edges, Codex
-  forks are Fork edges, subagents are Spawn edges. Compaction window links are
-  intra-session metadata, not lineage edges.
-- `CompactionKind` + window metadata.
+- `LineageEdge { from, to, kind: LineageEdgeKind::{Continuation, Fork,
+  Spawn} }` — session lineage is a typed graph with a real carrier:
+  `SourceProvider::lineage()` returns the corpus's edges (CC resume chains
+  are Continuation, Codex forks Fork, subagents Spawn). Compaction window
+  links are intra-session metadata, not lineage edges.
+- Tool semantics are **per tool call** (keyed by native call id — one entry
+  can carry several calls with different classifications); usage
+  observations carry **their own values** alongside scope+aggregation so
+  annotations are never separated from the numbers they describe.
+- `CompactionKind` exists; the carrier for compaction window metadata is
+  explicitly deferred to Phase B3/C.
 
 Provider identity remains available for reporting and exceptional cases, but
 is not the primary semantic switch. Two gates stay table-driven rather than
@@ -410,6 +420,22 @@ carriers exist (EntrySemantics sidecar: PromptSemantics, ToolSemantics with
 ToolKind + native name, UsageObservation) — emitted by the fake, consumed by
 tests; (6) twin-precedence tie-breaking uses stable ArtifactId ordering with
 reordering-stability and descriptor-validation tests.
+
+## Review round 5 (2026-07-17, same Codex agent — A.0 re-review)
+
+Three blockers, all fixed in a scoped amendment with adversarial tests:
+(1) qualified ids were still not injective — colon concatenation of
+unrestricted segments let namespace "a" + native "b:c" collide with
+namespace "a:b" + native "c", and the global display form was ambiguous the
+same way; EntryId is now a structured type and both external encodings
+escape segments reversibly; the validator also enforces that every entry id
+belongs to the session's descriptor key. (2) Semantic cardinality: tool
+semantics are per-call (BTreeMap keyed by native call id) and usage
+observations embed their own Usage values. (3) The lineage graph gained its
+carrier: LineageEdge { from, to, kind } + SourceProvider::lineage(). Cleanup:
+the validator rejects duplicate entry ids within a producing outcome and
+duplicate record refs within an origin list. CompactionKind window-metadata
+carrier explicitly deferred to B3/C. 18 contract tests (was 15).
 
 ## Open questions (to settle in-phase)
 

@@ -97,18 +97,33 @@ pub struct LogicalSessionKey {
     pub native_id: String,
 }
 
+/// Escape a key segment for the colon-delimited external form: `%` → `%25`,
+/// `:` → `%3A`. Reversible, so two distinct keys can never render
+/// identically (namespace "a" + native "b:c" vs namespace "a:b" + native
+/// "c" differ once literal colons are escaped).
+fn escape_segment(s: &str) -> String {
+    s.replace('%', "%25").replace(':', "%3A")
+}
+
 impl fmt::Display for LogicalSessionKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Qualified-id form used by CLI/MCP: "codex:<native-id>". The
-        // namespace is omitted from the *display* form when global; entry-id
-        // derivation always includes it (injectivity).
+        // namespace is omitted from the *display* form when global — segment
+        // escaping keeps the two- and three-segment forms unambiguous.
         if self.namespace == SessionNamespace::global() {
-            write!(f, "{}:{}", self.provider, self.native_id)
+            write!(
+                f,
+                "{}:{}",
+                escape_segment(&self.provider.0),
+                escape_segment(&self.native_id)
+            )
         } else {
             write!(
                 f,
                 "{}:{}:{}",
-                self.provider, self.namespace.0, self.native_id
+                escape_segment(&self.provider.0),
+                escape_segment(&self.namespace.0),
+                escape_segment(&self.native_id)
             )
         }
     }
@@ -245,20 +260,44 @@ pub struct ProviderCapabilities {
 
 /// Deterministic, provider-qualified identity of one normalized entry.
 ///
-/// Stable across repeated parsing and append-only growth (acceptance
-/// invariant #2). Canonical form always includes the namespace so sessions
-/// that collide on native id cannot collide on entry ids:
+/// Structured — identity comparisons never depend on string encoding, so
+/// delimiter collisions are impossible by construction. Stable across
+/// repeated parsing and append-only growth (acceptance invariant #2). The
+/// external encoding ([`fmt::Display`]) escapes segments and always includes
+/// the namespace:
 /// `<provider>:<namespace>:<native-id>:<ordinal>:<subindex>`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct EntryId(pub String);
+pub struct EntryId {
+    /// The session the entry belongs to.
+    pub session: LogicalSessionKey,
+    /// Native record ordinal the entry derives from.
+    pub ordinal: u64,
+    /// Sub-index for records producing several entries.
+    pub subindex: u32,
+}
 
 impl EntryId {
-    /// Build the canonical deterministic id from the full logical key.
+    /// Build the deterministic id from the full logical key.
     pub fn deterministic(key: &LogicalSessionKey, record_ordinal: u64, subindex: u32) -> Self {
-        EntryId(format!(
-            "{}:{}:{}:{record_ordinal}:{subindex}",
-            key.provider, key.namespace.0, key.native_id
-        ))
+        EntryId {
+            session: key.clone(),
+            ordinal: record_ordinal,
+            subindex,
+        }
+    }
+}
+
+impl fmt::Display for EntryId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}:{}:{}:{}:{}",
+            escape_segment(&self.session.provider.0),
+            escape_segment(&self.session.namespace.0),
+            escape_segment(&self.session.native_id),
+            self.ordinal,
+            self.subindex
+        )
     }
 }
 
@@ -460,13 +499,17 @@ pub enum UsageAggregation {
     Cumulative,
 }
 
-/// One usage observation attached to an entry: both axes, explicit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One usage observation attached to an entry: both axes plus the observed
+/// values, so an annotation is never separated from the numbers it
+/// describes.
+#[derive(Debug, Clone)]
 pub struct UsageObservation {
     /// What the numbers cover.
     pub scope: UsageScope,
     /// How they aggregate.
     pub aggregation: UsageAggregation,
+    /// The observed token values.
+    pub usage: crate::model::usage::Usage,
 }
 
 /// The Phase A.0 semantic carrier.
@@ -475,16 +518,18 @@ pub struct UsageObservation {
 /// [`ParsedSession::semantics`]. Phase A may migrate individual fields onto
 /// model types per the design's carrier decision; the sidecar is the
 /// seam-level contract.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct EntrySemantics {
     /// New activity vs inherited history.
     pub activity: ActivityKind,
     /// Prompt axes, when the entry is prompt-shaped.
     pub prompt: Option<PromptSemantics>,
-    /// Tool axes, when the entry is a tool call.
-    pub tool: Option<ToolSemantics>,
+    /// Tool axes per tool call, keyed by the native tool-call id — one entry
+    /// can carry several tool calls with different classifications.
+    pub tools: BTreeMap<String, ToolSemantics>,
     /// Usage observations carried by the entry (may be several: Codex emits
-    /// a Call/Delta and a Session/Cumulative side by side).
+    /// a Call/Delta and a Session/Cumulative side by side; each carries its
+    /// own values so annotations stay paired with numbers).
     pub usage: Vec<UsageObservation>,
 }
 
@@ -501,7 +546,19 @@ pub enum LineageEdgeKind {
     Spawn,
 }
 
-/// Kind of compaction event.
+/// One typed lineage edge between two logical sessions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineageEdge {
+    /// The predecessor/parent session.
+    pub from: LogicalSessionKey,
+    /// The successor/child session.
+    pub to: LogicalSessionKey,
+    /// The relationship.
+    pub kind: LineageEdgeKind,
+}
+
+/// Kind of compaction event. Carrier for compaction window metadata is
+/// explicitly deferred to Phase B3/C.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompactionKind {
     /// Full context compaction.
@@ -556,7 +613,13 @@ impl ParsedSession {
         let mut entry_ids: BTreeSet<&EntryId> = BTreeSet::new();
         for e in &self.entries {
             if !entry_ids.insert(&e.id) {
-                violations.push(format!("duplicate entry id {}", e.id.0));
+                violations.push(format!("duplicate entry id {}", e.id));
+            }
+            if e.id.session != self.descriptor.key {
+                violations.push(format!(
+                    "entry {} belongs to session {}, not this session ({})",
+                    e.id, e.id.session, self.descriptor.key
+                ));
             }
         }
 
@@ -596,22 +659,31 @@ impl ParsedSession {
                         d.record.ordinal
                     ));
                 }
+                let mut edge_dedup: BTreeSet<&EntryId> = BTreeSet::new();
+                for e in entries {
+                    if !edge_dedup.insert(e) {
+                        violations.push(format!(
+                            "record #{} names entry {} more than once",
+                            d.record.ordinal, e
+                        ));
+                    }
+                }
                 producing.insert(&d.record, entries);
                 for e in entries {
                     if !entry_ids.contains(e) {
                         violations.push(format!(
                             "record #{} names entry {} which does not exist",
-                            d.record.ordinal, e.0
+                            d.record.ordinal, e
                         ));
                     }
                     match self.entry_origins.get(e) {
                         None => violations.push(format!(
                             "record #{} maps to entry {} which has no origins",
-                            d.record.ordinal, e.0
+                            d.record.ordinal, e
                         )),
                         Some(origins) if !origins.contains(&d.record) => violations.push(format!(
                             "entry {} origins do not include record #{}",
-                            e.0, d.record.ordinal
+                            e, d.record.ordinal
                         )),
                         Some(_) => {}
                     }
@@ -628,29 +700,38 @@ impl ParsedSession {
         // Every entry must have provenance; every origin must be real.
         for e in &self.entries {
             match self.entry_origins.get(&e.id) {
-                None => violations.push(format!("entry {} has no origins", e.id.0)),
+                None => violations.push(format!("entry {} has no origins", e.id)),
                 Some(origins) if origins.is_empty() => {
-                    violations.push(format!("entry {} has an empty origin list", e.id.0));
+                    violations.push(format!("entry {} has an empty origin list", e.id));
                 }
                 Some(_) => {}
             }
         }
         for (entry, origins) in &self.entry_origins {
+            let mut origin_dedup: BTreeSet<&RecordRef> = BTreeSet::new();
+            for r in origins {
+                if !origin_dedup.insert(r) {
+                    violations.push(format!(
+                        "entry {} lists origin record #{} more than once",
+                        entry, r.ordinal
+                    ));
+                }
+            }
             if !entry_ids.contains(entry) {
                 violations.push(format!(
                     "entry_origins names entry {} which does not exist",
-                    entry.0
+                    entry
                 ));
             }
             for r in origins {
                 match producing.get(r) {
                     None => violations.push(format!(
                         "entry {} claims origin record #{} which has no producing disposition",
-                        entry.0, r.ordinal
+                        entry, r.ordinal
                     )),
                     Some(entries) if !entries.contains(entry) => violations.push(format!(
                         "record #{} produces entries but not entry {}",
-                        r.ordinal, entry.0
+                        r.ordinal, entry
                     )),
                     Some(_) => {}
                 }
@@ -660,10 +741,7 @@ impl ParsedSession {
         // Semantics may only describe existing entries.
         for id in self.semantics.keys() {
             if !entry_ids.contains(id) {
-                violations.push(format!(
-                    "semantics names entry {} which does not exist",
-                    id.0
-                ));
+                violations.push(format!("semantics names entry {} which does not exist", id));
             }
         }
 
@@ -727,6 +805,11 @@ pub trait SourceProvider {
 
     /// Enumerate discovered sessions (logical identity + artifacts).
     fn sessions(&self) -> Result<Vec<SessionDescriptor>, ProviderError>;
+
+    /// Typed session-lineage edges across this provider's corpus
+    /// (continuations, forks, spawns). Endpoints are logical keys returned
+    /// by [`SourceProvider::sessions`].
+    fn lineage(&self) -> Result<Vec<LineageEdge>, ProviderError>;
 
     /// Parse one session into identified entries with full provenance and
     /// semantics.

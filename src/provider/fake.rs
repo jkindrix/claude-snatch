@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 
 use super::*;
+use crate::model::usage::Usage;
 
 /// In-memory provider with hostile-to-assumptions shapes.
 pub struct FakeProvider;
@@ -253,23 +254,47 @@ impl SourceProvider for FakeProvider {
                 ..Default::default()
             },
         );
-        // Merged tool call: canonical kind + preserved native name, and a
-        // dual usage observation (Codex token_count shape).
+        // Merged tool call carrying TWO calls with different classifications
+        // (one entry, several tool calls), plus a dual usage observation
+        // (Codex token_count shape) where each annotation carries its own
+        // values.
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "call-7".to_string(),
+            ToolSemantics {
+                kind: ToolKind::FileWrite,
+                native_name: "fake_apply_patch".into(),
+            },
+        );
+        tools.insert(
+            "call-8".to_string(),
+            ToolSemantics {
+                kind: ToolKind::Shell,
+                native_name: "fake_exec".into(),
+            },
+        );
         semantics.insert(
             e(1, 0),
             EntrySemantics {
-                tool: Some(ToolSemantics {
-                    kind: ToolKind::FileWrite,
-                    native_name: "fake_apply_patch".into(),
-                }),
+                tools,
                 usage: vec![
                     UsageObservation {
                         scope: UsageScope::Call,
                         aggregation: UsageAggregation::Delta,
+                        usage: Usage {
+                            input_tokens: 10,
+                            output_tokens: 5,
+                            ..Default::default()
+                        },
                     },
                     UsageObservation {
                         scope: UsageScope::Session,
                         aggregation: UsageAggregation::Cumulative,
+                        usage: Usage {
+                            input_tokens: 200,
+                            output_tokens: 50,
+                            ..Default::default()
+                        },
                     },
                 ],
                 ..Default::default()
@@ -300,6 +325,14 @@ impl SourceProvider for FakeProvider {
                 unparseable: 0,
             },
         })
+    }
+
+    fn lineage(&self) -> Result<Vec<LineageEdge>, ProviderError> {
+        Ok(vec![LineageEdge {
+            from: multi_artifact_key(),
+            to: colliding_key(),
+            kind: LineageEdgeKind::Fork,
+        }])
     }
 
     fn write_archive(
