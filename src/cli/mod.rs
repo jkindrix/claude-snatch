@@ -2391,6 +2391,12 @@ pub struct TimelineArgs {
     /// Session ID (full UUID or short prefix).
     pub session_id: String,
 
+    /// Route through a session-log provider (repeatable; "all" = every
+    /// installed provider). Provider-qualified ids ("codex:...") route
+    /// automatically.
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
+
     /// Maximum timeline entries.
     #[arg(short = 'l', long, default_value = "50")]
     pub limit: usize,
@@ -2460,6 +2466,12 @@ impl MessageTypeFilter {
 pub struct MessagesArgs {
     /// Session ID (full UUID or short prefix).
     pub session_id: String,
+
+    /// Route through a session-log provider (repeatable; "all" = every
+    /// installed provider). Provider-qualified ids ("codex:...") route
+    /// automatically.
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
 
     /// Detail level for message output.
     #[arg(short = 'D', long, default_value = "standard")]

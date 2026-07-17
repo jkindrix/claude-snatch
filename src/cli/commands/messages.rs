@@ -167,6 +167,13 @@ fn renders_at_detail(
 
 /// Run the messages command.
 pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
+    if !args.provider.is_empty()
+        || (args.session_id.contains(':')
+            && super::helpers::provider_registry(cli).looks_qualified(&args.session_id))
+    {
+        return run_provider(cli, args);
+    }
+
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
 
     let session =
@@ -200,6 +207,94 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
         }
     }
 
+    let ctx = RenderContext {
+        display_id: args.session_id.clone(),
+        project_path,
+        chain,
+        unparsed,
+        session: Some(&session),
+    };
+    render(cli, args, &conversation, &ctx)
+}
+
+/// Provider-routed messages: the session resolves through the registry and
+/// the conversation is built from the COMPLETE ParsedSession bundle
+/// (round-21 constraint 5), then rendered by the same pipeline as Claude
+/// sessions — normalized entries are model-shaped.
+fn run_provider(cli: &Cli, args: &MessagesArgs) -> Result<()> {
+    // COMPLETE argument classification (destructured without `..`):
+    // generic view options apply to any provider; Claude-specific machinery
+    // (resume chains, subagent transcripts, prompt-boundary chunks — Phase
+    // C owns codex chunking) is refused, never ignored.
+    let MessagesArgs {
+        session_id: _,
+        provider: _,
+        detail: _,
+        message_type: _,
+        limit: _,
+        offset: _,
+        reverse: _,
+        include_thinking: _,
+        after: _,
+        before: _,
+        subagent_transcripts,
+        no_chain,
+        chunk,
+        errors_only: _,
+        max_text_len: _,
+    } = args;
+    super::helpers::refuse_unsupported_flags(
+        "provider-routed messages",
+        &[
+            ("--subagent-transcripts", *subagent_transcripts),
+            ("--no-chain", *no_chain),
+            ("--chunk", chunk.is_some()),
+        ],
+    )?;
+
+    let registry = super::helpers::provider_registry(cli);
+    let resolution = registry.resolve_with_default_policy(&args.provider, &args.session_id)?;
+    let parsed = crate::provider::registry::cached_parsed_session(
+        crate::cache::global_cache(),
+        resolution.provider,
+        &resolution.key,
+    )?;
+    let unparsed = parsed.diagnostics.unparseable;
+    let project_path = parsed
+        .entries
+        .iter()
+        .find_map(|e| match &e.entry {
+            LogEntry::User(m) => m.cwd.clone(),
+            LogEntry::Assistant(m) => m.cwd.clone(),
+            _ => None,
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    let conversation = Conversation::from_parsed_session(parsed)?;
+    let ctx = RenderContext {
+        display_id: resolution.key.to_string(),
+        project_path,
+        chain: None,
+        unparsed,
+        session: None,
+    };
+    render(cli, args, &conversation, &ctx)
+}
+
+/// Shared acquisition-independent rendering context.
+struct RenderContext<'a> {
+    display_id: String,
+    project_path: String,
+    chain: Option<super::helpers::ChainMeta>,
+    unparsed: usize,
+    session: Option<&'a crate::discovery::Session>,
+}
+
+fn render(
+    cli: &Cli,
+    args: &MessagesArgs,
+    conversation: &Conversation,
+    ctx: &RenderContext<'_>,
+) -> Result<()> {
     let detail = args.detail.as_str();
     let msg_type_filter = args.message_type.as_str();
     // 0 means unlimited, matching `list -n 0` (a literal take(0) returned
@@ -236,14 +331,13 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
     // chain members may live under those members' directories and are not
     // scanned here yet, so their Agent/Task calls may remain unlinked (the
     // subagent may not be discovered at all, not merely reported as unmatched).
-    let subagent_matches: SubagentMatches = if detail == "full" {
-        match_subagents(
-            &session,
+    let subagent_matches: SubagentMatches = match (detail, ctx.session) {
+        ("full", Some(session)) => match_subagents(
+            session,
             &conversation.main_thread_entries(),
             cli.max_file_size,
-        )
-    } else {
-        SubagentMatches::default()
+        ),
+        _ => SubagentMatches::default(),
     };
 
     let mut main_entries: Vec<&LogEntry> = conversation.main_thread_entries();
@@ -408,11 +502,11 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
                 .collect();
 
             let output = MessagesOutput {
-                session_id: args.session_id.clone(),
-                project_path,
-                chain_id: chain.as_ref().map(|c| c.root_id.clone()),
-                chain_members: chain.as_ref().map(|c| c.members.clone()),
-                chain_member_count: chain.as_ref().map(|c| c.members.len()),
+                session_id: ctx.display_id.clone(),
+                project_path: ctx.project_path.clone(),
+                chain_id: ctx.chain.as_ref().map(|c| c.root_id.clone()),
+                chain_members: ctx.chain.as_ref().map(|c| c.members.clone()),
+                chain_member_count: ctx.chain.as_ref().map(|c| c.members.len()),
                 total_messages,
                 returned: messages.len(),
                 offset,
@@ -454,15 +548,16 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
             };
             println!(
                 "Session {} ({} messages, showing {}-{}{skip_note})\n",
-                &args.session_id[..8.min(args.session_id.len())],
+                &ctx.display_id[..8.min(ctx.display_id.len())],
                 total_messages,
                 offset + 1,
                 (offset + paginated.len()).min(total_messages),
             );
-            if unparsed > 0 {
+            if ctx.unparsed > 0 {
                 println!(
-                    "⚠ {unparsed} line{} could not be parsed (dropped from this view)\n",
-                    if unparsed == 1 { "" } else { "s" }
+                    "⚠ {} line{} could not be parsed (dropped from this view)\n",
+                    ctx.unparsed,
+                    if ctx.unparsed == 1 { "" } else { "s" }
                 );
             }
 

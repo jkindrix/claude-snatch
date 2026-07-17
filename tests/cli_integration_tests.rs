@@ -2129,3 +2129,116 @@ fn providers_status_triple_reflects_construction_and_scan() {
         );
     }
 }
+
+#[cfg(feature = "codex")]
+mod codex_normalization_cli {
+    use super::*;
+
+    const THREAD: &str = "0198cccc-dddd-7eee-8fff-000011112222";
+
+    /// A dual-stream codex fixture exercising the whole slice: human
+    /// prompt (with event twin), reasoning, tool call/result, usage.
+    fn slice_home() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        let day = tmp.path().join("sessions/2026/07/16");
+        std::fs::create_dir_all(&day).unwrap();
+        let lines = [
+            serde_json::json!({"timestamp": "2026-07-16T10:00:00.000Z", "type": "session_meta",
+                "payload": {"id": THREAD, "cwd": "/tmp/p", "cli_version": "0.9"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:01.000Z", "type": "turn_context",
+                "payload": {"turn_id": "t-1", "model": "gpt-test"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:02.000Z", "type": "response_item",
+                "payload": {"type": "message", "role": "user",
+                            "content": [{"type": "input_text", "text": "run the tests"}]}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:02.500Z", "type": "event_msg",
+                "payload": {"type": "user_message", "message": "run the tests"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:03.000Z", "type": "response_item",
+                "payload": {"type": "reasoning", "summary": [{"type": "summary_text", "text": "Plan the test run"}],
+                            "content": [], "encrypted_content": "sig"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:04.000Z", "type": "response_item",
+                "payload": {"type": "function_call", "name": "shell",
+                            "arguments": "{\"command\":[\"cargo\",\"test\"]}", "call_id": "call_1"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:05.000Z", "type": "response_item",
+                "payload": {"type": "function_call_output", "call_id": "call_1", "output": "ok: 12 passed"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:06.000Z", "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "All green."}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:06.500Z", "type": "response_item",
+                "payload": {"type": "message", "role": "assistant",
+                            "content": [{"type": "output_text", "text": "All green."}]}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:07.000Z", "type": "event_msg",
+                "payload": {"type": "token_count", "info": {
+                    "last_token_usage": {"input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 25, "total_tokens": 125},
+                    "total_token_usage": {"input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 25, "total_tokens": 125}}}}),
+        ];
+        let content = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(
+            day.join(format!("rollout-2026-07-16T10-00-00-{THREAD}.jsonl")),
+            content,
+        )
+        .unwrap();
+        tmp
+    }
+
+    #[test]
+    fn messages_renders_normalized_codex_conversation() {
+        let claude = setup_fixture_dir();
+        let codex = slice_home();
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "messages",
+                &format!("codex:{THREAD}"),
+                "--detail",
+                "full",
+                "--include-thinking",
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("run the tests"))
+            .stdout(predicate::str::contains("All green."))
+            .stdout(predicate::str::contains("(gpt-test)"))
+            .stdout(predicate::str::contains("shell"))
+            .stdout(predicate::str::contains("Plan the test run"));
+    }
+
+    #[test]
+    fn timeline_renders_normalized_codex_turns() {
+        let claude = setup_fixture_dir();
+        let codex = slice_home();
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["timeline", &format!("codex:{THREAD}")])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("run the tests"))
+            .stdout(predicate::str::contains("All green."));
+    }
+
+    #[test]
+    fn messages_refuses_claude_machinery_flags_on_codex_sessions() {
+        let claude = setup_fixture_dir();
+        let codex = slice_home();
+        for extra in [
+            &["--chunk", "0"][..],
+            &["--no-chain"],
+            &["--subagent-transcripts"],
+        ] {
+            let mut args = vec!["messages", "codex:0198cccc"];
+            args.extend_from_slice(extra);
+            snatch_cmd()
+                .env("SNATCH_CLAUDE_DIR", claude.path())
+                .env("CODEX_HOME", codex.path())
+                .args(&args)
+                .assert()
+                .failure()
+                .stderr(predicate::str::contains("not supported with"));
+        }
+    }
+}
