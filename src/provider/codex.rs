@@ -2415,7 +2415,7 @@ mod tests {
         // from cache when nothing changed.
         use crate::cache::CacheManager;
         use crate::config::CacheConfig;
-        use crate::provider::registry::cached_session_entries;
+        use crate::provider::registry::cached_parsed_session;
 
         let (tmp, p) = home_with(THREAD_A, session_a_content().as_bytes(), false);
         let cache = CacheManager::new(&CacheConfig {
@@ -2423,12 +2423,17 @@ mod tests {
             ..Default::default()
         });
 
-        let first = cached_session_entries(&cache, &p, &key(THREAD_A)).unwrap();
-        let n = first.len();
+        let first = cached_parsed_session(&cache, &p, &key(THREAD_A)).unwrap();
+        let n = first.entries.len();
         assert!(n > 0);
+        assert_eq!(
+            first.record_dispositions.len(),
+            n,
+            "B1 posture: one disposition per record, retained in the bundle"
+        );
 
         // Unchanged revision: the same Arc comes back — a genuine cache hit.
-        let again = cached_session_entries(&cache, &p, &key(THREAD_A)).unwrap();
+        let again = cached_parsed_session(&cache, &p, &key(THREAD_A)).unwrap();
         assert!(
             std::sync::Arc::ptr_eq(&first, &again),
             "unchanged revision must be served from cache"
@@ -2451,12 +2456,21 @@ mod tests {
         f.write_all(extra.as_bytes()).unwrap();
         drop(f);
 
-        let after = cached_session_entries(&cache, &p, &key(THREAD_A)).unwrap();
+        let after = cached_parsed_session(&cache, &p, &key(THREAD_A)).unwrap();
         assert!(
             !std::sync::Arc::ptr_eq(&first, &after),
             "revision change must invalidate the cached parse"
         );
-        assert_eq!(after.len(), n + 1, "reparse must see the appended record");
+        assert_eq!(
+            after.entries.len(),
+            n + 1,
+            "reparse must see the appended record"
+        );
+        assert_eq!(
+            after.record_dispositions.len(),
+            n + 1,
+            "provenance tracks the reparse too"
+        );
     }
 
     #[test]

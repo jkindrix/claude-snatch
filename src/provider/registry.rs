@@ -389,24 +389,22 @@ impl ProviderRegistry {
     }
 }
 
-/// Parse a provider session with caching.
+/// Parse a provider session with caching, retaining the COMPLETE bundle.
 ///
-/// The first production consumer of [`SourceProvider::parse_cache_token`]
-/// (round-11 guardrail). Entries are cached under the session's logical
-/// identity and revalidated against the provider's current token, so an
-/// artifact revision change between lookups forces a reparse — the token
-/// covers full descriptor state and parse policy, never just one file's
-/// mtime.
-pub fn cached_session_entries(
+/// The production consumer of [`SourceProvider::parse_cache_token`]
+/// (round-11 guardrail). The full [`super::ParsedSession`] — entry ids,
+/// provenance, dispositions, semantics, diagnostics — is cached under the
+/// session's logical identity and revalidated against the provider's
+/// current token, so an artifact revision change between lookups forces a
+/// reparse. Caching only entries here made propagation illusory
+/// (round-18); the bundle is the canonical parsed representation.
+pub fn cached_parsed_session(
     cache: &crate::cache::CacheManager,
     provider: &dyn SourceProvider,
     key: &LogicalSessionKey,
-) -> crate::error::Result<std::sync::Arc<Vec<crate::model::LogEntry>>> {
+) -> crate::error::Result<std::sync::Arc<super::ParsedSession>> {
     let token = provider.parse_cache_token(key)?;
-    cache.get_or_parse_keyed(key, &token, || {
-        let parsed = provider.parse(key)?;
-        Ok(parsed.entries.into_iter().map(|e| e.entry).collect())
-    })
+    cache.get_or_parse_provider_session(key, &token, || Ok(provider.parse(key)?))
 }
 
 /// Uniqueness rule shared by qualified-prefix and unqualified resolution:

@@ -120,6 +120,17 @@ pub struct Conversation {
     /// (Phase A provider-context threading). `None` when built without source
     /// context (tests, ad-hoc entry lists); carries no behavioral weight yet.
     source: Option<crate::provider::LogicalSessionKey>,
+    /// The complete provider-parsed bundle this conversation was built from
+    /// ([`Conversation::from_parsed_session`] only): entry ids, provenance,
+    /// dispositions, semantics, diagnostics. The bundle is AUTHORITATIVE for
+    /// provenance/semantics; the node tree is a view over its entries.
+    bundle: Option<std::sync::Arc<crate::provider::ParsedSession>>,
+    /// Entry-uuid -> deterministic [`EntryId`] correlation, first occurrence
+    /// wins — matching the node tree's duplicate-UUID keep-first rule, so a
+    /// node's uuid always maps to the entry the tree actually kept.
+    ///
+    /// [`EntryId`]: crate::provider::EntryId
+    entry_ids_by_uuid: HashMap<String, crate::provider::EntryId>,
 }
 
 /// A dropped duplicate-UUID entry, kept for diagnostics.
@@ -560,6 +571,8 @@ impl Conversation {
             orphan_entries,
             duplicate_uuids,
             source: None,
+            bundle: None,
+            entry_ids_by_uuid: HashMap::new(),
         })
     }
 
@@ -576,18 +589,58 @@ impl Conversation {
         Ok(conversation)
     }
 
-    /// Build a conversation from a provider-parsed session.
+    /// Build a conversation from a provider-parsed session, RETAINING the
+    /// complete bundle.
     ///
     /// The single sanctioned bridge from the [`SourceProvider`] seam to
-    /// conversation surfaces: source identity is threaded here, and future
-    /// consumers of parsed provenance/semantics extend this constructor
-    /// rather than each call site (B2 centralization guardrail).
+    /// conversation surfaces (B2 centralization guardrail). Survival rule
+    /// (round-18): the bundle is authoritative for entry ids, provenance,
+    /// dispositions, semantics, and diagnostics — reconstruction never
+    /// drops them, it builds a node-tree VIEW over the bundle's entries.
+    /// Deduplication affects only the view: when the tree keeps the first
+    /// of two same-uuid entries, [`Conversation::entry_id_for_uuid`] maps
+    /// to that same first entry, and the dropped duplicate remains fully
+    /// present in the bundle.
     ///
     /// [`SourceProvider`]: crate::provider::SourceProvider
-    pub fn from_parsed_session(parsed: crate::provider::ParsedSession) -> Result<Self> {
+    pub fn from_parsed_session(
+        parsed: std::sync::Arc<crate::provider::ParsedSession>,
+    ) -> Result<Self> {
         let source = parsed.descriptor.key.clone();
-        let entries = parsed.entries.into_iter().map(|e| e.entry).collect();
-        Self::from_entries_with_source(entries, source)
+        let entries = parsed.entries.iter().map(|e| e.entry.clone()).collect();
+        let mut conversation = Self::from_entries_with_source(entries, source)?;
+        let mut by_uuid: HashMap<String, crate::provider::EntryId> = HashMap::new();
+        for e in &parsed.entries {
+            if let Some(uuid) = e.entry.uuid() {
+                by_uuid
+                    .entry(uuid.to_string())
+                    .or_insert_with(|| e.id.clone());
+            }
+        }
+        conversation.entry_ids_by_uuid = by_uuid;
+        conversation.bundle = Some(parsed);
+        Ok(conversation)
+    }
+
+    /// The complete provider-parsed bundle this conversation was built from,
+    /// when constructed via [`Conversation::from_parsed_session`].
+    #[must_use]
+    pub fn provider_bundle(&self) -> Option<&std::sync::Arc<crate::provider::ParsedSession>> {
+        self.bundle.as_ref()
+    }
+
+    /// Deterministic entry id for a node uuid (first occurrence wins,
+    /// matching the tree's duplicate-UUID rule).
+    #[must_use]
+    pub fn entry_id_for_uuid(&self, uuid: &str) -> Option<&crate::provider::EntryId> {
+        self.entry_ids_by_uuid.get(uuid)
+    }
+
+    /// Adapter-asserted semantics for a node uuid, from the retained bundle.
+    #[must_use]
+    pub fn semantics_for_uuid(&self, uuid: &str) -> Option<&crate::provider::EntrySemantics> {
+        let id = self.entry_ids_by_uuid.get(uuid)?;
+        self.bundle.as_ref()?.semantics.get(id)
     }
 
     /// Provider-qualified identity of the session these entries came from,

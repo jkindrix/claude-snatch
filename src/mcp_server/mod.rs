@@ -157,7 +157,7 @@ impl SnatchServer {
         flags: &[String],
         reference: &str,
     ) -> ToolOutput {
-        use crate::provider::registry::cached_session_entries;
+        use crate::provider::registry::cached_parsed_session;
         use crate::provider::ArtifactForm;
 
         let resolution = match registry.resolve_with_default_policy(flags, reference) {
@@ -167,24 +167,34 @@ impl SnatchServer {
         let provider = resolution.provider;
         let key = &resolution.key;
 
-        let descriptor = match provider.sessions() {
-            Ok(descriptors) => match descriptors.into_iter().find(|d| d.key == *key) {
-                Some(d) => d,
-                None => return ToolOutput::error(format!("Session not found: {key}")),
-            },
-            Err(e) => return ToolOutput::error(format!("session scan failed: {e}")),
-        };
-        let entries = match cached_session_entries(crate::cache::global_cache(), provider, key) {
-            Ok(e) => e,
+        // Complete bundle: provenance/semantics travel with the entries
+        // through both the cache and reconstruction (round-18).
+        let parsed = match cached_parsed_session(crate::cache::global_cache(), provider, key) {
+            Ok(p) => p,
             Err(e) => return ToolOutput::error(format!("Failed to parse session: {e}")),
         };
+        let conversation_nodes = match Conversation::from_parsed_session(parsed.clone()) {
+            Ok(c) => c.len(),
+            Err(e) => return ToolOutput::error(format!("Failed to reconstruct conversation: {e}")),
+        };
+        let descriptor = &parsed.descriptor;
         let capabilities = provider.capabilities();
+        let d = &parsed.diagnostics;
         let out = serde_json::json!({
             "qualified_id": key.to_string(),
             "provider": key.provider.to_string(),
             "namespace": key.namespace.0,
             "native_id": key.native_id,
-            "entries": entries.len(),
+            "entries": parsed.entries.len(),
+            "conversation_nodes": conversation_nodes,
+            "record_dispositions": {
+                "mapped": d.mapped,
+                "suppressed": d.suppressed,
+                "unknown": d.unknown,
+                "recovered": d.recovered,
+                "unparseable": d.unparseable,
+            },
+            "semantic_annotations": parsed.semantics.len(),
             "artifacts": descriptor
                 .artifacts
                 .iter()

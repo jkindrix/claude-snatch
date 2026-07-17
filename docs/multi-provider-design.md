@@ -785,6 +785,17 @@ breath as any completion claim).
       source cannot be independently forgotten; per-surface source threading
       lands WITH each surface's provider parameter (covers CLI + MCP +
       library/API — the ~28-site deferral inventory, rounds 10/T3).
+      ROUND-18 CORRECTION: the first implementation ticked this while
+      caching/bridging only `Vec<LogEntry>` — propagation was illusory.
+      B2.7 makes it real: the cache retains `Arc<ParsedSession>` complete
+      (`cached_parsed_session` / `get_or_parse_provider_session`);
+      `from_parsed_session` RETAINS the bundle on the `Conversation` with a
+      defined survival rule (bundle authoritative; node tree is a view;
+      uuid→EntryId correlation is keep-first, matching dedup) and exposes
+      `provider_bundle`/`entry_id_for_uuid`/`semantics_for_uuid`; the CLI
+      and MCP info consumers construct through it and surface disposition
+      counts + semantics counts; tests prove semantics/provenance survive
+      both cache miss and hit.
 - [x] First production cache consumer uses `parse_cache_token` (round-11
       guardrail; token already implemented + tested end-to-end). Test the
       consumer with an artifact revision change BETWEEN two lookups —

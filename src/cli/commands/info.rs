@@ -1155,29 +1155,29 @@ fn show_provider_session_info(
     registry: &crate::provider::registry::ProviderRegistry,
     target: &str,
 ) -> Result<()> {
-    use crate::provider::registry::cached_session_entries;
+    use crate::provider::registry::cached_parsed_session;
     use crate::provider::ArtifactForm;
 
     let resolution = registry.resolve_with_default_policy(&args.provider, target)?;
     let provider = resolution.provider;
     let key = &resolution.key;
 
-    let descriptor = provider
-        .sessions()?
-        .into_iter()
-        .find(|d| d.key == *key)
-        .ok_or_else(|| SnatchError::SessionNotFound {
-            session_id: key.to_string(),
-        })?;
+    // The complete parsed bundle — provenance, semantics, and diagnostics
+    // travel with the entries through cache and reconstruction alike.
+    let parsed = cached_parsed_session(crate::cache::global_cache(), provider, key)?;
+    let descriptor = &parsed.descriptor;
+    let conversation = Conversation::from_parsed_session(parsed.clone())?;
 
-    let entries = cached_session_entries(crate::cache::global_cache(), provider, key)?;
     let mut type_counts: std::collections::BTreeMap<&'static str, usize> =
         std::collections::BTreeMap::new();
-    for entry in entries.iter() {
-        *type_counts.entry(entry_type_name(entry)).or_default() += 1;
+    for entry in &parsed.entries {
+        *type_counts
+            .entry(entry_type_name(&entry.entry))
+            .or_default() += 1;
     }
 
     let capabilities = provider.capabilities();
+    let d = &parsed.diagnostics;
     let report = serde_json::json!({
         "qualified_id": key.to_string(),
         "provider": key.provider.to_string(),
@@ -1199,8 +1199,17 @@ fn show_provider_session_info(
                 })
             })
             .collect::<Vec<_>>(),
-        "entries": entries.len(),
+        "entries": parsed.entries.len(),
         "entry_types": type_counts,
+        "conversation_nodes": conversation.len(),
+        "record_dispositions": {
+            "mapped": d.mapped,
+            "suppressed": d.suppressed,
+            "unknown": d.unknown,
+            "recovered": d.recovered,
+            "unparseable": d.unparseable,
+        },
+        "semantic_annotations": parsed.semantics.len(),
         "capabilities": {
             "native_export": capabilities.native_export,
             "raw_jsonl": capabilities.raw_jsonl,
@@ -1228,6 +1237,13 @@ fn show_provider_session_info(
     if !types.is_empty() {
         println!("Entry types: {types}");
     }
+    println!("Conversation nodes: {}", report["conversation_nodes"]);
+    let disp = &report["record_dispositions"];
+    println!(
+        "Record dispositions: mapped {}, suppressed {}, unknown {}, recovered {}, unparseable {}",
+        disp["mapped"], disp["suppressed"], disp["unknown"], disp["recovered"], disp["unparseable"],
+    );
+    println!("Semantic annotations: {}", report["semantic_annotations"]);
     println!("Artifacts:");
     for a in report["artifacts"].as_array().unwrap() {
         println!(

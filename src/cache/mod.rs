@@ -430,24 +430,6 @@ impl ParsedEntriesCache {
         Ok(arc_entries)
     }
 
-    /// Get cached entries for a provider-keyed session, valid only while the
-    /// provider's parse cache token still matches.
-    pub fn get_keyed(
-        &self,
-        key: &LogicalSessionKey,
-        current_revision: &str,
-    ) -> Option<Arc<Vec<LogEntry>>> {
-        self.inner.write().get_keyed(key, current_revision).cloned()
-    }
-
-    /// Cache parsed entries under a provider session key + parse cache token.
-    pub fn insert_keyed(&self, key: &LogicalSessionKey, revision: String, entries: Vec<LogEntry>) {
-        let size = entries.len() * 1024;
-        self.inner
-            .write()
-            .insert_keyed(key, revision, Arc::new(entries), size);
-    }
-
     /// Invalidate stale entries.
     pub fn invalidate_stale(&self) {
         self.inner.write().invalidate_stale();
@@ -472,12 +454,80 @@ impl std::fmt::Debug for ParsedEntriesCache {
     }
 }
 
+/// Thread-safe cache of COMPLETE provider-parsed sessions, keyed by logical
+/// identity and revalidated by parse cache tokens.
+///
+/// Retains the full [`ParsedSession`] bundle — entry ids, provenance,
+/// dispositions, semantics, diagnostics — never just entries: discarding
+/// them at the cache made parsed-session propagation illusory (round-18).
+///
+/// [`ParsedSession`]: crate::provider::ParsedSession
+pub struct ProviderParsedCache {
+    inner: RwLock<LruCache<Arc<crate::provider::ParsedSession>>>,
+}
+
+impl ProviderParsedCache {
+    /// Create a new provider-parsed session cache.
+    pub fn new(config: &CacheConfig) -> Self {
+        let max_entries = 100;
+        let max_size = (config.max_size * 9 / 10) as usize;
+        Self {
+            inner: RwLock::new(LruCache::new(max_entries, max_size)),
+        }
+    }
+
+    fn size_estimate(parsed: &crate::provider::ParsedSession) -> usize {
+        // Rough: entries dominate; provenance/semantics ride along.
+        parsed.entries.len() * 1536 + 4096
+    }
+
+    /// Get a cached bundle, valid only while the parse cache token matches.
+    pub fn get_keyed(
+        &self,
+        key: &LogicalSessionKey,
+        current_revision: &str,
+    ) -> Option<Arc<crate::provider::ParsedSession>> {
+        self.inner.write().get_keyed(key, current_revision).cloned()
+    }
+
+    /// Cache a bundle under a provider session key + parse cache token.
+    pub fn insert_keyed(
+        &self,
+        key: &LogicalSessionKey,
+        revision: String,
+        parsed: Arc<crate::provider::ParsedSession>,
+    ) {
+        let size = Self::size_estimate(&parsed);
+        self.inner.write().insert_keyed(key, revision, parsed, size);
+    }
+
+    /// Clear all entries.
+    pub fn clear(&self) {
+        self.inner.write().clear();
+    }
+
+    /// Get statistics.
+    pub fn stats(&self) -> CacheStats {
+        self.inner.read().stats()
+    }
+}
+
+impl std::fmt::Debug for ProviderParsedCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderParsedCache")
+            .field("stats", &self.stats())
+            .finish()
+    }
+}
+
 /// Combined cache manager for the application.
 pub struct CacheManager {
     /// Session metadata cache.
     pub metadata: SessionMetadataCache,
     /// Parsed entries cache.
     pub entries: ParsedEntriesCache,
+    /// Provider-parsed session bundles (complete `ParsedSession`s).
+    pub provider_sessions: ProviderParsedCache,
     /// Whether caching is enabled.
     enabled: bool,
 }
@@ -488,6 +538,7 @@ impl CacheManager {
         Self {
             metadata: SessionMetadataCache::new(config),
             entries: ParsedEntriesCache::new(config),
+            provider_sessions: ProviderParsedCache::new(config),
             enabled: config.enabled,
         }
     }
@@ -502,6 +553,7 @@ impl CacheManager {
         Self {
             metadata: SessionMetadataCache::new(&config),
             entries: ParsedEntriesCache::new(&config),
+            provider_sessions: ProviderParsedCache::new(&config),
             enabled: false,
         }
     }
@@ -555,32 +607,29 @@ impl CacheManager {
         }
     }
 
-    /// Get provider-keyed entries valid for `current_revision` (a parse
-    /// cache token), or parse and cache them under that revision.
-    pub fn get_or_parse_keyed<F>(
+    /// Get a provider-parsed session bundle valid for `current_revision`
+    /// (a parse cache token), or parse and cache the COMPLETE bundle under
+    /// that revision. Provenance and semantics survive both the miss and
+    /// hit paths — they are part of the cached value.
+    pub fn get_or_parse_provider_session<F>(
         &self,
         key: &LogicalSessionKey,
         current_revision: &str,
         parse_fn: F,
-    ) -> Result<Arc<Vec<LogEntry>>>
+    ) -> Result<Arc<crate::provider::ParsedSession>>
     where
-        F: FnOnce() -> Result<Vec<LogEntry>>,
+        F: FnOnce() -> Result<crate::provider::ParsedSession>,
     {
         if !self.enabled {
             return parse_fn().map(Arc::new);
         }
-        if let Some(entries) = self.entries.get_keyed(key, current_revision) {
-            return Ok(entries);
+        if let Some(parsed) = self.provider_sessions.get_keyed(key, current_revision) {
+            return Ok(parsed);
         }
-        let entries = Arc::new(parse_fn()?);
-        let size = entries.len() * 1024;
-        self.entries.inner.write().insert_keyed(
-            key,
-            current_revision.to_string(),
-            entries.clone(),
-            size,
-        );
-        Ok(entries)
+        let parsed = Arc::new(parse_fn()?);
+        self.provider_sessions
+            .insert_keyed(key, current_revision.to_string(), parsed.clone());
+        Ok(parsed)
     }
 
     /// Invalidate all stale entries.
@@ -595,6 +644,7 @@ impl CacheManager {
     pub fn clear(&self) {
         self.metadata.clear();
         self.entries.clear();
+        self.provider_sessions.clear();
     }
 
     /// Get combined statistics.
@@ -603,6 +653,7 @@ impl CacheManager {
             enabled: self.enabled,
             metadata: self.metadata.stats(),
             entries: self.entries.stats(),
+            provider_sessions: self.provider_sessions.stats(),
         }
     }
 }
@@ -625,6 +676,8 @@ pub struct CacheManagerStats {
     pub metadata: CacheStats,
     /// Entries cache stats.
     pub entries: CacheStats,
+    /// Provider-parsed session bundle cache stats.
+    pub provider_sessions: CacheStats,
 }
 
 impl CacheManagerStats {

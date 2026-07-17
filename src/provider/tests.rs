@@ -986,8 +986,78 @@ fn qualified_reference_supports_native_prefix_within_its_provider() {
 
 #[test]
 fn from_parsed_session_threads_source_identity() {
-    let parsed = FakeProvider.parse(&multi_artifact_key()).unwrap();
+    let parsed = std::sync::Arc::new(FakeProvider.parse(&multi_artifact_key()).unwrap());
     let expected = parsed.descriptor.key.clone();
     let conversation = crate::reconstruction::Conversation::from_parsed_session(parsed).unwrap();
     assert_eq!(conversation.source(), Some(&expected));
+}
+
+#[test]
+fn from_parsed_session_retains_bundle_and_correlates_semantics() {
+    // Round-18 survival rule: the bundle (ids, provenance, dispositions,
+    // semantics, diagnostics) survives reconstruction, and node uuids
+    // correlate back to deterministic entry ids.
+    let parsed = std::sync::Arc::new(FakeProvider.parse(&multi_artifact_key()).unwrap());
+    assert!(!parsed.semantics.is_empty(), "fixture must carry semantics");
+    let conversation =
+        crate::reconstruction::Conversation::from_parsed_session(parsed.clone()).unwrap();
+
+    let bundle = conversation.provider_bundle().expect("bundle retained");
+    assert!(std::sync::Arc::ptr_eq(bundle, &parsed));
+    assert_eq!(
+        bundle.record_dispositions.len(),
+        parsed.record_dispositions.len()
+    );
+    assert_eq!(bundle.diagnostics, parsed.diagnostics);
+
+    // At least one semantics-bearing entry with a uuid must be reachable
+    // through the conversation-side lookup, and the lookup must agree with
+    // the bundle's own map.
+    let mut correlated = 0;
+    for (id, expected_semantics) in &parsed.semantics {
+        let entry = parsed
+            .entries
+            .iter()
+            .find(|e| e.id == *id)
+            .expect("semantics key names an entry");
+        if let Some(uuid) = entry.entry.uuid() {
+            assert_eq!(conversation.entry_id_for_uuid(uuid), Some(id));
+            let via_conversation = conversation
+                .semantics_for_uuid(uuid)
+                .expect("semantics reachable via conversation");
+            assert_eq!(
+                format!("{via_conversation:?}"),
+                format!("{expected_semantics:?}")
+            );
+            correlated += 1;
+        }
+    }
+    assert!(correlated > 0, "no uuid-bearing semantic entry correlated");
+}
+
+#[test]
+fn cached_parsed_session_preserves_bundle_across_miss_and_hit() {
+    // Round-18: provenance and semantics must survive BOTH cache paths.
+    use super::registry::cached_parsed_session;
+    let cache = crate::cache::CacheManager::new(&crate::config::CacheConfig {
+        enabled: true,
+        ..Default::default()
+    });
+    let key = multi_artifact_key();
+
+    let miss = cached_parsed_session(&cache, &FakeProvider, &key).unwrap();
+    assert!(!miss.semantics.is_empty());
+    assert!(!miss.record_dispositions.is_empty());
+    assert!(!miss.entry_origins.is_empty());
+
+    let hit = cached_parsed_session(&cache, &FakeProvider, &key).unwrap();
+    assert!(
+        std::sync::Arc::ptr_eq(&miss, &hit),
+        "unchanged token must be a cache hit"
+    );
+    assert!(!hit.semantics.is_empty() && !hit.record_dispositions.is_empty());
+
+    // The hit still builds a conversation with reachable semantics.
+    let conversation = crate::reconstruction::Conversation::from_parsed_session(hit).unwrap();
+    assert!(conversation.provider_bundle().is_some());
 }
