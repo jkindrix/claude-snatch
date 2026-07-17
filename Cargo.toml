@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.80.0"
 authors = ["claude-snatch contributors"]
-description = "High-performance CLI/TUI tool for extracting and analyzing Claude Code conversation logs"
+description = "High-performance CLI tool for extracting and analyzing Claude Code conversation logs"
 license = "MIT"
 repository = "https://github.com/jkindrix/claude-snatch"
-keywords = ["claude", "code", "jsonl", "extraction", "cli", "tui"]
+keywords = ["claude", "code", "jsonl", "extraction", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
 
@@ -16,11 +16,6 @@ readme = "README.md"
 clap = { version = "4.5", features = ["derive", "env", "string", "wrap_help"] }
 clap_complete = "4.6"
 
-# TUI Framework (compiled only with the `tui` feature)
-ratatui = { version = "0.30", features = ["all-widgets"], optional = true }
-crossterm = { version = "0.29", features = ["event-stream"], optional = true }
-ratatui-image = { version = "11.0", default-features = false, features = ["image-defaults", "crossterm"], optional = true }
-image = { version = "0.25", optional = true }
 
 # Async Runtime
 tokio = { version = "1.41", features = ["full"] }
@@ -127,11 +122,9 @@ harness = false
 
 [features]
 default = []
-tui = ["dep:ratatui", "dep:crossterm"]  # Interactive terminal UI
 tracing = []
 mmap = ["dep:memmap2"]  # Memory-mapped file parsing for very large JSONL files
 mcp = ["dep:mcpkit"]  # MCP server mode for AI model integration
-image-preview = ["tui", "dep:ratatui-image", "dep:image"]  # Terminal image preview (sixel/kitty/iterm)
 
 [lints.rust]
 # Use deny instead of forbid to allow targeted unsafe in mmap feature

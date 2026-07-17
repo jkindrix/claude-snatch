@@ -1,4 +1,4 @@
-//! claude-snatch: High-performance CLI/TUI for extracting Claude Code conversation logs.
+//! claude-snatch: High-performance CLI for extracting Claude Code conversation logs.
 //!
 //! This tool provides maximum-fidelity extraction of Claude Code JSONL session logs
 //! with support for all 77+ documented data elements, conversation tree reconstruction,

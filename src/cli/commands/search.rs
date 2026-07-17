@@ -248,8 +248,8 @@ fn matches_model(entry: &LogEntry, model_filter: &str) -> bool {
                 .contains(&model_filter_lower)
         }
         // Non-assistant entries carry no model, so they cannot match a model
-        // filter. Exclude them while a model filter is active (matches the TUI's
-        // semantics and keeps `--model` an entry-level assistant filter, so
+        // filter. Exclude them while a model filter is active (keeps `--model`
+        // an entry-level assistant filter, so
         // `--files-only` returns a session only if it has a matching assistant
         // entry rather than any user text).
         _ => false,

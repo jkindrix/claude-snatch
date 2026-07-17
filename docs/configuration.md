@@ -26,11 +26,6 @@ the default shown below.
 ```toml
 # ~/.config/claude-snatch/config.toml
 
-[theme]
-name = "default"
-color = true
-unicode = true
-
 [display]
 full_ids = false
 show_sizes = true
@@ -55,14 +50,6 @@ show_in_stats = true
 ```
 
 ## Configuration Sections
-
-### `[theme]`
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `name` | string | `default` | Theme name |
-| `color` | bool | `true` | Use color output |
-| `unicode` | bool | `true` | Use Unicode characters |
 
 ### `[display]`
 
@@ -129,7 +116,6 @@ snatch config reset                         # reset to defaults
 
 Keys accepted by `config get` / `config set`:
 
-- `theme.name`, `theme.color`, `theme.unicode`
 - `display.full_ids`, `display.show_sizes`, `display.truncate_at`, `display.context_lines`
 - `cache.enabled`, `cache.directory`, `cache.max_size`, `cache.ttl_seconds`
 - `budget.daily_limit`, `budget.weekly_limit`, `budget.monthly_limit`, `budget.warning_threshold`, `budget.show_in_stats`

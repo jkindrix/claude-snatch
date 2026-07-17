@@ -16,9 +16,6 @@ use crate::util::atomic_write;
 /// Application configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
-    /// TUI theme.
-    #[serde(default)]
-    pub theme: ThemeConfig,
     /// Display options.
     #[serde(default)]
     pub display: DisplayConfig,
@@ -82,13 +79,6 @@ impl Config {
     // the same literal, so the bit patterns match.
     #[allow(clippy::float_cmp)]
     pub fn merge_from(&mut self, other: &Config) {
-        // Merge theme config
-        if other.theme.name != "default" {
-            self.theme.name = other.theme.name.clone();
-        }
-        self.theme.color = other.theme.color;
-        self.theme.unicode = other.theme.unicode;
-
         // Merge display config
         self.display.full_ids = other.display.full_ids;
         self.display.show_sizes = other.display.show_sizes;
@@ -152,30 +142,6 @@ impl Config {
         atomic_write(path, content.as_bytes())?;
 
         Ok(())
-    }
-}
-
-/// Theme configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThemeConfig {
-    /// Theme name.
-    #[serde(default = "default_theme")]
-    pub name: String,
-    /// Use color output.
-    #[serde(default = "default_true")]
-    pub color: bool,
-    /// Use Unicode characters.
-    #[serde(default = "default_true")]
-    pub unicode: bool,
-}
-
-impl Default for ThemeConfig {
-    fn default() -> Self {
-        Self {
-            name: "default".to_string(),
-            color: true,
-            unicode: true,
-        }
     }
 }
 
@@ -422,10 +388,6 @@ impl Default for CacheConfig {
 // Default value functions for serde
 fn default_true() -> bool {
     true
-}
-
-fn default_theme() -> String {
-    "default".to_string()
 }
 
 fn default_truncate() -> usize {
@@ -706,7 +668,6 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert!(config.theme.color);
         assert!(config.cache.enabled);
     }
 
@@ -715,18 +676,25 @@ mod tests {
         let config = Config::default();
         let toml = toml::to_string(&config).unwrap();
         let parsed: Config = toml::from_str(&toml).unwrap();
-        assert_eq!(parsed.theme.name, config.theme.name);
+        assert_eq!(parsed.display.truncate_at, config.display.truncate_at);
+        assert_eq!(parsed.cache.enabled, config.cache.enabled);
     }
 
     #[test]
-    fn test_removed_default_format_group_is_ignored() {
-        // The whole `[default_format]` group was removed (it was read by no
-        // command). Old config files still carrying it must keep loading —
-        // serde ignores the unknown section — and known sections still parse.
+    fn test_removed_config_groups_are_ignored() {
+        // The `[default_format]` group (read by no command) and the `[theme]`
+        // group (TUI-only, cut with the TUI) were removed. Old config files
+        // still carrying them must keep loading — serde ignores the unknown
+        // sections — and known sections still parse.
         let toml = r#"
 [default_format]
 format = "text"
 include_thinking = false
+
+[theme]
+name = "dark"
+color = true
+unicode = true
 
 [display]
 truncate_at = 1234
@@ -741,12 +709,10 @@ truncate_at = 1234
         let mut override_config = Config::default();
 
         // Set some overrides
-        override_config.theme.name = "dark".to_string();
         override_config.display.truncate_at = 5000;
 
         base.merge_from(&override_config);
 
-        assert_eq!(base.theme.name, "dark");
         assert_eq!(base.display.truncate_at, 5000);
     }
 
@@ -770,7 +736,6 @@ truncate_at = 3000
 
         assert_eq!(config.display.truncate_at, 3000);
         // Defaults should be preserved where not overridden
-        assert!(config.theme.color);
     }
 
     #[test]
@@ -781,7 +746,6 @@ truncate_at = 3000
         let config = Config::load_for_project(temp_dir.path()).unwrap();
 
         // Should return defaults
-        assert!(config.theme.color);
         assert!(config.cache.enabled);
     }
 }

@@ -24,7 +24,6 @@ fn show_json(args: &QuickstartArgs) -> Result<()> {
             QuickstartTopic::Export,
             QuickstartTopic::Search,
             QuickstartTopic::Stats,
-            QuickstartTopic::Tui,
             QuickstartTopic::Workflows,
         ],
         topic => vec![topic],
@@ -52,7 +51,6 @@ fn show_text(args: &QuickstartArgs) -> Result<()> {
         QuickstartTopic::Export => show_export(args.verbose),
         QuickstartTopic::Search => show_search(args.verbose),
         QuickstartTopic::Stats => show_stats(args.verbose),
-        QuickstartTopic::Tui => show_tui(args.verbose),
         QuickstartTopic::Workflows => show_workflows(args.verbose),
         QuickstartTopic::All => {
             show_overview(args.verbose);
@@ -64,8 +62,6 @@ fn show_text(args: &QuickstartArgs) -> Result<()> {
             show_search(args.verbose);
             println!("\n{}\n", "=".repeat(60));
             show_stats(args.verbose);
-            println!("\n{}\n", "=".repeat(60));
-            show_tui(args.verbose);
             println!("\n{}\n", "=".repeat(60));
             show_workflows(args.verbose);
         }
@@ -80,7 +76,6 @@ fn topic_title(topic: QuickstartTopic) -> &'static str {
         QuickstartTopic::Export => "Exporting Conversations",
         QuickstartTopic::Search => "Searching Sessions",
         QuickstartTopic::Stats => "Usage Statistics",
-        QuickstartTopic::Tui => "Interactive TUI Browser",
         QuickstartTopic::Workflows => "Common Workflows",
         QuickstartTopic::All => "Complete Guide",
     }
@@ -121,7 +116,6 @@ fn topic_examples(topic: QuickstartTopic, verbose: bool) -> Vec<&'static str> {
             "snatch stats --global --costs",
             "snatch stats --blocks",
         ],
-        QuickstartTopic::Tui => vec!["snatch tui", "snatch tui --session <id>"],
         QuickstartTopic::Workflows => vec![
             "snatch prompts --all > prompts.txt",
             "snatch standup --period 24h",
@@ -174,7 +168,7 @@ QUICK REFERENCE
   snatch export <id>       Export a conversation
   snatch search "query"    Search across sessions
   snatch stats             Usage statistics
-  snatch tui               Interactive browser
+  snatch pick              Interactive session picker
   snatch info <id>         Session details
   snatch quickstart <topic> More help on specific topics
 
@@ -184,7 +178,6 @@ AVAILABLE TOPICS
   snatch quickstart export      All export formats and options
   snatch quickstart search      Search and filtering
   snatch quickstart stats       Understanding usage data
-  snatch quickstart tui         Interactive TUI guide
   snatch quickstart workflows   Common recipes and integrations
   snatch quickstart all         Show everything"#
     );
@@ -429,82 +422,6 @@ EXPORT
     }
 }
 
-fn show_tui(verbose: bool) {
-    println!(
-        r#"
-INTERACTIVE TUI BROWSER
-=======================
-
-LAUNCH
-------
-  snatch tui                          # Open TUI browser
-  snatch tui -p /my/project           # Start with project
-  snatch tui -s abc12345              # Open specific session
-
-NAVIGATION
-----------
-  j/k or Up/Down    Move through list
-  h/l or Left/Right Switch panels
-  Enter             Select/expand item
-  Esc               Go back
-  1/2/3             Focus specific panel
-
-SEARCH
-------
-  /                 Start search
-  n/N               Next/previous result
-  Enter             Confirm search
-  Esc               Cancel search
-
-ACTIONS
--------
-  e                 Export current session
-  c                 Copy message to clipboard
-  C                 Copy code block
-  r                 Refresh
-
-DISPLAY
--------
-  t                 Toggle thinking blocks
-  o                 Toggle tool outputs
-  w                 Toggle word wrap
-  #                 Toggle line numbers
-  z                 Focus mode (hide panels)
-  T                 Cycle theme
-  ?                 Toggle help panel
-
-FILTERS
--------
-  f                 Toggle filter panel
-  F/B               Cycle message type filter
-  E                 Toggle errors-only
-  M                 Filter by model
-  [/]               Set date range
-  X                 Clear all filters"#
-    );
-
-    if verbose {
-        println!(
-            r#"
-
-THEMES
-------
-  snatch tui --theme dark             # Dark theme (default)
-  snatch tui --theme light            # Light theme
-  snatch tui --ascii                  # ASCII-only (no Unicode)
-
-EXPORT DIALOG
--------------
-  When pressing 'e' to export:
-    h/l             Change format
-    t               Toggle thinking
-    o               Toggle tools
-    Enter           Confirm export
-    Esc             Cancel"#
-        );
-    }
-}
-
 fn show_workflows(verbose: bool) {
     println!(
         r#"
@@ -552,7 +469,6 @@ SHELL INTEGRATION
   alias sl='snatch list'
   alias se='snatch export'
   alias ss='snatch search'
-  alias st='snatch tui'
 
   # Quick export function:
   snexport() {{ snatch export "$1" -O "${{2:-conversation.md}}"; }}

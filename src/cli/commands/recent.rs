@@ -137,7 +137,7 @@ pub fn run(cli: &Cli, args: &RecentArgs) -> Result<()> {
             }
 
             println!();
-            println!("Tip: Use 'snatch info <id>' for details or 'snatch tui' to browse.");
+            println!("Tip: Use 'snatch info <id>' for details or 'snatch pick' to browse.");
         }
     }
 
@@ -269,7 +269,7 @@ fn run_collapsed(
             }
 
             println!();
-            println!("Tip: Use 'snatch info <id>' for details or 'snatch tui' to browse.");
+            println!("Tip: Use 'snatch info <id>' for details or 'snatch pick' to browse.");
         }
     }
 

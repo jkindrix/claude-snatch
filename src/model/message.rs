@@ -323,7 +323,7 @@ impl LogEntry {
     ///
     /// For an unknown entry this returns its actual raw `type` (falling back to
     /// `"unknown"` only when the discriminator is absent), so preserved types
-    /// like `pr-link` are visible in CSV/TUI/analytics surfaces rather than
+    /// like `pr-link` are visible in CSV/analytics surfaces rather than
     /// collapsed to a generic placeholder.
     #[must_use]
     pub fn message_type(&self) -> &str {

@@ -2,7 +2,7 @@
 //!
 //! This module provides async versions of common I/O operations using tokio.
 //! It enables non-blocking file reading, writing, and directory operations
-//! for improved TUI responsiveness and parallel processing.
+//! for improved interactive responsiveness and parallel processing.
 
 use std::path::{Path, PathBuf};
 

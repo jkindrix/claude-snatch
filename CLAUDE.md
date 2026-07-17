@@ -7,7 +7,6 @@ Rust CLI tool for extracting, analyzing, and searching Claude Code conversation 
 ```bash
 cargo build                    # standard build
 cargo build --features mcp     # with MCP server
-cargo build --features tui     # with TUI
 cargo test                     # run tests
 ```
 

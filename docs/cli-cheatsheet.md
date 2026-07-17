@@ -3,7 +3,7 @@ Snatch Cheatsheet (v0.1.0)
 Claude Code conversation log extractor and analyzer.
 
 Reads ~/.claude session data. All session IDs support short prefixes (e.g. 780893e4).
-Running snatch with no subcommand launches the interactive TUI in a terminal.
+Running snatch with no subcommand shows a quick summary.
 
 Global Options (apply to all commands)
 
@@ -42,7 +42,7 @@ Most commands have short aliases for quick access:
   list → ls            info → i, show       pick → browse
   search → s, find     stats → stat         standup → daily
   diff → d             export → x           recover → restore
-  tui → ui             cleanup → clean      index → idx
+  cleanup → clean      index → idx
   config → cfg         extract → ext        quickstart → guide, examples
 
 ---
@@ -96,15 +96,6 @@ snatch pick -a open                   # pick then print file path
 snatch pick -p myproject              # scope to project
 snatch pick --subagents               # include subagents
 
-Interactive TUI browser (alias: ui)
-
-snatch tui                            # launch TUI
-snatch tui -p myproject               # start on a project
-snatch tui -s <SESSION>               # start on a session
-snatch tui --theme mytheme            # custom theme
-snatch tui --ascii                    # ASCII-only (no Unicode box drawing)
-
----
 Searching
 
 Regex/fuzzy search across sessions (aliases: s, find)
@@ -443,7 +434,6 @@ snatch quickstart explore             # exploring sessions
 snatch quickstart export              # exporting conversations
 snatch quickstart search              # searching sessions
 snatch quickstart stats               # usage statistics
-snatch quickstart tui                 # TUI browser
 snatch quickstart workflows           # common recipes
 snatch quickstart all                 # all topics
 
@@ -507,8 +497,4 @@ All flags have env var equivalents prefixed with SNATCH_:
 │ SNATCH_MAX_FILE_SIZE │ File size limit       │
 ├──────────────────────┼───────────────────────┤
 │ SNATCH_EXPORT_FORMAT │ Default export format │
-├──────────────────────┼───────────────────────┤
-│ SNATCH_TUI_THEME     │ TUI theme             │
-├──────────────────────┼───────────────────────┤
-│ SNATCH_ASCII         │ ASCII-only TUI mode   │
 └──────────────────────┴───────────────────────┘

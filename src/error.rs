@@ -143,13 +143,6 @@ pub enum SnatchError {
         path: String,
     },
 
-    /// TUI error.
-    #[error("TUI error: {message}")]
-    TuiError {
-        /// Human-readable error message.
-        message: String,
-    },
-
     /// Interrupted operation.
     #[error("Operation interrupted")]
     Interrupted,
@@ -371,9 +364,6 @@ impl SnatchError {
             ),
             Self::SearchError { .. } => Some(
                 "Use 'snatch search --help' for search syntax.",
-            ),
-            Self::TuiError { .. } => Some(
-                "Ensure your terminal supports VT100/ANSI escape codes, or run the command without the TUI flag.",
             ),
             _ => None,
         }

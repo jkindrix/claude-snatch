@@ -624,12 +624,6 @@ impl ExportLicenseInfo {
             Some("https://github.com/clap-rs/clap"),
         );
         self.add_dependency(
-            "ratatui",
-            None,
-            "MIT",
-            Some("https://github.com/ratatui/ratatui"),
-        );
-        self.add_dependency(
             "chrono",
             None,
             "MIT OR Apache-2.0",

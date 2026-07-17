@@ -1,6 +1,6 @@
 //! Summary command implementation.
 //!
-//! Shows a quick overview of Claude Code usage without launching the full TUI.
+//! Shows a quick overview of Claude Code usage.
 
 use chrono::{Duration, Utc};
 use rayon::prelude::*;
@@ -245,7 +245,6 @@ pub fn run(cli: &Cli, args: &SummaryArgs) -> Result<()> {
             println!("--------------");
             println!("  snatch recent          Show recent sessions");
             println!("  snatch stats --global  Detailed statistics");
-            println!("  snatch tui             Interactive browser");
         }
     }
 
@@ -255,7 +254,7 @@ pub fn run(cli: &Cli, args: &SummaryArgs) -> Result<()> {
 /// Run a quick summary for bare `snatch` command in non-interactive mode.
 ///
 /// This provides a brief overview without requiring arguments, suitable for
-/// piping or scripting contexts where the full TUI isn't available.
+/// piping or scripting contexts.
 pub fn run_quick_summary(cli: &Cli) -> Result<()> {
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
 
@@ -311,7 +310,7 @@ pub fn run_quick_summary(cli: &Cli) -> Result<()> {
                 format_count(total_sessions)
             );
             println!();
-            println!("Run 'snatch --help' for commands, or 'snatch' interactively for TUI.");
+            println!("Run 'snatch --help' for commands.");
         }
     }
 

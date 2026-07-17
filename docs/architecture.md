@@ -1,6 +1,6 @@
 # Architecture Overview
 
-This document describes the high-level architecture of snatch, a high-performance Rust CLI/TUI tool for extracting and analyzing Claude Code conversation logs.
+This document describes the high-level architecture of snatch, a high-performance Rust CLI tool for extracting and analyzing Claude Code conversation logs.
 
 ## System Overview
 
@@ -10,14 +10,9 @@ This document describes the high-level architecture of snatch, a high-performanc
 ├─────────────────────────────────────────────────────────────────────────┤
 │  CLI Layer (clap)                                                        │
 │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐           │
-│  │  list   │ │ export  │ │ search  │ │  stats  │ │   tui   │           │
+│  │  list   │ │ export  │ │ search  │ │  stats  │ │  watch  │           │
 │  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘           │
 ├───────┴──────────┴──────────┴──────────┴──────────┴────────────────────┤
-│  TUI Layer (ratatui)                                                     │
-│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐                        │
-│  │  Tree View  │ │ Conversation│ │  Details    │                        │
-│  │   Panel     │ │   Panel     │ │   Panel     │                        │
-│  └─────────────┘ └─────────────┘ └─────────────┘                        │
 ├─────────────────────────────────────────────────────────────────────────┤
 │  Core Library                                                            │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐      │
@@ -64,21 +59,6 @@ cli/
 │   ├── stats.rs    # Analytics and statistics
 │   └── diff.rs     # Session comparison
 └── output.rs       # Output formatting helpers
-```
-
-### `src/tui/` - Terminal User Interface
-
-Interactive terminal interface built with ratatui and crossterm.
-
-```
-tui/
-├── mod.rs          # TUI entry point
-├── app.rs          # Main event loop
-├── state.rs        # Application state
-├── components.rs   # Reusable UI components
-├── events.rs       # Event handling
-├── highlight.rs    # Syntax highlighting
-└── theme.rs        # Color themes
 ```
 
 ### `src/model/` - Data Model
@@ -253,17 +233,6 @@ JSONL File → JsonlParser → LogEntry[] → Conversation → Export
            ParseStats              ConversationTree
 ```
 
-### TUI Flow
-
-```
-User Input → EventHandler → AppState → UI Render
-                               │
-                               ├─→ ClaudeDirectory (discovery)
-                               ├─→ JsonlParser (parsing)
-                               ├─→ Conversation (reconstruction)
-                               └─→ SessionAnalytics (analysis)
-```
-
 ## Design Principles
 
 ### 1. Zero-Copy Where Possible
@@ -317,13 +286,6 @@ Optimized for large files:
 2. Add serde rename if needed
 3. Update display/export logic
 4. Add tests
-
-### Adding a New TUI Feature
-
-1. Update `AppState` in `state.rs`
-2. Add key binding in `app.rs`
-3. Update `draw_ui()` if UI changes
-4. Update help overlay
 
 ## Testing Strategy
 

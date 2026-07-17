@@ -3,7 +3,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-High-performance CLI/TUI tool for extracting, analyzing, and exporting Claude Code conversation logs with **maximum data fidelity**.
+High-performance CLI tool for extracting, analyzing, and exporting Claude Code conversation logs with **maximum data fidelity**.
 
 ## Features
 
@@ -11,7 +11,6 @@ High-performance CLI/TUI tool for extracting, analyzing, and exporting Claude Co
 - **Multiple Export Formats**: Markdown, JSON, HTML, CSV, SQLite, JSONL, and more
 - **Rust Performance**: Native speed, 10-100x faster than Python/Node alternatives
 - **Lossless Round-Trip**: Preserve unknown fields for forward compatibility
-- **Dual Interface**: CLI (scriptable) and TUI (interactive) modes
 - **Cross-Platform**: Linux, macOS, Windows (including WSL)
 - **Conversation Reconstruction**: Tree building with parent-child linking and branch detection
 - **Session Analytics**: Token usage, cost estimation, tool statistics
@@ -78,9 +77,6 @@ snatch stats -s <session-id>
 
 # Show global statistics across all sessions
 snatch stats --global
-
-# Launch interactive TUI (requires --features tui at build time)
-snatch tui
 ```
 
 ## Commands
@@ -98,7 +94,6 @@ snatch tui
 | `messages` | `msgs` | Show messages for a session |
 | `info` | `i`, `show` | Display detailed information |
 | `pick` | `browse` | Interactively pick a session using fuzzy search |
-| `tui` | `ui` | Launch interactive terminal UI |
 | `diff` | | Compare two sessions or files |
 | `tag` | | Manage session tags, names, and bookmarks |
 | `prompts` | | Extract user prompts from sessions |
@@ -317,19 +312,6 @@ snatch stats --global --all
 snatch stats -s <session-id> --tools
 ```
 
-## TUI Navigation
-
-| Key | Action |
-|-----|--------|
-| `j` / `↓` | Move down |
-| `k` / `↑` | Move up |
-| `Enter` | Select / Expand |
-| `Tab` | Switch panel |
-| `/` | Search |
-| `e` | Export current |
-| `q` | Quit |
-| `?` | Show help |
-
 ## Architecture
 
 ```
@@ -353,7 +335,6 @@ claude-snatch/
 │   ├── notes/         # Note management
 │   ├── parser/        # JSONL parsing with streaming support
 │   ├── reconstruction/# Conversation tree building
-│   ├── tui/           # Terminal user interface
 │   ├── util/          # Utility functions
 │   ├── api.rs         # API types
 │   ├── error.rs       # Error types and handling
@@ -413,27 +394,19 @@ cargo build --release
 Enable additional functionality with feature flags:
 
 ```bash
-# Interactive terminal UI
-cargo build --features tui
-
 # MCP server mode for AI model integration
 cargo build --features mcp
-
-# Terminal image preview (sixel/kitty/iterm2/halfblocks)
-cargo build --features image-preview
 
 # Memory-mapped file parsing for very large JSONL files
 cargo build --features mmap
 
 # Enable all optional features
-cargo build --features "tui,mcp,image-preview,mmap,tracing"
+cargo build --features "mcp,mmap,tracing"
 ```
 
 | Feature | Description |
 |---------|-------------|
-| `tui` | Interactive terminal UI (`snatch tui`) |
 | `mcp` | MCP server exposing tools for session recall, search, lesson extraction, and goal and decision management |
-| `image-preview` | Terminal image rendering using sixel, kitty, or iterm2 protocols |
 | `mmap` | Memory-mapped file parsing for very large JSONL files |
 | `tracing` | Enable tracing/diagnostic instrumentation |
 

@@ -31,7 +31,7 @@ use crate::export::ExportFormat;
 #[command(propagate_version = true)]
 #[command(disable_help_flag = true)]
 pub struct Cli {
-    /// Subcommand to run (defaults to TUI in interactive terminals).
+    /// Subcommand to run (defaults to a quick summary).
     #[command(subcommand)]
     pub command: Option<Commands>,
 
@@ -206,7 +206,7 @@ impl Cli {
 /// - **Search**: search - find content across sessions
 /// - **Analysis**: stats, summary, standup, diff - usage analytics and comparisons
 /// - **Export**: export, code, prompts - extract content in various formats
-/// - **Interactive**: tui, watch - live session viewing
+/// - **Interactive**: watch - live session viewing
 /// - **Management**: tag, cleanup, validate, cache, index - session maintenance
 /// - **Configuration**: config, extract, completions - settings and setup
 #[derive(Debug, Subcommand)]
@@ -352,10 +352,6 @@ pub enum Commands {
     // ═══════════════════════════════════════════════════════════════════════
     // INTERACTIVE - Live session viewing
     // ═══════════════════════════════════════════════════════════════════════
-    /// Launch interactive TUI browser (requires the `tui` feature).
-    #[command(alias = "ui", display_order = 40)]
-    Tui(TuiArgs),
-
     /// Watch for session changes in real-time.
     #[command(display_order = 41)]
     Watch(WatchArgs),
@@ -1231,26 +1227,6 @@ pub struct InfoArgs {
     /// Show files touched in this session (created, modified, read).
     #[arg(long)]
     pub files: bool,
-}
-
-/// Arguments for the TUI command.
-#[derive(Debug, Default, Parser)]
-pub struct TuiArgs {
-    /// Start with specific project.
-    #[arg(short = 'p', long)]
-    pub project: Option<String>,
-
-    /// Start with specific session (supports short prefixes like "780893e4").
-    #[arg(short = 's', long)]
-    pub session: Option<String>,
-
-    /// Theme to use.
-    #[arg(long, env = "SNATCH_TUI_THEME")]
-    pub theme: Option<String>,
-
-    /// Use ASCII-only characters (no Unicode box drawing).
-    #[arg(long, env = "SNATCH_ASCII")]
-    pub ascii: bool,
 }
 
 /// Arguments for the validate command.
@@ -2607,8 +2583,6 @@ pub enum QuickstartTopic {
     Search,
     /// Understanding usage statistics.
     Stats,
-    /// Interactive TUI browser.
-    Tui,
     /// Common workflow recipes.
     Workflows,
     /// All topics in sequence.
@@ -2787,22 +2761,14 @@ pub fn run() -> Result<()> {
     init_global_cache(&config.cache);
 
     match &cli.command {
-        // No command provided - launch TUI if interactive, otherwise show quick summary
-        None => {
-            if io::stdout().is_terminal() && io::stdin().is_terminal() {
-                let tui_args = TuiArgs::default();
-                commands::tui::run(&cli, &tui_args)
-            } else {
-                commands::summary::run_quick_summary(&cli)
-            }
-        }
+        // No command provided - show the quick summary
+        None => commands::summary::run_quick_summary(&cli),
         Some(Commands::List(args)) => commands::list::run(&cli, args),
         Some(Commands::Export(args)) => commands::export::run(&cli, args),
         Some(Commands::Grab(args)) => commands::grab::run(&cli, args),
         Some(Commands::Search(args)) => commands::search::run(&cli, args),
         Some(Commands::Stats(args)) => commands::stats::run(&cli, args),
         Some(Commands::Info(args)) => commands::info::run(&cli, args),
-        Some(Commands::Tui(args)) => commands::tui::run(&cli, args),
         Some(Commands::Validate(args)) => commands::validate::run(&cli, args),
         Some(Commands::Watch(args)) => commands::watch::run(&cli, args),
         Some(Commands::Diff(args)) => commands::diff::run(&cli, args),

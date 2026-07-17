@@ -20,14 +20,11 @@ snatch list --verbose
 ### Interactive Browsing
 
 ```bash
-# Launch TUI browser
-snatch tui
+# Fuzzy-pick a session
+snatch pick
 
-# Open specific project
-snatch tui --project ~/my-project
-
-# Open specific session
-snatch tui --session abc12345
+# Scope the picker to a project
+snatch pick -p my-project
 ```
 
 ### Export a Conversation
@@ -123,45 +120,6 @@ snatch extract abc12345 --type code --language python --output python-code/
 # Extract with file metadata
 snatch extract abc12345 --type code --with-metadata
 ```
-
-## TUI Recipes
-
-### Navigate Large Sessions
-
-1. Press `/` to start search
-2. Type your search term
-3. Press `Enter` to confirm
-4. Use `n` for next match, `N` for previous
-5. Press `Escape` to exit search mode
-
-### Filter by Message Type
-
-1. Press `F` to cycle through filters:
-   - All → User → Assistant → System → Tools
-2. Press `X` to clear filters
-
-### Filter by Date Range
-
-1. Press `[` to set start date
-2. Type date in YYYY-MM-DD format
-3. Press `Enter` to confirm
-4. Press `]` to set end date
-5. Press `X` to clear date filters
-
-### Quick Export from TUI
-
-1. Select a session
-2. Press `e` to open export dialog
-3. Use `h`/`l` to select format
-4. Press `t` to toggle thinking blocks
-5. Press `o` to toggle tool outputs
-6. Press `Enter` to export
-
-### Copy Code to Clipboard
-
-1. Navigate to message with code
-2. Press `C` to copy code block
-3. Press `c` to copy entire message
 
 ## Integration Examples
 
@@ -358,15 +316,3 @@ snatch export abc12345 --verbose
 ls -la ~/.claude/projects/
 ```
 
-### TUI Not Rendering
-
-```bash
-# Check terminal capabilities
-echo $TERM
-
-# Try with different theme
-snatch tui --theme high_contrast
-
-# Check for color support
-snatch tui --no-color
-```

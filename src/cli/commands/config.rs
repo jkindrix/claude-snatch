@@ -34,12 +34,6 @@ fn show_config(cli: &Cli) -> Result<()> {
             println!("Snatch Configuration");
             println!("====================\n");
 
-            println!("[theme]");
-            println!("  name = \"{}\"", config.theme.name);
-            println!("  color = {}", config.theme.color);
-            println!("  unicode = {}", config.theme.unicode);
-            println!();
-
             println!("[display]");
             println!("  full_ids = {}", config.display.full_ids);
             println!("  show_sizes = {}", config.display.show_sizes);
@@ -98,10 +92,6 @@ fn get_config_value(cli: &Cli, key: &str) -> Result<()> {
     let config = Config::load().unwrap_or_default();
 
     let value = match key {
-        "theme.name" => config.theme.name,
-        "theme.color" => config.theme.color.to_string(),
-        "theme.unicode" => config.theme.unicode.to_string(),
-
         "display.full_ids" => config.display.full_ids.to_string(),
         "display.show_sizes" => config.display.show_sizes.to_string(),
         "display.truncate_at" => config.display.truncate_at.to_string(),
@@ -158,16 +148,6 @@ fn set_config_value(_cli: &Cli, key: &str, value: &str) -> Result<()> {
     let mut config = Config::load().unwrap_or_default();
 
     match key {
-        "theme.name" => {
-            config.theme.name = value.to_string();
-        }
-        "theme.color" => {
-            config.theme.color = parse_bool(value)?;
-        }
-        "theme.unicode" => {
-            config.theme.unicode = parse_bool(value)?;
-        }
-
         "display.full_ids" => {
             config.display.full_ids = parse_bool(value)?;
         }

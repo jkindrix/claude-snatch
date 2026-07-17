@@ -43,7 +43,6 @@ pub mod summary;
 pub mod tag;
 pub mod thread;
 pub mod timeline;
-pub mod tui;
 pub mod validate;
 pub mod watch;
 

@@ -1,4 +1,4 @@
-//! claude-snatch: High-performance CLI/TUI tool for extracting Claude Code conversation logs.
+//! claude-snatch: High-performance CLI tool for extracting Claude Code conversation logs.
 //!
 //! This crate provides comprehensive extraction, analysis, and export capabilities
 //! for Claude Code JSONL session logs with maximum data fidelity.
@@ -9,7 +9,6 @@
 //! - **Beyond-JSONL**: Access 21+ supplementary data sources
 //! - **Rust Performance**: Native speed, 10-100x faster than alternatives
 //! - **Lossless Round-Trip**: Preserve unknown fields for forward compatibility
-//! - **Dual Interface**: Both CLI (scriptable) and TUI (interactive) modes
 //!
 //! # Quick Start (High-Level API)
 //!
@@ -48,7 +47,6 @@
 //! - [`export`]: Output format generation (Markdown, JSON, etc.)
 //! - [`extraction`]: Beyond-JSONL data extraction (settings, CLAUDE.md, MCP, etc.)
 //! - [`cli`]: Command-line interface
-//! - [`tui`]: Terminal user interface
 //! - [`config`]: Configuration management
 //! - [`error`]: Error types and handling
 //!
@@ -100,8 +98,6 @@ pub mod notes;
 pub mod parser;
 pub mod reconstruction;
 pub mod tags;
-#[cfg(feature = "tui")]
-pub mod tui;
 pub mod util;
 
 // MCP server (Model Context Protocol) - optional feature

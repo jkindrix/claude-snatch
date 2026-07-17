@@ -45,7 +45,6 @@ claude-snatch/
 │   ├── lib.rs           # Library entry point
 │   ├── main.rs          # CLI entry point
 │   ├── cli/             # Command-line interface
-│   ├── tui/             # Terminal UI
 │   ├── model/           # Data model
 │   ├── parser/          # JSONL parser
 │   ├── reconstruction/  # Conversation tree
@@ -110,7 +109,7 @@ git commit -m "feat(export): add XML export format"
 git commit -m "fix(parser): handle empty content blocks"
 
 # Documentation
-git commit -m "docs: update TUI guide"
+git commit -m "docs: update export guide"
 
 # Refactoring
 git commit -m "refactor(model): simplify ContentBlock enum"
@@ -218,7 +217,7 @@ fn process_file(path: &Path) -> Result<Data> {
 1. Create file in `src/export/`
 2. Implement `Exporter` trait
 3. Add to `ExportFormat` enum
-4. Register in CLI and TUI
+4. Register in the CLI
 5. Add tests
 6. Document format
 
