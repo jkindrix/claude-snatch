@@ -1338,11 +1338,11 @@ mod tests {
                     if !session.validate_provenance().is_empty() {
                         violations += 1;
                     }
-                    // Round-23 SOURCE-DERIVED semantic audits, asserted for
+                    // Round-24 SOURCE-DERIVED semantic audits, asserted for
                     // EVERY session. The oracle reads the NATIVE record
-                    // stream itself — never observations or any other
-                    // normalizer output — and applies the documented rules
-                    // as independently written test code.
+                    // stream itself; expectations are computed by
+                    // independently written rule code, never by replaying
+                    // production outputs.
                     let (_, audit_path) = p.resolve(&d.key).unwrap();
                     let raw_records: Vec<(u64, serde_json::Value)> = {
                         let mut reader = p.open_records(&audit_path).unwrap();
@@ -1367,39 +1367,106 @@ mod tests {
                     };
                     let raw_by_ordinal: std::collections::BTreeMap<u64, &serde_json::Value> =
                         raw_records.iter().map(|(o, v)| (*o, v)).collect();
+                    let joined = |payload: &serde_json::Value| -> String {
+                        payload["content"]
+                            .as_array()
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .filter_map(|i| i["text"].as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("")
+                            })
+                            .unwrap_or_default()
+                    };
 
-                    // (a) Every DuplicateStream suppression names a mapped
-                    // twin whose NATIVE record actually contains the
-                    // suppressed event's content (type-correspondent twin).
-                    for d in &session.record_dispositions {
+                    // (a) STRUCTURAL twin verification: type correspondence
+                    // plus exact extracted content (or exact fingerprint for
+                    // event-to-event duplicates). No empty-text escape.
+                    for disp in &session.record_dispositions {
                         if let RecordOutcome::Suppressed {
                             reason: super::super::SuppressionReason::DuplicateStream { twin },
-                        } = &d.outcome
+                        } = &disp.outcome
                         {
-                            let ev = raw_by_ordinal[&d.record.ordinal];
+                            let ev = raw_by_ordinal[&disp.record.ordinal];
                             let tw = raw_by_ordinal[&twin.ordinal];
-                            let ev_payload = &ev["payload"];
-                            let ev_text = ev_payload["message"]
+                            let ev_pt = ev["payload"]["type"].as_str().unwrap_or("");
+                            let ev_text = ev["payload"]["message"]
                                 .as_str()
-                                .or_else(|| ev_payload["text"].as_str())
+                                .or_else(|| ev["payload"]["text"].as_str())
                                 .unwrap_or("");
-                            let tw_str = tw.to_string();
-                            assert!(
-                                tw_str.contains(
-                                    serde_json::to_string(ev_text).unwrap().trim_matches('"')
-                                ) || ev_text.is_empty(),
-                                "duplicate-stream twin does not contain the event's content"
-                            );
+                            if tw["type"] == "event_msg" {
+                                // Event-to-event duplicate: exact fingerprint.
+                                assert_eq!(
+                                    ev["payload"], tw["payload"],
+                                    "event duplicate must share the exact payload"
+                                );
+                                assert_eq!(
+                                    ev["timestamp"], tw["timestamp"],
+                                    "event duplicate must share the timestamp"
+                                );
+                            } else {
+                                assert_eq!(tw["type"], "response_item");
+                                match ev_pt {
+                                    "user_message" => {
+                                        assert_eq!(tw["payload"]["type"], "message");
+                                        assert_eq!(tw["payload"]["role"], "user");
+                                        assert_eq!(
+                                            ev_text,
+                                            joined(&tw["payload"]),
+                                            "user twin content must match exactly"
+                                        );
+                                    }
+                                    "agent_message" => {
+                                        assert_eq!(tw["payload"]["type"], "message");
+                                        assert_eq!(tw["payload"]["role"], "assistant");
+                                        assert_eq!(
+                                            ev_text,
+                                            joined(&tw["payload"]),
+                                            "agent twin content must match exactly"
+                                        );
+                                    }
+                                    "agent_reasoning" | "agent_reasoning_raw_content" => {
+                                        assert_eq!(tw["payload"]["type"], "reasoning");
+                                        let mut found = false;
+                                        for list in ["summary", "content"] {
+                                            if let Some(items) = tw["payload"][list].as_array() {
+                                                for item in items {
+                                                    if item["text"].as_str() == Some(ev_text) {
+                                                        found = true;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        assert!(
+                                            found,
+                                            "reasoning twin must contain the exact section"
+                                        );
+                                    }
+                                    other => panic!("unexpected suppressed type {other}"),
+                                }
+                            }
                         }
                     }
 
-                    // (b) Usage: partition completeness + reconciliation
-                    // from SOURCE records. Every native token_count carrying
-                    // total_token_usage must be either an origin of some
-                    // entry (attributed) or a preserved Unknown entry —
-                    // never absent (no-loss). Expected sums come from the
-                    // documented epoch/basis rules applied to the raw
-                    // stream by THIS test.
+                    // (b) Usage: attribution derives from the observations'
+                    // OWN record carriers; every native usage record is in
+                    // EXACTLY ONE partition (XOR).
+                    let attributed: std::collections::BTreeSet<u64> = session
+                        .semantics
+                        .values()
+                        .flat_map(|s| s.usage.iter().map(|o| o.record.ordinal))
+                        .collect();
+                    let preserved: std::collections::BTreeSet<u64> = session
+                        .entries
+                        .iter()
+                        .filter(|e| {
+                            matches!(&e.entry, crate::model::LogEntry::Unknown(v)
+                                if v["payload"]["type"] == "token_count"
+                                    && v["payload"]["info"]["total_token_usage"].is_object())
+                        })
+                        .map(|e| e.id.ordinal)
+                        .collect();
                     let mut token_ordinals: Vec<(u64, (u64, u64, u64))> = Vec::new();
                     for (o, v) in &raw_records {
                         if v["type"] == "event_msg"
@@ -1418,41 +1485,22 @@ mod tests {
                             ));
                         }
                     }
-                    let mut attributed: std::collections::BTreeSet<u64> =
-                        std::collections::BTreeSet::new();
-                    for origins in session.entry_origins.values() {
-                        for r in &origins[1..] {
-                            attributed.insert(r.ordinal);
-                        }
-                    }
-                    let preserved: std::collections::BTreeSet<u64> = session
-                        .entries
-                        .iter()
-                        .filter(|e| {
-                            matches!(&e.entry, crate::model::LogEntry::Unknown(v)
-                                if v["payload"]["type"] == "token_count"
-                                    && v["payload"]["info"]["total_token_usage"].is_object())
-                        })
-                        .map(|e| e.id.ordinal)
-                        .collect();
                     for (o, _) in &token_ordinals {
+                        let a = attributed.contains(o);
+                        let pr = preserved.contains(o);
                         assert!(
-                            attributed.contains(o) || preserved.contains(o),
-                            "usage record neither attributed nor preserved (lost)"
+                            a ^ pr,
+                            "usage record must be in exactly one partition (attributed={a}, preserved={pr})"
                         );
                     }
 
-                    // Independent basis detection (documented rule: cached >
-                    // input anywhere proves the excludes basis).
-                    let excludes_basis = token_ordinals.iter().any(|(_, t)| t.1 > t.0);
-                    let fresh_of = |t: &(u64, u64, u64)| {
-                        if excludes_basis {
-                            t.0
-                        } else {
-                            t.0.saturating_sub(t.1)
-                        }
-                    };
+                    // Reconciliation under the SOURCE-BACKED basis (Codex
+                    // TokenUsage: fresh = input − cached, all audited tags):
+                    // ambiguous fresh decreases contribute zero fresh.
+                    let fresh_of = |t: &(u64, u64, u64)| t.0.saturating_sub(t.1);
                     let mut expected = (0u64, 0u64, 0u64);
+                    let mut ambiguous_ordinals: std::collections::BTreeSet<u64> =
+                        std::collections::BTreeSet::new();
                     let mut prev: Option<(u64, u64, u64)> = None;
                     for (o, t) in &token_ordinals {
                         let delta = match prev {
@@ -1462,8 +1510,9 @@ mod tests {
                                     (fresh_of(t), t.1, t.2)
                                 } else {
                                     let (fa, fb) = (fresh_of(t), fresh_of(&pv));
-                                    // Ambiguous fresh decrease contributes
-                                    // zero fresh (documented rule).
+                                    if fa < fb {
+                                        ambiguous_ordinals.insert(*o);
+                                    }
                                     (fa.saturating_sub(fb), t.1.saturating_sub(pv.1), t.2 - pv.2)
                                 }
                             }
@@ -1490,20 +1539,52 @@ mod tests {
                         "canonical usage must reconcile against the source-derived oracle"
                     );
 
-                    // (c) Every usage observation names its source record
-                    // directly, and that record is a real native token_count.
+                    // (c) Per-observation verification against the NATIVE
+                    // record: values by aggregation, basis by the record's
+                    // own numbers, ambiguity by independent recomputation.
                     for sem in session.semantics.values() {
                         for obs in &sem.usage {
                             let raw = raw_by_ordinal
                                 .get(&obs.record.ordinal)
                                 .expect("observation names a real record");
+                            let info = &raw["payload"]["info"];
+                            let source = match obs.aggregation {
+                                crate::provider::UsageAggregation::Delta => {
+                                    &info["last_token_usage"]
+                                }
+                                crate::provider::UsageAggregation::Cumulative => {
+                                    &info["total_token_usage"]
+                                }
+                            };
+                            let g = |k: &str| source[k].as_u64().unwrap_or(0);
                             assert_eq!(
-                                raw["payload"]["type"], "token_count",
-                                "observation source must be a token_count record"
+                                (obs.input_tokens, obs.cached_input_tokens, obs.output_tokens),
+                                (
+                                    g("input_tokens"),
+                                    g("cached_input_tokens"),
+                                    g("output_tokens")
+                                ),
+                                "observation numbers must equal the native record's"
+                            );
+                            let contradicts = obs.cached_input_tokens > obs.input_tokens;
+                            let expected_basis = if contradicts {
+                                super::super::UsageBasis::Unknown
+                            } else {
+                                super::super::UsageBasis::InputIncludesCached
+                            };
+                            assert_eq!(obs.basis, expected_basis);
+                            let expected_ambiguous = match obs.aggregation {
+                                crate::provider::UsageAggregation::Delta => contradicts,
+                                crate::provider::UsageAggregation::Cumulative => {
+                                    contradicts || ambiguous_ordinals.contains(&obs.record.ordinal)
+                                }
+                            };
+                            assert_eq!(
+                                obs.ambiguous, expected_ambiguous,
+                                "ambiguity flag must match independent recomputation"
                             );
                         }
                     }
-                    // Completeness: the parser must have reached every
                     // physical record — compare against an independent count
                     // of the preferred artifact's records. Active sessions
                     // can append between the parse and the count; a mismatch
@@ -3326,9 +3407,70 @@ mod tests {
     }
 
     #[test]
-    fn excludes_basis_is_detected_and_ambiguity_is_surfaced() {
-        // Era shape found in the corpus: cumulative cached exceeds
-        // cumulative input → the input number EXCLUDES cached tokens.
+    fn contradictory_call_observation_is_unknown_without_reinterpreting_the_session() {
+        // REAL corpus shape (round-24 census: four last_token_usage
+        // observations in one January session where cached > input; ZERO
+        // cumulative observations do). The contradictory Call observation
+        // becomes Unknown/ambiguous with raw values preserved; the Session
+        // observation and the canonical accounting keep the source-backed
+        // includes-cached basis.
+        let (_tmp, p) = normalize_home(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "a"}]}),
+            ),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "token_count", "info": {
+                    "last_token_usage": {"input_tokens": 50, "cached_input_tokens": 400, "output_tokens": 5},
+                    "total_token_usage": {"input_tokens": 1000, "cached_input_tokens": 400, "output_tokens": 50}}}),
+            ),
+        ]);
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        let sem = parsed
+            .semantics
+            .values()
+            .find(|s| !s.usage.is_empty())
+            .expect("usage semantics");
+        let call = sem
+            .usage
+            .iter()
+            .find(|o| matches!(o.scope, crate::provider::UsageScope::Call))
+            .unwrap();
+        assert!(matches!(call.basis, crate::provider::UsageBasis::Unknown));
+        assert!(call.ambiguous);
+        assert_eq!((call.input_tokens, call.cached_input_tokens), (50, 400));
+        let session = sem
+            .usage
+            .iter()
+            .find(|o| matches!(o.scope, crate::provider::UsageScope::Session))
+            .unwrap();
+        assert!(matches!(
+            session.basis,
+            crate::provider::UsageBasis::InputIncludesCached
+        ));
+        assert!(!session.ambiguous);
+        // Canonical accounting unaffected: fresh = 1000 − 400.
+        let fresh: u64 = parsed
+            .entries
+            .iter()
+            .filter_map(|e| match &e.entry {
+                crate::model::LogEntry::Assistant(m) => {
+                    m.message.usage.as_ref().map(|u| u.input_tokens)
+                }
+                _ => None,
+            })
+            .sum();
+        assert_eq!(fresh, 600);
+    }
+
+    #[test]
+    fn ambiguous_fresh_transition_zeroes_only_the_fresh_delta() {
+        // Field-specific ambiguity (round-24): a fresh decrease without a
+        // reset zeroes ONLY the fresh contribution; the cached and output
+        // deltas remain well-defined and still contribute.
         let tc = |input: u64, cached: u64, output: u64| {
             envelope_line(
                 "event_msg",
@@ -3343,56 +3485,37 @@ mod tests {
                 serde_json::json!({"type": "message", "role": "assistant",
                 "content": [{"type": "output_text", "text": "a"}]}),
             ),
-            tc(100, 900, 10), // cached > input: proves excludes basis
-            tc(150, 1400, 20),
+            tc(1000, 100, 10), // fresh 900
+            tc(1050, 700, 20), // fresh 350: dropped, input/output monotonic
         ]);
         let parsed = p.parse(&key(THREAD_A)).unwrap();
         let sem = parsed
             .semantics
             .values()
             .find(|s| !s.usage.is_empty())
-            .expect("usage semantics");
-        assert!(sem
+            .unwrap();
+        let flagged = sem
             .usage
             .iter()
-            .all(|o| matches!(o.basis, crate::provider::UsageBasis::InputExcludesCached)));
-        // Under the excludes basis fresh = input: 100 then +50 = 150 total.
-        let mut fresh = 0u64;
+            .filter(|o| {
+                matches!(o.aggregation, crate::provider::UsageAggregation::Cumulative)
+                    && o.ambiguous
+            })
+            .count();
+        assert_eq!(flagged, 1, "the uninterpretable transition is surfaced");
+        let (mut fresh, mut cached, mut output) = (0u64, 0u64, 0u64);
         for e in &parsed.entries {
             if let crate::model::LogEntry::Assistant(m) = &e.entry {
                 if let Some(u) = &m.message.usage {
                     fresh += u.input_tokens;
+                    cached += u.cache_read_input_tokens.unwrap_or(0);
+                    output += u.output_tokens;
                 }
             }
         }
-        assert_eq!(fresh, 150, "excludes basis: fresh input is the raw input");
-        // Every observation names its source record directly.
-        for o in &sem.usage {
-            assert!(o.record.ordinal == 2 || o.record.ordinal == 3);
-        }
-
-        // Ambiguity: an includes-basis session whose derived fresh drops
-        // without a reset is SURFACED, and contributes zero fresh.
-        let (_tmp2, p2) = normalize_home(&[
-            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
-            envelope_line(
-                "response_item",
-                serde_json::json!({"type": "message", "role": "assistant",
-                "content": [{"type": "output_text", "text": "a"}]}),
-            ),
-            tc(1000, 100, 10), // fresh 900
-            tc(1050, 700, 20), // fresh 350: dropped, input/output monotonic
-        ]);
-        let parsed2 = p2.parse(&key(THREAD_A)).unwrap();
-        let sem2 = parsed2
-            .semantics
-            .values()
-            .find(|s| !s.usage.is_empty())
-            .unwrap();
-        assert!(
-            sem2.usage.iter().any(|o| o.ambiguous),
-            "the uninterpretable transition must be surfaced, not clamped away"
-        );
+        // fresh: 900 + 0 (ambiguous delta zeroed); cached: 100 + 600;
+        // output: 10 + 10.
+        assert_eq!((fresh, cached, output), (900, 700, 20));
     }
 
     #[test]
@@ -3431,9 +3554,19 @@ mod tests {
     }
 
     #[test]
-    fn web_search_call_maps_as_web_tool_use() {
+    fn web_search_call_preserves_native_id_status_and_action() {
+        // Mined corpus shapes: 158/341 records carry a native `id` (a
+        // `ws_...` value alongside status + action); the remainder have no
+        // id and fall back to a synthesized one.
         let (_tmp, p) = normalize_home(&[
             envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "web_search_call",
+                "id": "ws_0824df55bcb45159016a3e88021de881919c1c600526d97948",
+                "status": "completed",
+                "action": {"type": "search", "query": "site:docs.example.dev q"}}),
+            ),
             envelope_line(
                 "response_item",
                 serde_json::json!({"type": "web_search_call", "status": "completed",
@@ -3441,16 +3574,43 @@ mod tests {
             ),
         ]);
         let parsed = p.parse(&key(THREAD_A)).unwrap();
-        let id = crate::provider::EntryId::deterministic(&key(THREAD_A), 1, 0);
-        let entry = parsed.entries.iter().find(|e| e.id == id).unwrap();
-        let is_web_tool = matches!(&entry.entry, crate::model::LogEntry::Assistant(m)
-            if m.message.content.iter().any(|b| matches!(b, crate::model::ContentBlock::ToolUse(t) if t.name == "web_search")));
-        assert!(is_web_tool);
-        let sem = parsed.semantics.get(&id).unwrap();
-        assert!(sem
-            .tools
-            .values()
-            .any(|t| matches!(t.kind, crate::provider::ToolKind::Web)));
+        let tool_of = |ordinal| {
+            let id = crate::provider::EntryId::deterministic(&key(THREAD_A), ordinal, 0);
+            let entry = parsed.entries.iter().find(|e| e.id == id).unwrap();
+            let crate::model::LogEntry::Assistant(m) = &entry.entry else {
+                panic!("assistant expected at ordinal {ordinal}");
+            };
+            m.message
+                .content
+                .iter()
+                .find_map(|b| match b {
+                    crate::model::ContentBlock::ToolUse(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .expect("tool use present")
+        };
+        // Native id, status, and action all preserved.
+        let with_id = tool_of(1);
+        assert_eq!(
+            with_id.id,
+            "ws_0824df55bcb45159016a3e88021de881919c1c600526d97948"
+        );
+        assert_eq!(with_id.input["status"], "completed");
+        assert_eq!(with_id.input["action"]["type"], "search");
+        assert_eq!(with_id.input["action"]["query"], "site:docs.example.dev q");
+        // Id-less era: synthesized fallback, status/action still preserved.
+        let without_id = tool_of(2);
+        assert_eq!(without_id.id, "ws_2");
+        assert_eq!(without_id.input["status"], "completed");
+        assert_eq!(without_id.input["action"]["url"], "https://example.com");
+        for ordinal in [1u64, 2] {
+            let id = crate::provider::EntryId::deterministic(&key(THREAD_A), ordinal, 0);
+            let sem = parsed.semantics.get(&id).unwrap();
+            assert!(sem
+                .tools
+                .values()
+                .any(|t| matches!(t.kind, crate::provider::ToolKind::Web)));
+        }
     }
 
     #[test]

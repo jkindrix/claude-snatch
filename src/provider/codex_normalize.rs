@@ -290,7 +290,8 @@ struct PendingUsage {
     canonical: Usage,
     last_obs: ObservationNumbers,
     total_obs: ObservationNumbers,
-    ambiguous: bool,
+    /// The cumulative transition's fresh delta was uninterpretable.
+    ambiguous_transition: bool,
 }
 
 /// Raw native numbers destined for an observation.
@@ -314,41 +315,10 @@ struct WalkState {
     /// Previous cumulative usage totals (None before the first observation;
     /// re-seeded across epoch resets).
     prev_total: Option<RawUsage>,
-    /// Session usage basis (detected up front from cumulative totals).
-    usage_basis: super::UsageBasis,
     /// Usage events awaiting the next assistant emission.
     pending_usage: Vec<PendingUsage>,
     /// Previous mapped entry's synthetic uuid (linear threading).
     last_uuid: Option<String>,
-}
-
-/// Detect the session's usage basis from its cumulative totals: an
-/// includes-cached basis makes `cached > input` impossible, so observing it
-/// anywhere proves the excludes basis. Sessions without usage records get
-/// `Unknown` (no canonical derivation happens anyway).
-fn detect_usage_basis(records: &[(RecordRef, Value)]) -> super::UsageBasis {
-    let mut saw_usage = false;
-    for (_, value) in records {
-        let (et, payload, pt) = envelope_parts(value);
-        if et == "event_msg" && pt == "token_count" {
-            if let Some(total) = payload
-                .get("info")
-                .and_then(|i| i.get("total_token_usage"))
-                .filter(|t| t.is_object())
-            {
-                saw_usage = true;
-                let raw = RawUsage::read(Some(total));
-                if raw.cached > raw.input {
-                    return super::UsageBasis::InputExcludesCached;
-                }
-            }
-        }
-    }
-    if saw_usage {
-        super::UsageBasis::InputIncludesCached
-    } else {
-        super::UsageBasis::Unknown
-    }
 }
 
 pub(super) fn normalize(
@@ -363,7 +333,6 @@ pub(super) fn normalize(
         diagnostics: IngestionDiagnostics::default(),
     };
     let plan = plan_matches(records);
-    let usage_basis = detect_usage_basis(records);
 
     let mut state = WalkState {
         version: "unknown".into(),
@@ -373,7 +342,6 @@ pub(super) fn normalize(
         window: 0,
         last_assistant: None,
         prev_total: None,
-        usage_basis,
         pending_usage: Vec::new(),
         last_uuid: None,
     };
@@ -894,19 +862,22 @@ fn handle_token_count(
     };
     let total = RawUsage::read(info.get("total_token_usage"));
     let last = RawUsage::read(info.get("last_token_usage"));
-    // Cumulative FRESH stream under the DETECTED basis (round-23 blocker 4:
-    // canonical derivation is only meaningful when the basis is known):
-    // includes-cached → fresh = input − cached; excludes → fresh = input.
-    let fresh_of = |r: RawUsage| match state.usage_basis {
-        super::UsageBasis::InputIncludesCached => r.input.saturating_sub(r.cached),
-        super::UsageBasis::InputExcludesCached | super::UsageBasis::Unknown => r.input,
-    };
-    // Transition rule: unchanged → zero; input/output decrease → epoch
-    // reset (the new cumulative IS the first delta). A fresh decrease
-    // WITHOUT a reset is uninterpretable under the detected basis: it is
-    // surfaced as an AMBIGUOUS observation and contributes zero fresh —
-    // never silently clamped into a wrong number.
-    let mut ambiguous = false;
+    // The basis is SOURCE-BACKED, not detected (round-24): Codex's own
+    // TokenUsage defines non-cached input as input_tokens −
+    // cached_input_tokens across every audited tag (0.31 … 0.144.5), and
+    // the corpus census found zero cumulative observations contradicting
+    // it. It is validated PER OBSERVATION: an observation whose own
+    // numbers contradict the basis (cached > input — four Call
+    // observations in one January session) is marked Unknown/ambiguous
+    // with its raw values preserved, and never reinterprets the session.
+    let fresh_of = |r: RawUsage| r.input.saturating_sub(r.cached);
+    // Transition rule on the cumulative FRESH stream: unchanged → zero;
+    // input/output decrease → epoch reset (the new cumulative IS the first
+    // delta). A fresh decrease WITHOUT a reset is uninterpretable: the
+    // FRESH delta is zeroed and the Cumulative observation is flagged
+    // ambiguous; the cached and output deltas remain well-defined and
+    // still contribute (field-specific ambiguity).
+    let mut ambiguous_transition = false;
     let canonical = match state.prev_total {
         None => Usage {
             input_tokens: fresh_of(total),
@@ -926,7 +897,7 @@ fn handle_token_count(
                 let fresh_now = fresh_of(total);
                 let fresh_prev = fresh_of(prev);
                 if fresh_now < fresh_prev {
-                    ambiguous = true;
+                    ambiguous_transition = true;
                 }
                 Usage {
                     input_tokens: fresh_now.saturating_sub(fresh_prev),
@@ -954,21 +925,15 @@ fn handle_token_count(
             cached: total.cached,
             output: total.output,
         },
-        ambiguous,
+        ambiguous_transition,
     };
-    let basis = state.usage_basis;
     match state.last_assistant {
-        Some((idx, window)) if window == state.window => attach_usage(pending, basis, idx, out),
+        Some((idx, window)) if window == state.window => attach_usage(pending, idx, out),
         _ => state.pending_usage.push(pending),
     }
 }
 
-fn attach_usage(
-    pending: PendingUsage,
-    basis: super::UsageBasis,
-    idx: usize,
-    out: &mut NormalizeOutput,
-) {
+fn attach_usage(pending: PendingUsage, idx: usize, out: &mut NormalizeOutput) {
     let id = out.entries[idx].id.clone();
     out.entry_origins
         .get_mut(&id)
@@ -988,20 +953,39 @@ fn attach_usage(
         }
     }
     if let Some(sem) = out.semantics.get_mut(&id) {
-        for (scope, aggregation, numbers) in [
-            (UsageScope::Call, UsageAggregation::Delta, pending.last_obs),
+        // Basis and ambiguity are PER OBSERVATION (round-24): an
+        // observation whose own numbers contradict the includes-cached
+        // basis is Unknown/ambiguous; the Cumulative observation is also
+        // ambiguous when its transition's fresh delta was uninterpretable.
+        let obs_basis = |n: &ObservationNumbers| {
+            if n.cached > n.input {
+                super::UsageBasis::Unknown
+            } else {
+                super::UsageBasis::InputIncludesCached
+            }
+        };
+        let last_contradicts = pending.last_obs.cached > pending.last_obs.input;
+        let total_contradicts = pending.total_obs.cached > pending.total_obs.input;
+        for (scope, aggregation, numbers, ambiguous) in [
+            (
+                UsageScope::Call,
+                UsageAggregation::Delta,
+                pending.last_obs,
+                last_contradicts,
+            ),
             (
                 UsageScope::Session,
                 UsageAggregation::Cumulative,
                 pending.total_obs,
+                total_contradicts || pending.ambiguous_transition,
             ),
         ] {
             sem.usage.push(UsageObservation {
                 scope,
                 aggregation,
                 record: pending.record.clone(),
-                basis,
-                ambiguous: pending.ambiguous,
+                basis: obs_basis(&numbers),
+                ambiguous,
                 input_tokens: numbers.input,
                 cached_input_tokens: numbers.cached,
                 output_tokens: numbers.output,
@@ -1089,10 +1073,9 @@ fn push_assistant(
     // Usage events that arrived earlier IN THIS WINDOW attach now (a
     // boundary already flushed anything older as preserved).
     let pending: Vec<PendingUsage> = std::mem::take(&mut state.pending_usage);
-    let basis = state.usage_basis;
     for p in pending {
         debug_assert_eq!(p.window, state.window, "boundary flush must have run");
-        attach_usage(p, basis, idx, out);
+        attach_usage(p, idx, out);
     }
     idx
 }

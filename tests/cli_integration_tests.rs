@@ -2278,6 +2278,69 @@ mod codex_normalization_cli {
     }
 
     #[test]
+    fn steering_prompt_stays_inside_its_turn() {
+        // Round-24 blocker 1: a MidTurn human prompt (unmatched user event
+        // = steering) must NOT open a new timeline turn. Boundary prompt,
+        // assistant output, steering prompt, second assistant output — one
+        // turn_id, ONE turn.
+        let tmp = TempDir::new().unwrap();
+        let day = tmp.path().join("sessions/2026/07/16");
+        std::fs::create_dir_all(&day).unwrap();
+        let lines = [
+            serde_json::json!({"timestamp": "2026-07-16T10:00:00.000Z", "type": "session_meta",
+                "payload": {"id": THREAD, "cwd": "/tmp/p", "cli_version": "0.9"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:01.000Z", "type": "turn_context",
+                "payload": {"turn_id": "t-1", "model": "gpt-test"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:02.000Z", "type": "response_item",
+                "payload": {"type": "message", "role": "user",
+                            "content": [{"type": "input_text", "text": "start the task"}]}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:02.500Z", "type": "event_msg",
+                "payload": {"type": "user_message", "message": "start the task"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:03.000Z", "type": "response_item",
+                "payload": {"type": "message", "role": "assistant",
+                            "content": [{"type": "output_text", "text": "working"}]}}),
+            // Steering: user event with NO response twin, mid-window.
+            serde_json::json!({"timestamp": "2026-07-16T10:00:04.000Z", "type": "event_msg",
+                "payload": {"type": "user_message", "message": "also check the docs"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:05.000Z", "type": "response_item",
+                "payload": {"type": "message", "role": "assistant",
+                            "content": [{"type": "output_text", "text": "done, docs checked"}]}}),
+        ];
+        let content = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(
+            day.join(format!("rollout-2026-07-16T10-00-00-{THREAD}.jsonl")),
+            content,
+        )
+        .unwrap();
+
+        let claude = setup_fixture_dir();
+        let out = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", tmp.path())
+            .args(["timeline", &format!("codex:{THREAD}")])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            text.contains("(1 turns)"),
+            "steering split the turn: {text}"
+        );
+        assert!(text.contains("User: start the task"), "got: {text}");
+        assert!(
+            text.contains("done, docs checked"),
+            "final answer belongs to the same turn: {text}"
+        );
+    }
+
+    #[test]
     fn messages_refuses_claude_machinery_flags_on_codex_sessions() {
         let claude = setup_fixture_dir();
         let codex = slice_home();

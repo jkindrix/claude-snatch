@@ -901,8 +901,9 @@ Mapping (each mapped record keeps its B1 id `(ordinal, 0)` — constraint 1):
   (session_meta/turn_context/task_started/compacted boundaries), each
   response_item (or reasoning SECTION — reasoning events are per-section)
   is claimable once, content agreement confirms the positional pairing,
-  and the suppression records the twin's ordinal
-  (`DuplicateStream { twin_ordinal }`). Unmatched event content maps
+  and the suppression records the twin
+  (`DuplicateStream { twin_ordinal }` then; a full `RecordRef` since
+  round 23). Unmatched event content maps
   directly (corpus: post-compaction "Compact task completed" notices,
   reasoning before aborted turns — 380 such events were being discarded).
   The matched `user_message` event marks exactly its twin Human (the
@@ -914,19 +915,33 @@ Mapping (each mapped record keeps its B1 id `(ordinal, 0)` — constraint 1):
   full `RecordRef`s validated as MAPPED records by `validate_provenance`;
   and an unmatched non-duplicate `user_message` maps as Human/**MidTurn**
   (steering-or-unknown), never opening a turn boundary automatically.
-- event_msg token_count with usage → B3.1 (round-22): canonical usage
-  derives from CUMULATIVE transitions on clamped per-component streams
-  (fresh = input−cached clamped; unchanged totals → zero; input/output
-  decrease → epoch reset whose new cumulative is the first delta) — NEVER
-  a blind `last_token_usage` sum (94/178 real sessions disproved that).
+- event_msg token_count with usage → canonical usage derives from
+  CUMULATIVE transitions (unchanged totals → zero; input/output decrease →
+  epoch reset whose new cumulative is the first delta) — NEVER a blind
+  `last_token_usage` sum (94/178 real sessions disproved that, round 22).
   Records attach N:1 to the current window's assistant emission; events
-  arriving BEFORE their response are held for the next assistant; with no
-  assistant ever, the record stays a preserved Unknown entry (never
-  lost). Observations carry RAW pass-through numbers (input's
-  relationship to cached is era-dependent in the corpus — some eras
-  exclude cached from input). The conformance test replays the cumulative
-  stream independently from provenance and asserts entry sums reconcile
-  for every session.
+  arriving BEFORE their response are held for the next assistant WITHIN
+  the window (round-23: pending usage never crosses a boundary — it
+  flushes as preserved/unattributed); with no assistant, the record stays
+  a preserved Unknown entry (never lost). B3.1.2 (round-24, superseding
+  the round-23 "era" theory): the basis is SOURCE-BACKED — Codex's own
+  TokenUsage defines non-cached input as input − cached across every
+  audited tag (0.31…0.144.5), and the census (61,528 observations) found
+  ZERO contradicting cumulative points. The basis is validated PER
+  OBSERVATION: an observation whose own numbers contradict it (cached >
+  input — four real Call observations in one January session) is marked
+  Unknown/ambiguous with raw values preserved, never reinterpreting the
+  session. Ambiguity is FIELD-SPECIFIC: an uninterpretable fresh decrease
+  zeroes only the FRESH delta (cached/output still contribute) and flags
+  the Cumulative observation. Observations carry raw native numbers in
+  dedicated fields plus their own `RecordRef` and basis. The conformance
+  oracle is SOURCE-DERIVED and strengthened (round-24): attribution from
+  each observation's own RecordRef; XOR partition (every native usage
+  record in exactly one of attributed/preserved); observation values
+  verified per aggregation (Call↔last, Session↔total) with basis and
+  ambiguity recomputed independently; dedup twins verified STRUCTURALLY
+  (type correspondence + exact extracted content, or exact fingerprint
+  for event-to-event duplicates — no empty-text escape).
 - session_meta, turn_context, world_state, ghost_snapshot, compacted,
   task_started/complete and all other types → remain Unknown entries
   (preserved verbatim; consumed as normalization STATE — version, cwd,
@@ -945,10 +960,38 @@ Mapping (each mapped record keeps its B1 id `(ordinal, 0)` — constraint 1):
 - response_item web_search_call → assistant ToolUse (kind Web) — B3.1;
   341 corpus records.
 - Surfaces (B3.1): provider timeline groups turns SEMANTICALLY (turn_id
-  transitions + Human prompt boundaries; harness preambles form no turn),
+  transitions + Human TURN-BOUNDARY prompts — round-24: MidTurn/steering
+  human prompts stay inside their turn, honoring PromptDelivery; harness
+  preambles form no turn),
   and provider messages uses PromptSemantics for its human predicate — the
   Claude-shaped adjacent-pairing/is_human_prompt heuristics mislabeled
   harness context (a one-task real session reported 77 turns; now 1).
+
+## Review round 24 (2026-07-17, same Codex agent — B3.1.1 audit: B3.1.2)
+
+Verdict: one more bounded correction pass. All accepted and fixed:
+(1) the timeline renderer ignored PromptDelivery — MidTurn human prompts
+opened turns despite the normalizer's annotation; the flush is now
+boundary-only (steering fixture: boundary prompt + assistant + steering +
+assistant, one turn_id → ONE turn); (2) the round-23 "excludes era" was a
+WRONG THEORY — the reviewer verified Codex's own TokenUsage source across
+five tags and the census (61,528 observations, zero contradicting
+cumulative points): the basis is a source-backed constant, validated per
+observation (the four real contradictory Call observations go
+Unknown/ambiguous with raw values preserved), session-level detection
+deleted, the invented "excludes era" fixture replaced by the actual
+last.cached > last.input corpus shape, and ambiguity documented as
+field-specific; (3) the oracle's confirmatory shortcuts removed —
+attribution from observation RecordRefs (not positional origins), XOR
+partition, fixed source-backed basis rule, per-observation
+value/basis/ambiguity verification against native records, structural
+twin comparison with no empty-text escape; (4) the hollow web-search test
+(an earlier unverified bulk edit had silently failed to replace it) now
+asserts native id, status, action, and the id-less fallback. Corpus after
+B3.1.2: 224/224, 0 violations, strengthened oracle green on every
+session. Process note: the silent-edit failure is itself now guarded —
+bulk text edits assert their application (this round's doc edits caught
+two more stale anchors exactly this way).
 
 ## Review round 23 (2026-07-17, same Codex agent — B3.1 audit: B3.1.1)
 

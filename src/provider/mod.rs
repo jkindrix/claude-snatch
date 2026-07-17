@@ -618,10 +618,12 @@ pub struct UsageObservation {
     pub record: RecordRef,
     /// Declared relationship between the input and cached numbers.
     pub basis: UsageBasis,
-    /// This transition could not be interpreted under the detected basis
-    /// (e.g. derived fresh input decreased without an epoch reset); its
-    /// canonical contribution was zeroed and surfaced here rather than
-    /// silently clamped away.
+    /// FIELD-SPECIFIC ambiguity (round-24): true when this observation's
+    /// own numbers contradict the declared basis (cached > input), or —
+    /// for a Cumulative observation — when its transition's FRESH delta
+    /// was uninterpretable (fresh decreased without an epoch reset). Only
+    /// the fresh-input contribution is zeroed in that case; the cached and
+    /// output deltas remain well-defined and still contribute.
     pub ambiguous: bool,
     /// Native input tokens, verbatim (see `basis`).
     pub input_tokens: u64,

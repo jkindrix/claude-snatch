@@ -194,17 +194,24 @@ fn semantic_turns<'a>(
             .uuid()
             .and_then(|u| conversation.semantics_for_uuid(u));
         let entry_turn = sem.and_then(|s| s.turn_id.clone());
+        let prompt = sem.and_then(|s| s.prompt);
         let is_human = matches!(entry, LogEntry::User(_))
-            && sem
-                .and_then(|s| s.prompt)
-                .is_some_and(|p| matches!(p.authorship, PromptAuthorship::Human));
+            && prompt.is_some_and(|p| matches!(p.authorship, PromptAuthorship::Human));
+        // Only a TURN-BOUNDARY human prompt opens a turn; a MidTurn human
+        // prompt (steering) stays inside the current one (round-24: the
+        // normalizer's PromptDelivery axis must be honored here, not just
+        // authorship).
+        let is_human_boundary = is_human
+            && prompt.is_some_and(|p| {
+                matches!(p.delivery, crate::provider::PromptDelivery::TurnBoundary)
+            });
 
         let turn_changed = match (&entry_turn, &current_turn_id) {
             (Some(new), Some(old)) => new != old,
             (Some(_), None) => current.is_some(),
             _ => false,
         };
-        if is_human || turn_changed {
+        if is_human_boundary || turn_changed {
             flush(current.take(), &mut turns);
         }
         if entry_turn.is_some() {
