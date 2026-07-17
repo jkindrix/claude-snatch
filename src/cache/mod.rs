@@ -153,6 +153,11 @@ impl<T> LruCache<T> {
     }
 
     /// Insert a provider-keyed entry with its opaque revision token.
+    ///
+    /// An item whose estimate exceeds this cache's `max_size` is REFUSED
+    /// (any stale value under the same identity is still removed first) —
+    /// caching it would breach the partition budget no matter how much is
+    /// evicted (round-20). Callers keep and use the uncached value.
     pub fn insert_keyed(
         &mut self,
         key: &LogicalSessionKey,
@@ -163,6 +168,9 @@ impl<T> LruCache<T> {
         let identity = CacheIdentity::Provider(key.clone());
         if let Some((_, old_entry)) = self.entries.remove(&identity) {
             self.current_size = self.current_size.saturating_sub(old_entry.size_estimate);
+        }
+        if size_estimate > self.max_size {
+            return;
         }
         self.evict_if_needed(size_estimate);
         self.access_counter += 1;
@@ -179,10 +187,14 @@ impl<T> LruCache<T> {
                 },
             ),
         );
-        self.current_size += size_estimate;
+        self.current_size = self.current_size.saturating_add(size_estimate);
     }
 
     /// Insert a value into the cache.
+    ///
+    /// An item whose estimate exceeds this cache's `max_size` is REFUSED
+    /// (any stale value under the same identity is still removed first);
+    /// callers keep and use the uncached value (round-20).
     pub fn insert(&mut self, path: &Path, value: T, size_estimate: usize) {
         // Create cache key
         let Some(key) = CacheKey::from_path(path) else {
@@ -195,6 +207,10 @@ impl<T> LruCache<T> {
             .remove(&CacheIdentity::File(path.to_path_buf()))
         {
             self.current_size = self.current_size.saturating_sub(old_entry.size_estimate);
+        }
+
+        if size_estimate > self.max_size {
+            return;
         }
 
         // Evict if necessary
@@ -213,7 +229,7 @@ impl<T> LruCache<T> {
                 },
             ),
         );
-        self.current_size += size_estimate;
+        self.current_size = self.current_size.saturating_add(size_estimate);
     }
 
     /// Evict entries if cache is over limits.
@@ -223,8 +239,10 @@ impl<T> LruCache<T> {
             self.evict_lru();
         }
 
-        // Evict by size
-        while self.current_size + incoming_size > self.max_size && !self.entries.is_empty() {
+        // Evict by size (saturating: hostile estimates must not overflow).
+        while self.current_size.saturating_add(incoming_size) > self.max_size
+            && !self.entries.is_empty()
+        {
             self.evict_lru();
         }
     }
@@ -1139,69 +1157,154 @@ mod tests {
         Arc::new(FakeProvider.parse(&multi_artifact_key()).unwrap())
     }
 
+    fn quick_metadata(sid: &str) -> crate::discovery::QuickSessionMetadata {
+        crate::discovery::QuickSessionMetadata {
+            session_id: sid.to_string(),
+            is_subagent: false,
+            file_size: 1,
+            entry_count: 1,
+            unparsed_count: 0,
+            tool_result_count: 0,
+            tool_result_size: 0,
+            user_count: 1,
+            assistant_count: 0,
+            system_count: 0,
+            other_count: 0,
+            start_time: None,
+            end_time: None,
+            version: None,
+            schema_version: None,
+            extracted_cwd: None,
+            git_branch: None,
+            compaction_count: 0,
+            slug: None,
+            content_is_subagent: false,
+        }
+    }
+
+    /// Round-20 adversarial version: OVERSIZED legacy and provider values
+    /// simultaneously, a populated metadata partition, and per-partition
+    /// assertions — a single oversized item must be refused (never cached),
+    /// so no partition and no aggregate can exceed its budget.
     #[test]
-    fn filling_every_cache_stays_within_the_aggregate_budget() {
+    fn oversized_items_are_refused_and_every_partition_honors_its_budget() {
         let config = crate::config::CacheConfig {
             enabled: true,
-            max_size: 200_000,
+            max_size: 200_000, // metadata 20k, entries 90k, provider 90k
             ..Default::default()
         };
         let manager = CacheManager::new(&config);
-
-        // Flood the legacy parsed cache (path-keyed; files must exist for
-        // mtime-based keys).
         let tmp = tempfile::tempdir().unwrap();
-        let entries: Vec<crate::model::LogEntry> = (0..100)
-            .map(|_| crate::model::LogEntry::Unknown(serde_json::json!({"k": "v"})))
-            .collect();
-        for i in 0..10 {
-            let path = tmp.path().join(format!("s{i}.jsonl"));
+
+        // Populate the metadata partition.
+        for i in 0..20 {
+            let path = tmp.path().join(format!("m{i}.jsonl"));
             std::fs::write(&path, "x").unwrap();
-            manager.cache_entries(&path, entries.clone()); // ~102k each
+            manager.cache_metadata(&path, quick_metadata(&format!("s{i}")));
         }
-        // Flood the provider-bundle cache with distinct keys.
+
+        // Legacy: small entries cache; oversized entries are refused.
+        let small: Vec<crate::model::LogEntry> = (0..10)
+            .map(|_| crate::model::LogEntry::Unknown(serde_json::json!({"k": "v"})))
+            .collect(); // ~10 KB
+        let oversized: Vec<crate::model::LogEntry> = (0..100)
+            .map(|_| crate::model::LogEntry::Unknown(serde_json::json!({"k": "v"})))
+            .collect(); // ~102 KB > 90 KB partition
+        let small_path = tmp.path().join("small.jsonl");
+        std::fs::write(&small_path, "x").unwrap();
+        manager.cache_entries(&small_path, small);
+        let big_path = tmp.path().join("big.jsonl");
+        std::fs::write(&big_path, "x").unwrap();
+        manager.cache_entries(&big_path, oversized);
+        assert!(manager.get_entries(&small_path).is_some());
+        assert!(
+            manager.get_entries(&big_path).is_none(),
+            "an item larger than its partition must be refused, not cached"
+        );
+
+        // Provider: a small bundle caches; an inflated one is refused.
         let bundle = fake_bundle();
-        for i in 0..30 {
-            let key = LogicalSessionKey {
-                provider: crate::provider::ProviderId("fake".into()),
-                namespace: crate::provider::SessionNamespace(format!("ns{i}")),
-                native_id: "42".into(),
-            };
+        let key_small = LogicalSessionKey {
+            provider: crate::provider::ProviderId("fake".into()),
+            namespace: crate::provider::SessionNamespace("ns-small".into()),
+            native_id: "42".into(),
+        };
+        manager
+            .provider_sessions
+            .insert_keyed(&key_small, "rev".into(), bundle.clone());
+        let mut big_bundle = (*bundle).clone();
+        while big_bundle.entries.len() < 70 {
+            big_bundle.entries.extend(bundle.entries.iter().cloned()); // ~70*1536 > 90 KB
+        }
+        let key_big = LogicalSessionKey {
+            provider: crate::provider::ProviderId("fake".into()),
+            namespace: crate::provider::SessionNamespace("ns-big".into()),
+            native_id: "42".into(),
+        };
+        manager.provider_sessions.insert_keyed(
+            &key_big,
+            "rev".into(),
+            Arc::new(big_bundle.clone()),
+        );
+        assert!(manager
+            .provider_sessions
+            .get_keyed(&key_small, "rev")
+            .is_some());
+        assert!(
             manager
                 .provider_sessions
-                .insert_keyed(&key, "rev".into(), bundle.clone());
-        }
-
-        let stats = manager.stats();
-        let aggregate = stats.metadata.current_size
-            + stats.entries.current_size
-            + stats.provider_sessions.current_size;
-        assert!(aggregate > 0, "caches actually held data");
-        assert!(
-            aggregate <= config.max_size as usize,
-            "aggregate {} exceeds the configured budget {}",
-            aggregate,
-            config.max_size
+                .get_keyed(&key_big, "rev")
+                .is_none(),
+            "oversized provider bundle must be refused"
         );
-        assert_eq!(
-            stats.total_size(),
-            aggregate,
-            "totals must count all three caches"
+
+        // Replacing a cached identity with an OVERSIZED revision removes the
+        // stale value but does not cache the replacement.
+        manager
+            .provider_sessions
+            .insert_keyed(&key_small, "rev2".into(), Arc::new(big_bundle));
+        assert!(
+            manager
+                .provider_sessions
+                .get_keyed(&key_small, "rev")
+                .is_none()
+                && manager
+                    .provider_sessions
+                    .get_keyed(&key_small, "rev2")
+                    .is_none(),
+            "stale value gone, oversized replacement not cached"
+        );
+
+        // Every partition honors ITS OWN budget; the aggregate follows.
+        let stats = manager.stats();
+        for (name, cache_stats) in [
+            ("metadata", &stats.metadata),
+            ("entries", &stats.entries),
+            ("provider_sessions", &stats.provider_sessions),
+        ] {
+            assert!(
+                cache_stats.current_size <= cache_stats.max_size,
+                "{name}: {} > {}",
+                cache_stats.current_size,
+                cache_stats.max_size
+            );
+        }
+        assert!(stats.total_size() <= config.max_size as usize);
+        assert!(
+            stats.metadata.entry_count > 0,
+            "metadata partition populated"
         );
         assert_eq!(
             stats.total_entries(),
             stats.metadata.entry_count
                 + stats.entries.entry_count
-                + stats.provider_sessions.entry_count,
-            "entry totals must count all three caches"
+                + stats.provider_sessions.entry_count
         );
-        assert!(stats.provider_sessions.entry_count > 0);
 
         // clear() empties all three.
         manager.clear();
         let cleared = manager.stats();
         assert_eq!(cleared.total_entries(), 0);
         assert_eq!(cleared.total_size(), 0);
-        assert_eq!(cleared.provider_sessions.entry_count, 0);
     }
 }

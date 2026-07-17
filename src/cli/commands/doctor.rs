@@ -207,8 +207,17 @@ fn provider_diagnostics(cli: &Cli, args: &DoctorArgs) -> Result<()> {
     // Thin renderer: runtime-failure semantics (atomic vs partial, zero-
     // success error) are enforced centrally in the registry (round-19).
     // Unavailability and failure details are withheld here — doctor output
-    // promises no filesystem paths; `snatch providers` carries details.
-    let collected = registry.collect_selected_diagnostics(&selection)?;
+    // (stdout AND stderr) promises no filesystem paths; collection errors
+    // carry raw provider reasons (which may embed roots), so they are
+    // replaced wholesale with a fixed public message rather than
+    // interpolated (round-20). `snatch providers` carries the details.
+    let collected = registry
+        .collect_selected_diagnostics(&selection)
+        .map_err(|_| crate::error::SnatchError::ConfigError {
+            message: "provider diagnostics unavailable (details withheld; run \
+                      'snatch providers')"
+                .to_string(),
+        })?;
 
     let mut reports = serde_json::Map::new();
     for (id, value) in collected.items {

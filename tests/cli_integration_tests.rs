@@ -1952,6 +1952,180 @@ fn export_list_templates_rejects_provider_selection() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "cannot be combined with --provider",
+            "cannot be combined with a provider selection",
         ));
+}
+
+#[test]
+fn export_list_templates_rejects_qualified_session_reference() {
+    let tmp = setup_fixture_dir();
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["export", "claude-code:whatever", "--list-templates"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "provider-qualified session reference",
+        ));
+}
+
+/// Round-20: doctor's ERROR paths (not just partial-success rendering) must
+/// never expose raw provider reasons or filesystem paths, on stdout or
+/// stderr. `snatch providers` stays the intentionally detailed surface.
+#[test]
+fn doctor_error_paths_never_leak_paths() {
+    const SENTINEL: &str = "sentinel-secret-root";
+    let scratch = TempDir::new().unwrap();
+    let missing_claude = scratch.path().join(format!("{SENTINEL}-claude"));
+    let missing_codex = scratch.path().join(format!("{SENTINEL}-codex"));
+
+    // Case 1: every provider unavailable at construction (zero-success).
+    let out = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", &missing_claude)
+        .env("CODEX_HOME", &missing_codex)
+        .args(["doctor", "--provider", "all"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let all_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(all_text.contains("details withheld"), "got: {all_text}");
+    assert!(
+        !all_text.contains(SENTINEL),
+        "doctor leaked a sentinel path: {all_text}"
+    );
+
+    // Case 2/3 need a provider that CONSTRUCTS but fails diagnostics at
+    // runtime: a codex home whose sessions tree is a regular file.
+    let claude = setup_fixture_dir();
+    let broken_codex = TempDir::new().unwrap();
+    std::fs::write(
+        broken_codex.path().join("sessions"),
+        format!("not-a-directory {SENTINEL}"),
+    )
+    .unwrap();
+
+    // Case 2: explicit provider, runtime diagnostics failure (atomic).
+    let out = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", claude.path())
+        .env("CODEX_HOME", broken_codex.path())
+        .args(["doctor", "--provider", "codex"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let all_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(all_text.contains("details withheld"), "got: {all_text}");
+    assert!(
+        !all_text.contains(SENTINEL) && !all_text.contains("sessions"),
+        "doctor leaked runtime failure detail: {all_text}"
+    );
+
+    // Case 3: `all` where the only runtime diagnostics call fails and the
+    // other provider is unavailable at construction (zero successes).
+    let out = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", &missing_claude)
+        .env("CODEX_HOME", broken_codex.path())
+        .args(["doctor", "--provider", "all"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let all_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(all_text.contains("details withheld"), "got: {all_text}");
+    assert!(!all_text.contains(SENTINEL), "leak: {all_text}");
+
+    // Case 4: partial success — safe per-provider placeholder, no leak.
+    let out = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", claude.path())
+        .env("CODEX_HOME", &missing_codex)
+        .args(["doctor", "--provider", "all"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let all_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(all_text.contains("details withheld"), "got: {all_text}");
+    assert!(!all_text.contains(SENTINEL), "leak: {all_text}");
+}
+
+/// Round-20: the constructed/scan_ok/available triple as committed
+/// assertions across all three states.
+#[test]
+fn providers_status_triple_reflects_construction_and_scan() {
+    let claude = setup_fixture_dir();
+
+    // Not constructed (missing home).
+    let out = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", claude.path())
+        .env("CODEX_HOME", claude.path().join("nope"))
+        .args(["-o", "json", "providers"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let reports: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let claude_row = &reports[0];
+    assert_eq!(
+        (
+            claude_row["constructed"].as_bool(),
+            claude_row["scan_ok"].as_bool(),
+            claude_row["available"].as_bool()
+        ),
+        (Some(true), Some(true), Some(true))
+    );
+    if let Some(codex_row) = reports.as_array().unwrap().get(1) {
+        assert_eq!(
+            (
+                codex_row["constructed"].as_bool(),
+                codex_row["scan_ok"].as_bool(),
+                codex_row["available"].as_bool()
+            ),
+            (Some(false), Some(false), Some(false))
+        );
+    }
+
+    // Constructed but scan-failed (sessions tree is a regular file).
+    #[cfg(feature = "codex")]
+    {
+        let broken = TempDir::new().unwrap();
+        std::fs::write(broken.path().join("sessions"), "not-a-dir").unwrap();
+        let out = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", broken.path())
+            .args(["-o", "json", "providers"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let reports: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let codex_row = &reports[1];
+        assert_eq!(
+            (
+                codex_row["constructed"].as_bool(),
+                codex_row["scan_ok"].as_bool(),
+                codex_row["available"].as_bool()
+            ),
+            (Some(true), Some(false), Some(false)),
+            "constructed-but-scan-failed must be visible as such: {codex_row}"
+        );
+    }
 }

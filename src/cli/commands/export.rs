@@ -179,11 +179,19 @@ pub fn run(cli: &Cli, args: &ExportArgs) -> Result<()> {
     // with a provider selection would silently ignore the selection, so the
     // combination is rejected (round-19).
     if args.list_templates {
-        if !args.provider.is_empty() {
+        // A provider-qualified session reference is itself an explicit
+        // provider request (accepted policy), so it is rejected here for
+        // the same reason as --provider: the selection would be silently
+        // ignored (round-20).
+        let qualified_session = args.session.as_deref().is_some_and(|s| {
+            s.contains(':') && super::helpers::provider_registry(cli).looks_qualified(s)
+        });
+        if !args.provider.is_empty() || qualified_session {
             return Err(SnatchError::InvalidArgument {
                 name: "--list-templates".to_string(),
-                reason: "cannot be combined with --provider (templates are an \
-                         independent action; the selection would be ignored)"
+                reason: "cannot be combined with a provider selection (--provider or a \
+                         provider-qualified session reference); templates are an \
+                         independent action and the selection would be ignored"
                     .to_string(),
             });
         }

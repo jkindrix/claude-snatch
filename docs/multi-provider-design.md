@@ -831,6 +831,40 @@ breath as any completion claim).
       + native/raw export work on REAL Codex sessions — a real-session
       demonstration, not fixtures only.
 
+## Review round 20 (2026-07-17, same Codex agent — narrowly conditional sign-off: B2.11)
+
+Verdict: B2.10 passes except two exit defects + one edge; land B2.11 with
+adversarial tests, then B2 is signed off and B3 begins without another
+architecture review. All fixed:
+
+1. **Oversized entries bypassed the cache budget**: the LRU inserted an
+   item unconditionally once eviction emptied the cache, so a single item
+   larger than its partition breached the budget (the round-19 flood test
+   was a hollow-test variant — its "oversized" values coincidentally fit
+   the aggregate and it never populated metadata). Now `insert`/
+   `insert_keyed` REFUSE any item whose estimate exceeds the partition's
+   `max_size` (stale same-identity values still removed first — an
+   oversized replacement removes the old value and caches nothing), size
+   arithmetic saturates, and the adversarial replacement test inserts
+   oversized legacy AND provider values simultaneously with a populated
+   metadata partition, asserting each partition's `current_size <=
+   max_size` — not a coincidental aggregate.
+2. **Doctor leaked paths on ERROR paths**: `provider_diagnostics`
+   propagated collection errors verbatim (`?`), so the zero-success and
+   atomic-explicit paths printed raw construction reasons including
+   filesystem roots. Collection failures are now replaced WHOLESALE with a
+   fixed public message (nothing interpolated, so nothing can leak);
+   sentinel-path tests cover stdout+stderr across all-unavailable-at-
+   construction, explicit runtime diagnostics failure, `all` with zero
+   runtime successes, and partial success.
+3. **Edge**: `export codex:... --list-templates` silently ignored the
+   qualified reference — under the accepted policy a qualified id IS a
+   provider request, so it is now rejected like `--provider`.
+4. The `constructed`/`scan_ok`/`available` triple is pinned by committed
+   integration assertions across all three states (available; not
+   constructed; constructed-but-scan-failed via a sessions-tree-as-file
+   codex home).
+
 ## Review round 19 (2026-07-17, same Codex agent — B2 re-audit: one bounded B2.10)
 
 Verdict: B2.7–B2.9 pass their main-path review; four exit blockers + smaller
