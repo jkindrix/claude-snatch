@@ -37,43 +37,73 @@ undermine redaction — sanitized canonical content must not carry an
 unsanitized native copy — and has no meaning for compressed or DB-backed
 sources).
 
-Instead, a parsed session carries lightweight provenance:
+Instead, a parsed session carries provenance whose cardinality is explicit —
+one native record may produce several entries, several records may collapse
+into one entry, and some records produce none:
 
 ```rust
 struct ParsedSession {
-    descriptor: SessionDescriptor,     // SessionKey, provider, paths, meta
+    descriptor: SessionDescriptor,
     entries: Vec<LogEntry>,
-    origins: Vec<EntryOrigin>,         // record ordinal, mapping kind, digest?
-    diagnostics: IngestionDiagnostics, // unknown/suppressed/unparseable counts
+    entry_origins: Map<EntryId, Vec<RecordRef>>,   // N:1 and 1:N expressible
+    record_dispositions: Vec<RecordDisposition>,   // per native record:
+        // Mapped | Suppressed { reason } | Unknown | Unparseable
+    diagnostics: IngestionDiagnostics,
 }
 ```
 
-and the provider exposes a separate raw/native streaming operation.
+`record_dispositions` is what makes acceptance invariant #1 enforceable: every
+native record has exactly one disposition. `RecordRef` is artifact identity +
+record ordinal — no content hashes (unnecessary absent a corruption-detection
+requirement, and hashes of low-entropy sensitive text leak equality
+information). The provider exposes separate archive/native/raw streaming
+operations.
 
 Export promises are **capability-tiered per provider** (an extension of
 decision #24's archival/complete/readable contract):
 
-- **native**: the exact source artifact, byte-for-byte, including `.jsonl.zst`
-  or DB rows. Every provider has this tier.
-- **raw-jsonl**: the provider's unmodified JSONL record stream (decompressed
-  where applicable). Only JSONL-backed providers advertise this tier.
-- **json/jsonl (normalized)**: snatch's representation, content-complete, with
-  derived-field provenance documented.
+- **archive (universal tier)**: a lossless, provider-defined bundle with a
+  manifest. File providers deliver exact artifact bytes; DB providers deliver
+  lossless value/schema preservation of the session's records (a DB row has no
+  independent byte representation, and copying a whole database would bundle
+  unrelated sessions).
+- **native (optional, stronger)**: exact source-artifact bytes, including
+  `.jsonl.zst`. Advertised only where a discrete source artifact exists.
+- **raw-jsonl (optional)**: the provider's unmodified JSONL record stream
+  (decompressed where applicable). Only JSONL-backed providers advertise it.
+- **json/jsonl (normalized)**: snatch's representation, content-complete.
+  Normalized output carries **machine-readable provider and derivation
+  metadata** — documentation alone will not stop consumers from mistaking
+  synthesized Claude-shaped fields for native data.
 
 Synthesized linkage (e.g. an ordering parent edge) is documented as **derived
 ordering, never native causality**.
 
 ## Identity and provider context
 
-- Global identity is `SessionKey { provider: ProviderId, native_id: String }`.
-  Native ids alone are not unique across providers, and "path to a JSONL
-  file" is not a valid universal identity once DB-backed providers exist.
+- **Logical identity and artifact identity are separate.** One logical
+  session can have several physical artifacts: active + archived copies,
+  plain + `.zst` twins, backup/imported copies under multiple roots (the
+  cc-archive setup on this machine is a live example), and forks containing
+  copied source history.
+
+  ```rust
+  LogicalSessionKey { provider: ProviderId, native_id: String }
+  ArtifactKey { provider_instance, locator, revision }
+  SessionDescriptor { key, artifacts, preferred_artifact, ... }
+  ```
+
+  Phase A must define twin precedence (e.g. plain `.jsonl` over `.zst`),
+  duplicate detection across roots, and which artifact archive/native export
+  selects. Native ids alone are not unique across providers, and "path to a
+  JSONL file" is not a valid universal identity once DB-backed providers
+  exist.
 - Provider context flows past `Session` into parsed sessions, `Conversation`,
   analytics, and exports — `Conversation::from_entries` currently takes only
   `Vec<LogEntry>` (src/reconstruction/mod.rs), which is exactly where provider
   information would otherwise die.
 - The parse cache (currently keyed by path+mtime, src/cache/mod.rs) is re-keyed
-  by `SessionKey` + a provider-supplied revision token (path/size/mtime for
+  by `LogicalSessionKey` + a provider-supplied revision token (path/size/mtime for
   files; row/index revision for databases).
 - Normalized entry ids are deterministic and unique, e.g.
   `codex:<thread-id>:<record-ordinal>:<subindex>`. `turn_id` is retained as
@@ -84,12 +114,23 @@ ordering, never native causality**.
 ## Semantic annotations (adapter output, middle stays neutral)
 
 The adapter emits canonical annotations; middle-layer logic keys on these, not
-on provider:
+on provider. **Carrier decision (Phase A.0):** annotations live as fields on
+the relevant existing semantic types (prompt metadata on user messages,
+canonical kind on tool calls, usage scope on usage observations) plus
+session-level context on `ParsedSession` — NOT a universal
+`CanonicalEntry { entry, semantics }` wrapper, which would recreate Option B's
+blast radius. A sidecar keyed by deterministic entry id is the fallback where
+a field placement doesn't exist.
 
-- `PromptOrigin::{Human, Steering, Harness, ToolResult}` — feeds
-  `is_human_prompt` / prompt-boundary chunking.
+The enums below are illustrative, not frozen:
+
+- Prompt semantics are **two axes**, authorship and delivery mode (a steered
+  message is human-authored but mid-turn-delivered) — feeds `is_human_prompt`
+  / prompt-boundary chunking.
 - `ToolKind` + preserved native tool name — feeds tool analyses/lessons.
-- `UsageBasis::{PerTurn, Cumulative, Unknown}` — feeds token accounting.
+- Usage semantics need **scope and aggregation as separate dimensions**:
+  Codex `token_count` events carry both last-call usage and
+  session-cumulative usage side by side.
 - `LineageEdgeKind::{Continuation, Fork, Spawn}` — session lineage is a typed
   graph, not a generic "chain": CC resume chains are Continuation edges, Codex
   forks are Fork edges, subagents are Spawn edges. Compaction window links are
@@ -205,14 +246,24 @@ directory walks.
 
 ## Phase plan
 
+- **Phase A.0 — type-contract pass (opens Phase A, before touching call
+  sites).** Pin down, as reviewed types with unit-level tests: (1)
+  archive/native capability semantics; (2) provenance cardinality and record
+  accounting (`entry_origins` + `record_dispositions`); (3) where semantic
+  annotations live (carrier decision above); (4) logical sessions vs physical
+  artifacts (twin precedence, duplicate detection, export artifact
+  selection).
 - **Phase A — seam + identity (refactor, zero behavior change).**
-  `SourceProvider` trait, `SessionKey`/`SessionDescriptor`, provider
-  capabilities, parsed-session context threading, raw-source delegation,
-  cache re-keying. `ClaudeCodeProvider` is the production impl; a tiny
-  in-memory fake provider exists from day one so the seam is not designed
-  against a single implementation. Provider-selection UX is *designed* here
-  (flags, qualified ids). Acceptance: full suite + snapshot exports
-  byte-identical; Claude CLI/MCP/library behavior unchanged.
+  `SourceProvider` trait, `LogicalSessionKey`/`ArtifactKey`/
+  `SessionDescriptor`, provider capabilities, parsed-session context
+  threading, archive/raw-source delegation, cache re-keying
+  (`LogicalSessionKey` + provider revision token). `ClaudeCodeProvider` is
+  the production impl; a fake in-memory provider exists from day one and
+  deliberately stresses the seam — **non-file-backed, no raw-jsonl tier, one
+  session with multiple artifacts** (a fake that merely resembles Claude
+  JSONL would not test the seam honestly). Provider-selection UX is
+  *designed* here (flags, qualified ids). Acceptance: full suite + snapshot
+  exports byte-identical; Claude CLI/MCP/library behavior unchanged.
 - **Phase B1 — Codex inventory & decoding.** Discovery of plain, archived,
   compressed (`.zst`, with decompressed-size limits), active/truncated, and
   legacy (pre-envelope) files; envelope parser; native diagnostics. Legacy
@@ -246,15 +297,20 @@ directory walks.
    reason, classified unknown, or reported unparseable — never silently
    dropped.
 2. Normalized ids are stable across repeated parsing and append-only growth.
-3. Two-stream reconciliation produces no duplicated user/assistant text or
-   token usage.
+3. Two-stream reconciliation: records representing the same semantic emission
+   render once; distinct emissions remain distinct even when their text is
+   identical (dedup keys on emission identity, never on text equality); token
+   usage is never double-counted.
 4. Compaction `replacement_history` is not counted as new chronological
-   activity.
+   activity; fork-copied history is retained when viewing the fork
+   independently but not double-counted as new work in cross-session views.
 5. Plain and compressed versions of a session normalize identically;
    decompressed-size limits prevent compression bombs.
 6. Active files with partial final lines do not generate permanent drift
-   findings.
-7. Claude CLI, MCP, library API, raw export, error behavior, ordering, and
+   findings; drift diagnostics record unknown *nested field paths*, not only
+   unknown top-level record types.
+7. Normalized output carries machine-readable provider + derivation metadata.
+8. Claude CLI, MCP, library API, raw export, error behavior, ordering, and
    snapshots remain unchanged throughout.
 
 ## Review amendments (2026-07-17)
@@ -266,6 +322,7 @@ was verified and adopted:
   `EntryOrigin` provenance (verified: raw exporter already bypasses parsing,
   src/cli/commands/export.rs; redaction/memory/N:1 hazards real).
 - `SessionKey` qualified identity + provider context through `Conversation`
+  (refined to `LogicalSessionKey`/`ArtifactKey` in round 2)
   and the cache (verified: cache keyed path+mtime, src/cache/mod.rs;
   `from_entries` takes bare entries).
 - Rejected `message.id := turn_id`; deterministic entry ids instead.
@@ -280,13 +337,29 @@ was verified and adopted:
   fake provider added to A; registry-storage scope surfaced in D; acceptance
   invariants adopted.
 
+## Review round 2 (2026-07-17, same Codex agent)
+
+Verdict: no remaining architecture/phase-ordering objections; Phase A gated on
+the A.0 type-contract pass. Adopted: archive-vs-native tier split (a DB row
+has no independent byte representation); explicit provenance cardinality
+(`entry_origins` map + `record_dispositions`) with ordinal-only RecordRefs (no
+content hashes — equality leakage on sensitive low-entropy text); annotation
+carrier decision (fields on semantic types, not a universal wrapper) +
+authorship/delivery and scope/aggregation axis corrections; logical-vs-
+artifact identity split with twin precedence; honest fake-provider
+requirements; invariant #3 reworded to semantic-emission identity (text-
+equality dedup would merge legitimate repeats); machine-readable derivation
+metadata, nested-path drift, fork-history double-count guards. The round also
+verified the two previously unverified doc claims (Codex plan-vs-API billing
+distinction; resume/fork/archive documented as stable operations).
+
 ## Open questions (to settle in-phase)
 
-1. Two-stream dedup policy details (B3, empirical).
+1. Two-stream dedup policy details (B3, empirical — under the emission-
+   identity rule of invariant #3).
 2. Steered/queued prompt persisted shape (B3, empirical — inferred from
    inject.rs code paths only).
 3. `world_state` / `ghost_snapshot` semantics (B3).
-4. `EntryOrigin` digest: include content hashes or ordinal-only (A).
-5. Provider capability surface: which tiers/features each provider advertises
-   (A).
+4. Twin precedence + duplicate detection rules across roots (A.0).
+5. Annotation carrier field placements per semantic type (A.0).
 6. Default-provider switch to `all` (D, with union view).
