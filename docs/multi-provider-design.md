@@ -46,10 +46,20 @@ struct ParsedSession {
     descriptor: SessionDescriptor,
     entries: Vec<LogEntry>,
     entry_origins: Map<EntryId, Vec<RecordRef>>,   // N:1 and 1:N expressible
-    record_dispositions: Vec<RecordDisposition>,   // per native record:
-        // Mapped | Suppressed { reason } | Unknown | Unparseable
+    record_dispositions: Vec<RecordDisposition>,   // self-identifying:
     diagnostics: IngestionDiagnostics,
 }
+// A disposition names its record — a bare list cannot identify records
+// across multiple artifacts without relying on implicit ordering.
+struct RecordDisposition { record: RecordRef, outcome: RecordOutcome }
+enum RecordOutcome {
+    Mapped(Vec<EntryId>),
+    Suppressed { reason: SuppressionReason },
+    Unknown,
+    Unparseable { error: ParseDiagnostic },
+}
+// entry_origins is the reverse index and is validated for consistency
+// against the outcomes.
 ```
 
 `record_dispositions` is what makes acceptance invariant #1 enforceable: every
@@ -88,8 +98,15 @@ ordering, never native causality**.
   copied source history.
 
   ```rust
-  LogicalSessionKey { provider: ProviderId, native_id: String }
-  ArtifactKey { provider_instance, locator, revision }
+  // namespace: provider-defined; equivalent backup roots share one,
+  // genuinely separate installations cannot collide accidentally
+  // (matters for providers with database-local integer ids).
+  LogicalSessionKey { provider: ProviderId, namespace: SessionNamespace, native_id: String }
+  // revision is NOT part of identity — an append to an active session
+  // must not mint a new artifact identity.
+  ArtifactId { provider_instance, locator }
+  ArtifactRevision(/* opaque provider token */)
+  ArtifactSnapshot { id: ArtifactId, revision: ArtifactRevision }
   SessionDescriptor { key, artifacts, preferred_artifact, ... }
   ```
 
@@ -247,12 +264,16 @@ directory walks.
 ## Phase plan
 
 - **Phase A.0 — type-contract pass (opens Phase A, before touching call
-  sites).** Pin down, as reviewed types with unit-level tests: (1)
-  archive/native capability semantics; (2) provenance cardinality and record
-  accounting (`entry_origins` + `record_dispositions`); (3) where semantic
+  sites).** First deliverable is deliberately narrow: (a) the identity,
+  artifact, revision, provenance, capability, and semantic metadata types;
+  (b) unit tests exercising them through the deliberately awkward fake
+  provider; (c) a review checkpoint before the types are threaded through
+  existing call sites. Pins: (1) archive/native capability semantics; (2)
+  provenance cardinality and record accounting (self-identifying
+  `record_dispositions` + `entry_origins` consistency); (3) where semantic
   annotations live (carrier decision above); (4) logical sessions vs physical
-  artifacts (twin precedence, duplicate detection, export artifact
-  selection).
+  artifacts (identity separate from revision, namespaces, twin precedence,
+  duplicate detection, export artifact selection).
 - **Phase A — seam + identity (refactor, zero behavior change).**
   `SourceProvider` trait, `LogicalSessionKey`/`ArtifactKey`/
   `SessionDescriptor`, provider capabilities, parsed-session context
@@ -278,11 +299,11 @@ directory walks.
   qualified session id. Default remains Claude-only until Phase D.
   Milestone: list/info + native/raw export work on real Codex sessions.
 - **Phase B3 — normalization.** Deterministic entry ids, two-stream
-  reconciliation (no duplicated text or token usage), typed fork/spawn
+  reconciliation under invariant #3's emission-identity rule, typed fork/spawn
   lineage, steered-prompt and `world_state`/`ghost_snapshot` semantics settled
   empirically. Milestone: messages/timeline/normalized exports.
 - **Phase C — semantic tuning.** Codex prompt-boundary chunking, lessons
-  noise filters, usage semantics (`UsageBasis`), reasoning-availability
+  noise filters, usage semantics (scope + aggregation), reasoning-availability
   reporting in doctor, compaction-window presentation.
 - **Phase D — cross-provider UX.** Unified project identity across providers
   (cwd/git), union views, default-provider switch consideration, and registry
@@ -310,8 +331,13 @@ directory walks.
    findings; drift diagnostics record unknown *nested field paths*, not only
    unknown top-level record types.
 7. Normalized output carries machine-readable provider + derivation metadata.
-8. Claude CLI, MCP, library API, raw export, error behavior, ordering, and
-   snapshots remain unchanged throughout.
+8. Compatibility is phased, so #7 does not contradict it: during Phase A,
+   existing Claude outputs and snapshots are byte-identical; from B2 onward,
+   existing inputs and semantics stay backward-compatible while additive
+   provider/derivation metadata is permitted (an explicitly versioned
+   normalized envelope if additive fields ever become unsafe); Claude
+   raw-jsonl remains byte-identical permanently. Tests encode these three
+   promises separately.
 
 ## Review amendments (2026-07-17)
 
@@ -352,6 +378,15 @@ equality dedup would merge legitimate repeats); machine-readable derivation
 metadata, nested-path drift, fork-history double-count guards. The round also
 verified the two previously unverified doc claims (Codex plan-vs-API billing
 distinction; resume/fork/archive documented as stable operations).
+
+## Review round 3 (2026-07-17, same Codex agent)
+
+Verdict: proceed with Phase A.0; stop cycling the design doc. Adopted into
+A.0: identity separated from revision (ArtifactId/ArtifactRevision/
+ArtifactSnapshot); provider-defined SessionNamespace in LogicalSessionKey;
+invariants #7/#8 reconciled as a phased compatibility contract;
+RecordDisposition made self-identifying; stale UsageBasis / "no duplicated
+text" shorthand cleaned up.
 
 ## Open questions (to settle in-phase)
 
