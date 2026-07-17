@@ -831,6 +831,35 @@ breath as any completion claim).
       + native/raw export work on REAL Codex sessions — a real-session
       demonstration, not fixtures only.
 
+## Review round 21 (2026-07-17, same Codex agent — B2 SIGN-OFF)
+
+Verdict: "Yes—B2 is signed off. Proceed directly to B3." Reviewer
+independently verified the B2.11 fixes (cache partition budgets incl.
+oversized replacement + saturating arithmetic; doctor wholesale error
+replacement with stdout+stderr adversarial tests; qualified-reference
+rejection on --list-templates; status-triple coverage), the clean worktree,
+the full local matrix (873 library tests + integration/corpus/property/
+snapshot/doc + no-default-features + MCP-only), and green remote CI. The
+documented [~] api/flagless routing remainder is accepted as explicitly
+B3-consumer work.
+
+HARD CONSTRAINTS for B3 (reviewer-set, binding):
+1. Preserve existing deterministic EntryIds when records change from
+   Unknown to Mapped.
+2. Model turn_id separately; never repurpose message identity.
+3. Deduplicate by semantic emission/call identity — not text equality —
+   and PROVE token usage is not double-counted.
+4. Keep fork-inherited history, compaction replacement history, forks, and
+   spawns semantically distinct.
+5. Route new consumers through the complete ParsedSession bundle so
+   provenance and semantics are not stripped again.
+6. Validate each normalization slice against both adversarial fixtures and
+   the real corpus before expanding it.
+
+Checkpoint: after the first end-to-end normalization slice —
+user/assistant content, reasoning summaries, tool calls/results, and
+usage — works through messages and timeline on real sessions.
+
 ## Review round 20 (2026-07-17, same Codex agent — narrowly conditional sign-off: B2.11)
 
 Verdict: B2.10 passes except two exit defects + one edge; land B2.11 with
