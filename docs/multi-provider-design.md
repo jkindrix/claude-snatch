@@ -717,6 +717,95 @@ strings — before `snatch doctor` prints them, cap distinct-path cardinality
 and path length, track overflow counts, and emit no session ids, paths, or
 field values by default.
 
+## Execution checklist: B2 through D (consolidated 2026-07-17)
+
+Single forward-looking list gathering every obligation accumulated across
+review rounds 1-16 — read THIS (not just the phase prose) before starting a
+phase, and check items off against their original wording (see the
+requirement-evaporation memory: deferred parts must be named in the same
+breath as any completion claim).
+
+### Phase B2 — provider UX + production routing
+- [ ] `--provider claude-code|codex|all` (repeatable) on CLI; MCP requests
+      gain optional `provider`; responses always carry provider + qualified
+      session id. Default stays Claude-only until D.
+- [ ] Qualified-id parsing: FromStr/decoding + round-trip tests for the
+      escaped encoding BEFORE ids become CLI/MCP inputs (round-6 guardrail).
+- [ ] `snatch providers` command: discovered roots, session counts, format
+      families, diagnostics.
+- [ ] Production routing through SourceProvider: shared resolver path,
+      library API (`api.rs`) and MCP paths stop calling Session::parse
+      directly; archive/raw provider methods gain production callers
+      (round-10 re-phasing).
+- [ ] Parsed-session propagation: centralized
+      `Conversation::from_parsed_session(...)` so provenance, semantics, and
+      source cannot be independently forgotten; per-surface source threading
+      lands WITH each surface's provider parameter (covers CLI + MCP +
+      library/API — the ~28-site deferral inventory, rounds 10/T3).
+- [ ] First production cache consumer uses `parse_cache_token` (round-11
+      guardrail; token already implemented + tested end-to-end).
+- [ ] `snatch doctor` surfacing of CodexDriftReport + a provider-neutral
+      diagnostics hook (round-15 re-phasing). SECURITY (round-16): unknown
+      field names are native attacker-controlled strings — cap distinct-path
+      cardinality and path length, track overflow counts, emit no session
+      ids/paths/field values by default.
+- [ ] `codex` feature becomes default-on at release (round-11).
+- [ ] Compatibility promise from B2 on: backward-compatible inputs/semantics,
+      additive provider metadata permitted; Claude raw-jsonl byte-identical
+      permanently (invariant #8 phasing).
+
+### Phase B3 — Codex normalization
+- [ ] Envelope records flip from Unknown{entries} to Mapped with the SAME
+      deterministic ids (B1 parse comment contract).
+- [ ] turn_id carrier before normalization (round-6 guardrail).
+- [ ] Two-stream dedup under invariant #3's emission-identity rule (lean:
+      response_item authoritative for content; event_msg for user-facing
+      text/token counts) — settle empirically.
+- [ ] Steered/queued prompt persisted shape — empirical (inject.rs inference
+      unverified).
+- [ ] `world_state` / `ghost_snapshot` semantics — empirical.
+- [ ] Fork lineage via the embedded-second-meta heuristic (this corpus's
+      forks predate forked_from_id — B1a observation).
+- [ ] Compaction: `compacted` items with replacement_history not counted as
+      new chronological activity (invariant #4); window-metadata carrier
+      (deferred from A.0 round 5).
+- [ ] Semantic sidecar emission (EntrySemantics: prompt axes, per-call tools,
+      usage observations with values, InheritedHistory for fork-copied
+      records).
+- [ ] Pre-envelope legacy files: keep unsupported-legacy refusal unless
+      provenance-documented fixtures justify a parser (round-6 posture).
+- [ ] Milestone: messages/timeline/normalized exports on real Codex sessions.
+
+### Phase C — semantic tuning
+- [ ] Codex prompt-boundary chunking (PromptOrigin axes feed
+      is_prompt_boundary).
+- [ ] Lessons noise filters for Codex tool shapes (content-tuned per
+      provider — annotations reduce but do not eliminate this).
+- [ ] Usage semantics via UsageScope/UsageAggregation observations.
+- [ ] Pricing: Codex stays unpriced by default; if ever added, label
+      "API-equivalent cost", explicit pricing mode, never inferred from
+      auth.json (round-3).
+- [ ] Reasoning availability + drift surfaced in doctor output (era-bucketed,
+      never aggregate-only).
+- [ ] Compaction-window presentation.
+
+### Phase D — cross-provider UX
+- [ ] Unified project identity across providers (cwd/git), union views
+      (absorbs the long-deferred union-view item, note #4).
+- [ ] Default-provider switch to `all` considered only here.
+- [ ] Registry storage: goals/notes/decisions live under Claude-owned
+      project storage — scope those MCP ops per-provider or migrate storage
+      BEFORE claiming unified projects (round-3 hidden scope).
+- [ ] Candidate export targets: ATIF, OTel GenAI (landscape verdict: export
+      targets only, never the internal model).
+
+### Standing constraints (all phases)
+- [ ] The 8 acceptance invariants (above) gate "Codex supported".
+- [ ] Drift-coverage claims must state checked vs unchecked counts
+      (round-16); baselines absorb instrument discoveries WITH provenance.
+- [ ] Every completion claim re-reads the original requirement wording
+      (requirement-evaporation memory).
+
 ## Open questions (to settle in-phase)
 
 1. Two-stream dedup policy details (B3, empirical — under the emission-
