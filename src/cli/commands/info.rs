@@ -20,9 +20,7 @@ pub fn run(cli: &Cli, args: &InfoArgs) -> Result<()> {
     // Targets that merely contain ':' (Windows paths, project filters) do
     // not match a registered provider and stay on the classic path.
     if let Some(target) = &args.target {
-        let registry = crate::provider::registry::ProviderRegistry::with_claude_root(
-            cli.claude_dir.as_deref(),
-        );
+        let registry = super::helpers::provider_registry(cli);
         if !args.provider.is_empty() || registry.looks_qualified(target) {
             return show_provider_session_info(cli, args, &registry, target);
         }
@@ -1157,6 +1155,22 @@ fn show_provider_session_info(
 ) -> Result<()> {
     use crate::provider::registry::cached_parsed_session;
     use crate::provider::ArtifactForm;
+
+    // COMPLETE argument classification (round-18): universal arguments are
+    // the target reference and --provider; every classic info view flag is
+    // refused until it has provider-neutral meaning.
+    super::helpers::refuse_unsupported_flags(
+        "provider-routed info (identity, artifacts, provenance until normalization)",
+        &[
+            ("--no-chain", args.no_chain),
+            ("--tree", args.tree),
+            ("--raw", args.raw),
+            ("--entry", args.entry.is_some()),
+            ("--paths", args.paths),
+            ("--messages", args.messages.is_some()),
+            ("--files", args.files),
+        ],
+    )?;
 
     let resolution = registry.resolve_with_default_policy(&args.provider, target)?;
     let provider = resolution.provider;

@@ -753,7 +753,7 @@ impl SourceProvider for SmallProvider {
         ProviderCapabilities::default()
     }
     fn sessions(&self) -> Result<Vec<SessionDescriptor>, ProviderError> {
-        Ok(["421", "5", "56"]
+        Ok(["421", "5", "56", "we:ird"]
             .iter()
             .map(|n| SessionDescriptor {
                 key: Self::key(n),
@@ -914,12 +914,117 @@ fn qualified_id_naming_unavailable_or_unknown_provider_is_precise() {
         "got: {err}"
     );
 
+    // A colon-bearing reference whose first segment names NO registered
+    // provider is NOT a qualified id (unified predicate, round-18): it is
+    // searched as a plain prefix and misses, with an explanatory hint.
     let err = r
         .resolve_session(&ProviderSelection::All, "ghost:xyz")
         .err()
         .unwrap()
         .to_string();
-    assert!(err.contains("unknown provider"), "got: {err}");
+    assert!(
+        err.contains("no session matching") && err.contains("registered provider"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn native_ids_with_encoded_colons_resolve_via_qualified_form() {
+    let r = matrix_registry();
+    // small owns native id "we:ird"; its qualified form escapes the colon.
+    let shown = SmallProvider::key("we:ird").to_string();
+    assert_eq!(shown, "small:we%3Aird");
+    let res = r.resolve_session(&ProviderSelection::All, &shown).unwrap();
+    assert_eq!(res.key, SmallProvider::key("we:ird"));
+
+    // The RAW (unescaped) form is not a valid qualified id for it: it parses
+    // as native id "ird" under namespace "we" and misses precisely.
+    assert!(r
+        .resolve_session(&ProviderSelection::All, "small:we:ird")
+        .is_err());
+}
+
+#[test]
+fn ambiguity_candidates_are_sorted_before_truncation() {
+    // Register a provider with many sessions sharing a prefix; the error
+    // must list the lexicographically FIRST five, not an arbitrary five.
+    struct ManyProvider;
+    impl SourceProvider for ManyProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId("many".into())
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::default()
+        }
+        fn sessions(&self) -> Result<Vec<SessionDescriptor>, ProviderError> {
+            // Emitted in DESCENDING order so unsorted truncation would show
+            // p9..p5.
+            Ok((0..10)
+                .rev()
+                .map(|i| SessionDescriptor {
+                    key: LogicalSessionKey {
+                        provider: ProviderId("many".into()),
+                        namespace: SessionNamespace::global(),
+                        native_id: format!("p{i}"),
+                    },
+                    artifacts: vec![],
+                })
+                .collect())
+        }
+        fn lineage(&self) -> Result<Vec<LineageEdge>, ProviderError> {
+            Ok(vec![])
+        }
+        fn parse(&self, key: &LogicalSessionKey) -> Result<ParsedSession, ProviderError> {
+            Err(ProviderError::NotFound(key.to_string()))
+        }
+        fn parse_cache_token(&self, key: &LogicalSessionKey) -> Result<String, ProviderError> {
+            Err(ProviderError::NotFound(key.to_string()))
+        }
+        fn write_archive(
+            &self,
+            key: &LogicalSessionKey,
+            _out: &mut dyn std::io::Write,
+        ) -> Result<(), ProviderError> {
+            Err(ProviderError::NotFound(key.to_string()))
+        }
+        fn write_native(
+            &self,
+            _artifact: &ArtifactId,
+            _out: &mut dyn std::io::Write,
+        ) -> Result<(), ProviderError> {
+            Err(ProviderError::Unsupported {
+                capability: "native export",
+            })
+        }
+        fn write_raw_jsonl(
+            &self,
+            _key: &LogicalSessionKey,
+            _out: &mut dyn std::io::Write,
+        ) -> Result<(), ProviderError> {
+            Err(ProviderError::Unsupported {
+                capability: "raw-jsonl export",
+            })
+        }
+    }
+    let mut r = ProviderRegistry::new();
+    r.register(RegisteredProvider {
+        id: ProviderId("many".into()),
+        root: None,
+        provider: Ok(Box::new(ManyProvider)),
+    })
+    .unwrap();
+    let err = r
+        .resolve_session(&ProviderSelection::All, "p")
+        .err()
+        .expect("ambiguous")
+        .to_string();
+    for shown in ["many:p0", "many:p1", "many:p2", "many:p3", "many:p4"] {
+        assert!(err.contains(shown), "expected {shown} in: {err}");
+    }
+    assert!(
+        !err.contains("many:p9"),
+        "unsorted truncation leaked: {err}"
+    );
 }
 
 #[test]

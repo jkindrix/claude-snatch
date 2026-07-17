@@ -100,7 +100,7 @@ impl SnatchServer {
     /// set: qualified ids + artifact summaries via the registry's selection
     /// matrix (B2; titles/timestamps arrive with normalization in B3).
     fn provider_sessions_output(&self, flags: &[String], limit: usize) -> ToolOutput {
-        use crate::provider::registry::{ProviderRegistry, ProviderSelection};
+        use crate::provider::registry::ProviderSelection;
 
         let selection = match ProviderSelection::from_flags(flags) {
             Ok(s) => s,
@@ -108,7 +108,7 @@ impl SnatchServer {
                 return ToolOutput::error(format!("Invalid provider selection: {reason}"))
             }
         };
-        let registry = ProviderRegistry::with_claude_root(self.claude_dir.as_deref());
+        let registry = self.provider_registry();
         let selected = match registry.select(&selection) {
             Ok(s) => s,
             Err(e) => return ToolOutput::error(e.to_string()),
@@ -220,6 +220,18 @@ impl SnatchServer {
         }
     }
 
+    /// Build the provider registry from the server's global options — the
+    /// ONE construction path for MCP surfaces (round-18 blocker 4: parsing
+    /// limits must never be dropped).
+    fn provider_registry(&self) -> crate::provider::registry::ProviderRegistry {
+        crate::provider::registry::ProviderRegistry::with_config(
+            &crate::provider::registry::RegistryConfig {
+                claude_root: self.claude_dir.clone(),
+                max_file_size: self.max_file_size,
+            },
+        )
+    }
+
     pub(crate) fn get_claude_dir(&self) -> Result<ClaudeDirectory, String> {
         let result = if let Some(ref path) = self.claude_dir {
             ClaudeDirectory::from_path(path.clone())
@@ -240,6 +252,22 @@ impl SnatchServer {
     #[tool(description = "List Claude Code sessions with optional filtering by project")]
     async fn list_sessions(&self, request: ListSessionsRequest) -> ToolOutput {
         if let Some(flags) = request.provider.as_ref().filter(|f| !f.is_empty()) {
+            // Scope arguments the provider route does not implement are
+            // refused, never ignored — silently returning sessions outside
+            // the requested project would be a scope/privacy bug (round-18).
+            if request.project.is_some() {
+                return ToolOutput::error(
+                    "'project' is not supported with 'provider' yet (provider-neutral \
+                     listing has no project scoping until normalization); refused rather \
+                     than ignored",
+                );
+            }
+            if request.include_subagents.is_some() {
+                return ToolOutput::error(
+                    "'include_subagents' is not supported with 'provider'; refused rather \
+                     than ignored",
+                );
+            }
             return self.provider_sessions_output(flags, request.limit.unwrap_or(50));
         }
 
@@ -313,9 +341,7 @@ impl SnatchServer {
     async fn get_session_info(&self, request: GetSessionInfoRequest) -> ToolOutput {
         let provider_flags = request.provider.clone().unwrap_or_default();
         if !provider_flags.is_empty() || request.session_id.contains(':') {
-            let registry = crate::provider::registry::ProviderRegistry::with_claude_root(
-                self.claude_dir.as_deref(),
-            );
+            let registry = self.provider_registry();
             if !provider_flags.is_empty() || registry.looks_qualified(&request.session_id) {
                 return self.provider_session_info_output(
                     &registry,
@@ -3976,5 +4002,31 @@ mod tests {
         assert_eq!(v["qualified_id"], format!("claude-code:{sid}"));
         assert!(v["entries"].as_u64().unwrap() > 0);
         assert!(v["capabilities"]["raw_jsonl"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn provider_list_sessions_refuses_scope_args_rather_than_ignoring() {
+        let sid = "abcdabcd-5555-6666-7777-888899990000";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let server = make_server(&tmp);
+        for (project, include_subagents) in [
+            (Some("proj".to_string()), None),
+            (None, Some(true)),
+            (None, Some(false)),
+        ] {
+            let out = server
+                .list_sessions(ListSessionsRequest {
+                    project,
+                    limit: None,
+                    include_subagents,
+                    provider: Some(vec!["claude-code".to_string()]),
+                })
+                .await;
+            let msg = format!("{out:?}");
+            assert!(
+                msg.contains("refused rather than ignored"),
+                "scope arg must be refused, got: {msg}"
+            );
+        }
     }
 }

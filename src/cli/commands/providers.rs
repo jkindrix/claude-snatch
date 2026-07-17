@@ -5,12 +5,11 @@ use std::collections::BTreeMap;
 
 use crate::cli::{Cli, OutputFormat};
 use crate::error::Result;
-use crate::provider::registry::ProviderRegistry;
 use crate::provider::ArtifactForm;
 
 /// Run the providers command.
 pub fn run(cli: &Cli) -> Result<()> {
-    let registry = ProviderRegistry::with_claude_root(cli.claude_dir.as_deref());
+    let registry = super::helpers::provider_registry(cli);
 
     let mut reports = Vec::new();
     for entry in registry.entries() {

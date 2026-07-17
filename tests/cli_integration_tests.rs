@@ -1685,3 +1685,183 @@ fn doctor_provider_codex_reports_capped_drift_diagnostics() {
             "vocabulary keys dropped at cap: 0",
         ));
 }
+
+// =============================================================================
+// B2.8: complete option refusal + unified qualification (round-18)
+// =============================================================================
+
+/// Every non-universal flag must be individually refused on the provider
+/// route — silently ignored options are the round-18 blocker-3 hazard.
+#[test]
+fn provider_list_refuses_every_unsupported_flag_individually() {
+    let tmp = setup_fixture_dir();
+    let cases: &[&[&str]] = &[
+        &["-p", "x"],
+        &["--subagents"],
+        &["--subagents-only"],
+        &["--active"],
+        &["--compacted"],
+        &["-s", "name"],
+        &["--full-ids"],
+        &["--sizes"],
+        &["--pager"],
+        &["--since", "1d"],
+        &["--until", "1d"],
+        &["--tag", "t"],
+        &["--tags", "t"],
+        &["--bookmarked"],
+        &["--outcome", "success"],
+        &["--by-name", "x"],
+        &["--min-size", "1k"],
+        &["--max-size", "1m"],
+        &["--context"],
+        &["--hide-empty"],
+        &["--no-chain"],
+    ];
+    for extra in cases {
+        let mut args = vec!["list", "sessions", "--provider", "claude-code"];
+        args.extend_from_slice(extra);
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", tmp.path())
+            .args(&args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("not supported with"));
+    }
+    // Non-session list targets are refused too.
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["list", "projects", "--provider", "claude-code"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("only `list sessions`"));
+}
+
+#[test]
+fn provider_info_refuses_every_unsupported_flag_individually() {
+    let tmp = setup_fixture_dir();
+    let target = format!("claude-code:{SESSION_ID}");
+    let cases: &[&[&str]] = &[
+        &["--no-chain"],
+        &["--tree"],
+        &["--raw"],
+        &["--entry", "u"],
+        &["--paths"],
+        &["-m", "3"],
+        &["--files"],
+    ];
+    for extra in cases {
+        let mut args = vec!["info", target.as_str()];
+        args.extend_from_slice(extra);
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", tmp.path())
+            .args(&args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("not supported with"));
+    }
+}
+
+#[test]
+fn provider_export_refuses_every_unsupported_flag_individually() {
+    let tmp = setup_fixture_dir();
+    let target = format!("claude-code:{SESSION_ID}");
+    let cases: &[&[&str]] = &[
+        &["--all"],
+        &["-p", "x"],
+        &["--since", "1d"],
+        &["--until", "1d"],
+        &["--subagents"],
+        &["--combine-agents"],
+        &["--resolve-tool-results"],
+        &["--no-thinking"],
+        &["--no-tool-use"],
+        &["--no-tool-results"],
+        &["--no-images"],
+        &["--system"],
+        &["--only", "prompts"],
+        &["--metadata"],
+        &["--main-thread"],
+        &["--no-chain"],
+        &["--pretty"],
+        &["--full"],
+        &["--progress"],
+        &["--redact", "security"],
+        &["--warn-pii"],
+        &["--redact-preview"],
+        &["--gist"],
+        &["--toc"],
+        &["--dark"],
+        &["--clipboard"],
+        &["--template", "summary"],
+    ];
+    for extra in cases {
+        let mut args = vec!["export", target.as_str(), "-f", "raw-jsonl"];
+        args.extend_from_slice(extra);
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", tmp.path())
+            .args(&args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("not supported with"));
+    }
+}
+
+#[test]
+fn provider_doctor_refuses_unsupported_filters_individually() {
+    let tmp = setup_fixture_dir();
+    let cases: &[&[&str]] = &[&["proj"], &["--since", "1d"], &["--subagents"]];
+    for extra in cases {
+        let mut args = vec!["doctor", "--provider", "claude-code"];
+        args.extend_from_slice(extra);
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", tmp.path())
+            .args(&args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("not supported with"));
+    }
+}
+
+/// Unified qualification predicate at the command level (round-18
+/// blocker 5): only references whose first segment names a REGISTERED
+/// provider take the qualified path.
+#[test]
+fn qualification_predicate_is_unified_at_command_level() {
+    let tmp = setup_fixture_dir();
+
+    // Windows-style path: classic path, no qualified-id parse error.
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .env("CODEX_HOME", tmp.path().join("no-such"))
+        .args(["info", r"C:\Users\someone\project"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Session not found"))
+        .stderr(predicate::str::contains("segments").not());
+
+    // Unknown colon-bearing reference: classic path, plain not-found.
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["info", "ghost:xyz"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Session not found"))
+        .stderr(predicate::str::contains("segments").not());
+
+    // Registered-provider qualified id resolves.
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["info", &format!("claude-code:{SESSION_ID}")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Provider: claude-code"));
+
+    // Malformed qualified id (registered prefix, bad escape) errors loudly.
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["info", "claude-code:ab%zz"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid escape"));
+}

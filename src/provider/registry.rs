@@ -14,6 +14,18 @@ use super::{LogicalSessionKey, ProviderError, ProviderId, SourceProvider};
 use crate::discovery::ClaudeDirectory;
 use crate::provider::claude_code::ClaudeCodeProvider;
 
+/// Configuration for default provider construction: the surface's global
+/// options that every provider must receive (silently dropping one is the
+/// round-18 blocker-4 hazard).
+#[derive(Debug, Clone, Default)]
+pub struct RegistryConfig {
+    /// Explicit Claude root (the CLI's global `--claude-dir`); `None`
+    /// discovers.
+    pub claude_root: Option<PathBuf>,
+    /// Global parse size limit (`--max-file-size`), in bytes.
+    pub max_file_size: Option<u64>,
+}
+
 /// One installed provider: identity plus either a working instance or the
 /// reason it is unavailable. The id and root stay reportable either way.
 pub struct RegisteredProvider {
@@ -42,22 +54,41 @@ impl ProviderRegistry {
     /// always, `codex` when the feature is enabled. Discovery failure makes
     /// a provider unavailable, never absent.
     pub fn with_defaults() -> Self {
-        Self::with_claude_root(None)
+        Self::with_config(&RegistryConfig::default())
     }
 
-    /// Like [`ProviderRegistry::with_defaults`], but with an explicit Claude
-    /// root (the CLI's global `--claude-dir`) instead of discovery.
+    /// Compatibility wrapper over [`ProviderRegistry::with_config`] carrying
+    /// only an explicit Claude root.
     pub fn with_claude_root(claude_root: Option<&std::path::Path>) -> Self {
+        Self::with_config(&RegistryConfig {
+            claude_root: claude_root.map(std::path::Path::to_path_buf),
+            ..Default::default()
+        })
+    }
+
+    /// Build the default providers from an explicit configuration.
+    ///
+    /// Every global parsing limit the surface knows about must be carried
+    /// here — constructing providers without them silently loses safety
+    /// options (round-18 blocker 4). `max_file_size` maps to Claude's parse
+    /// size limit directly; for Codex it TIGHTENS both the compressed-input
+    /// and decompressed-output caps (never loosens the defaults), making
+    /// oversized sessions honest unreadable/unparseable findings. Both
+    /// providers fold the limit into their parse cache tokens.
+    pub fn with_config(config: &RegistryConfig) -> Self {
         let mut registry = Self::new();
 
-        let claude_dir = match claude_root {
+        let claude_dir = match &config.claude_root {
             Some(root) => ClaudeDirectory::from_path(root),
             None => ClaudeDirectory::discover(),
         };
         let (root, provider) = match claude_dir {
             Ok(dir) => (
                 Some(dir.root().to_path_buf()),
-                Ok(Box::new(ClaudeCodeProvider::new(dir)) as Box<dyn SourceProvider>),
+                Ok(
+                    Box::new(ClaudeCodeProvider::new(dir).with_max_file_size(config.max_file_size))
+                        as Box<dyn SourceProvider>,
+                ),
             ),
             Err(e) => (None, Err(e.to_string())),
         };
@@ -73,14 +104,15 @@ impl ProviderRegistry {
         {
             let (root, provider) = match super::codex::CodexProvider::discover() {
                 Ok(p) => {
+                    let p = match config.max_file_size {
+                        Some(limit) => p.tighten_limits(limit),
+                        None => p,
+                    };
                     let home = p.codex_home().to_path_buf();
                     if home.exists() {
                         (Some(home), Ok(Box::new(p) as Box<dyn SourceProvider>))
                     } else {
-                        (
-                            Some(home.clone()),
-                            Err(format!("codex home not found at {}", home.display())),
-                        )
+                        (Some(home), Err("codex home not found".to_string()))
                     }
                 }
                 Err(e) => (None, Err(e.to_string())),
@@ -285,7 +317,7 @@ impl ProviderRegistry {
     ) -> Result<Resolution<'_>, ProviderError> {
         let selected = self.select(selection)?;
 
-        if reference.contains(':') {
+        if self.looks_qualified(reference) {
             let key: LogicalSessionKey = reference
                 .parse()
                 .map_err(|e: String| ProviderError::Other(e))?;
@@ -379,7 +411,7 @@ impl ProviderRegistry {
     ) -> Result<Resolution<'_>, ProviderError> {
         let selection = if !provider_flags.is_empty() {
             ProviderSelection::from_flags(provider_flags).map_err(ProviderError::Other)?
-        } else if reference.contains(':') {
+        } else if self.looks_qualified(reference) {
             let key: LogicalSessionKey = reference.parse().map_err(ProviderError::Other)?;
             ProviderSelection::Explicit(vec![key.provider])
         } else {
@@ -428,6 +460,12 @@ fn pick_unique(
         1 => Ok(candidates.into_iter().next().expect("len checked")),
         0 => {
             let mut msg = format!("no session matching '{reference}'");
+            if reference.contains(':') {
+                msg.push_str(
+                    " (colon-bearing references are treated as qualified ids only when \
+                     the first segment names a registered provider)",
+                );
+            }
             if !skipped.is_empty() {
                 msg.push_str(&format!(
                     " (not searched — unavailable: {})",
@@ -442,12 +480,11 @@ fn pick_unique(
         }
         n => {
             const SHOW: usize = 5;
-            let mut shown: Vec<String> = candidates
-                .iter()
-                .take(SHOW)
-                .map(ToString::to_string)
-                .collect();
+            // Sort BEFORE truncating so the listed candidates are the
+            // lexicographically first five, deterministically (round-18).
+            let mut shown: Vec<String> = candidates.iter().map(ToString::to_string).collect();
             shown.sort();
+            shown.truncate(SHOW);
             let more = if n > SHOW {
                 format!(" and {} more", n - SHOW)
             } else {

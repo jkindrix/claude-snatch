@@ -303,6 +303,16 @@ impl CodexProvider {
         &self.codex_home
     }
 
+    /// Tighten both safety caps to at most `limit` (the surface's global
+    /// `--max-file-size`). Never loosens the defaults; the caps are parse
+    /// cache token inputs, so a changed limit changes the token.
+    #[must_use]
+    pub fn tighten_limits(mut self, limit: u64) -> Self {
+        self.max_compressed = self.max_compressed.min(limit);
+        self.max_decompressed = self.max_decompressed.min(limit);
+        self
+    }
+
     /// Configure the decompressed-output cap (bytes).
     #[must_use]
     pub fn with_max_decompressed(mut self, max: u64) -> Self {
@@ -511,6 +521,19 @@ impl CodexProvider {
                 remaining: self.max_decompressed,
             })))
         } else {
+            // The decompressed-output cap is a general record-stream cap:
+            // plain files are checked against it too, so a surface-supplied
+            // `--max-file-size` (which tightens it) applies consistently to
+            // every artifact form instead of silently skipping plain files
+            // (round-18 blocker 4).
+            let plain_len = std::fs::metadata(path)?.len();
+            if self.max_decompressed > 0 && plain_len > self.max_decompressed {
+                return Err(ProviderError::Other(format!(
+                    "record stream {} exceeds the size limit ({plain_len} > {} bytes)",
+                    path.display(),
+                    self.max_decompressed
+                )));
+            }
             Ok(Box::new(BufReader::new(file)))
         }
     }
@@ -2392,6 +2415,32 @@ mod tests {
             "escaped control character not found: {:?}",
             report.unknown_field_paths.keys().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn surface_size_limit_changes_token_and_bounds_plain_parses() {
+        // Round-18 blocker 4: the surface's --max-file-size must reach the
+        // provider, change its parse cache token, and actually bound a
+        // production parse — for PLAIN files too, not only compressed ones.
+        let (tmp, p) = home_with(THREAD_A, session_a_content().as_bytes(), false);
+        let k = key(THREAD_A);
+        let default_token = p.parse_cache_token(&k).unwrap();
+        assert!(p.parse(&k).is_ok(), "default limits parse the fixture");
+
+        let tight = CodexProvider::new(tmp.path()).tighten_limits(4);
+        let tight_token = tight.parse_cache_token(&k).unwrap();
+        assert_ne!(
+            default_token, tight_token,
+            "a changed limit must change the cache token"
+        );
+        let err = tight
+            .parse(&k)
+            .expect_err("4-byte limit must refuse the plain file");
+        assert!(err.to_string().contains("size limit"), "got: {err}");
+
+        // Tightening never loosens: a huge limit keeps the defaults.
+        let loose = CodexProvider::new(tmp.path()).tighten_limits(u64::MAX);
+        assert_eq!(loose.parse_cache_token(&k).unwrap(), default_token);
     }
 
     #[test]

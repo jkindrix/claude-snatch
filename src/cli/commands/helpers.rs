@@ -773,6 +773,38 @@ pub fn main_thread_entries(entries: &[LogEntry]) -> Vec<&LogEntry> {
         .collect()
 }
 
+/// Build the provider registry from the CLI's global options — the ONE
+/// construction path for CLI surfaces, so global parsing limits can never
+/// be silently dropped (round-18 blocker 4).
+pub fn provider_registry(cli: &crate::cli::Cli) -> crate::provider::registry::ProviderRegistry {
+    crate::provider::registry::ProviderRegistry::with_config(
+        &crate::provider::registry::RegistryConfig {
+            claude_root: cli.claude_dir.clone(),
+            max_file_size: cli.max_file_size,
+        },
+    )
+}
+
+/// Table-driven refusal for provider-routed commands.
+///
+/// Round-18 blocker 3: every argument a route does not implement must be
+/// REFUSED when set, never silently ignored. `offenders` lists
+/// (flag, was-set) for every non-universal argument of the command.
+pub fn refuse_unsupported_flags(
+    route: &str,
+    offenders: &[(&str, bool)],
+) -> crate::error::Result<()> {
+    for (flag, set) in offenders {
+        if *set {
+            return Err(crate::error::SnatchError::InvalidArgument {
+                name: (*flag).to_string(),
+                reason: format!("not supported with {route}; refused rather than ignored"),
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

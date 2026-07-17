@@ -190,11 +190,7 @@ pub fn run(cli: &Cli, args: &ExportArgs) -> Result<()> {
     if !args.provider.is_empty()
         || provider_tier
         || args.session.as_deref().is_some_and(|s| {
-            s.contains(':')
-                && crate::provider::registry::ProviderRegistry::with_claude_root(
-                    cli.claude_dir.as_deref(),
-                )
-                .looks_qualified(s)
+            s.contains(':') && super::helpers::provider_registry(cli).looks_qualified(s)
         })
     {
         return export_via_provider(cli, args);
@@ -2431,39 +2427,53 @@ fn render_entry(entry: &LogEntry, template: &ExportTemplate) -> String {
 /// streamed through the SourceProvider seam for any provider. Normalized
 /// formats for non-Claude sessions arrive with Phase B3.
 fn export_via_provider(cli: &Cli, args: &ExportArgs) -> Result<()> {
-    use crate::provider::registry::ProviderRegistry;
-
-    if args.all {
-        return Err(SnatchError::ConfigError {
-            message: "--all is not supported with provider-routed exports; export one session"
-                .to_string(),
-        });
-    }
-    // Content-shaping and delivery flags have no meaning for fidelity-tier
-    // streams; refuse rather than silently ignore.
-    for (flag, set) in [
-        ("--since", args.since.is_some()),
-        ("--until", args.until.is_some()),
-        ("--only", !args.only.is_empty()),
-        ("--no-thinking", args.no_thinking),
-        ("--no-tool-use", args.no_tool_use),
-        ("--no-tool-results", args.no_tool_results),
-        ("--combine-agents", args.combine_agents),
-        ("--main-thread", args.main_thread),
-        ("--template", args.template.is_some()),
-        ("--redact", args.redact.is_some()),
-        ("--gist", args.gist),
-        ("--clipboard", args.clipboard),
-    ] {
-        if set {
-            return Err(SnatchError::InvalidArgument {
-                name: flag.to_string(),
-                reason: "not supported with provider-routed exports (fidelity tiers stream \
-                         source data unmodified)"
-                    .to_string(),
-            });
-        }
-    }
+    // COMPLETE argument classification (round-18): universal arguments are
+    // the session reference, --provider, -O/--out, -f/--format, and
+    // --overwrite. Fidelity tiers stream source data unmodified, so every
+    // content-shaping, filtering, presentation, security-transform, and
+    // delivery flag is refused when it deviates from its default — never
+    // silently ignored (--warn-pii/--redact-preview/--no-images included:
+    // a security option that silently does nothing is a hazard).
+    super::helpers::refuse_unsupported_flags(
+        "provider-routed exports (fidelity tiers stream source data unmodified)",
+        &[
+            ("--all", args.all),
+            ("--project", args.project.is_some()),
+            ("--since", args.since.is_some()),
+            ("--until", args.until.is_some()),
+            ("--subagents", args.subagents),
+            ("--combine-agents", args.combine_agents),
+            ("--resolve-tool-results", args.resolve_tool_results),
+            ("--thinking=false", !args.thinking),
+            ("--no-thinking", args.no_thinking),
+            ("--tool-use=false", !args.tool_use),
+            ("--no-tool-use", args.no_tool_use),
+            ("--tool-results=false", !args.tool_results),
+            ("--no-tool-results", args.no_tool_results),
+            ("--images=false", !args.images),
+            ("--no-images", args.no_images),
+            ("--system", args.system),
+            ("--only", !args.only.is_empty()),
+            ("--timestamps=false", !args.timestamps),
+            ("--usage=false", !args.usage),
+            ("--metadata", args.metadata),
+            ("--main-thread", args.main_thread),
+            ("--no-chain", args.no_chain),
+            ("--pretty", args.pretty),
+            ("--full", args.full),
+            ("--progress", args.progress),
+            ("--redact", args.redact.is_some()),
+            ("--warn-pii", args.warn_pii),
+            ("--redact-preview", args.redact_preview),
+            ("--gist", args.gist),
+            ("--gist-public", args.gist_public),
+            ("--gist-description", args.gist_description.is_some()),
+            ("--toc", args.toc),
+            ("--dark", args.dark),
+            ("--clipboard", args.clipboard),
+            ("--template", args.template.is_some()),
+        ],
+    )?;
 
     let reference = args
         .session
@@ -2471,7 +2481,7 @@ fn export_via_provider(cli: &Cli, args: &ExportArgs) -> Result<()> {
         .ok_or_else(|| SnatchError::ConfigError {
             message: "provider-routed export needs a session reference".to_string(),
         })?;
-    let registry = ProviderRegistry::with_claude_root(cli.claude_dir.as_deref());
+    let registry = super::helpers::provider_registry(cli);
     let resolution = registry.resolve_with_default_policy(&args.provider, reference)?;
     let provider = resolution.provider;
     let key = &resolution.key;

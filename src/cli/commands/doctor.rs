@@ -175,7 +175,19 @@ fn print_human(report: &DoctorReport, failed: usize, since: Option<&str>) {
 /// native strings during collection, and no session ids or file paths are
 /// emitted (round-16/17 security guardrail).
 fn provider_diagnostics(cli: &Cli, args: &DoctorArgs) -> Result<()> {
-    use crate::provider::registry::{ProviderRegistry, ProviderSelection};
+    use crate::provider::registry::ProviderSelection;
+
+    // COMPLETE argument classification (round-18): --all is universal here
+    // (provider diagnostics always scan the full corpus); project/date/
+    // subagent filters have no provider-diagnostics meaning and are refused.
+    helpers::refuse_unsupported_flags(
+        "doctor --provider (full-corpus provider diagnostics)",
+        &[
+            ("project", args.project.is_some()),
+            ("--since", args.since.is_some()),
+            ("--subagents", args.subagents),
+        ],
+    )?;
 
     let selection = ProviderSelection::from_flags(&args.provider).map_err(|reason| {
         crate::error::SnatchError::InvalidArgument {
@@ -183,7 +195,7 @@ fn provider_diagnostics(cli: &Cli, args: &DoctorArgs) -> Result<()> {
             reason,
         }
     })?;
-    let registry = ProviderRegistry::with_claude_root(cli.claude_dir.as_deref());
+    let registry = helpers::provider_registry(cli);
     let selected = registry.select(&selection)?;
 
     let mut reports = serde_json::Map::new();

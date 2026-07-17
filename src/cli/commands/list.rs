@@ -1316,27 +1316,45 @@ impl LogicalSessionInfo {
 /// Pre-normalization (B2) this intentionally shows identity and artifacts,
 /// not titles/timestamps — those arrive with Phase B3.
 fn list_provider_sessions(cli: &Cli, args: &ListArgs) -> Result<()> {
-    use crate::provider::registry::{ProviderRegistry, ProviderSelection};
+    use crate::provider::registry::ProviderSelection;
     use crate::provider::ArtifactForm;
 
-    // Claude-specific filters have no provider-neutral meaning yet; refuse
-    // rather than silently ignore.
-    for (flag, set) in [
-        ("--project", args.project.is_some()),
-        ("--subagents", args.subagents),
-        ("--subagents-only", args.subagents_only),
-        ("--active", args.active),
-        ("--compacted", args.compacted),
-    ] {
-        if set {
-            return Err(crate::error::SnatchError::InvalidArgument {
-                name: flag.to_string(),
-                reason: "not supported with --provider (provider-neutral listing is \
-                         identity + artifacts until normalization lands)"
-                    .to_string(),
-            });
-        }
+    // COMPLETE argument classification for this route (round-18): universal
+    // arguments are target=sessions, --provider, and -n/--limit; everything
+    // else is refused until normalization gives it provider-neutral meaning.
+    // (--context-length is dependent on --context and inert without it.)
+    if args.target != ListTarget::Sessions {
+        return Err(crate::error::SnatchError::InvalidArgument {
+            name: "target".to_string(),
+            reason: "only `list sessions` supports --provider".to_string(),
+        });
     }
+    super::helpers::refuse_unsupported_flags(
+        "list --provider (identity + artifacts until normalization lands)",
+        &[
+            ("--project", args.project.is_some()),
+            ("--subagents", args.subagents),
+            ("--subagents-only", args.subagents_only),
+            ("--active", args.active),
+            ("--compacted", args.compacted),
+            ("--sort", args.sort != SortOrder::Modified),
+            ("--full-ids", args.full_ids),
+            ("--sizes", args.sizes),
+            ("--pager", args.pager),
+            ("--since", args.since.is_some()),
+            ("--until", args.until.is_some()),
+            ("--tag", args.tag.is_some()),
+            ("--tags", args.tags.is_some()),
+            ("--bookmarked", args.bookmarked),
+            ("--outcome", args.outcome.is_some()),
+            ("--by-name", args.by_name.is_some()),
+            ("--min-size", args.min_size.is_some()),
+            ("--max-size", args.max_size.is_some()),
+            ("--context", args.context),
+            ("--hide-empty", args.hide_empty),
+            ("--no-chain", args.no_chain),
+        ],
+    )?;
 
     let selection = ProviderSelection::from_flags(&args.provider).map_err(|reason| {
         crate::error::SnatchError::InvalidArgument {
@@ -1344,7 +1362,7 @@ fn list_provider_sessions(cli: &Cli, args: &ListArgs) -> Result<()> {
             reason,
         }
     })?;
-    let registry = ProviderRegistry::with_claude_root(cli.claude_dir.as_deref());
+    let registry = super::helpers::provider_registry(cli);
     let selected = registry.select(&selection)?;
 
     let mut rows = Vec::new();
