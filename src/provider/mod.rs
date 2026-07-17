@@ -321,6 +321,19 @@ pub struct ProviderCapabilities {
     /// merely present) semantics map — an adapter without coverage would
     /// otherwise lose prompts and collapse timelines (round-23 blocker 1).
     pub semantic_annotations: bool,
+    /// Whether existing model-rate tables may be applied to this provider.
+    /// `Unpriced` is a deliberate policy, not a zero-dollar estimate.
+    pub pricing: ProviderPricing,
+}
+
+/// Provider-level pricing policy for analytical consumers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProviderPricing {
+    /// Apply the tool's known exact-model rate table.
+    KnownModelRates,
+    /// Do not estimate cost for this provider.
+    #[default]
+    Unpriced,
 }
 
 // ============================================================================

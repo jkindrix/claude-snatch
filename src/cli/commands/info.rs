@@ -1192,6 +1192,10 @@ fn show_provider_session_info(
     let parsed = cached_parsed_session(crate::cache::global_cache(), provider, key)?;
     let descriptor = &parsed.descriptor;
     let conversation = Conversation::from_parsed_session(parsed.clone())?;
+    let usage = crate::analysis::usage::provider_usage_summary(
+        &conversation,
+        provider.capabilities().pricing,
+    );
 
     let mut type_counts: std::collections::BTreeMap<&'static str, usize> =
         std::collections::BTreeMap::new();
@@ -1235,6 +1239,7 @@ fn show_provider_session_info(
             "unparseable": d.unparseable,
         },
         "semantic_annotations": parsed.semantics.len(),
+        "usage": usage,
         "capabilities": {
             "native_export": capabilities.native_export,
             "raw_jsonl": capabilities.raw_jsonl,
@@ -1269,6 +1274,37 @@ fn show_provider_session_info(
         disp["mapped"], disp["suppressed"], disp["unknown"], disp["recovered"], disp["unparseable"],
     );
     println!("Semantic annotations: {}", report["semantic_annotations"]);
+    let usage = &report["usage"];
+    let canonical = &usage["canonical"];
+    println!(
+        "Usage: {} fresh input, {} cached input, {} output ({} processed)",
+        canonical["input_tokens"],
+        canonical["cache_read_tokens"],
+        canonical["output_tokens"],
+        canonical["total_processed_tokens"],
+    );
+    let observations = usage["observation_counts"]
+        .as_object()
+        .map(|counts| {
+            counts
+                .iter()
+                .map(|(axis, count)| format!("{axis} {count}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    if !observations.is_empty() {
+        println!(
+            "Native usage observations: {observations}; ambiguous {}",
+            usage["ambiguous_observations"]
+        );
+    }
+    let pricing = &usage["pricing"];
+    if let Some(cost) = pricing["estimated_cost"].as_f64() {
+        println!("Estimated cost: ${cost:.4}");
+    } else {
+        println!("Estimated cost: unavailable ({})", pricing["policy"]);
+    }
     println!("Artifacts:");
     for a in report["artifacts"].as_array().unwrap() {
         println!(

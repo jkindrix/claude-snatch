@@ -245,6 +245,7 @@ impl SourceProvider for ClaudeCodeProvider {
             // The Claude adapter does not yet emit prompt/turn semantics;
             // surfaces must keep classic heuristics for it (round-23).
             semantic_annotations: false,
+            pricing: crate::provider::ProviderPricing::KnownModelRates,
         }
     }
 

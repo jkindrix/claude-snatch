@@ -182,10 +182,15 @@ impl SnatchServer {
             Ok(p) => p,
             Err(e) => return ToolOutput::error(format!("Failed to parse session: {e}")),
         };
-        let conversation_nodes = match Conversation::from_parsed_session(parsed.clone()) {
-            Ok(c) => c.len(),
+        let conversation = match Conversation::from_parsed_session(parsed.clone()) {
+            Ok(c) => c,
             Err(e) => return ToolOutput::error(format!("Failed to reconstruct conversation: {e}")),
         };
+        let conversation_nodes = conversation.len();
+        let usage = crate::analysis::usage::provider_usage_summary(
+            &conversation,
+            provider.capabilities().pricing,
+        );
         let descriptor = &parsed.descriptor;
         let capabilities = provider.capabilities();
         let d = &parsed.diagnostics;
@@ -204,6 +209,7 @@ impl SnatchServer {
                 "unparseable": d.unparseable,
             },
             "semantic_annotations": parsed.semantics.len(),
+            "usage": usage,
             "artifacts": descriptor
                 .artifacts
                 .iter()
@@ -3526,6 +3532,14 @@ mod tests {
                     "content": [{"type": "output_text", "text": "done"}]}),
             ),
             line(
+                "event_msg",
+                serde_json::json!({"type": "token_count", "info": {
+                    "last_token_usage": {"input_tokens": 100, "cached_input_tokens": 60,
+                        "output_tokens": 25, "total_tokens": 125},
+                    "total_token_usage": {"input_tokens": 100, "cached_input_tokens": 60,
+                        "output_tokens": 25, "total_tokens": 125}}}),
+            ),
+            line(
                 "compacted",
                 serde_json::json!({"message": "compact summary", "window_id": 1}),
             ),
@@ -3579,6 +3593,21 @@ mod tests {
         let rendered = messages["messages"].to_string();
         assert!(rendered.contains("start task"));
         assert!(rendered.contains("also inspect tests"));
+
+        let info = unwrap_output(
+            server
+                .get_session_info(GetSessionInfoRequest {
+                    session_id: qualified.clone(),
+                    provider: None,
+                })
+                .await,
+        );
+        let info: serde_json::Value = serde_json::from_str(&info).unwrap();
+        assert_eq!(info["usage"]["observation_counts"]["call/delta"], 1);
+        assert_eq!(info["usage"]["observation_counts"]["session/cumulative"], 1);
+        assert_eq!(info["usage"]["canonical"]["total_processed_tokens"], 125);
+        assert_eq!(info["usage"]["pricing"]["policy"], "unpriced");
+        assert!(info["usage"]["pricing"]["estimated_cost"].is_null());
 
         let timeline = unwrap_output(
             server

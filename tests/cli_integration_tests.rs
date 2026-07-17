@@ -2414,6 +2414,37 @@ mod codex_normalization_cli {
     }
 
     #[test]
+    fn info_separates_native_usage_axes_and_keeps_codex_unpriced() {
+        let claude = setup_fixture_dir();
+        let codex = slice_home();
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "info", &format!("codex:{THREAD}")])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["usage"]["observation_counts"]["call/delta"], 1);
+        assert_eq!(
+            value["usage"]["observation_counts"]["session/cumulative"],
+            1
+        );
+        assert_eq!(value["usage"]["canonical"]["input_tokens"], 40);
+        assert_eq!(value["usage"]["canonical"]["cache_read_tokens"], 60);
+        assert_eq!(value["usage"]["canonical"]["output_tokens"], 25);
+        assert_eq!(value["usage"]["canonical"]["total_processed_tokens"], 125);
+        assert_eq!(value["usage"]["pricing"]["policy"], "unpriced");
+        assert!(value["usage"]["pricing"]["estimated_cost"].is_null());
+        assert_eq!(
+            value["usage"]["pricing"]["unpriced_models"],
+            serde_json::json!(["gpt-test"])
+        );
+    }
+
+    #[test]
     fn timeline_renders_normalized_codex_turns() {
         let claude = setup_fixture_dir();
         let codex = slice_home();

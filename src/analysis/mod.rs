@@ -27,3 +27,4 @@ pub mod search;
 pub mod subagents;
 pub mod threading;
 pub mod timeline;
+pub mod usage;

@@ -121,6 +121,7 @@ impl SourceProvider for FakeProvider {
             native_export: false,
             raw_jsonl: false,
             semantic_annotations: true,
+            pricing: crate::provider::ProviderPricing::Unpriced,
         }
     }
 

@@ -1094,6 +1094,7 @@ impl SourceProvider for CodexProvider {
             native_export: true,
             raw_jsonl: true,
             semantic_annotations: true,
+            pricing: crate::provider::ProviderPricing::Unpriced,
         }
     }
 

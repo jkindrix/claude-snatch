@@ -1553,10 +1553,16 @@ Decisions taken in-implementation, FLAGGED FOR REVIEW:
       shapes remain pinned independently.
 - [ ] Lessons noise filters for Codex tool shapes (content-tuned per
       provider — annotations reduce but do not eliminate this).
-- [ ] Usage semantics via UsageScope/UsageAggregation observations.
-- [ ] Pricing: Codex stays unpriced by default; if ever added, label
-      "API-equivalent cost", explicit pricing mode, never inferred from
-      auth.json (round-3).
+- [x] Usage semantics via UsageScope/UsageAggregation observations (Phase C
+      slice 3): provider info in CLI/MCP presents canonical summable totals
+      separately from native call/delta and session/cumulative observations,
+      including basis and ambiguity counts. Cumulative observations are never
+      added as calls.
+- [x] Pricing: providers declare an explicit pricing policy. Codex is unpriced
+      even if a native model string happens to match a known Claude rate;
+      `None` means unavailable, never $0. If Codex pricing is ever added, label
+      it "API-equivalent cost", require an explicit mode, and never infer it
+      from auth.json (round-3).
 - [x] Reasoning availability + drift PRESENTATION tuning in doctor output:
       text and JSON preserve month/era buckets (never aggregate-only), with
       an end-to-end March-present/April-absent regression fixture. Collection
@@ -1582,6 +1588,13 @@ collection underneath them. Doctor's reasoning-summary output is pinned across
 two eras in both text and JSON. Timeline compaction events now retain the typed
 sidecar through CLI and MCP, including replacement cardinality and the complete
 window link; classic events continue to serialize only timestamp/summary.
+
+Slice 3 makes usage annotations operational. A shared consumer reports the
+canonical normalized totals existing analytics may sum, then reports the
+native scope/aggregation and basis axes separately for reconciliation. Pricing
+is provider policy rather than model-name inference: Claude keeps known-rate
+behavior, while Codex is explicitly unpriced. A hostile known-Claude-name test
+proves the Codex policy cannot be bypassed accidentally.
 
 ### Phase D — cross-provider UX
 - [ ] Unified project identity across providers (cwd/git), union views
