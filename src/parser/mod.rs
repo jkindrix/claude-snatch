@@ -338,7 +338,7 @@ impl JsonlParser {
 /// embedded entry-shaped object start; accept a candidate only when the whole
 /// rest of the line parses as a clean sequence of entries, so a partial or
 /// garbage parse is never admitted.
-fn salvage_torn_line(line: &str) -> Vec<LogEntry> {
+pub(crate) fn salvage_torn_line(line: &str) -> Vec<LogEntry> {
     // Entry objects start with one of these keys. Inside a JSON string these
     // bytes can't occur unescaped (quotes would be `\"`), so a raw match is
     // either the fused entry we want or part of the already-lost prefix.

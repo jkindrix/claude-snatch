@@ -344,6 +344,7 @@ impl SourceProvider for FakeProvider {
                 mapped: 4,
                 suppressed: 1,
                 unknown: 1,
+                recovered: 0,
                 unparseable: 0,
             },
         })

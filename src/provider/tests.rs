@@ -279,6 +279,7 @@ fn provenance_expresses_every_cardinality() {
             mapped: 4,
             suppressed: 1,
             unknown: 1,
+            recovered: 0,
             unparseable: 0
         }
     );

@@ -454,6 +454,27 @@ call-id validation (A), dangling lineage endpoints allowed (A), qualified-id
 FromStr/round-trip before CLI/MCP input use (B2), turn_id carrier before
 normalization (B3).
 
+## Review round 7 (2026-07-17, same Codex agent — milestone 1.5)
+
+Four adapter issues fixed while still additive: (1) subagent logical
+identity is parent-qualified (namespace `subagent:<parent>[:<workflow-dir>]`
+— agent ids are only unique per parent), and duplicate native ids across
+roots/projects merge into one descriptor with multiple artifacts; (2) the
+contract gained `RecordOutcome::Recovered { entries, error }` (+ a
+`recovered` diagnostics counter) and the adapter reuses the established
+parser's torn-line salvage — record status is now separable from produced
+entries; a provider-level immutable `max_file_size` mirrors the CLI option
+until limits are threaded; (3) `write_native` resolves artifact ids against
+discovered artifacts and streams the stored path — the previous lexical
+`starts_with` check was forgeable via `<root>/../` traversal (tested); (4)
+continuation edges derive from direct parent links independent of
+complete-chain reconstruction (dangling parents keep their edges), Spawn
+edges carry sidecar metadata (tool_use_id/agent_type/description) as
+LineageEdgeKind::Spawn fields, and lineage output is sorted + deduplicated.
+27 provider tests. Known inherited limitation noted in the adapter: Claude
+discovery dedupes identical agent ids within one project (most-recent wins)
+before the provider sees them.
+
 ## Open questions (to settle in-phase)
 
 1. Two-stream dedup policy details (B3, empirical — under the emission-

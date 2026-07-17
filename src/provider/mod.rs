@@ -370,7 +370,16 @@ pub enum RecordOutcome {
         /// Entries preserving the unmodeled content.
         entries: Vec<EntryId>,
     },
-    /// Could not be parsed.
+    /// Damaged but partially salvaged (e.g. a torn/fused JSONL line): the
+    /// record had a parse error AND produced recovered entries. Separates
+    /// record status from produced entries so salvage is representable.
+    Recovered {
+        /// Entries recovered from the damaged record (non-empty).
+        entries: Vec<EntryId>,
+        /// The original parse failure.
+        error: ParseDiagnostic,
+    },
+    /// Could not be parsed (and nothing salvaged).
     Unparseable {
         /// What went wrong.
         error: ParseDiagnostic,
@@ -397,7 +406,9 @@ pub struct IngestionDiagnostics {
     pub suppressed: usize,
     /// Parseable-but-unmodeled records (drift; content preserved).
     pub unknown: usize,
-    /// Unparseable records.
+    /// Damaged records partially salvaged (torn lines).
+    pub recovered: usize,
+    /// Unparseable records (nothing salvaged).
     pub unparseable: usize,
 }
 
@@ -536,18 +547,27 @@ pub struct EntrySemantics {
 /// Typed session-lineage edge. Lineage is a graph with typed edges, not a
 /// generic "chain"; compaction window links are intra-session metadata and
 /// deliberately absent here.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LineageEdgeKind {
     /// Same conversation continued (Claude Code resume chains).
     Continuation,
     /// A new session branched from copied history (Codex fork).
     Fork,
-    /// A subagent spawned by a parent session.
-    Spawn,
+    /// A subagent spawned by a parent session, with the sidecar metadata
+    /// downstream matching/presentation needs.
+    Spawn {
+        /// Spawning Agent/Task tool_use id, when the provider records it.
+        tool_use_id: Option<String>,
+        /// Agent type (e.g. "Explore"), when recorded.
+        agent_type: Option<String>,
+        /// Spawn description, when recorded.
+        description: Option<String>,
+    },
 }
 
-/// One typed lineage edge between two logical sessions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One typed lineage edge between two logical sessions. Providers emit
+/// edges sorted and deduplicated for deterministic output.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LineageEdge {
     /// The predecessor/parent session.
     pub from: LogicalSessionKey,
@@ -641,6 +661,10 @@ impl ParsedSession {
                 }
                 RecordOutcome::Unknown { entries } => {
                     tally.unknown += 1;
+                    Some(entries)
+                }
+                RecordOutcome::Recovered { entries, .. } => {
+                    tally.recovered += 1;
                     Some(entries)
                 }
                 RecordOutcome::Suppressed { .. } => {

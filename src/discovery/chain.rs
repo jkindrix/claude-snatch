@@ -53,7 +53,7 @@ pub struct ChainMember {
 ///
 /// Reads at most `max_lines` to find the first entry with a `sessionId` field.
 /// Returns `(sessionId, slug, timestamp)` if found.
-fn extract_session_link(
+pub(crate) fn extract_session_link(
     path: &Path,
     max_lines: usize,
 ) -> Option<(String, Option<String>, Option<DateTime<Utc>>)> {
