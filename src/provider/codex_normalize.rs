@@ -813,7 +813,9 @@ fn normalize_web_search(
 /// Canonical tool classification from Codex native tool names.
 fn classify_tool(name: &str) -> ToolKind {
     match name {
-        "shell" | "local_shell" | "exec_command" | "container.exec" => ToolKind::Shell,
+        "shell" | "local_shell" | "exec_command" | "write_stdin" | "container.exec" => {
+            ToolKind::Shell
+        }
         "apply_patch" => ToolKind::FileWrite,
         "read_file" | "view_image" => ToolKind::FileRead,
         "web_search" | "browser.search" | "web.run" => ToolKind::Web,

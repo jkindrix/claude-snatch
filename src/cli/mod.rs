@@ -2045,6 +2045,11 @@ pub struct LessonsArgs {
     /// Session ID (full UUID or short prefix). Optional when --project or --all is used.
     pub session_id: Option<String>,
 
+    /// Source provider (`claude-code` or `codex`). A qualified session id
+    /// also selects its provider. Cross-session union extraction is Phase D.
+    #[arg(long = "provider", value_name = "PROVIDER", action = clap::ArgAction::Append)]
+    pub provider: Vec<String>,
+
     /// Lesson category: errors, corrections, or all.
     #[arg(short = 'c', long, default_value = "all")]
     pub category: Option<String>,

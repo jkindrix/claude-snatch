@@ -1685,6 +1685,166 @@ mod tests {
     /// Emits AGGREGATE results only — no transcript content.
     #[test]
     #[ignore = "requires a real $CODEX_HOME; aggregate-only, opt-in"]
+    fn codex_real_corpus_lesson_shape_census() {
+        let Ok(provider) = CodexProvider::discover() else {
+            eprintln!("no Codex home; skipping");
+            return;
+        };
+        let Ok(sessions) = provider.sessions() else {
+            eprintln!("no sessions; skipping");
+            return;
+        };
+        let mut totals: std::collections::BTreeMap<&'static str, usize> =
+            std::collections::BTreeMap::new();
+        let soft = regex::RegexBuilder::new(
+            r"(?:Segmentation fault|SIGSEGV|SIGABRT|panic|stack overflow|assertion failed|fatal error|thread .* panicked|Exit code (?:[1-9]\d*|1\d\d)|error\[E\d+\]|cannot find|unresolved|undefined reference)",
+        )
+        .case_insensitive(true)
+        .build()
+        .unwrap();
+
+        for descriptor in sessions {
+            let Ok((_, path)) = provider.resolve(&descriptor.key) else {
+                continue;
+            };
+            let Ok(mut reader) = provider.open_records(&path) else {
+                continue;
+            };
+            let mut calls: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+                let Ok(record) = serde_json::from_slice::<serde_json::Value>(&buf) else {
+                    continue;
+                };
+                if record["type"] != "response_item" {
+                    continue;
+                }
+                let payload = &record["payload"];
+                match payload["type"].as_str() {
+                    Some("function_call" | "custom_tool_call") => {
+                        if let (Some(call), Some(name)) =
+                            (payload["call_id"].as_str(), payload["name"].as_str())
+                        {
+                            calls.insert(call.to_string(), name.to_string());
+                        }
+                    }
+                    Some("function_call_output" | "custom_tool_call_output") => {
+                        *totals.entry("outputs").or_default() += 1;
+                        let call = payload["call_id"].as_str().unwrap_or_default();
+                        let name = calls.get(call).map(String::as_str).unwrap_or("unknown");
+                        let known_name = match name {
+                            "exec_command" => "name/exec-command",
+                            "write_stdin" => "name/write-stdin",
+                            "apply_patch" => "name/apply-patch",
+                            "shell" | "local_shell" | "container.exec" => "name/other-shell",
+                            _ => "name/other",
+                        };
+                        *totals.entry(known_name).or_default() += 1;
+                        let kind = match name {
+                            "shell" | "local_shell" | "exec_command" | "write_stdin"
+                            | "container.exec" => "shell",
+                            "apply_patch" => "file-write",
+                            "read_file" | "view_image" => "file-read",
+                            "grep" | "find" | "search" => "search",
+                            "web_search" | "browser.search" | "web.run" => "web",
+                            n if n.starts_with("mcp") || n.contains("__") => "mcp",
+                            _ => "other",
+                        };
+                        *totals.entry(kind).or_default() += 1;
+                        if payload["output"].is_object() {
+                            *totals.entry("object-output").or_default() += 1;
+                        } else if payload["output"].is_string() {
+                            *totals.entry("string-output").or_default() += 1;
+                        }
+                        let output = payload["output"]
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| payload["output"].to_string());
+                        let exit = output.lines().find_map(|line| {
+                            line.trim()
+                                .strip_prefix("Process exited with code ")
+                                .and_then(|code| code.trim().parse::<i32>().ok())
+                        });
+                        match exit {
+                            Some(0) => *totals.entry("explicit-exit-zero").or_default() += 1,
+                            Some(_) => *totals.entry("explicit-exit-nonzero").or_default() += 1,
+                            None if output.contains("Process running with session ID") => {
+                                *totals.entry("running-no-exit").or_default() += 1;
+                            }
+                            None => *totals.entry("no-explicit-exit").or_default() += 1,
+                        }
+                        if exit.is_none() {
+                            if output.starts_with("Chunk ID:") {
+                                *totals.entry("no-exit/starts-chunk-id").or_default() += 1;
+                            }
+                            if output.contains("Process exited") {
+                                *totals.entry("no-exit/contains-process-exited").or_default() += 1;
+                            }
+                            if output.trim() == "Done!" {
+                                *totals.entry("no-exit/exact-done").or_default() += 1;
+                            }
+                            if output.contains("apply_patch verification failed")
+                                || output.contains("Failed to find expected")
+                                || output.contains("Invalid Context")
+                            {
+                                *totals.entry("no-exit/patch-failure-marker").or_default() += 1;
+                            }
+                        }
+                        if soft.is_match(&output) {
+                            *totals.entry("soft-keyword-hit").or_default() += 1;
+                            match exit {
+                                Some(0) => {
+                                    *totals.entry("soft-hit-with-exit-zero").or_default() += 1;
+                                }
+                                Some(_) => {
+                                    *totals.entry("soft-hit-with-exit-nonzero").or_default() += 1;
+                                }
+                                None => {
+                                    *totals.entry("soft-hit-without-exit").or_default() += 1;
+                                }
+                            }
+                            let soft_kind = match kind {
+                                "shell" => "soft-kind/shell",
+                                "file-write" => "soft-kind/file-write",
+                                _ => "soft-kind/other",
+                            };
+                            *totals.entry(soft_kind).or_default() += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Ok(parsed) = provider.parse(&descriptor.key) {
+                if let Ok(conversation) = crate::reconstruction::Conversation::from_parsed_session(
+                    std::sync::Arc::new(parsed),
+                ) {
+                    let lessons = crate::analysis::lessons::extract_lessons_from_conversation(
+                        &conversation,
+                        &crate::analysis::lessons::LessonOptions {
+                            limit: usize::MAX,
+                            ..Default::default()
+                        },
+                        true,
+                    );
+                    *totals.entry("extracted-error-lessons").or_default() +=
+                        lessons.summary.total_errors;
+                    *totals.entry("extracted-corrections").or_default() +=
+                        lessons.summary.total_corrections;
+                }
+            }
+        }
+        eprintln!("codex lesson output-shape census: {totals:?}");
+    }
+
+    #[test]
+    #[ignore = "requires a real $CODEX_HOME; aggregate-only, opt-in"]
     fn codex_real_corpus_conformance() {
         let Ok(p) = CodexProvider::discover() else {
             eprintln!("no Codex home; skipping");

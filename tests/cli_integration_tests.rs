@@ -2390,6 +2390,68 @@ mod codex_normalization_cli {
         tmp
     }
 
+    fn lessons_home() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        let day = tmp.path().join("sessions/2026/07/16");
+        std::fs::create_dir_all(&day).unwrap();
+        let lines = [
+            serde_json::json!({"timestamp": "2026-07-16T10:00:00.000Z", "type": "session_meta",
+                "payload": {"id": THREAD, "cwd": "/tmp/p", "cli_version": "0.9"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:01.000Z", "type": "turn_context",
+                "payload": {"turn_id": "t-1", "model": "gpt-test"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:02.000Z", "type": "response_item",
+                "payload": {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "make the change"}]}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:02.100Z", "type": "event_msg",
+                "payload": {"type": "user_message", "message": "make the change"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:03.000Z", "type": "response_item",
+                "payload": {"type": "custom_tool_call", "name": "apply_patch",
+                    "call_id": "patch-1", "input": "patch"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:04.000Z", "type": "response_item",
+                "payload": {"type": "custom_tool_call_output", "call_id": "patch-1",
+                    "output": "apply_patch verification failed: Failed to find expected lines"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:05.000Z", "type": "response_item",
+                "payload": {"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "I will inspect the exact context."}]}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:06.000Z", "type": "response_item",
+                "payload": {"type": "function_call", "name": "exec_command", "call_id": "ok-1",
+                    "arguments": "{\"cmd\":\"cargo check\"}"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:07.000Z", "type": "response_item",
+                "payload": {"type": "function_call_output", "call_id": "ok-1",
+                    "output": "Process exited with code 0\nFinal output:\nerror[E0308] quoted fixture"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:08.000Z", "type": "response_item",
+                "payload": {"type": "function_call", "name": "exec_command", "call_id": "fail-1",
+                    "arguments": "{\"cmd\":\"cargo test\"}"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:09.000Z", "type": "response_item",
+                "payload": {"type": "function_call_output", "call_id": "fail-1",
+                    "output": "Process exited with code 101\nFinal output:\ntest failed"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:10.000Z", "type": "response_item",
+                "payload": {"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "I will fix the failing test."}]}}),
+            // Harness text with correction words must not count.
+            serde_json::json!({"timestamp": "2026-07-16T10:00:11.000Z", "type": "response_item",
+                "payload": {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "No, this harness reminder is wrong instead"}]}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:12.000Z", "type": "response_item",
+                "payload": {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "No, use the exact context instead"}]}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:12.100Z", "type": "event_msg",
+                "payload": {"type": "user_message", "message": "No, use the exact context instead"}}),
+        ];
+        let content = lines
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(
+            day.join(format!("rollout-2026-07-16T10-00-00-{THREAD}.jsonl")),
+            content,
+        )
+        .unwrap();
+        tmp
+    }
+
     #[test]
     fn messages_renders_normalized_codex_conversation() {
         let claude = setup_fixture_dir();
@@ -2442,6 +2504,63 @@ mod codex_normalization_cli {
             value["usage"]["pricing"]["unpriced_models"],
             serde_json::json!(["gpt-test"])
         );
+    }
+
+    #[test]
+    fn lessons_use_tool_and_prompt_semantics_without_content_false_positives() {
+        let claude = setup_fixture_dir();
+        let codex = lessons_home();
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "lessons", &format!("codex:{THREAD}")])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["provider"], "codex");
+        assert_eq!(value["qualified_id"], format!("codex:{THREAD}"));
+        assert_eq!(value["summary"]["total_errors"], 2);
+        assert_eq!(value["summary"]["total_corrections"], 1);
+        let tools: std::collections::BTreeSet<_> = value["error_fix_pairs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|pair| pair["tool_name"].as_str().unwrap())
+            .collect();
+        assert_eq!(tools, ["apply_patch", "exec_command"].into_iter().collect());
+        assert_eq!(
+            value["user_corrections"][0]["user_text"],
+            "No, use the exact context instead"
+        );
+    }
+
+    #[test]
+    fn cross_session_lessons_refuse_provider_requests_until_union_semantics_exist() {
+        let claude = setup_fixture_dir();
+        let codex = lessons_home();
+        let cases = vec![
+            vec!["lessons", "--all", "--provider", "codex"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+            vec![
+                "lessons".to_string(),
+                format!("codex:{THREAD}"),
+                "--all".to_string(),
+            ],
+        ];
+        for args in cases {
+            snatch_cmd()
+                .env("SNATCH_CLAUDE_DIR", claude.path())
+                .env("CODEX_HOME", codex.path())
+                .args(args)
+                .assert()
+                .failure()
+                .stderr(predicate::str::contains("Phase D"));
+        }
     }
 
     #[test]
@@ -2809,5 +2928,55 @@ fn provider_routed_claude_messages_and_timeline_match_classic() {
     assert_eq!(
         routed_export, classic_export,
         "provider routing must not alter Claude normalized export output"
+    );
+}
+
+#[test]
+fn provider_routed_claude_lessons_keep_classic_correction_semantics() {
+    let tmp = TempDir::new().unwrap();
+    let project_dir = tmp
+        .path()
+        .join("projects")
+        .join(encode_project_path(PROJECT_PATH));
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let sid = "bbbbbbbb-1111-2222-3333-444444444444";
+    let lines = [
+        serde_json::json!({"type":"assistant","uuid":"a1","parentUuid":null,
+            "timestamp":"2026-07-17T00:00:00Z","sessionId":sid,"version":"1",
+            "message":{"id":"m1","type":"message","role":"assistant",
+                "model":"claude-sonnet-5","content":[{"type":"text","text":"I will rewrite it."}]}}),
+        serde_json::json!({"type":"user","uuid":"u1","parentUuid":"a1",
+            "timestamp":"2026-07-17T00:00:01Z","sessionId":sid,"version":"1",
+            "message":{"role":"user","content":"No, use the builder instead"}}),
+    ];
+    std::fs::write(
+        project_dir.join(format!("{sid}.jsonl")),
+        lines
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let run = |reference: &str| {
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", tmp.path())
+            .args(["-o", "json", "lessons", reference])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone()
+    };
+    let classic: serde_json::Value = serde_json::from_slice(&run(sid)).unwrap();
+    let routed: serde_json::Value =
+        serde_json::from_slice(&run(&format!("claude-code:{sid}"))).unwrap();
+    assert_eq!(classic["summary"]["total_corrections"], 1);
+    assert_eq!(routed["summary"]["total_corrections"], 1);
+    assert_eq!(
+        classic["user_corrections"], routed["user_corrections"],
+        "provider routing must not switch Claude onto absent semantic annotations"
     );
 }

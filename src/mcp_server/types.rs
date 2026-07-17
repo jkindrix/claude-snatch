@@ -723,6 +723,10 @@ pub struct GetSessionLessonsRequest {
     /// Session ID (full or prefix).
     pub session_id: String,
 
+    /// Source provider selection. A qualified session id also selects its
+    /// provider.
+    pub provider: Option<Vec<String>>,
+
     /// Lesson category filter: "errors" (error→fix pairs), "corrections"
     /// (user corrections of agent behavior), "all". Default: "all".
     pub category: Option<String>,
@@ -767,6 +771,8 @@ pub struct UserCorrection {
 #[derive(Debug, Serialize)]
 pub struct SessionLessonsResponse {
     pub session_id: String,
+    pub provider: String,
+    pub qualified_id: String,
     pub project_path: String,
     pub error_fix_pairs: Vec<ErrorFixLesson>,
     pub user_corrections: Vec<UserCorrection>,

@@ -9,7 +9,9 @@
 
 use std::collections::HashMap;
 
-use crate::analysis::lessons::{extract_lessons, LessonCategory, LessonOptions, LessonResult};
+use crate::analysis::lessons::{
+    extract_lessons_from_conversation, LessonCategory, LessonOptions, LessonResult,
+};
 use crate::cli::{Cli, LessonsArgs, OutputFormat};
 use crate::error::{Result, SnatchError};
 use crate::reconstruction::Conversation;
@@ -20,6 +22,10 @@ use super::get_claude_dir;
 #[derive(serde::Serialize)]
 struct LessonsOutput {
     session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    qualified_id: Option<String>,
     summary: LessonsOutputSummary,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     error_fix_pairs: Vec<ErrorFixOutput>,
@@ -73,6 +79,16 @@ struct AggregatedLessonsOutput {
 pub fn run(cli: &Cli, args: &LessonsArgs) -> Result<()> {
     // Determine mode: single-session vs cross-session
     if args.project.is_some() || args.all {
+        let qualified_request = args.session_id.as_ref().is_some_and(|session_id| {
+            super::helpers::provider_registry(cli).looks_qualified(session_id)
+        });
+        if !args.provider.is_empty() || qualified_request {
+            return Err(SnatchError::InvalidArgument {
+                name: "--provider".to_string(),
+                reason: "cross-provider project/all lesson unions arrive in Phase D; use a single session now"
+                    .to_string(),
+            });
+        }
         return run_cross_session(cli, args);
     }
 
@@ -84,18 +100,40 @@ pub fn run(cli: &Cli, args: &LessonsArgs) -> Result<()> {
             reason: "session ID is required unless --project or --all is specified".to_string(),
         })?;
 
-    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
-    let session =
-        claude_dir
-            .find_session(session_id)?
-            .ok_or_else(|| SnatchError::SessionNotFound {
-                session_id: session_id.clone(),
+    let registry = super::helpers::provider_registry(cli);
+    let provider_route = !args.provider.is_empty() || registry.looks_qualified(session_id);
+    let (conversation, display_id, provider, qualified_id, semantic_annotations) =
+        if provider_route {
+            let resolution = registry.resolve_with_default_policy(&args.provider, session_id)?;
+            let semantic_annotations = resolution.provider.capabilities().semantic_annotations;
+            let parsed = crate::provider::registry::cached_parsed_session(
+                crate::cache::global_cache(),
+                resolution.provider,
+                &resolution.key,
+            )?;
+            (
+                Conversation::from_parsed_session(parsed)?,
+                resolution.key.to_string(),
+                Some(resolution.key.provider.to_string()),
+                Some(resolution.key.to_string()),
+                semantic_annotations,
+            )
+        } else {
+            let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
+            let session = claude_dir.find_session(session_id)?.ok_or_else(|| {
+                SnatchError::SessionNotFound {
+                    session_id: session_id.clone(),
+                }
             })?;
-
-    let entries = session.parse_with_options(cli.max_file_size)?;
-    let conversation = Conversation::from_entries(entries)?;
-    let all_entries = conversation.chronological_entries();
-    let entry_refs: Vec<&_> = all_entries.clone();
+            let entries = session.parse_with_options(cli.max_file_size)?;
+            (
+                Conversation::from_entries(entries)?,
+                session_id.clone(),
+                None,
+                None,
+                false,
+            )
+        };
 
     let category = args
         .category
@@ -109,12 +147,14 @@ pub fn run(cli: &Cli, args: &LessonsArgs) -> Result<()> {
         ..LessonOptions::default()
     };
 
-    let result = extract_lessons(&entry_refs, &opts);
+    let result = extract_lessons_from_conversation(&conversation, &opts, semantic_annotations);
 
     match cli.effective_output() {
         OutputFormat::Json => {
             let output = LessonsOutput {
-                session_id: session_id.clone(),
+                session_id: display_id.clone(),
+                provider,
+                qualified_id,
                 summary: LessonsOutputSummary {
                     total_errors: result.summary.total_errors,
                     total_corrections: result.summary.total_corrections,
@@ -149,13 +189,13 @@ pub fn run(cli: &Cli, args: &LessonsArgs) -> Result<()> {
         _ => {
             // Text output
             if result.error_fix_pairs.is_empty() && result.user_corrections.is_empty() {
-                println!("No lessons found in session {}.", session_id);
+                println!("No lessons found in session {}.", display_id);
                 return Ok(());
             }
 
             println!(
                 "Lessons for session {} ({} errors, {} corrections)\n",
-                session_id, result.summary.total_errors, result.summary.total_corrections,
+                display_id, result.summary.total_errors, result.summary.total_corrections,
             );
 
             print_text_lessons(&result);
@@ -229,10 +269,7 @@ fn run_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
             Ok(c) => c,
             Err(_) => continue,
         };
-        let all_entries = conversation.chronological_entries();
-        let entry_refs: Vec<&_> = all_entries.clone();
-
-        let result = extract_lessons(&entry_refs, &opts);
+        let result = extract_lessons_from_conversation(&conversation, &opts, false);
 
         if result.error_fix_pairs.is_empty() && result.user_corrections.is_empty() {
             continue;

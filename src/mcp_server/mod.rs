@@ -1895,12 +1895,22 @@ impl SnatchServer {
     /// Extract operational lessons from a session: error→fix pairs and user corrections.
     /// Targets the most expensive compaction failure mode (negative result amnesia).
     #[tool(
-        description = "Extract lessons from a session: error->fix pairs (what failed and how it was resolved) and user corrections (where the user corrected agent behavior). Use after compaction to recover operational gotchas and avoid retrying failed approaches."
+        description = "Extract lessons from an agent session: error->fix pairs (what failed and how it was resolved) and human corrections. Claude Code is the default; select another provider with provider or a qualified id. Provider tool and prompt semantics suppress content-shaped false positives."
     )]
     async fn get_session_lessons(&self, request: GetSessionLessonsRequest) -> ToolOutput {
-        use crate::analysis::lessons::{extract_lessons, LessonCategory, LessonOptions};
+        use crate::analysis::lessons::{
+            extract_lessons_from_conversation, LessonCategory, LessonOptions,
+        };
 
-        let resolved = match resolve_session(self, &request.session_id) {
+        let provider_flags = request.provider.as_deref().unwrap_or(&[]);
+        let registry = self.provider_registry();
+        let provider_route =
+            !provider_flags.is_empty() || registry.looks_qualified(&request.session_id);
+        let resolved = match if provider_route {
+            self.resolve_provider_session(provider_flags, &request.session_id)
+        } else {
+            resolve_session(self, &request.session_id)
+        } {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -1910,20 +1920,23 @@ impl SnatchServer {
 
         // Use all entries (not just main thread) so lessons on branches
         // and across compaction boundaries are visible.
-        let all_entries = resolved.conversation.chronological_entries();
-        let entry_refs: Vec<&LogEntry> = all_entries.clone();
-
         let opts = LessonOptions {
             category: LessonCategory::from_str_loose(category),
             limit,
             ..LessonOptions::default()
         };
 
-        let result = extract_lessons(&entry_refs, &opts);
+        let result = extract_lessons_from_conversation(
+            &resolved.conversation,
+            &opts,
+            resolved.semantic_annotations,
+        );
 
         // Convert from analysis types to MCP wire types
         let response = SessionLessonsResponse {
             session_id: resolved.session_id,
+            provider: resolved.provider,
+            qualified_id: resolved.qualified_id,
             project_path: resolved.project_path,
             error_fix_pairs: result
                 .error_fix_pairs
@@ -3609,6 +3622,20 @@ mod tests {
         assert_eq!(info["usage"]["pricing"]["policy"], "unpriced");
         assert!(info["usage"]["pricing"]["estimated_cost"].is_null());
 
+        let lessons = unwrap_output(
+            server
+                .get_session_lessons(GetSessionLessonsRequest {
+                    session_id: qualified.clone(),
+                    provider: None,
+                    category: None,
+                    limit: None,
+                })
+                .await,
+        );
+        let lessons: serde_json::Value = serde_json::from_str(&lessons).unwrap();
+        assert_eq!(lessons["provider"], "codex");
+        assert_eq!(lessons["qualified_id"], qualified);
+
         let timeline = unwrap_output(
             server
                 .get_session_timeline(GetSessionTimelineRequest {
@@ -3930,6 +3957,7 @@ mod tests {
             server
                 .get_session_lessons(GetSessionLessonsRequest {
                     session_id: sid.to_string(),
+                    provider: None,
                     category: None,
                     limit: None,
                 })

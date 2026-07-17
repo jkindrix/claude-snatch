@@ -1551,8 +1551,14 @@ Decisions taken in-implementation, FLAGGED FOR REVIEW:
       sessions; a negative control proves mislabeling steering as a boundary
       fails the audit. Claude's queued-prompt behavior and flagless output
       shapes remain pinned independently.
-- [ ] Lessons noise filters for Codex tool shapes (content-tuned per
-      provider — annotations reduce but do not eliminate this).
+- [x] Lessons noise filters for Codex tool shapes (Phase C slice 4): CLI and
+      MCP route complete bundles into a semantic extractor. Explicit shell
+      exit status outranks output keywords; running processes and expected
+      grep/rg no-match exits are not failures; patch verification markers and
+      structured MCP errors are; read/search/web content does not become a
+      failure merely by containing source diagnostics. Human corrections use
+      PromptAuthorship, and inherited fork history is excluded from new-work
+      lessons. Provider-routed Claude is pinned to classic behavior.
 - [x] Usage semantics via UsageScope/UsageAggregation observations (Phase C
       slice 3): provider info in CLI/MCP presents canonical summable totals
       separately from native call/delta and session/cumulative observations,
@@ -1595,6 +1601,25 @@ native scope/aggregation and basis axes separately for reconciliation. Pricing
 is provider policy rather than model-name inference: Claude keeps known-rate
 behavior, while Codex is explicitly unpriced. A hostile known-Claude-name test
 proves the Codex policy cannot be bypassed accidentally.
+
+Slice 4 was preceded by an aggregate-only native-record census. It found the
+old broad soft-error rule would flag hundreds of outputs that explicitly exited
+zero, while Codex also persisted explicit nonzero exits and provider-specific
+patch-failure markers. The resulting classifier keys on ToolKind plus those
+observed wrappers, with adversarial success/failure/running/content fixtures.
+The census remains an opt-in local test and prints counts only—never transcript
+content, paths, commands, or ids.
+
+Phase C exit audit: all six checklist obligations are implemented. The final
+corpus run parsed 226/226 discovered sessions with zero parse errors,
+provenance violations, races, or unknown native vocabulary; all 227,272
+physical records were dispositioned. The full repository gate passed 934 unit
+tests (two opt-in corpus tests excluded), 80 CLI integration tests, the corpus,
+property, export-snapshot, documentation, formatting, and lint suites. Lesson
+classification is intentionally described as a provider-informed heuristic,
+not an exact semantic oracle: aggregate corpus evidence and adversarial
+negative controls establish its error boundaries without claiming subjective
+ground truth.
 
 ### Phase D — cross-provider UX
 - [ ] Unified project identity across providers (cwd/git), union views

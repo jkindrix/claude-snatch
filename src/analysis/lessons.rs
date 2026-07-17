@@ -24,6 +24,8 @@ use std::collections::HashMap;
 
 use crate::model::content::ToolResultContent;
 use crate::model::message::LogEntry;
+use crate::provider::{ActivityKind, PromptAuthorship, ToolKind, ToolSemantics};
+use crate::reconstruction::Conversation;
 
 use super::extraction::{
     extract_assistant_summary, extract_tool_input_summary, extract_user_prompt_text,
@@ -208,6 +210,131 @@ fn is_readonly_git_command(command: &str) -> bool {
         || c.starts_with("git status")
 }
 
+/// Extract a shell command from the provider-normalized tool input.
+fn shell_command(input: &serde_json::Value) -> Option<String> {
+    for key in ["cmd", "command"] {
+        match input.get(key) {
+            Some(serde_json::Value::String(command)) => return Some(command.clone()),
+            Some(serde_json::Value::Array(parts)) => {
+                return Some(
+                    parts
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Commands whose successful output is content rather than an operation
+/// result. Error-looking text inside that content is not evidence of failure.
+fn is_observational_shell_command(command: &str) -> bool {
+    let command = command.trim_start();
+    [
+        "cat ",
+        "sed ",
+        "rg ",
+        "grep ",
+        "head ",
+        "tail ",
+        "find ",
+        "ls ",
+        "wc ",
+        "git log",
+        "git show",
+        "git diff",
+        "git blame",
+        "git status",
+    ]
+    .iter()
+    .any(|prefix| command.starts_with(prefix))
+}
+
+fn process_exit_code(content: &str) -> Option<i32> {
+    content.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("Process exited with code ")
+            .and_then(|code| code.trim().parse().ok())
+    })
+}
+
+fn structured_error(content: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(content)
+        .ok()
+        .and_then(|value| value.get("error").cloned())
+        .is_some_and(|error| !error.is_null() && error != false)
+}
+
+/// Provider-semantic error classification grounded in the Codex corpus shape
+/// census. Explicit process status is authoritative; cumulative/plain output
+/// content is not treated as an error merely because it contains source code,
+/// compiler diagnostics, or words such as "panic".
+fn semantic_tool_result_is_error(
+    semantics: &ToolSemantics,
+    input: &serde_json::Value,
+    content: &str,
+    soft_error_re: Option<&regex::Regex>,
+) -> bool {
+    match &semantics.kind {
+        ToolKind::Shell => {
+            let command = shell_command(input);
+            if let Some(exit) = process_exit_code(content) {
+                if exit == 0 {
+                    return false;
+                }
+                // `rg`/`grep` use 1 for an ordinary no-match result.
+                if exit == 1
+                    && command.as_deref().is_some_and(|command| {
+                        let command = command.trim_start();
+                        command.starts_with("rg ") || command.starts_with("grep ")
+                    })
+                {
+                    return false;
+                }
+                return true;
+            }
+            if content.contains("Process running with session ID") {
+                return false;
+            }
+            if command
+                .as_deref()
+                .is_some_and(is_observational_shell_command)
+            {
+                return false;
+            }
+            soft_error_re.is_some_and(|re| re.is_match(content))
+                || structured_error(content)
+                || content.trim_start().starts_with("Error:")
+        }
+        ToolKind::FileWrite => {
+            content.contains("apply_patch verification failed")
+                || content.contains("Failed to find expected")
+                || content.contains("Invalid Context")
+                || content.contains("Patch failed")
+                || structured_error(content)
+        }
+        ToolKind::Mcp | ToolKind::Web => structured_error(content),
+        // Read/search results routinely contain source text that matches the
+        // soft regex. Only the provider's hard-error bit (handled by the
+        // caller) is authoritative for those content-bearing tools.
+        ToolKind::FileRead | ToolKind::Search | ToolKind::Subagent => false,
+        ToolKind::Other(_) => {
+            structured_error(content)
+                || content.trim_start().starts_with("Error:")
+                || soft_error_re.is_some_and(|re| re.is_match(content))
+        }
+    }
+}
+
+#[derive(Default)]
+struct SemanticLessonContext {
+    tools: HashMap<String, ToolSemantics>,
+}
+
 /// Soft error pattern: detect errors in tool result content even when
 /// `is_error` is not set (e.g., SIGSEGV, panics, assertion failures).
 fn build_soft_error_regex() -> Option<regex::Regex> {
@@ -273,6 +400,14 @@ fn is_summary_text(text: &str) -> bool {
 /// in tool result content like SIGSEGV, panics, compiler errors).
 /// For each error, captures the next assistant response as the resolution.
 pub fn extract_error_fix_pairs(entries: &[&LogEntry], opts: &LessonOptions) -> Vec<ErrorFixPair> {
+    extract_error_fix_pairs_with(entries, opts, None)
+}
+
+fn extract_error_fix_pairs_with(
+    entries: &[&LogEntry],
+    opts: &LessonOptions,
+    semantic: Option<&SemanticLessonContext>,
+) -> Vec<ErrorFixPair> {
     let soft_error_re = build_soft_error_regex();
 
     // Build map: tool_use_id → (tool_name, input, timestamp)
@@ -299,10 +434,35 @@ pub fn extract_error_fix_pairs(entries: &[&LogEntry], opts: &LessonOptions) -> V
                 // Check for hard error (is_error=true)
                 let is_hard_error = result.is_error == Some(true);
 
-                // Check for soft error (error patterns in content)
+                // Look up the tool before classifying content: provider
+                // semantics distinguish shell status wrappers, file-write
+                // failures, and content-bearing read/search/web outputs.
+                let (tool_name, input, timestamp) = tool_use_map
+                    .get(&result.tool_use_id)
+                    .cloned()
+                    .unwrap_or_else(|| ("unknown".into(), serde_json::Value::Null, None));
                 let content_text = result.content.as_ref().map(tool_result_text);
+
+                // Check for soft error (error patterns in content)
                 let is_soft_error = if !is_hard_error {
-                    if let (Some(ref re), Some(ref text)) = (&soft_error_re, &content_text) {
+                    if let Some(context) = semantic {
+                        content_text.as_deref().is_some_and(|text| {
+                            context.tools.get(&result.tool_use_id).map_or_else(
+                                || {
+                                    structured_error(text)
+                                        || text.trim_start().starts_with("Error:")
+                                },
+                                |tool_semantics| {
+                                    semantic_tool_result_is_error(
+                                        tool_semantics,
+                                        &input,
+                                        text,
+                                        soft_error_re.as_ref(),
+                                    )
+                                },
+                            )
+                        })
+                    } else if let (Some(ref re), Some(ref text)) = (&soft_error_re, &content_text) {
                         re.is_match(text)
                     } else {
                         false
@@ -315,15 +475,9 @@ pub fn extract_error_fix_pairs(entries: &[&LogEntry], opts: &LessonOptions) -> V
                     continue;
                 }
 
-                // Look up the tool name for false positive filtering and display
-                let (tool_name, input, timestamp) = tool_use_map
-                    .get(&result.tool_use_id)
-                    .cloned()
-                    .unwrap_or_else(|| ("unknown".into(), serde_json::Value::Null, None));
-
                 // Filter false positives: a soft-error keyword inside read-only git
                 // output (commit messages, diffs) is not a real failure.
-                if is_soft_error && tool_name == "Bash" {
+                if semantic.is_none() && is_soft_error && tool_name == "Bash" {
                     if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
                         if is_readonly_git_command(cmd) {
                             continue;
@@ -333,9 +487,11 @@ pub fn extract_error_fix_pairs(entries: &[&LogEntry], opts: &LessonOptions) -> V
 
                 // Filter false positives: successful results spuriously flagged is_error=true,
                 // or soft error patterns matching inside structured response data
-                if let Some(ref text) = content_text {
-                    if is_likely_false_positive(&tool_name, text) {
-                        continue;
+                if semantic.is_none() {
+                    if let Some(ref text) = content_text {
+                        if is_likely_false_positive(&tool_name, text) {
+                            continue;
+                        }
                     }
                 }
 
@@ -394,6 +550,17 @@ pub fn extract_user_corrections(
     entries: &[&LogEntry],
     opts: &LessonOptions,
 ) -> Vec<UserCorrectionEntry> {
+    extract_user_corrections_with(entries, opts, is_human_prompt)
+}
+
+fn extract_user_corrections_with<Human>(
+    entries: &[&LogEntry],
+    opts: &LessonOptions,
+    is_human: Human,
+) -> Vec<UserCorrectionEntry>
+where
+    Human: Fn(&LogEntry) -> bool,
+{
     let correction_re = match build_correction_regex() {
         Some(re) => re,
         None => return Vec::new(),
@@ -416,7 +583,7 @@ pub fn extract_user_corrections(
                 // tool-result turns, compaction summaries, isMeta entries) so
                 // corrections reflect actual human pushback rather than
                 // boilerplate. See #26.
-                if !is_human_prompt(entry) {
+                if !is_human(entry) {
                     continue;
                 }
                 if let Some(text) = extract_user_prompt_text(entry) {
@@ -463,16 +630,28 @@ pub fn rank_error_prone_tools(pairs: &[ErrorFixPair]) -> Vec<(String, usize)> {
 /// The summary reports **true totals** across the entire session, while
 /// the returned vectors are truncated to `opts.limit`.
 pub fn extract_lessons(entries: &[&LogEntry], opts: &LessonOptions) -> LessonResult {
+    extract_lessons_with(entries, opts, None, is_human_prompt)
+}
+
+fn extract_lessons_with<Human>(
+    entries: &[&LogEntry],
+    opts: &LessonOptions,
+    semantic: Option<&SemanticLessonContext>,
+    is_human: Human,
+) -> LessonResult
+where
+    Human: Fn(&LogEntry) -> bool,
+{
     let mut error_fix_pairs = if opts.category == LessonCategory::Corrections {
         Vec::new()
     } else {
-        extract_error_fix_pairs(entries, opts)
+        extract_error_fix_pairs_with(entries, opts, semantic)
     };
 
     let mut user_corrections = if opts.category == LessonCategory::Errors {
         Vec::new()
     } else {
-        extract_user_corrections(entries, opts)
+        extract_user_corrections_with(entries, opts, is_human)
     };
 
     // Summary reflects true totals (ranked from all errors, not just the limited set)
@@ -495,9 +674,153 @@ pub fn extract_lessons(entries: &[&LogEntry], opts: &LessonOptions) -> LessonRes
     }
 }
 
+/// Extract lessons from a complete conversation under the provider's declared
+/// semantic capability.
+///
+/// The capability is explicit: bundle presence alone is not semantic coverage
+/// (the Claude adapter retains a complete bundle but deliberately uses classic
+/// prompt/tool heuristics).
+#[must_use]
+pub fn extract_lessons_from_conversation(
+    conversation: &Conversation,
+    opts: &LessonOptions,
+    semantic_annotations: bool,
+) -> LessonResult {
+    let all_entries = conversation.chronological_entries();
+    if !semantic_annotations {
+        return extract_lessons(&all_entries, opts);
+    }
+    let Some(bundle) = conversation.provider_bundle() else {
+        return extract_lessons(&all_entries, opts);
+    };
+
+    let entries: Vec<&LogEntry> = all_entries
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .uuid()
+                .and_then(|uuid| conversation.semantics_for_uuid(uuid))
+                .map_or(true, |semantics| semantics.activity == ActivityKind::New)
+        })
+        .collect();
+    let mut semantic = SemanticLessonContext::default();
+    for entry_semantics in bundle.semantics.values() {
+        for (call_id, tool) in &entry_semantics.tools {
+            semantic
+                .tools
+                .entry(call_id.clone())
+                .or_insert_with(|| tool.clone());
+        }
+    }
+    let is_human = |entry: &LogEntry| {
+        matches!(entry, LogEntry::User(_))
+            && entry
+                .uuid()
+                .and_then(|uuid| conversation.semantics_for_uuid(uuid))
+                .and_then(|semantics| semantics.prompt)
+                .is_some_and(|prompt| prompt.authorship == PromptAuthorship::Human)
+    };
+    extract_lessons_with(&entries, opts, Some(&semantic), is_human)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn semantics(kind: ToolKind, native_name: &str) -> ToolSemantics {
+        ToolSemantics {
+            kind,
+            native_name: native_name.to_string(),
+        }
+    }
+
+    #[test]
+    fn semantic_shell_status_beats_error_words_in_successful_output() {
+        let re = build_soft_error_regex().unwrap();
+        let output = "Process exited with code 0\nFinal output:\nerror[E0308]: quoted fixture";
+        assert!(!semantic_tool_result_is_error(
+            &semantics(ToolKind::Shell, "exec_command"),
+            &serde_json::json!({"cmd": "cargo check"}),
+            output,
+            Some(&re),
+        ));
+    }
+
+    #[test]
+    fn semantic_shell_nonzero_is_an_error_but_running_and_no_match_are_not() {
+        let re = build_soft_error_regex().unwrap();
+        let shell = semantics(ToolKind::Shell, "exec_command");
+        assert!(semantic_tool_result_is_error(
+            &shell,
+            &serde_json::json!({"cmd": "cargo test"}),
+            "Process exited with code 101\nFinal output:\nfailed",
+            Some(&re),
+        ));
+        assert!(!semantic_tool_result_is_error(
+            &shell,
+            &serde_json::json!({"cmd": "long task"}),
+            "Process running with session ID 42\nLive output:\nstill working",
+            Some(&re),
+        ));
+        assert!(!semantic_tool_result_is_error(
+            &shell,
+            &serde_json::json!({"cmd": "rg missing"}),
+            "Process exited with code 1\nFinal output:\n",
+            Some(&re),
+        ));
+    }
+
+    #[test]
+    fn semantic_content_tools_do_not_treat_source_text_as_failures() {
+        let re = build_soft_error_regex().unwrap();
+        assert!(!semantic_tool_result_is_error(
+            &semantics(ToolKind::FileRead, "read_file"),
+            &serde_json::Value::Null,
+            "thread worker panicked in this test fixture",
+            Some(&re),
+        ));
+        assert!(!semantic_tool_result_is_error(
+            &semantics(ToolKind::Search, "grep"),
+            &serde_json::Value::Null,
+            "42:error[E0308] appears in source",
+            Some(&re),
+        ));
+    }
+
+    #[test]
+    fn semantic_patch_and_structured_mcp_failures_are_detected() {
+        let re = build_soft_error_regex().unwrap();
+        assert!(semantic_tool_result_is_error(
+            &semantics(ToolKind::FileWrite, "apply_patch"),
+            &serde_json::Value::Null,
+            "apply_patch verification failed: Failed to find expected lines",
+            Some(&re),
+        ));
+        assert!(semantic_tool_result_is_error(
+            &semantics(ToolKind::Mcp, "mcp__tool"),
+            &serde_json::Value::Null,
+            r#"{"error":{"code":"failed"}}"#,
+            Some(&re),
+        ));
+    }
+
+    #[test]
+    fn missing_provider_tool_semantics_does_not_reenable_classic_soft_matching() {
+        let entry: LogEntry = serde_json::from_value(serde_json::json!({
+            "type": "user", "uuid": "u1", "parentUuid": null,
+            "timestamp": "2026-01-01T00:00:00Z", "sessionId": "s", "version": "1",
+            "message": {"role": "user", "content": [{"type": "tool_result",
+                "tool_use_id": "missing", "content": "error[E0308] quoted source"}]}
+        }))
+        .unwrap();
+        let refs = vec![&entry];
+        let result = extract_error_fix_pairs_with(
+            &refs,
+            &LessonOptions::default(),
+            Some(&SemanticLessonContext::default()),
+        );
+        assert!(result.is_empty());
+    }
 
     /// Helper: build a User entry that contains a tool result.
     fn user_tool_result(tool_use_id: &str, is_error: bool, content: &str) -> LogEntry {
