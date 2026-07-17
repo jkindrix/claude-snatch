@@ -304,16 +304,23 @@ directory walks.
   real assistant entry with two ToolUse blocks, and semantic call ids are
   validated against actual calls; lineage tolerates dangling endpoints
   (real corpora reference deleted/unavailable parents — keep the edge).
-  Threading status (T1-T3, 2026-07-17): logical_key(&Session) shared between
-  adapter and pipeline; Conversation carries an inert
-  source: Option<LogicalSessionKey> (from_entries_with_source), threaded at
-  the MCP shared-resolution funnel; the cache key is provider-neutral
-  (identity + RevisionSource, file variant preserving exact pre-provider
-  semantics and on-disk format). DELIBERATE DEFERRAL: the ~28 CLI
-  construction sites are threaded per-surface in B2, when each surface gains
-  its provider parameter — an inert source set by 28 no-op edits would be
-  verified by nothing today, while threading with the consumer lands each
-  edit under a behavioral test.
+  STATUS (2026-07-17, round 10): **Phase A foundation complete** — the
+  honest framing. Delivered: seam + contracts + hardened ClaudeCodeProvider;
+  logical_key(&Session) shared between adapter and pipeline; Conversation
+  carries an inert source (from_entries_with_source), threaded at the MCP
+  shared-resolution funnel; the cache is keyed by typed
+  CacheIdentity::{File(PathBuf), Provider(LogicalSessionKey)} with opaque
+  revision comparison, exercised by the fake provider (File identity stays
+  a lossless PathBuf — a display-string rendering collides on non-UTF-8
+  paths, regression-tested). NOT yet delivered (explicitly moved to B2/B3):
+  production routing through SourceProvider (MCP paths still call
+  Session::parse directly; the library API builds source-less
+  conversations; archive/raw delegation has no production caller),
+  parsed-session propagation, and export delegation. The construction-site
+  deferral covers CLI, MCP, and library/API sites alike; when provider-aware
+  consumers arrive, a centralized Conversation::from_parsed_session(...)
+  path is preferred so provenance, semantics, and source cannot be
+  independently forgotten.
 - **Phase B1 — Codex inventory & decoding.** Discovery of plain, archived,
   compressed (`.zst`, with decompressed-size limits), active/truncated, and
   legacy (pre-envelope) files; envelope parser; native diagnostics. Legacy
@@ -503,6 +510,23 @@ continues (previously it aborted the whole session — a strict regression
 vs the established parser; characterization test: valid → invalid UTF-8 →
 valid), and metadata errors in the max-size check propagate instead of
 reading as zero. 28 provider tests.
+
+## Review round 10 (2026-07-17, same Codex agent — Phase A close review)
+
+Verdict: B1 may proceed; Phase A is renamed "foundation complete" rather
+than closed as fully threaded. Fixes adopted: (1) T2's string-keyed cache
+regressed non-UTF-8 path identity (distinct paths render identically via
+replacement characters) and delivered no provider-keyed API — replaced with
+typed CacheIdentity::{File(PathBuf), Provider(LogicalSessionKey)} +
+Revision::{FileMtime, Opaque}, get_keyed/insert_keyed validated against
+caller-supplied tokens, exercised by the fake provider, with a unix
+regression test proving the display-string aliasing; file persistence
+format unchanged (provider entries are rebuilt, not persisted).
+(2) Production routing, parsed-session propagation, and export delegation
+explicitly moved to B2/B3 (recorded above). (3) The construction-site
+deferral inventory now includes MCP and library/API sites, with a
+centralized from_parsed_session(...) path preferred when consumers arrive.
+18 cache tests (was 16), 28 provider tests.
 
 ## Open questions (to settle in-phase)
 

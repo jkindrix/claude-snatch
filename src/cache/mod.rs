@@ -22,54 +22,61 @@ use crate::config::CacheConfig;
 use crate::discovery::QuickSessionMetadata;
 use crate::error::Result;
 use crate::model::LogEntry;
+use crate::provider::LogicalSessionKey;
 
-/// Provider-neutral cache key (Phase A threading T2): an opaque identity
-/// plus a revision source. Identity is a file path today; provider
-/// consumers key by their `LogicalSessionKey`/`ArtifactId` encodings and add
-/// their own `RevisionSource` variant when they arrive (Phase B).
+/// Typed, lossless cache identity (Phase A T2, round-10 shape).
+///
+/// File paths stay `PathBuf` — distinct non-UTF-8 paths must remain
+/// distinct, and a display-string rendering can collide on replacement
+/// characters. Provider consumers key by their [`LogicalSessionKey`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct CacheKey {
-    /// Opaque cache identity.
-    identity: String,
-    /// The revision observed at insert time and how to recompute it.
-    source: RevisionSource,
+pub enum CacheIdentity {
+    /// A file-backed entry.
+    File(PathBuf),
+    /// A provider-parsed session.
+    Provider(LogicalSessionKey),
 }
 
-/// A cache entry's revision: the value captured at insert time plus what it
-/// derives from, so staleness can be re-checked.
+/// A cache entry's revision at insert time.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum RevisionSource {
-    /// File-backed: revision is the file mtime — identical staleness
-    /// semantics (and on-disk persistence format) to the pre-provider
-    /// path+mtime key.
-    File {
-        /// The backing file.
-        path: PathBuf,
-        /// mtime at insert time.
-        mtime: SystemTime,
-    },
+enum Revision {
+    /// File mtime — self-revalidating by stat; identical staleness semantics
+    /// (and on-disk persistence format) to the pre-provider path+mtime key.
+    FileMtime(SystemTime),
+    /// Opaque provider token — validated by equality against the current
+    /// token the caller supplies at access time (e.g. an `ArtifactRevision`).
+    Opaque(String),
+}
+
+/// The revision observed at insert time, revalidated per identity kind.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CacheKey {
+    revision: Revision,
 }
 
 impl CacheKey {
-    /// Create a file-backed cache key (identity = path, revision = mtime).
+    /// Create a file-backed cache key (revision = mtime).
     fn from_path(path: &Path) -> Option<Self> {
         let mtime = std::fs::metadata(path).ok()?.modified().ok()?;
         Some(Self {
-            identity: path.display().to_string(),
-            source: RevisionSource::File {
-                path: path.to_path_buf(),
-                mtime,
-            },
+            revision: Revision::FileMtime(mtime),
         })
     }
 
-    /// Check if this key is still valid (revision unchanged).
-    fn is_valid(&self) -> bool {
-        match &self.source {
-            RevisionSource::File { path, mtime } => std::fs::metadata(path)
+    /// Whether the entry is still valid without caller input. File entries
+    /// re-stat; opaque-revision entries cannot self-validate and are treated
+    /// as valid here (they are validated against a supplied token on access
+    /// via `get_keyed`).
+    fn is_valid(&self, identity: &CacheIdentity) -> bool {
+        match (&self.revision, identity) {
+            (Revision::FileMtime(mtime), CacheIdentity::File(path)) => std::fs::metadata(path)
                 .and_then(|m| m.modified())
                 .map(|current| current == *mtime)
                 .unwrap_or(false),
+            (Revision::Opaque(_), _) => true,
+            // A file revision without a file identity cannot occur through
+            // the constructors; treat defensively as stale.
+            (Revision::FileMtime(_), CacheIdentity::Provider(_)) => false,
         }
     }
 }
@@ -88,8 +95,8 @@ struct CacheEntry<T> {
 /// Generic LRU cache with mtime-based invalidation.
 #[derive(Debug)]
 pub struct LruCache<T> {
-    /// Cache entries keyed by opaque identity (a file path today).
-    entries: HashMap<String, (CacheKey, CacheEntry<T>)>,
+    /// Cache entries keyed by typed identity.
+    entries: HashMap<CacheIdentity, (CacheKey, CacheEntry<T>)>,
     /// Global access counter for LRU tracking.
     access_counter: u64,
     /// Maximum number of entries.
@@ -114,20 +121,65 @@ impl<T> LruCache<T> {
 
     /// Get an entry if it exists and is still valid.
     pub fn get(&mut self, path: &Path) -> Option<&T> {
-        // Check if entry exists
-        if let Some((key, entry)) = self.entries.get_mut(&path.display().to_string()) {
-            // Validate mtime
-            if key.is_valid() {
+        let identity = CacheIdentity::File(path.to_path_buf());
+        if let Some((key, entry)) = self.entries.get_mut(&identity) {
+            if key.is_valid(&identity) {
                 // Update access order
                 self.access_counter += 1;
                 entry.access_order = self.access_counter;
                 return Some(&entry.value);
-            } else {
-                // Entry is stale, will be removed
-                return None;
             }
+            // Entry is stale, will be removed
+            return None;
         }
         None
+    }
+
+    /// Get a provider-keyed entry, validating its opaque revision token
+    /// against the caller-supplied current token (e.g. the provider's
+    /// `ArtifactRevision` for the session's preferred artifact).
+    pub fn get_keyed(&mut self, key: &LogicalSessionKey, current_revision: &str) -> Option<&T> {
+        let identity = CacheIdentity::Provider(key.clone());
+        if let Some((cached, entry)) = self.entries.get_mut(&identity) {
+            if cached.revision == Revision::Opaque(current_revision.to_string()) {
+                self.access_counter += 1;
+                entry.access_order = self.access_counter;
+                return Some(&entry.value);
+            }
+            // Revision moved on: stale.
+            return None;
+        }
+        None
+    }
+
+    /// Insert a provider-keyed entry with its opaque revision token.
+    pub fn insert_keyed(
+        &mut self,
+        key: &LogicalSessionKey,
+        revision: String,
+        value: T,
+        size_estimate: usize,
+    ) {
+        let identity = CacheIdentity::Provider(key.clone());
+        if let Some((_, old_entry)) = self.entries.remove(&identity) {
+            self.current_size = self.current_size.saturating_sub(old_entry.size_estimate);
+        }
+        self.evict_if_needed(size_estimate);
+        self.access_counter += 1;
+        self.entries.insert(
+            identity,
+            (
+                CacheKey {
+                    revision: Revision::Opaque(revision),
+                },
+                CacheEntry {
+                    value,
+                    access_order: self.access_counter,
+                    size_estimate,
+                },
+            ),
+        );
+        self.current_size += size_estimate;
     }
 
     /// Insert a value into the cache.
@@ -138,7 +190,10 @@ impl<T> LruCache<T> {
         };
 
         // Remove old entry if exists
-        if let Some((_, old_entry)) = self.entries.remove(&path.display().to_string()) {
+        if let Some((_, old_entry)) = self
+            .entries
+            .remove(&CacheIdentity::File(path.to_path_buf()))
+        {
             self.current_size = self.current_size.saturating_sub(old_entry.size_estimate);
         }
 
@@ -148,7 +203,7 @@ impl<T> LruCache<T> {
         // Insert new entry
         self.access_counter += 1;
         self.entries.insert(
-            path.display().to_string(),
+            CacheIdentity::File(path.to_path_buf()),
             (
                 key,
                 CacheEntry {
@@ -196,17 +251,21 @@ impl<T> LruCache<T> {
 
     /// Remove an entry.
     pub fn remove(&mut self, path: &Path) {
-        if let Some((_, entry)) = self.entries.remove(&path.display().to_string()) {
+        if let Some((_, entry)) = self
+            .entries
+            .remove(&CacheIdentity::File(path.to_path_buf()))
+        {
             self.current_size = self.current_size.saturating_sub(entry.size_estimate);
         }
     }
 
-    /// Invalidate stale entries.
+    /// Invalidate stale entries (file-backed entries re-stat; opaque-revision
+    /// entries are validated on access instead and left in place here).
     pub fn invalidate_stale(&mut self) {
-        let stale: Vec<String> = self
+        let stale: Vec<CacheIdentity> = self
             .entries
             .iter()
-            .filter(|(_, (key, _))| !key.is_valid())
+            .filter(|(identity, (key, _))| !key.is_valid(identity))
             .map(|(identity, _)| identity.clone())
             .collect();
 
@@ -587,8 +646,14 @@ impl CacheManager {
         let guard = self.metadata.inner.read();
         let mut persisted = PersistedCache::new();
 
-        for (key, entry) in guard.entries.values() {
-            let RevisionSource::File { path, mtime } = &key.source;
+        for (identity, (key, entry)) in guard.entries.iter() {
+            // Only file-backed entries persist; provider-keyed entries are
+            // rebuilt from their providers (their opaque revisions cannot be
+            // revalidated offline). On-disk format unchanged.
+            let (CacheIdentity::File(path), Revision::FileMtime(mtime)) = (identity, &key.revision)
+            else {
+                continue;
+            };
             let mtime_secs = mtime
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -666,17 +731,13 @@ impl CacheManager {
                 let mtime =
                     SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(entry.mtime_secs);
                 let key = CacheKey {
-                    identity: entry.path.display().to_string(),
-                    source: RevisionSource::File {
-                        path: entry.path.clone(),
-                        mtime,
-                    },
+                    revision: Revision::FileMtime(mtime),
                 };
 
                 guard.access_counter += 1;
                 let access_order = guard.access_counter;
                 guard.entries.insert(
-                    entry.path.display().to_string(),
+                    CacheIdentity::File(entry.path.clone()),
                     (
                         key,
                         CacheEntry {
@@ -716,6 +777,54 @@ pub fn global_cache() -> &'static CacheManager {
         let config = CacheConfig::default();
         CacheManager::new(&config)
     })
+}
+
+#[cfg(test)]
+mod provider_key_tests {
+    use super::*;
+    use crate::provider::fake::{colliding_key, multi_artifact_key, FakeProvider};
+    use crate::provider::SourceProvider;
+
+    /// Round-10 requirement: the provider-keyed cache path exercised with
+    /// the hostile fake provider's real keys and revision tokens.
+    #[test]
+    fn provider_keyed_entries_validate_by_opaque_revision() {
+        let descriptors = FakeProvider.sessions().unwrap();
+        let d = descriptors
+            .iter()
+            .find(|d| d.key == multi_artifact_key())
+            .unwrap();
+        let revision = d.preferred_artifact().unwrap().snapshot.revision.0.clone();
+
+        let mut cache: LruCache<&'static str> = LruCache::new(10, 1024);
+        cache.insert_keyed(&d.key, revision.clone(), "parsed", 8);
+
+        // Same key + same revision: hit.
+        assert_eq!(cache.get_keyed(&d.key, &revision), Some(&"parsed"));
+        // Revision moved on (e.g. new rows appended): stale.
+        assert_eq!(cache.get_keyed(&d.key, "rev-next"), None);
+        // A different logical session (same native id, other namespace)
+        // never aliases.
+        assert_eq!(cache.get_keyed(&colliding_key(), &revision), None);
+    }
+
+    /// Round-10 regression proof: distinct non-UTF-8 paths render to the
+    /// SAME display string (replacement characters) but must remain
+    /// distinct cache identities.
+    #[cfg(unix)]
+    #[test]
+    fn distinct_non_utf8_paths_stay_distinct() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let a = PathBuf::from(OsStr::from_bytes(b"/tmp/x-\xff-1"));
+        let b = PathBuf::from(OsStr::from_bytes(b"/tmp/x-\xfe-1"));
+        assert_eq!(
+            a.display().to_string(),
+            b.display().to_string(),
+            "display-string keying would have aliased these"
+        );
+        assert_ne!(CacheIdentity::File(a), CacheIdentity::File(b));
+    }
 }
 
 #[cfg(test)]

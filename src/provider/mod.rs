@@ -891,6 +891,6 @@ pub trait SourceProvider {
 pub mod claude_code;
 
 #[cfg(test)]
-mod fake;
+pub(crate) mod fake;
 #[cfg(test)]
 mod tests;
