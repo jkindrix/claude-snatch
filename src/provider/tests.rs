@@ -393,6 +393,31 @@ fn semantic_tool_calls_must_reference_actual_calls() {
 }
 
 #[test]
+fn validator_rejects_references_to_nonexistent_artifacts() {
+    let good = FakeProvider.parse(&multi_artifact_key()).unwrap();
+    let mut parsed = good;
+    // Forge a disposition whose RecordRef names an artifact absent from the
+    // descriptor.
+    let forged = RecordRef {
+        artifact: ArtifactId {
+            provider_instance: "mem://forged".into(),
+            locator: "not-a-real-artifact".into(),
+        },
+        ordinal: 999,
+    };
+    parsed.record_dispositions.push(RecordDisposition {
+        record: forged,
+        outcome: RecordOutcome::Suppressed {
+            reason: SuppressionReason::Other("forged".into()),
+        },
+    });
+    assert!(parsed
+        .validate_provenance()
+        .iter()
+        .any(|v| v.contains("not in the descriptor")));
+}
+
+#[test]
 fn entry_ids_are_deterministic_and_stable() {
     let p1 = FakeProvider.parse(&multi_artifact_key()).unwrap();
     let p2 = FakeProvider.parse(&multi_artifact_key()).unwrap();

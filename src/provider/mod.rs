@@ -643,6 +643,32 @@ impl ParsedSession {
             }
         }
 
+        // Every referenced artifact must belong to the descriptor — a
+        // RecordRef naming an artifact outside descriptor.artifacts is a
+        // fidelity violation (provenance pointing at nothing).
+        let descriptor_artifacts: BTreeSet<&ArtifactId> = self
+            .descriptor
+            .artifacts
+            .iter()
+            .map(|a| &a.snapshot.id)
+            .collect();
+        let check_artifact = |r: &RecordRef, what: &str, violations: &mut Vec<String>| {
+            if !descriptor_artifacts.contains(&r.artifact) {
+                violations.push(format!(
+                    "{what} references artifact {:?} which is not in the descriptor",
+                    r.artifact.locator
+                ));
+            }
+        };
+        for d in &self.record_dispositions {
+            check_artifact(&d.record, "disposition", &mut violations);
+        }
+        for origins in self.entry_origins.values() {
+            for r in origins {
+                check_artifact(r, "origin", &mut violations);
+            }
+        }
+
         // Dispositions: unique records, valid outcome shapes, tallies.
         let mut producing: BTreeMap<&RecordRef, &Vec<EntryId>> = BTreeMap::new();
         let mut seen_records: BTreeSet<&RecordRef> = BTreeSet::new();
@@ -845,6 +871,15 @@ impl From<std::io::Error> for ProviderError {
 /// changes, and preferred-selection changes all change the token — even
 /// when two artifacts share identical revision text.
 pub fn descriptor_state_token(descriptor: &SessionDescriptor) -> String {
+    // Canonical length-prefixed encoding: every field is emitted as
+    // "<len>:<bytes>", making concatenation unambiguous — provider-owned
+    // strings may contain any character, so delimiter joins are the same
+    // collision class already fixed in session and entry ids.
+    fn lp(out: &mut String, s: &str) {
+        out.push_str(&s.len().to_string());
+        out.push(':');
+        out.push_str(s);
+    }
     fn form_tag(form: &ArtifactForm) -> String {
         match form {
             ArtifactForm::PlainFile => "plain".into(),
@@ -857,22 +892,34 @@ pub fn descriptor_state_token(descriptor: &SessionDescriptor) -> String {
         .artifacts
         .iter()
         .map(|a| {
-            format!(
-                "{}\x1f{}\x1f{}\x1f{}\x1f{}",
-                a.snapshot.id.provider_instance,
-                a.snapshot.id.locator,
-                a.snapshot.revision.0,
-                form_tag(&a.form),
-                a.archived
-            )
+            let mut part = String::new();
+            lp(&mut part, &a.snapshot.id.provider_instance);
+            lp(&mut part, &a.snapshot.id.locator);
+            lp(&mut part, &a.snapshot.revision.0);
+            lp(&mut part, &form_tag(&a.form));
+            lp(&mut part, if a.archived { "1" } else { "0" });
+            part
         })
         .collect();
     parts.sort();
-    let preferred = descriptor
+    let mut out = String::new();
+    lp(&mut out, &descriptor.artifacts.len().to_string());
+    for part in parts {
+        lp(&mut out, &part);
+    }
+    // The COMPLETE preferred artifact id, not just its locator.
+    let (pref_instance, pref_locator) = descriptor
         .preferred_artifact()
-        .map(|a| a.snapshot.id.locator.clone())
+        .map(|a| {
+            (
+                a.snapshot.id.provider_instance.clone(),
+                a.snapshot.id.locator.clone(),
+            )
+        })
         .unwrap_or_default();
-    format!("{}\x1epref={preferred}", parts.join("\x1e"))
+    lp(&mut out, &pref_instance);
+    lp(&mut out, &pref_locator);
+    out
 }
 
 /// The discovery+parse seam: the dual of the existing `Exporter` trait.

@@ -154,21 +154,31 @@ const KNOWN_EVENT_MSG_TYPES: [&str; 23] = [
     "item_completed",
 ];
 
-/// Native-vocabulary drift report for a Codex corpus (the doctor surface).
+/// Native-vocabulary drift report for a Codex corpus.
 ///
 /// Inspects the envelope/payload vocabulary DIRECTLY — it deliberately does
 /// not read `ParsedSession` diagnostics, whose `unknown` counts are the
-/// intentional B1 preserved-Unknown representation, not drift.
+/// intentional B1 preserved-Unknown representation, not drift. CLI `doctor`
+/// surfacing and a provider-neutral diagnostics hook are explicitly Phase
+/// B2 scope (recorded in the design doc); this is the analysis capability.
 #[derive(Debug, Clone, Default)]
 pub struct CodexDriftReport {
     /// Envelope-era sessions scanned.
     pub sessions: usize,
     /// Legacy pre-envelope sessions (inventoried, not scanned).
     pub legacy_sessions: usize,
+    /// Sessions whose preferred artifact could not be opened/sniffed —
+    /// counted, never allowed to abort the rest of the report.
+    pub unreadable_sessions: usize,
     /// Total records seen.
     pub records: u64,
-    /// Records that failed to decode/parse.
+    /// Records that failed to decode/parse mid-file (real damage/drift).
     pub unparseable: u64,
+    /// Unterminated final records of active sessions — TRANSIENT, per the
+    /// acceptance invariant these are never permanent drift findings.
+    pub active_tails: u64,
+    /// Records whose envelope `type` is missing or not a string.
+    pub missing_type_discriminators: u64,
     /// Envelope type counts.
     pub envelope_types: BTreeMap<String, u64>,
     /// Envelope types outside the rust-v0.144.5 vocabulary (drift).
@@ -181,11 +191,20 @@ pub struct CodexDriftReport {
     pub event_msg_types: BTreeMap<String, u64>,
     /// event_msg payload types outside the known vocabulary (drift).
     pub unknown_event_msg_types: BTreeMap<String, u64>,
+    /// Unknown NESTED field paths (e.g.
+    /// `event_msg/token_count/nested_future_field`), evaluated against
+    /// curated per-payload-type key baselines; types without a baseline are
+    /// not evaluated (absence of a baseline is not drift).
+    pub unknown_field_paths: BTreeMap<String, u64>,
     /// reasoning response items seen.
     pub reasoning_items: u64,
-    /// reasoning items carrying a non-empty plaintext summary (availability
-    /// collapsed to 0% in corpora from Apr 2026 on — this measures it).
+    /// reasoning items carrying a non-empty plaintext summary.
     pub reasoning_with_summary: u64,
+    /// Era-bucketed availability: month ("YYYY-MM") -> (reasoning items,
+    /// items with summary). The corpus-wide ratio alone hides era collapses
+    /// (85-99% through 2026-03, 0% from 2026-04 can still aggregate to
+    /// ~89%) — the exact error the original research made.
+    pub reasoning_by_month: BTreeMap<String, (u64, u64)>,
 }
 
 /// OpenAI Codex CLI sessions behind the provider seam.
@@ -507,9 +526,68 @@ impl<R: Read> Read for LimitedReader<R> {
 }
 
 impl CodexProvider {
+    /// Curated known-key baselines for nested-field drift, keyed by
+    /// (envelope kind, payload type). Only listed types are evaluated.
+    fn payload_key_baseline(kind: &str, payload_type: &str) -> Option<&'static [&'static str]> {
+        match (kind, payload_type) {
+            ("event_msg", "token_count") => Some(&["type", "info", "rate_limits"]),
+            ("event_msg", "user_message") => Some(&[
+                "type",
+                "message",
+                "images",
+                "local_images",
+                "text_elements",
+                "kind",
+            ]),
+            // NOTE: "metadata" and reasoning's passthrough field were
+            // DISCOVERED by this instrument's first real-corpus run (2,339
+            // occurrences) — vocabulary the rust-v0.144.5 source research
+            // missed. Absorbed into the baselines with that provenance.
+            ("response_item", "reasoning") => Some(&[
+                "type",
+                "id",
+                "summary",
+                "content",
+                "encrypted_content",
+                "metadata",
+                "internal_chat_message_metadata_passthrough",
+            ]),
+            ("response_item", "message") => Some(&[
+                "type",
+                "id",
+                "role",
+                "content",
+                "phase",
+                "metadata",
+                "internal_chat_message_metadata_passthrough",
+            ]),
+            ("response_item", "function_call") => Some(&[
+                "type",
+                "id",
+                "name",
+                "namespace",
+                "arguments",
+                "call_id",
+                "metadata",
+                "internal_chat_message_metadata_passthrough",
+            ]),
+            ("response_item", "function_call_output") => Some(&[
+                "type",
+                "id",
+                "call_id",
+                "output",
+                "metadata",
+                "internal_chat_message_metadata_passthrough",
+            ]),
+            _ => None,
+        }
+    }
+
     /// Scan the corpus's native vocabulary for schema drift and
     /// reasoning-summary availability. Streams every envelope-era session's
-    /// preferred artifact; legacy sessions are counted, not scanned.
+    /// preferred artifact; legacy sessions are counted, not scanned; a
+    /// session that cannot be opened/sniffed is counted as unreadable and
+    /// never suppresses the rest of the report.
     pub fn drift_report(&self) -> Result<CodexDriftReport, ProviderError> {
         let (descriptors, paths) = self.inventory()?;
         let mut report = CodexDriftReport::default();
@@ -520,12 +598,25 @@ impl CodexProvider {
             let Some(path) = paths.get(&preferred.snapshot.id) else {
                 continue;
             };
-            if self.sniff_format(path)? == FormatFamily::Legacy {
-                report.legacy_sessions += 1;
-                continue;
+            match self.sniff_format(path) {
+                Ok(FormatFamily::Legacy) => {
+                    report.legacy_sessions += 1;
+                    continue;
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    report.unreadable_sessions += 1;
+                    continue;
+                }
             }
+            let mut reader = match self.open_records(path) {
+                Ok(r) => r,
+                Err(_) => {
+                    report.unreadable_sessions += 1;
+                    continue;
+                }
+            };
             report.sessions += 1;
-            let mut reader = self.open_records(path)?;
             let mut buf: Vec<u8> = Vec::new();
             loop {
                 buf.clear();
@@ -541,61 +632,106 @@ impl CodexProvider {
                     continue;
                 }
                 report.records += 1;
+                // read_until only omits the trailing newline at EOF: an
+                // unterminated final record is an ACTIVE session's partial
+                // tail — transient by contract, never permanent drift.
+                let is_final_unterminated = !buf.ends_with(b"\n");
                 let Ok(value) = serde_json::from_slice::<serde_json::Value>(&buf) else {
-                    report.unparseable += 1;
+                    if is_final_unterminated {
+                        report.active_tails += 1;
+                    } else {
+                        report.unparseable += 1;
+                    }
                     continue;
                 };
                 let Some(kind) = value.get("type").and_then(|t| t.as_str()) else {
+                    report.missing_type_discriminators += 1;
                     continue;
                 };
-                *report.envelope_types.entry(kind.to_string()).or_default() += 1;
-                if !KNOWN_ENVELOPE_TYPES.contains(&kind) {
+                let kind = kind.to_string();
+                *report.envelope_types.entry(kind.clone()).or_default() += 1;
+                if !KNOWN_ENVELOPE_TYPES.contains(&kind.as_str()) {
                     *report
                         .unknown_envelope_types
-                        .entry(kind.to_string())
+                        .entry(kind.clone())
                         .or_default() += 1;
                 }
-                let payload_type = value
-                    .get("payload")
-                    .and_then(|p| p.get("type"))
-                    .and_then(|t| t.as_str());
-                match (kind, payload_type) {
-                    ("response_item", Some(pt)) => {
-                        *report
-                            .response_item_types
-                            .entry(pt.to_string())
-                            .or_default() += 1;
-                        if !KNOWN_RESPONSE_ITEM_TYPES.contains(&pt) {
+                // Envelope-level unknown keys.
+                if let Some(obj) = value.as_object() {
+                    for k in obj.keys() {
+                        if !matches!(k.as_str(), "timestamp" | "type" | "payload") {
                             *report
-                                .unknown_response_item_types
-                                .entry(pt.to_string())
+                                .unknown_field_paths
+                                .entry(format!("{kind}/$envelope/{k}"))
                                 .or_default() += 1;
                         }
-                        if pt == "reasoning" {
-                            report.reasoning_items += 1;
-                            let has_summary =
-                                value["payload"]["summary"].as_array().is_some_and(|s| {
-                                    s.iter().any(|item| {
+                    }
+                }
+                let month = value
+                    .get("timestamp")
+                    .and_then(|t| t.as_str())
+                    .map(|t| t.chars().take(7).collect::<String>())
+                    .unwrap_or_else(|| "unknown".into());
+                let payload = value.get("payload");
+                let payload_type = payload
+                    .and_then(|p| p.get("type"))
+                    .and_then(|t| t.as_str())
+                    .map(str::to_string);
+                if let (Some(payload), Some(pt)) = (payload, payload_type.as_deref()) {
+                    // Nested-field drift against curated baselines.
+                    if let Some(baseline) = Self::payload_key_baseline(&kind, pt) {
+                        if let Some(obj) = payload.as_object() {
+                            for k in obj.keys() {
+                                if !baseline.contains(&k.as_str()) {
+                                    *report
+                                        .unknown_field_paths
+                                        .entry(format!("{kind}/{pt}/{k}"))
+                                        .or_default() += 1;
+                                }
+                            }
+                        }
+                    }
+                    match kind.as_str() {
+                        "response_item" => {
+                            *report
+                                .response_item_types
+                                .entry(pt.to_string())
+                                .or_default() += 1;
+                            if !KNOWN_RESPONSE_ITEM_TYPES.contains(&pt) {
+                                *report
+                                    .unknown_response_item_types
+                                    .entry(pt.to_string())
+                                    .or_default() += 1;
+                            }
+                            if pt == "reasoning" {
+                                report.reasoning_items += 1;
+                                let has_summary = payload["summary"].as_array().is_some_and(|sm| {
+                                    sm.iter().any(|item| {
                                         item.get("text")
                                             .and_then(|t| t.as_str())
                                             .is_some_and(|t| !t.trim().is_empty())
                                     })
                                 });
-                            if has_summary {
-                                report.reasoning_with_summary += 1;
+                                let bucket =
+                                    report.reasoning_by_month.entry(month.clone()).or_default();
+                                bucket.0 += 1;
+                                if has_summary {
+                                    report.reasoning_with_summary += 1;
+                                    bucket.1 += 1;
+                                }
                             }
                         }
-                    }
-                    ("event_msg", Some(pt)) => {
-                        *report.event_msg_types.entry(pt.to_string()).or_default() += 1;
-                        if !KNOWN_EVENT_MSG_TYPES.contains(&pt) {
-                            *report
-                                .unknown_event_msg_types
-                                .entry(pt.to_string())
-                                .or_default() += 1;
+                        "event_msg" => {
+                            *report.event_msg_types.entry(pt.to_string()).or_default() += 1;
+                            if !KNOWN_EVENT_MSG_TYPES.contains(&pt) {
+                                *report
+                                    .unknown_event_msg_types
+                                    .entry(pt.to_string())
+                                    .or_default() += 1;
+                            }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }
@@ -639,10 +775,15 @@ impl SourceProvider for CodexProvider {
             });
         }
 
-        let artifact_id = ArtifactId {
-            provider_instance: self.codex_home.display().to_string(),
-            locator: path.display().to_string(),
-        };
+        // The record artifact id comes from the RESOLVED descriptor — never
+        // reconstructed from a path (a lossy reconstruction made every
+        // RecordRef name a nonexistent artifact under non-UTF-8 homes).
+        let artifact_id = descriptor
+            .preferred_artifact()
+            .ok_or_else(|| ProviderError::Other(format!("descriptor {key} has no artifacts")))?
+            .snapshot
+            .id
+            .clone();
         let mut reader = self.open_records(&path)?;
         let mut entries = Vec::new();
         let mut entry_origins = BTreeMap::new();
@@ -1072,6 +1213,20 @@ mod tests {
             drift.reasoning_items
         );
         eprintln!(
+            "codex drift detail: {} unknown field paths {:?}, {} months, active_tails={}, \
+             missing_types={}, unreadable={}",
+            drift.unknown_field_paths.len(),
+            drift
+                .unknown_field_paths
+                .iter()
+                .take(10)
+                .collect::<Vec<_>>(),
+            drift.reasoning_by_month.len(),
+            drift.active_tails,
+            drift.missing_type_discriminators,
+            drift.unreadable_sessions
+        );
+        eprintln!(
             "codex corpus: {n} sessions, {parsed_ok} parsed, {legacy} legacy-refused, \
              {errors} errors, {violations} provenance violations, {edges} lineage edges, \
              {raced} raced, records: {totals:?}",
@@ -1428,6 +1583,21 @@ mod tests {
         // resolution goes through the preserved PathBuf, never the string.
         let parsed = p.parse(&key(THREAD_A)).unwrap();
         assert_eq!(parsed.diagnostics.unknown, 4);
+        // Every provenance reference names an artifact that actually exists
+        // in the descriptor (against 48513e3 this failed: parse
+        // reconstructed a lossy id that matched nothing).
+        let members: std::collections::BTreeSet<_> = parsed
+            .descriptor
+            .artifacts
+            .iter()
+            .map(|a| a.snapshot.id.clone())
+            .collect();
+        for d in &parsed.record_dispositions {
+            assert!(
+                members.contains(&d.record.artifact),
+                "disposition references a nonexistent artifact"
+            );
+        }
         let art = sessions[0]
             .preferred_artifact()
             .unwrap()
@@ -1713,6 +1883,97 @@ mod tests {
     }
 
     #[test]
+    fn drift_reports_the_committed_nested_future_field_exactly() {
+        let bytes = std::fs::read(fixture_path("envelope_session.jsonl")).unwrap();
+        let (_t, p) = home_with(THREAD_A, &bytes, false);
+        let report = p.drift_report().unwrap();
+        assert_eq!(
+            report
+                .unknown_field_paths
+                .get("event_msg/token_count/nested_future_field"),
+            Some(&1),
+            "the committed nested drift fixture must be reported at its exact path: {:?}",
+            report.unknown_field_paths
+        );
+        // Known keys are not drift.
+        assert!(!report
+            .unknown_field_paths
+            .keys()
+            .any(|k| k.ends_with("/info") || k.ends_with("/rate_limits")));
+    }
+
+    #[test]
+    fn drift_counts_missing_type_discriminators() {
+        let content = format!(
+            "{}\n{{\"timestamp\":\"2026-07-16T23:40:00.000Z\",\"payload\":{{}}}}\n{{\"timestamp\":\"2026-07-16T23:41:00.000Z\",\"type\":42,\"payload\":{{}}}}\n",
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A}))
+        );
+        let (_t, p) = home_with(THREAD_A, content.as_bytes(), false);
+        let report = p.drift_report().unwrap();
+        assert_eq!(report.missing_type_discriminators, 2);
+    }
+
+    #[test]
+    fn drift_classifies_active_tail_as_transient_not_permanent() {
+        let content = format!(
+            "{}\n{}",
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            r#"{"timestamp":"2026-07-16T23:59:59.000Z","type":"response_item","payload":{"type":"mess"#
+        );
+        let (_t, p) = home_with(THREAD_A, content.as_bytes(), false);
+        let report = p.drift_report().unwrap();
+        assert_eq!(report.active_tails, 1, "{report:?}");
+        assert_eq!(
+            report.unparseable, 0,
+            "a partial tail is not permanent drift"
+        );
+    }
+
+    #[test]
+    fn drift_buckets_reasoning_availability_by_era() {
+        // March (summaries present) vs April (encrypted-only): the aggregate
+        // ratio must not be the only signal — the exact original research
+        // error.
+        let content = [
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            serde_json::json!({"timestamp": "2026-03-15T10:00:00.000Z", "type": "response_item", "payload": {"type": "reasoning", "summary": [{"type": "summary_text", "text": "march headline"}], "encrypted_content": "x"}}).to_string(),
+            serde_json::json!({"timestamp": "2026-04-15T10:00:00.000Z", "type": "response_item", "payload": {"type": "reasoning", "summary": [], "encrypted_content": "y"}}).to_string(),
+        ]
+        .join("\n")
+            + "\n";
+        let (_t, p) = home_with(THREAD_A, content.as_bytes(), false);
+        let report = p.drift_report().unwrap();
+        assert_eq!(report.reasoning_by_month.get("2026-03"), Some(&(1, 1)));
+        assert_eq!(report.reasoning_by_month.get("2026-04"), Some(&(1, 0)));
+    }
+
+    #[test]
+    fn one_unreadable_session_does_not_suppress_healthy_results() {
+        let tmp = tempfile::tempdir().unwrap();
+        let day = tmp.path().join("sessions/2026/07/16");
+        std::fs::create_dir_all(&day).unwrap();
+        // Healthy session.
+        std::fs::write(
+            day.join(format!("rollout-2026-07-16T23-38-33-{THREAD_A}.jsonl")),
+            session_a_content(),
+        )
+        .unwrap();
+        // Garbage bytes masquerading as a .zst artifact: opening fails.
+        std::fs::write(
+            day.join(format!("rollout-2026-07-16T22-00-00-{THREAD_B}.jsonl.zst")),
+            b"this is not a zstd frame at all",
+        )
+        .unwrap();
+        let p = CodexProvider::new(tmp.path());
+        let report = p.drift_report().unwrap();
+        assert!(report.sessions >= 1, "healthy session must be reported");
+        assert!(
+            report.envelope_types.contains_key("session_meta"),
+            "healthy content present: {report:?}"
+        );
+    }
+
+    #[test]
     fn drift_report_measures_reasoning_summary_availability() {
         let content = [
             envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
@@ -1744,6 +2005,65 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_token_is_injective_under_hostile_field_contents() {
+        use super::super::descriptor_state_token;
+        // These two states COLLIDE under the previous \x1f-joined encoding:
+        // locator "a\x1fb" + revision "c" vs locator "a" + revision
+        // "b\x1fc" join to identical bytes. Length-prefixing must
+        // distinguish them.
+        let art = |locator: &str, revision: &str| SessionArtifact {
+            snapshot: ArtifactSnapshot {
+                id: ArtifactId {
+                    provider_instance: "r".into(),
+                    locator: locator.into(),
+                },
+                revision: ArtifactRevision(revision.into()),
+            },
+            form: ArtifactForm::PlainFile,
+            archived: false,
+        };
+        let d1 = SessionDescriptor {
+            key: key(THREAD_A),
+            artifacts: vec![art("a\u{1f}b", "c")],
+        };
+        let d2 = SessionDescriptor {
+            key: key(THREAD_A),
+            artifacts: vec![art("a", "b\u{1f}c")],
+        };
+        assert_ne!(
+            descriptor_state_token(&d1),
+            descriptor_state_token(&d2),
+            "delimiter smuggling must not collide tokens"
+        );
+    }
+
+    #[test]
+    fn cache_token_gates_the_provider_keyed_cache_end_to_end() {
+        use crate::cache::LruCache;
+        let (_tmp, p) = fixture();
+        let k = key(THREAD_B);
+        let token = p.parse_cache_token(&k).unwrap();
+        let parsed_len = p.parse(&k).unwrap().entries.len();
+
+        let mut cache: LruCache<usize> = LruCache::new(8, 1024);
+        cache.insert_keyed(&k, token.clone(), parsed_len, 64);
+        // Same provider config: hit.
+        assert_eq!(
+            cache.get_keyed(&k, &p.parse_cache_token(&k).unwrap()),
+            Some(&parsed_len)
+        );
+        // Stricter limits => different token => the cached parse from the
+        // laxer configuration is NOT shared.
+        let (_tmp2, strict) = fixture();
+        let strict = strict.with_max_decompressed(16);
+        assert_eq!(
+            cache.get_keyed(&k, &strict.parse_cache_token(&k).unwrap()),
+            None,
+            "different safety limits must never share a cached parse"
+        );
+    }
+
+    #[test]
     fn descriptor_token_distinguishes_preferred_flip_with_identical_revisions() {
         use super::super::descriptor_state_token;
         let art = |instance: &str, locator: &str| SessionArtifact {
@@ -1772,7 +2092,9 @@ mod tests {
             descriptor_state_token(&both),
             descriptor_state_token(&only_b)
         );
-        assert!(descriptor_state_token(&both).contains("pref="));
+        // (The canonical encoding has no human-readable marker; the
+        // preferred artifact id is covered by the trailing length-prefixed
+        // fields, proven by the inequality above.)
     }
 
     #[test]

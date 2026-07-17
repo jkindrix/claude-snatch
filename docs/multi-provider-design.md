@@ -651,6 +651,41 @@ three levels, reasoning-summary availability measurement. Real-corpus run:
 this corpus) and reasoning summaries 24779/27765 (~89%), independently
 reproducing the design-round census. 58 provider tests total.
 
+## Review round 15 (2026-07-17, same Codex agent — B1 exit audit)
+
+Three contract failures fixed, each with a test that fails against 48513e3:
+(1) parse() reconstructed record artifact ids from lossy path display — on
+non-UTF-8 homes every RecordRef named a nonexistent artifact; the id now
+comes from the resolved descriptor, validate_provenance() rejects any
+disposition/origin whose artifact is absent from descriptor.artifacts
+(hostile forged-reference test), and the non-UTF-8 test asserts membership
+for every RecordRef. (2) descriptor_state_token's \x1f/\x1e joins were the
+same delimiter-collision class fixed in session/entry ids — replaced with a
+canonical length-prefixed encoding including the COMPLETE preferred
+ArtifactId; an adversarial test collides under the old encoding, and
+parse_cache_token is exercised end-to-end through the provider-keyed cache
+(stricter limits never share a cached parse). (3) drift_report now meets
+the documented contract: unknown NESTED field paths against curated
+baselines (the committed nested_future_field reports at its exact path),
+unterminated active tails classified transient (never permanent drift),
+era-bucketed reasoning availability by month (the aggregate-only ratio was
+exactly the original research error), missing/malformed type
+discriminators counted, and one unreadable session never suppresses
+healthy results. EXPLICIT RE-PHASING: CLI `snatch doctor` surfacing and a
+provider-neutral diagnostics hook are Phase B2 scope — B1 delivers the
+analysis capability only.
+
+Instrument validation: the nested-field scan's first real-corpus run
+DISCOVERED vocabulary the source research missed ("metadata" on
+message/function_call/reasoning and reasoning's metadata passthrough —
+2,339 occurrences), absorbed into the baselines with that provenance;
+corpus now reports 0 unknown paths, 9 era buckets, 0 active tails,
+0 missing discriminators, 0 unreadable. Process note (owned): rounds 12-14
+exhibited requirement evaporation — "doctor drift surfacing" was reported
+complete while delivering type counts plus one aggregate ratio; this round
+restores the documented scope and the re-phasing above states what remains
+honestly. 66 provider tests.
+
 ## Open questions (to settle in-phase)
 
 1. Two-stream dedup policy details (B3, empirical — under the emission-
