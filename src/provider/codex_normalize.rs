@@ -92,7 +92,10 @@ fn joined_text(payload: &Value) -> String {
 /// map directly later; response items left unclaimed simply have no twin.
 #[derive(Default)]
 struct MatchPlan {
-    /// event ordinal → proven twin response ordinal.
+    /// event ordinal → target ordinal of its proven twin: the authoritative
+    /// response record, or (for a repeated identical native event) the
+    /// representative event's own target/record. Targets are always MAPPED
+    /// records — the validator enforces it.
     suppressed_events: BTreeMap<u64, u64>,
     /// response_item user-message ordinals claimed by a `user_message`
     /// event → HUMAN-authored prompts.
@@ -139,6 +142,45 @@ fn plan_window(window: &[(RecordRef, Value)], plan: &mut MatchPlan) {
     let mut users: Vec<Candidate> = Vec::new();
     let mut agents: Vec<Candidate> = Vec::new();
     let mut sections: Vec<Candidate> = Vec::new();
+
+    // Event-to-event dedup FIRST (round-23 blocker 2): identical native
+    // events — same payload type, same payload JSON, same timestamp,
+    // same window — are one semantic emission. Later copies map to the
+    // representative; repeated text at a DIFFERENT timestamp stays
+    // distinct because the timestamp is part of the fingerprint.
+    let mut representatives: BTreeMap<(String, String, String), u64> = BTreeMap::new();
+    let mut event_duplicates: BTreeMap<u64, u64> = BTreeMap::new();
+    for (record, value) in window {
+        let (et, payload, pt) = envelope_parts(value);
+        if et != "event_msg"
+            || !matches!(
+                pt,
+                "user_message"
+                    | "agent_message"
+                    | "agent_reasoning"
+                    | "agent_reasoning_raw_content"
+            )
+        {
+            continue;
+        }
+        let fingerprint = (
+            pt.to_string(),
+            payload.to_string(),
+            value
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        );
+        match representatives.get(&fingerprint) {
+            Some(rep) => {
+                event_duplicates.insert(record.ordinal, *rep);
+            }
+            None => {
+                representatives.insert(fingerprint, record.ordinal);
+            }
+        }
+    }
     for (record, value) in window {
         let (et, payload, pt) = envelope_parts(value);
         if et != "response_item" {
@@ -178,7 +220,7 @@ fn plan_window(window: &[(RecordRef, Value)], plan: &mut MatchPlan) {
     }
     for (record, value) in window {
         let (et, payload, pt) = envelope_parts(value);
-        if et != "event_msg" {
+        if et != "event_msg" || event_duplicates.contains_key(&record.ordinal) {
             continue;
         }
         let twin = match pt {
@@ -204,6 +246,13 @@ fn plan_window(window: &[(RecordRef, Value)], plan: &mut MatchPlan) {
             plan.suppressed_events.insert(record.ordinal, twin_ordinal);
         }
     }
+    // Duplicates target their representative's twin when it has one, else
+    // the representative record itself (which maps, and so satisfies the
+    // validator's mapped-twin rule).
+    for (dup, rep) in event_duplicates {
+        let target = plan.suppressed_events.get(&rep).copied().unwrap_or(rep);
+        plan.suppressed_events.insert(dup, target);
+    }
 }
 
 /// Raw cumulative usage triple straight from a codex usage object.
@@ -227,36 +276,29 @@ impl RawUsage {
             output: get("output_tokens"),
         }
     }
-
-    /// RAW pass-through for observations: `input_tokens` carries codex's
-    /// own input number unmodified (its relationship to `cached` is
-    /// era-dependent — the corpus contains sessions where cumulative cached
-    /// outgrows cumulative input, i.e. input EXCLUDES cached), so replaying
-    /// the stream from observations is exact.
-    fn raw_observation(self) -> Usage {
-        Usage {
-            input_tokens: self.input,
-            output_tokens: self.output,
-            cache_read_input_tokens: Some(self.cached),
-            ..Default::default()
-        }
-    }
-
-    /// The clamped cumulative FRESH-input stream value (era-safe: never
-    /// negative regardless of whether input includes cached).
-    fn fresh(self) -> u64 {
-        self.input.saturating_sub(self.cached)
-    }
 }
 
 /// A usage event waiting for its assistant emission (round-22: token
-/// events may precede the response records they describe).
+/// events may precede the response records they describe). Carries the
+/// window it was born in — pending usage never crosses a turn/window
+/// boundary (round-23 blocker 3): at the boundary it flushes as a
+/// preserved, unattributed record instead of leaking into a later turn.
 struct PendingUsage {
     record: RecordRef,
     value: Value,
+    window: u64,
     canonical: Usage,
-    last_raw: Usage,
-    total_raw: Usage,
+    last_obs: ObservationNumbers,
+    total_obs: ObservationNumbers,
+    ambiguous: bool,
+}
+
+/// Raw native numbers destined for an observation.
+#[derive(Clone, Copy)]
+struct ObservationNumbers {
+    input: u64,
+    cached: u64,
+    output: u64,
 }
 
 /// Session-level state threaded through the linear walk.
@@ -272,10 +314,41 @@ struct WalkState {
     /// Previous cumulative usage totals (None before the first observation;
     /// re-seeded across epoch resets).
     prev_total: Option<RawUsage>,
+    /// Session usage basis (detected up front from cumulative totals).
+    usage_basis: super::UsageBasis,
     /// Usage events awaiting the next assistant emission.
     pending_usage: Vec<PendingUsage>,
     /// Previous mapped entry's synthetic uuid (linear threading).
     last_uuid: Option<String>,
+}
+
+/// Detect the session's usage basis from its cumulative totals: an
+/// includes-cached basis makes `cached > input` impossible, so observing it
+/// anywhere proves the excludes basis. Sessions without usage records get
+/// `Unknown` (no canonical derivation happens anyway).
+fn detect_usage_basis(records: &[(RecordRef, Value)]) -> super::UsageBasis {
+    let mut saw_usage = false;
+    for (_, value) in records {
+        let (et, payload, pt) = envelope_parts(value);
+        if et == "event_msg" && pt == "token_count" {
+            if let Some(total) = payload
+                .get("info")
+                .and_then(|i| i.get("total_token_usage"))
+                .filter(|t| t.is_object())
+            {
+                saw_usage = true;
+                let raw = RawUsage::read(Some(total));
+                if raw.cached > raw.input {
+                    return super::UsageBasis::InputExcludesCached;
+                }
+            }
+        }
+    }
+    if saw_usage {
+        super::UsageBasis::InputIncludesCached
+    } else {
+        super::UsageBasis::Unknown
+    }
 }
 
 pub(super) fn normalize(
@@ -290,6 +363,7 @@ pub(super) fn normalize(
         diagnostics: IngestionDiagnostics::default(),
     };
     let plan = plan_matches(records);
+    let usage_basis = detect_usage_basis(records);
 
     let mut state = WalkState {
         version: "unknown".into(),
@@ -299,6 +373,7 @@ pub(super) fn normalize(
         window: 0,
         last_assistant: None,
         prev_total: None,
+        usage_basis,
         pending_usage: Vec::new(),
         last_uuid: None,
     };
@@ -313,6 +388,13 @@ pub(super) fn normalize(
 
         if is_window_boundary(envelope_type, payload_type) {
             state.window += 1;
+            // Pending usage from the closed window flushes as PRESERVED,
+            // unattributed records — it must never attach to a later
+            // turn's assistant (round-23 blocker 3).
+            let stale: Vec<PendingUsage> = std::mem::take(&mut state.pending_usage);
+            for pending in stale {
+                push_unknown(pending.value, key, &pending.record, &mut out);
+            }
         }
 
         // State updates from records that stay Unknown.
@@ -394,7 +476,10 @@ pub(super) fn normalize(
                         record: record.clone(),
                         outcome: RecordOutcome::Suppressed {
                             reason: SuppressionReason::DuplicateStream {
-                                twin_ordinal: *twin,
+                                twin: RecordRef {
+                                    artifact: record.artifact.clone(),
+                                    ordinal: *twin,
+                                },
                             },
                         },
                     });
@@ -481,9 +566,13 @@ fn map_unmatched_event(
             );
             let id = out.entries[idx].id.clone();
             if let Some(sem) = out.semantics.get_mut(&id) {
+                // Unmatched (non-duplicate) user events have no response
+                // twin: plausibly steering/mid-turn injections — human-
+                // authored but NOT a turn boundary (round-23: an unmatched
+                // user_message must not automatically open a human turn).
                 sem.prompt = Some(PromptSemantics {
                     authorship: PromptAuthorship::Human,
-                    delivery: PromptDelivery::TurnBoundary,
+                    delivery: PromptDelivery::MidTurn,
                 });
             }
         }
@@ -687,11 +776,18 @@ fn normalize_web_search(
     state: &mut WalkState,
     out: &mut NormalizeOutput,
 ) {
+    // Native id field first (158/341 corpus records carry `ws_...` ids);
+    // call_id as a fallback family; a synthesized id only for the id-less
+    // era. status AND action are preserved in the input.
     let call_id = payload
-        .get("call_id")
+        .get("id")
+        .or_else(|| payload.get("call_id"))
         .and_then(Value::as_str)
         .map_or_else(|| format!("ws_{}", record.ordinal), str::to_string);
-    let input = payload.get("action").cloned().unwrap_or(Value::Null);
+    let input = serde_json::json!({
+        "status": payload.get("status").cloned().unwrap_or(Value::Null),
+        "action": payload.get("action").cloned().unwrap_or(Value::Null),
+    });
     let idx = push_assistant(
         vec![ContentBlock::ToolUse(ToolUse {
             id: call_id.clone(),
@@ -798,13 +894,22 @@ fn handle_token_count(
     };
     let total = RawUsage::read(info.get("total_token_usage"));
     let last = RawUsage::read(info.get("last_token_usage"));
-    // Cumulative transition, per component on clamped streams (era-safe):
-    // unchanged → zero; a decrease in input or output → epoch reset (the
-    // new cumulative IS the epoch's first delta); otherwise differences of
-    // the fresh/cached/output streams.
+    // Cumulative FRESH stream under the DETECTED basis (round-23 blocker 4:
+    // canonical derivation is only meaningful when the basis is known):
+    // includes-cached → fresh = input − cached; excludes → fresh = input.
+    let fresh_of = |r: RawUsage| match state.usage_basis {
+        super::UsageBasis::InputIncludesCached => r.input.saturating_sub(r.cached),
+        super::UsageBasis::InputExcludesCached | super::UsageBasis::Unknown => r.input,
+    };
+    // Transition rule: unchanged → zero; input/output decrease → epoch
+    // reset (the new cumulative IS the first delta). A fresh decrease
+    // WITHOUT a reset is uninterpretable under the detected basis: it is
+    // surfaced as an AMBIGUOUS observation and contributes zero fresh —
+    // never silently clamped into a wrong number.
+    let mut ambiguous = false;
     let canonical = match state.prev_total {
         None => Usage {
-            input_tokens: total.fresh(),
+            input_tokens: fresh_of(total),
             output_tokens: total.output,
             cache_read_input_tokens: Some(total.cached),
             ..Default::default()
@@ -812,14 +917,19 @@ fn handle_token_count(
         Some(prev) => {
             if total.input < prev.input || total.output < prev.output {
                 Usage {
-                    input_tokens: total.fresh(),
+                    input_tokens: fresh_of(total),
                     output_tokens: total.output,
                     cache_read_input_tokens: Some(total.cached),
                     ..Default::default()
                 }
             } else {
+                let fresh_now = fresh_of(total);
+                let fresh_prev = fresh_of(prev);
+                if fresh_now < fresh_prev {
+                    ambiguous = true;
+                }
                 Usage {
-                    input_tokens: total.fresh().saturating_sub(prev.fresh()),
+                    input_tokens: fresh_now.saturating_sub(fresh_prev),
                     output_tokens: total.output - prev.output,
                     cache_read_input_tokens: Some(total.cached.saturating_sub(prev.cached)),
                     ..Default::default()
@@ -832,17 +942,33 @@ fn handle_token_count(
     let pending = PendingUsage {
         record: record.clone(),
         value: value.clone(),
+        window: state.window,
         canonical,
-        last_raw: last.raw_observation(),
-        total_raw: total.raw_observation(),
+        last_obs: ObservationNumbers {
+            input: last.input,
+            cached: last.cached,
+            output: last.output,
+        },
+        total_obs: ObservationNumbers {
+            input: total.input,
+            cached: total.cached,
+            output: total.output,
+        },
+        ambiguous,
     };
+    let basis = state.usage_basis;
     match state.last_assistant {
-        Some((idx, window)) if window == state.window => attach_usage(pending, idx, out),
+        Some((idx, window)) if window == state.window => attach_usage(pending, basis, idx, out),
         _ => state.pending_usage.push(pending),
     }
 }
 
-fn attach_usage(pending: PendingUsage, idx: usize, out: &mut NormalizeOutput) {
+fn attach_usage(
+    pending: PendingUsage,
+    basis: super::UsageBasis,
+    idx: usize,
+    out: &mut NormalizeOutput,
+) {
     let id = out.entries[idx].id.clone();
     out.entry_origins
         .get_mut(&id)
@@ -850,7 +976,7 @@ fn attach_usage(pending: PendingUsage, idx: usize, out: &mut NormalizeOutput) {
         .push(pending.record.clone());
     out.diagnostics.mapped += 1;
     out.record_dispositions.push(RecordDisposition {
-        record: pending.record,
+        record: pending.record.clone(),
         outcome: RecordOutcome::Mapped(vec![id.clone()]),
     });
     if let LogEntry::Assistant(msg) = &mut out.entries[idx].entry {
@@ -862,16 +988,25 @@ fn attach_usage(pending: PendingUsage, idx: usize, out: &mut NormalizeOutput) {
         }
     }
     if let Some(sem) = out.semantics.get_mut(&id) {
-        sem.usage.push(UsageObservation {
-            scope: UsageScope::Call,
-            aggregation: UsageAggregation::Delta,
-            usage: pending.last_raw,
-        });
-        sem.usage.push(UsageObservation {
-            scope: UsageScope::Session,
-            aggregation: UsageAggregation::Cumulative,
-            usage: pending.total_raw,
-        });
+        for (scope, aggregation, numbers) in [
+            (UsageScope::Call, UsageAggregation::Delta, pending.last_obs),
+            (
+                UsageScope::Session,
+                UsageAggregation::Cumulative,
+                pending.total_obs,
+            ),
+        ] {
+            sem.usage.push(UsageObservation {
+                scope,
+                aggregation,
+                record: pending.record.clone(),
+                basis,
+                ambiguous: pending.ambiguous,
+                input_tokens: numbers.input,
+                cached_input_tokens: numbers.cached,
+                output_tokens: numbers.output,
+            });
+        }
     }
 }
 
@@ -951,10 +1086,13 @@ fn push_assistant(
     });
     let idx = push_mapped(entry, key, record, state, out);
     state.last_assistant = Some((idx, state.window));
-    // Usage events that arrived before this emission attach now.
+    // Usage events that arrived earlier IN THIS WINDOW attach now (a
+    // boundary already flushed anything older as preserved).
     let pending: Vec<PendingUsage> = std::mem::take(&mut state.pending_usage);
+    let basis = state.usage_basis;
     for p in pending {
-        attach_usage(p, idx, out);
+        debug_assert_eq!(p.window, state.window, "boundary flush must have run");
+        attach_usage(p, basis, idx, out);
     }
     idx
 }

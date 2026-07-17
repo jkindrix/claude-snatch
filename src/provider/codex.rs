@@ -934,6 +934,7 @@ impl SourceProvider for CodexProvider {
         ProviderCapabilities {
             native_export: true,
             raw_jsonl: true,
+            semantic_annotations: true,
         }
     }
 
@@ -1337,118 +1338,138 @@ mod tests {
                     if !session.validate_provenance().is_empty() {
                         violations += 1;
                     }
-                    // Round-22 semantic audits, asserted for EVERY session:
-                    // (a) every DuplicateStream suppression carries a twin
-                    // whose record actually MAPPED — proof, not assumption.
-                    let mapped_ordinals: std::collections::BTreeSet<u64> = session
-                        .record_dispositions
-                        .iter()
-                        .filter(|d| matches!(d.outcome, RecordOutcome::Mapped(_)))
-                        .map(|d| d.record.ordinal)
-                        .collect();
+                    // Round-23 SOURCE-DERIVED semantic audits, asserted for
+                    // EVERY session. The oracle reads the NATIVE record
+                    // stream itself — never observations or any other
+                    // normalizer output — and applies the documented rules
+                    // as independently written test code.
+                    let (_, audit_path) = p.resolve(&d.key).unwrap();
+                    let raw_records: Vec<(u64, serde_json::Value)> = {
+                        let mut reader = p.open_records(&audit_path).unwrap();
+                        let mut buf = Vec::new();
+                        let mut ordinal = 0u64;
+                        let mut recs = Vec::new();
+                        loop {
+                            buf.clear();
+                            match reader.read_until(b'\n', &mut buf) {
+                                Ok(0) => break,
+                                Ok(_) => {
+                                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&buf)
+                                    {
+                                        recs.push((ordinal, v));
+                                    }
+                                    ordinal += 1;
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        recs
+                    };
+                    let raw_by_ordinal: std::collections::BTreeMap<u64, &serde_json::Value> =
+                        raw_records.iter().map(|(o, v)| (*o, v)).collect();
+
+                    // (a) Every DuplicateStream suppression names a mapped
+                    // twin whose NATIVE record actually contains the
+                    // suppressed event's content (type-correspondent twin).
                     for d in &session.record_dispositions {
                         if let RecordOutcome::Suppressed {
-                            reason:
-                                super::super::SuppressionReason::DuplicateStream { twin_ordinal },
+                            reason: super::super::SuppressionReason::DuplicateStream { twin },
                         } = &d.outcome
                         {
+                            let ev = raw_by_ordinal[&d.record.ordinal];
+                            let tw = raw_by_ordinal[&twin.ordinal];
+                            let ev_payload = &ev["payload"];
+                            let ev_text = ev_payload["message"]
+                                .as_str()
+                                .or_else(|| ev_payload["text"].as_str())
+                                .unwrap_or("");
+                            let tw_str = tw.to_string();
                             assert!(
-                                mapped_ordinals.contains(twin_ordinal),
-                                "a DuplicateStream suppression must point at a mapped twin"
+                                tw_str.contains(
+                                    serde_json::to_string(ev_text).unwrap().trim_matches('"')
+                                ) || ev_text.is_empty(),
+                                "duplicate-stream twin does not contain the event's content"
                             );
                         }
                     }
-                    // (b) canonical usage reconciles: rebuild the FULL
-                    // cumulative stream from provenance — attached
-                    // observations (paired with their token-record ordinals
-                    // via entry_origins) plus PRESERVED unattached
-                    // token_count entries — then replay the normalizer's
-                    // transition rule independently. The canonical deltas of
-                    // attached events must equal the summed entry usage;
-                    // preserved events contribute to the baseline but not
-                    // the sums (they were never attributed — and never
-                    // lost).
-                    let mut stream: Vec<(u64, (u64, u64, u64), bool)> = Vec::new();
-                    for e in &session.entries {
-                        match &e.entry {
-                            crate::model::LogEntry::Assistant(_) => {
-                                if let Some(sem) = session.semantics.get(&e.id) {
-                                    let cumulative: Vec<(u64, u64, u64)> = sem
-                                        .usage
-                                        .iter()
-                                        .filter(|o| {
-                                            matches!(
-                                                o.aggregation,
-                                                crate::provider::UsageAggregation::Cumulative
-                                            )
-                                        })
-                                        .map(|o| {
-                                            // Observations are RAW
-                                            // pass-through: input as codex
-                                            // reported it.
-                                            (
-                                                o.usage.input_tokens,
-                                                o.usage.cache_read_input_tokens.unwrap_or(0),
-                                                o.usage.output_tokens,
-                                            )
-                                        })
-                                        .collect();
-                                    let tc_ordinals: Vec<u64> = session.entry_origins[&e.id][1..]
-                                        .iter()
-                                        .map(|r| r.ordinal)
-                                        .collect();
-                                    assert_eq!(
-                                        cumulative.len(),
-                                        tc_ordinals.len(),
-                                        "one cumulative observation per attached usage record"
-                                    );
-                                    for (ord, c) in tc_ordinals.into_iter().zip(cumulative) {
-                                        stream.push((ord, c, true));
-                                    }
-                                }
-                            }
-                            crate::model::LogEntry::Unknown(v)
-                                if v["payload"]["type"] == "token_count"
-                                    && v["payload"]["info"]["total_token_usage"].is_object() =>
-                            {
-                                let u = &v["payload"]["info"]["total_token_usage"];
-                                let g = |k: &str| u[k].as_u64().unwrap_or(0);
-                                stream.push((
-                                    e.id.ordinal,
-                                    (
-                                        g("input_tokens"),
-                                        g("cached_input_tokens"),
-                                        g("output_tokens"),
-                                    ),
-                                    false,
-                                ));
-                            }
-                            _ => {}
+
+                    // (b) Usage: partition completeness + reconciliation
+                    // from SOURCE records. Every native token_count carrying
+                    // total_token_usage must be either an origin of some
+                    // entry (attributed) or a preserved Unknown entry —
+                    // never absent (no-loss). Expected sums come from the
+                    // documented epoch/basis rules applied to the raw
+                    // stream by THIS test.
+                    let mut token_ordinals: Vec<(u64, (u64, u64, u64))> = Vec::new();
+                    for (o, v) in &raw_records {
+                        if v["type"] == "event_msg"
+                            && v["payload"]["type"] == "token_count"
+                            && v["payload"]["info"]["total_token_usage"].is_object()
+                        {
+                            let u = &v["payload"]["info"]["total_token_usage"];
+                            let g = |k: &str| u[k].as_u64().unwrap_or(0);
+                            token_ordinals.push((
+                                *o,
+                                (
+                                    g("input_tokens"),
+                                    g("cached_input_tokens"),
+                                    g("output_tokens"),
+                                ),
+                            ));
                         }
                     }
-                    stream.sort_by_key(|(ord, _, _)| *ord);
-                    // Replay the normalizer's exact rule: clamped
-                    // fresh/cached streams, reset on input/output decrease.
-                    let fresh_of = |c: &(u64, u64, u64)| c.0.saturating_sub(c.1);
+                    let mut attributed: std::collections::BTreeSet<u64> =
+                        std::collections::BTreeSet::new();
+                    for origins in session.entry_origins.values() {
+                        for r in &origins[1..] {
+                            attributed.insert(r.ordinal);
+                        }
+                    }
+                    let preserved: std::collections::BTreeSet<u64> = session
+                        .entries
+                        .iter()
+                        .filter(|e| {
+                            matches!(&e.entry, crate::model::LogEntry::Unknown(v)
+                                if v["payload"]["type"] == "token_count"
+                                    && v["payload"]["info"]["total_token_usage"].is_object())
+                        })
+                        .map(|e| e.id.ordinal)
+                        .collect();
+                    for (o, _) in &token_ordinals {
+                        assert!(
+                            attributed.contains(o) || preserved.contains(o),
+                            "usage record neither attributed nor preserved (lost)"
+                        );
+                    }
+
+                    // Independent basis detection (documented rule: cached >
+                    // input anywhere proves the excludes basis).
+                    let excludes_basis = token_ordinals.iter().any(|(_, t)| t.1 > t.0);
+                    let fresh_of = |t: &(u64, u64, u64)| {
+                        if excludes_basis {
+                            t.0
+                        } else {
+                            t.0.saturating_sub(t.1)
+                        }
+                    };
                     let mut expected = (0u64, 0u64, 0u64);
                     let mut prev: Option<(u64, u64, u64)> = None;
-                    for (_, c, attached) in &stream {
+                    for (o, t) in &token_ordinals {
                         let delta = match prev {
-                            None => (fresh_of(c), c.1, c.2),
+                            None => (fresh_of(t), t.1, t.2),
                             Some(pv) => {
-                                if c.0 < pv.0 || c.2 < pv.2 {
-                                    (fresh_of(c), c.1, c.2)
+                                if t.0 < pv.0 || t.2 < pv.2 {
+                                    (fresh_of(t), t.1, t.2)
                                 } else {
-                                    (
-                                        fresh_of(c).saturating_sub(fresh_of(&pv)),
-                                        c.1.saturating_sub(pv.1),
-                                        c.2 - pv.2,
-                                    )
+                                    let (fa, fb) = (fresh_of(t), fresh_of(&pv));
+                                    // Ambiguous fresh decrease contributes
+                                    // zero fresh (documented rule).
+                                    (fa.saturating_sub(fb), t.1.saturating_sub(pv.1), t.2 - pv.2)
                                 }
                             }
                         };
-                        prev = Some(*c);
-                        if *attached {
+                        prev = Some(*t);
+                        if attributed.contains(o) {
                             expected.0 += delta.0;
                             expected.1 += delta.1;
                             expected.2 += delta.2;
@@ -1466,9 +1487,22 @@ mod tests {
                     }
                     assert_eq!(
                         entry_sum, expected,
-                        "canonical usage must reconcile against an independent replay of \
-                         the cumulative stream"
+                        "canonical usage must reconcile against the source-derived oracle"
                     );
+
+                    // (c) Every usage observation names its source record
+                    // directly, and that record is a real native token_count.
+                    for sem in session.semantics.values() {
+                        for obs in &sem.usage {
+                            let raw = raw_by_ordinal
+                                .get(&obs.record.ordinal)
+                                .expect("observation names a real record");
+                            assert_eq!(
+                                raw["payload"]["type"], "token_count",
+                                "observation source must be a token_count record"
+                            );
+                        }
+                    }
                     // Completeness: the parser must have reached every
                     // physical record — compare against an independent count
                     // of the preferred artifact's records. Active sessions
@@ -3079,19 +3113,30 @@ mod tests {
             "harness context must never be claimed human"
         );
         assert_eq!(auth(2), Some(crate::provider::PromptAuthorship::Human));
-        // One event suppressed (proven twin ordinal 2), the duplicate maps.
+        // Round-23: the repeated identical event is ONE semantic emission —
+        // both events suppress against the same authoritative response
+        // (ordinal 2); no duplicate human entry exists at all.
         let twins: Vec<u64> = parsed
             .record_dispositions
             .iter()
             .filter_map(|d| match &d.outcome {
                 RecordOutcome::Suppressed {
-                    reason: super::super::SuppressionReason::DuplicateStream { twin_ordinal },
-                } => Some(*twin_ordinal),
+                    reason: super::super::SuppressionReason::DuplicateStream { twin },
+                } => Some(twin.ordinal),
                 _ => None,
             })
             .collect();
-        assert_eq!(twins, vec![2]);
-        assert_eq!(auth(4), Some(crate::provider::PromptAuthorship::Human));
+        assert_eq!(twins, vec![2, 2]);
+        let human_entries = parsed
+            .semantics
+            .values()
+            .filter(|s| {
+                s.prompt.is_some_and(|p| {
+                    matches!(p.authorship, crate::provider::PromptAuthorship::Human)
+                })
+            })
+            .count();
+        assert_eq!(human_entries, 1, "exactly one human emission");
     }
 
     #[test]
@@ -3214,6 +3259,175 @@ mod tests {
         };
         assert_eq!(turn(2).as_deref(), Some("turn-new"));
         assert_eq!(turn(3).as_deref(), Some("turn-new"));
+    }
+
+    #[test]
+    fn same_text_at_different_timestamps_stays_distinct() {
+        // Fingerprint includes the timestamp: repeated text later in the
+        // window is a REAL second emission, not a duplicate.
+        let mk = |ts: &str| {
+            format!(
+                "{{\"timestamp\":\"{ts}\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"agent_message\",\"message\":\"again\"}}}}"
+            )
+        };
+        let (_tmp, p) = normalize_home(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            mk("2026-07-16T10:00:01.000Z"),
+            mk("2026-07-16T10:00:05.000Z"),
+        ]);
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        assert_eq!(parsed.diagnostics.suppressed, 0);
+        let texts = parsed
+            .entries
+            .iter()
+            .filter(|e| matches!(&e.entry, crate::model::LogEntry::Assistant(_)))
+            .count();
+        assert_eq!(texts, 2, "distinct timestamps are distinct emissions");
+    }
+
+    #[test]
+    fn pending_usage_never_crosses_a_window_boundary() {
+        // Corpus shape: token_count → abort/boundary → later assistant. The
+        // usage must be preserved unattributed, never attached to the later
+        // turn.
+        let (_tmp, p) = normalize_home(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "token_count", "info": {
+                "total_token_usage": {"input_tokens": 100, "cached_input_tokens": 0, "output_tokens": 10}}}),
+            ),
+            envelope_line(
+                "turn_context",
+                serde_json::json!({"turn_id": "t2", "model": "m"}),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "later turn"}]}),
+            ),
+        ]);
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        assert!(parsed.validate_provenance().is_empty());
+        // The assistant in the later window received NO usage.
+        for e in &parsed.entries {
+            if let crate::model::LogEntry::Assistant(m) = &e.entry {
+                assert!(
+                    m.message.usage.is_none(),
+                    "usage leaked across the boundary"
+                );
+            }
+        }
+        // The token record is preserved, not lost.
+        assert!(parsed.entries.iter().any(|e| {
+            matches!(&e.entry, crate::model::LogEntry::Unknown(v)
+                if v["payload"]["type"] == "token_count")
+        }));
+    }
+
+    #[test]
+    fn excludes_basis_is_detected_and_ambiguity_is_surfaced() {
+        // Era shape found in the corpus: cumulative cached exceeds
+        // cumulative input → the input number EXCLUDES cached tokens.
+        let tc = |input: u64, cached: u64, output: u64| {
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "token_count", "info": {
+                "total_token_usage": {"input_tokens": input, "cached_input_tokens": cached, "output_tokens": output}}}),
+            )
+        };
+        let (_tmp, p) = normalize_home(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "a"}]}),
+            ),
+            tc(100, 900, 10), // cached > input: proves excludes basis
+            tc(150, 1400, 20),
+        ]);
+        let parsed = p.parse(&key(THREAD_A)).unwrap();
+        let sem = parsed
+            .semantics
+            .values()
+            .find(|s| !s.usage.is_empty())
+            .expect("usage semantics");
+        assert!(sem
+            .usage
+            .iter()
+            .all(|o| matches!(o.basis, crate::provider::UsageBasis::InputExcludesCached)));
+        // Under the excludes basis fresh = input: 100 then +50 = 150 total.
+        let mut fresh = 0u64;
+        for e in &parsed.entries {
+            if let crate::model::LogEntry::Assistant(m) = &e.entry {
+                if let Some(u) = &m.message.usage {
+                    fresh += u.input_tokens;
+                }
+            }
+        }
+        assert_eq!(fresh, 150, "excludes basis: fresh input is the raw input");
+        // Every observation names its source record directly.
+        for o in &sem.usage {
+            assert!(o.record.ordinal == 2 || o.record.ordinal == 3);
+        }
+
+        // Ambiguity: an includes-basis session whose derived fresh drops
+        // without a reset is SURFACED, and contributes zero fresh.
+        let (_tmp2, p2) = normalize_home(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "a"}]}),
+            ),
+            tc(1000, 100, 10), // fresh 900
+            tc(1050, 700, 20), // fresh 350: dropped, input/output monotonic
+        ]);
+        let parsed2 = p2.parse(&key(THREAD_A)).unwrap();
+        let sem2 = parsed2
+            .semantics
+            .values()
+            .find(|s| !s.usage.is_empty())
+            .unwrap();
+        assert!(
+            sem2.usage.iter().any(|o| o.ambiguous),
+            "the uninterpretable transition must be surfaced, not clamped away"
+        );
+    }
+
+    #[test]
+    fn forged_duplicate_twin_is_a_provenance_violation() {
+        // The validator must reject twins that are not mapped records or
+        // reference foreign artifacts.
+        let (_tmp, p) = normalize_home(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "hi"}]}),
+            ),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "agent_message", "message": "hi"}),
+            ),
+        ]);
+        let mut parsed = p.parse(&key(THREAD_A)).unwrap();
+        assert!(parsed.validate_provenance().is_empty());
+        for d in &mut parsed.record_dispositions {
+            if let RecordOutcome::Suppressed {
+                reason: super::super::SuppressionReason::DuplicateStream { twin },
+            } = &mut d.outcome
+            {
+                twin.ordinal = 0; // session_meta: an UNKNOWN record, not mapped
+            }
+        }
+        assert!(
+            parsed
+                .validate_provenance()
+                .iter()
+                .any(|v| v.contains("not a mapped record")),
+            "forged twin must be a violation"
+        );
     }
 
     #[test]

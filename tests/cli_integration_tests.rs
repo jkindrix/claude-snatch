@@ -2298,3 +2298,72 @@ mod codex_normalization_cli {
         }
     }
 }
+
+/// Round-23 blocker 1: provider-routed CLAUDE sessions must not lose
+/// prompts or collapse the timeline — the Claude adapter declares no
+/// semantic coverage, so surfaces keep classic heuristics for it.
+#[test]
+fn provider_routed_claude_messages_and_timeline_match_classic() {
+    let tmp = setup_fixture_dir();
+    let qualified = format!("claude-code:{SESSION_ID}");
+
+    let classic = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["messages", SESSION_ID, "--detail", "conversation"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let routed = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["messages", &qualified, "--detail", "conversation"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let classic_text = String::from_utf8_lossy(&classic);
+    let routed_text = String::from_utf8_lossy(&routed);
+    assert!(
+        classic_text.contains("Hello, Claude!"),
+        "classic shows the prompt: {classic_text}"
+    );
+    assert!(
+        routed_text.contains("Hello, Claude!"),
+        "provider route must retain the user prompt: {routed_text}"
+    );
+
+    let classic_tl = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["timeline", SESSION_ID])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let routed_tl = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["timeline", &qualified])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let classic_turns = String::from_utf8_lossy(&classic_tl);
+    let routed_turns = String::from_utf8_lossy(&routed_tl);
+    let count = |t: &str| {
+        t.lines()
+            .find(|l| l.contains("turns)"))
+            .map(|l| l.to_string())
+    };
+    assert_eq!(
+        count(&classic_turns).map(|l| l.split('(').nth(1).map(str::to_string)),
+        count(&routed_turns).map(|l| l.split('(').nth(1).map(str::to_string)),
+        "turn counts must match: classic={classic_turns} routed={routed_turns}"
+    );
+    assert!(
+        routed_turns.contains("User: Hello, Claude!"),
+        "provider-routed timeline must keep the human turn: {routed_turns}"
+    );
+}

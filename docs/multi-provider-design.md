@@ -855,6 +855,14 @@ complete:
    to a new provider, list its semantic assumptions and check each against
    the new provider's data (the Claude-shaped turn pairing and
    is_human_prompt failures were this class).
+6. **Oracles are source-derived** (round-23): a corpus assertion must
+   compute its expectations from NATIVE records with independently written
+   rule code — an oracle that reads the implementation's outputs and
+   replays its formula proves only internal consistency.
+7. **Cross-provider regression checks** (round-23): any surface behavior
+   keyed on provider properties ships with a test that the OTHER
+   provider's route is unchanged (the semantic-rendering flag silently
+   regressed provider-routed Claude sessions).
 
 ## B3 slice 1 — normalization mapping (empirical, corpus of 224 real sessions)
 
@@ -875,9 +883,9 @@ Mapping (each mapped record keeps its B1 id `(ordinal, 0)` — constraint 1):
   Unknown); model from last `turn_context.model` (else "unknown").
 - response_item message role=user/developer → `LogEntry::User` (input_text
   → Text); PromptSemantics Harness/TurnBoundary, upgraded to
-  Human/TurnBoundary when claimed by a `user_message` event (nearest
-  preceding unclaimed user entry; a claim arriving first holds for the
-  next user entry).
+  Human/TurnBoundary when a `user_message` event PROVED it as its twin in
+  the pre-computed match plan (B3.1.1 — the earlier "nearest preceding
+  unclaimed" claimant is gone).
 - response_item reasoning → `LogEntry::Assistant` with a ThinkingBlock
   (summary + content texts; `encrypted_content` string → signature).
 - response_item function_call / custom_tool_call → `LogEntry::Assistant`
@@ -898,7 +906,14 @@ Mapping (each mapped record keeps its B1 id `(ordinal, 0)` — constraint 1):
   directly (corpus: post-compaction "Compact task completed" notices,
   reasoning before aborted turns — 380 such events were being discarded).
   The matched `user_message` event marks exactly its twin Human (the
-  former LIFO claimant could mis-mark harness entries).
+  former LIFO claimant could mis-mark harness entries). B3.1.1 (round-23):
+  identical native events — same payload type, payload JSON, timestamp,
+  and window — are ONE semantic emission: later copies suppress against
+  the representative's target (fingerprint includes the timestamp, so
+  repeated text at a different time stays distinct); suppression twins are
+  full `RecordRef`s validated as MAPPED records by `validate_provenance`;
+  and an unmatched non-duplicate `user_message` maps as Human/**MidTurn**
+  (steering-or-unknown), never opening a turn boundary automatically.
 - event_msg token_count with usage → B3.1 (round-22): canonical usage
   derives from CUMULATIVE transitions on clamped per-component streams
   (fresh = input−cached clamped; unchanged totals → zero; input/output
@@ -934,6 +949,29 @@ Mapping (each mapped record keeps its B1 id `(ordinal, 0)` — constraint 1):
   and provider messages uses PromptSemantics for its human predicate — the
   Claude-shaped adjacent-pairing/is_human_prompt heuristics mislabeled
   harness context (a one-task real session reported 77 turns; now 1).
+
+## Review round 23 (2026-07-17, same Codex agent — B3.1 audit: B3.1.1)
+
+Verdict: B3.1 materially improved but one more bounded unit. All accepted
+and fixed (details in the amended bullets above and the protocol's new
+rules 6-7): (1) semantic rendering keyed on a new
+`ProviderCapabilities::semantic_annotations` capability — the
+bundle-presence test had regressed provider-routed CLAUDE sessions (zero
+prompts, collapsed timeline; cross-provider parity now tested); (2)
+identical native events fingerprint-deduplicate into one emission, and
+unmatched user events are Human/MidTurn, not turn boundaries; (3) pending
+usage is window-scoped (boundary flushes to preserved — corpus
+token→abort→assistant sequences no longer mis-attribute), and the
+conformance oracle is source-derived instead of replaying the production
+formula; (4) usage basis is explicit and detected (includes/excludes
+cached — both statements were true, for different eras), ambiguous
+transitions are surfaced not clamped, and observations carry raw native
+numbers + their own RecordRef + basis (positional zipping eliminated);
+integrity: `DuplicateStream { twin: RecordRef }` validated as a MAPPED
+record by `validate_provenance` (forged-twin test), web_search_call
+preserves its native `ws_...` id (158/341 corpus records; mined fixture),
+stale claimant prose removed. Corpus after B3.1.1: 224/224, 0 violations,
+source-derived oracle green on every session.
 
 ## Review round 22 (2026-07-17, same Codex agent — slice-1 audit: B3.1)
 

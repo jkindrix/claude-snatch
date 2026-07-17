@@ -14,7 +14,6 @@ use std::collections::BTreeMap;
 use std::io::Write;
 
 use super::*;
-use crate::model::usage::Usage;
 
 /// In-memory provider with hostile-to-assumptions shapes.
 pub struct FakeProvider;
@@ -121,6 +120,7 @@ impl SourceProvider for FakeProvider {
         ProviderCapabilities {
             native_export: false,
             raw_jsonl: false,
+            semantic_annotations: true,
         }
     }
 
@@ -261,7 +261,7 @@ impl SourceProvider for FakeProvider {
             RecordDisposition {
                 record: rec(3),
                 outcome: RecordOutcome::Suppressed {
-                    reason: SuppressionReason::DuplicateStream { twin_ordinal: 0 },
+                    reason: SuppressionReason::DuplicateStream { twin: rec(0) },
                 },
             },
             RecordDisposition {
@@ -315,20 +315,22 @@ impl SourceProvider for FakeProvider {
                     UsageObservation {
                         scope: UsageScope::Call,
                         aggregation: UsageAggregation::Delta,
-                        usage: Usage {
-                            input_tokens: 10,
-                            output_tokens: 5,
-                            ..Default::default()
-                        },
+                        record: rec(2),
+                        basis: super::UsageBasis::InputIncludesCached,
+                        ambiguous: false,
+                        input_tokens: 10,
+                        cached_input_tokens: 0,
+                        output_tokens: 5,
                     },
                     UsageObservation {
                         scope: UsageScope::Session,
                         aggregation: UsageAggregation::Cumulative,
-                        usage: Usage {
-                            input_tokens: 200,
-                            output_tokens: 50,
-                            ..Default::default()
-                        },
+                        record: rec(2),
+                        basis: super::UsageBasis::InputIncludesCached,
+                        ambiguous: false,
+                        input_tokens: 200,
+                        cached_input_tokens: 0,
+                        output_tokens: 50,
                     },
                 ],
                 ..Default::default()

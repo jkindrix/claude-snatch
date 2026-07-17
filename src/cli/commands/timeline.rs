@@ -102,6 +102,7 @@ pub fn run(cli: &Cli, args: &TimelineArgs) -> Result<()> {
     let conversation = Conversation::from_entries(entries)?;
     let ctx = TimelineContext {
         display_id: args.session_id.clone(),
+        semantic: false,
         chain,
         unparsed,
         session: Some(&session),
@@ -135,9 +136,11 @@ fn run_provider(cli: &Cli, args: &TimelineArgs) -> Result<()> {
         &resolution.key,
     )?;
     let unparsed = parsed.diagnostics.unparseable;
+    let semantic = resolution.provider.capabilities().semantic_annotations;
     let conversation = Conversation::from_parsed_session(parsed)?;
     let ctx = TimelineContext {
         display_id: resolution.key.to_string(),
+        semantic,
         chain: None,
         unparsed,
         session: None,
@@ -148,6 +151,11 @@ fn run_provider(cli: &Cli, args: &TimelineArgs) -> Result<()> {
 /// Shared acquisition-independent rendering context.
 struct TimelineContext<'a> {
     display_id: String,
+    /// Semantic rendering is keyed on the provider's DECLARED
+    /// semantic_annotations capability — never on the mere presence of a
+    /// bundle (a coverage-less adapter would lose prompts and collapse
+    /// timelines; round-23 blocker 1).
+    semantic: bool,
     chain: Option<super::helpers::ChainMeta>,
     unparsed: usize,
     session: Option<&'a crate::discovery::Session>,
@@ -250,7 +258,7 @@ fn render(
     // adjacent user/assistant pairing would count every harness-injected
     // context message as a turn (round-22 blocker 3: a real one-task
     // session reported 77 turns). Claude sessions keep the classic pairing.
-    let turns = if conversation.provider_bundle().is_some() {
+    let turns = if ctx.semantic {
         semantic_turns(conversation)
     } else {
         conversation.turns()

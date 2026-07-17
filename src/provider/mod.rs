@@ -314,6 +314,12 @@ pub struct ProviderCapabilities {
     pub native_export: bool,
     /// The provider's records form a JSONL stream (`raw-jsonl` tier).
     pub raw_jsonl: bool,
+    /// The adapter emits semantic annotations (PromptSemantics/turn ids)
+    /// with enough coverage for semantic rendering. Surfaces MUST key
+    /// semantic behavior on this capability, never on a non-empty (or
+    /// merely present) semantics map — an adapter without coverage would
+    /// otherwise lose prompts and collapse timelines (round-23 blocker 1).
+    pub semantic_annotations: bool,
 }
 
 // ============================================================================
@@ -398,10 +404,11 @@ pub enum SuppressionReason {
     /// The record duplicates content carried by another stream of the same
     /// source (e.g. Codex `event_msg` mirroring a `response_item`).
     DuplicateStream {
-        /// Ordinal of the authoritative twin record this duplicate was
-        /// matched against — every suppression carries its PROOF
-        /// (round-22: suppress only a proven one-to-one twin).
-        twin_ordinal: u64,
+        /// The authoritative twin record this duplicate was matched
+        /// against — a COMPLETE reference (artifact + ordinal), so the
+        /// proof is self-identifying across artifacts (round-22/23). The
+        /// twin must be a MAPPED record; the validator checks it.
+        twin: RecordRef,
     },
     /// The record is a compaction replacement snapshot: it replays context,
     /// it does not record new activity.
@@ -577,17 +584,51 @@ pub enum UsageAggregation {
     Cumulative,
 }
 
-/// One usage observation attached to an entry: both axes plus the observed
-/// values, so an annotation is never separated from the numbers it
-/// describes.
+/// How a provider's native input-token number relates to its cached-token
+/// number.
+///
+/// Era-dependent in the Codex corpus (round-23): some eras report
+/// `input_tokens` INCLUDING cached tokens, others EXCLUDING them —
+/// canonical fresh-input derivation is only meaningful once the basis is
+/// known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageBasis {
+    /// `input_tokens` includes cached tokens (fresh = input − cached).
+    InputIncludesCached,
+    /// `input_tokens` excludes cached tokens (fresh = input).
+    InputExcludesCached,
+    /// The relationship could not be determined from the data.
+    Unknown,
+}
+
+/// One NATIVE usage observation attached to an entry.
+///
+/// Both axes, the source record, the declared basis, and the provider's
+/// raw numbers verbatim. Never the normalized model `Usage` — its
+/// `input_tokens` means FRESH input, so raw pass-through values would
+/// violate the destination type's semantics (round-23 blocker 4).
 #[derive(Debug, Clone)]
 pub struct UsageObservation {
     /// What the numbers cover.
     pub scope: UsageScope,
     /// How they aggregate.
     pub aggregation: UsageAggregation,
-    /// The observed token values.
-    pub usage: crate::model::usage::Usage,
+    /// The native record this observation came from — carried directly,
+    /// never recovered by positional zipping against origins (round-23).
+    pub record: RecordRef,
+    /// Declared relationship between the input and cached numbers.
+    pub basis: UsageBasis,
+    /// This transition could not be interpreted under the detected basis
+    /// (e.g. derived fresh input decreased without an epoch reset); its
+    /// canonical contribution was zeroed and surfaced here rather than
+    /// silently clamped away.
+    pub ambiguous: bool,
+    /// Native input tokens, verbatim (see `basis`).
+    pub input_tokens: u64,
+    /// Native cached input tokens, verbatim.
+    pub cached_input_tokens: u64,
+    /// Native output tokens, verbatim.
+    pub output_tokens: u64,
 }
 
 /// The Phase A.0 semantic carrier.
@@ -812,6 +853,36 @@ impl ParsedSession {
                 }
             }
         }
+        // Duplicate-stream suppressions must carry a self-identifying,
+        // PROVEN target: the twin's artifact belongs to this descriptor and
+        // the twin record has a MAPPED disposition (round-23).
+        let mapped_records: BTreeSet<&RecordRef> = self
+            .record_dispositions
+            .iter()
+            .filter(|d| matches!(d.outcome, RecordOutcome::Mapped(_)))
+            .map(|d| &d.record)
+            .collect();
+        for d in &self.record_dispositions {
+            if let RecordOutcome::Suppressed {
+                reason: SuppressionReason::DuplicateStream { twin },
+            } = &d.outcome
+            {
+                if !descriptor_artifacts.contains(&twin.artifact) {
+                    violations.push(format!(
+                        "record #{} duplicate-stream twin references an artifact outside \
+                         the descriptor",
+                        d.record.ordinal
+                    ));
+                }
+                if !mapped_records.contains(twin) {
+                    violations.push(format!(
+                        "record #{} duplicate-stream twin #{} is not a mapped record",
+                        d.record.ordinal, twin.ordinal
+                    ));
+                }
+            }
+        }
+
         if tally != self.diagnostics {
             violations.push(format!(
                 "diagnostics {:?} do not match disposition tallies {:?}",

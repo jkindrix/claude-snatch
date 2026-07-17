@@ -242,6 +242,9 @@ impl SourceProvider for ClaudeCodeProvider {
         ProviderCapabilities {
             native_export: true,
             raw_jsonl: true,
+            // The Claude adapter does not yet emit prompt/turn semantics;
+            // surfaces must keep classic heuristics for it (round-23).
+            semantic_annotations: false,
         }
     }
 

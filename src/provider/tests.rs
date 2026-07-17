@@ -466,12 +466,12 @@ fn semantics_are_emitted_and_consumable() {
         .iter()
         .find(|o| o.scope == UsageScope::Call && o.aggregation == UsageAggregation::Delta)
         .expect("last-call observation");
-    assert_eq!(last.usage.input_tokens, 10);
+    assert_eq!(last.input_tokens, 10);
     let total = usage
         .iter()
         .find(|o| o.scope == UsageScope::Session && o.aggregation == UsageAggregation::Cumulative)
         .expect("cumulative observation");
-    assert_eq!(total.usage.input_tokens, 200);
+    assert_eq!(total.input_tokens, 200);
 }
 
 #[test]

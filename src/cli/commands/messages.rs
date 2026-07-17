@@ -209,6 +209,7 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
 
     let ctx = RenderContext {
         display_id: args.session_id.clone(),
+        semantic: false,
         project_path,
         chain,
         unparsed,
@@ -269,9 +270,11 @@ fn run_provider(cli: &Cli, args: &MessagesArgs) -> Result<()> {
             _ => None,
         })
         .unwrap_or_else(|| "unknown".to_string());
+    let semantic = resolution.provider.capabilities().semantic_annotations;
     let conversation = Conversation::from_parsed_session(parsed)?;
     let ctx = RenderContext {
         display_id: resolution.key.to_string(),
+        semantic,
         project_path,
         chain: None,
         unparsed,
@@ -283,6 +286,11 @@ fn run_provider(cli: &Cli, args: &MessagesArgs) -> Result<()> {
 /// Shared acquisition-independent rendering context.
 struct RenderContext<'a> {
     display_id: String,
+    /// Semantic rendering is keyed on the provider's DECLARED
+    /// semantic_annotations capability — never on the mere presence of a
+    /// bundle (a coverage-less adapter would lose prompts and collapse
+    /// timelines; round-23 blocker 1).
+    semantic: bool,
     project_path: String,
     chain: Option<super::helpers::ChainMeta>,
     unparsed: usize,
@@ -300,7 +308,7 @@ fn render(
     // is_human_prompt heuristic would label harness-injected context
     // (permissions, environment, developer instructions) as human
     // (round-22 blocker 3). Claude sessions keep the classic heuristic.
-    let semantic = conversation.provider_bundle().is_some();
+    let semantic = ctx.semantic;
     let human = |e: &LogEntry| -> bool {
         if semantic {
             matches!(e, LogEntry::User(_))
