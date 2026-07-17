@@ -739,7 +739,7 @@ pub struct ManageGoalsRequest {
     /// Project path filter (substring match). Required.
     pub project: String,
 
-    /// Goal text (required for "add").
+    /// Goal text (required for "add"; optional for "update").
     pub text: Option<String>,
 
     /// Goal ID (required for "update" and "remove").
@@ -822,26 +822,27 @@ pub struct SessionDigestResponse {
 /// Request for tactical note management operations.
 #[derive(Debug, Deserialize, ToolInput)]
 pub struct ManageNotesRequest {
-    /// Operation: "list", "add", "remove", "clear".
+    /// Operation: "list", "add", "update", "remove", "clear".
     pub operation: String,
 
     /// Project path filter (substring match). Required.
     pub project: String,
 
-    /// Note text (required for "add").
+    /// Note text (required for "add"; optional for "update").
     pub text: Option<String>,
 
-    /// Session ID to tag the note with (optional, for "add").
+    /// Session ID to tag the note with (for "add"/"update").
     pub session_id: Option<String>,
 
-    /// Note ID (required for "remove").
+    /// Note ID (required for "update"/"remove").
     pub id: Option<u64>,
 
-    /// Concrete future moment this note must precede (optional, for "add").
-    /// Structured join key for debrief sweeps and resurfacing.
+    /// Concrete future moment this note must precede (for "add"/"update";
+    /// empty string clears). Structured join key for debrief sweeps and resurfacing.
     pub resurface_when: Option<String>,
 
-    /// Condition/version after which this note is stale (optional, for "add").
+    /// Condition/version after which this note is stale (for "add"/"update";
+    /// empty string clears).
     pub expires_when: Option<String>,
 }
 
@@ -885,7 +886,7 @@ pub struct ManageDecisionsRequest {
     /// Project path filter (substring match). Required.
     pub project: String,
 
-    /// Decision title (required for "add").
+    /// Decision title (required for "add"; optional for "update").
     pub title: Option<String>,
 
     /// Decision description.
@@ -906,14 +907,15 @@ pub struct ManageDecisionsRequest {
     /// ID of decision that supersedes this one (for "supersede" operation).
     pub superseded_by: Option<u64>,
 
-    /// Session ID where the decision was made.
+    /// Session ID where the decision was made (for "add"/"update").
     pub session_id: Option<String>,
 
-    /// Concrete future moment this decision must precede (for "add"/"update").
-    /// Structured join key for debrief sweeps and resurfacing.
+    /// Concrete future moment this decision must precede (for "add"/"update";
+    /// empty string clears). Structured join key for debrief sweeps and resurfacing.
     pub resurface_when: Option<String>,
 
-    /// Condition/version after which this decision is stale (for "add"/"update").
+    /// Condition/version after which this decision is stale (for "add"/"update";
+    /// empty string clears).
     pub expires_when: Option<String>,
 }
 

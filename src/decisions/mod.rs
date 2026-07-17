@@ -102,6 +102,36 @@ fn default_confidence() -> f64 {
     1.0
 }
 
+/// Field updates for [`DecisionStore::update_decision`]. `None` leaves a
+/// field unchanged.
+#[derive(Debug, Clone, Default)]
+pub struct DecisionUpdate {
+    /// New status.
+    pub status: Option<DecisionStatus>,
+    /// New title. Callers must reject empty titles before building the update.
+    pub title: Option<String>,
+    /// New description.
+    pub description: Option<String>,
+    /// New confidence score.
+    pub confidence: Option<f64>,
+    /// Replacement tag set.
+    pub tags: Option<Vec<String>>,
+    /// New originating session ID.
+    pub session_id: Option<String>,
+}
+
+impl DecisionUpdate {
+    /// True if no field is set.
+    pub fn is_empty(&self) -> bool {
+        self.status.is_none()
+            && self.title.is_none()
+            && self.description.is_none()
+            && self.confidence.is_none()
+            && self.tags.is_none()
+            && self.session_id.is_none()
+    }
+}
+
 /// Persistent decision store.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionStore {
@@ -152,7 +182,8 @@ impl DecisionStore {
     }
 
     /// Set the resurface/expiry join keys on a decision. `None` leaves a
-    /// field unchanged. Returns true if the decision was found.
+    /// field unchanged; an empty (or whitespace-only) string clears it.
+    /// Returns true if the decision was found.
     pub fn set_decision_schedule(
         &mut self,
         id: u64,
@@ -160,11 +191,11 @@ impl DecisionStore {
         expires_when: Option<String>,
     ) -> bool {
         if let Some(decision) = self.decisions.iter_mut().find(|d| d.id == id) {
-            if resurface_when.is_some() {
-                decision.resurface_when = resurface_when;
+            if let Some(r) = resurface_when {
+                decision.resurface_when = if r.trim().is_empty() { None } else { Some(r) };
             }
-            if expires_when.is_some() {
-                decision.expires_when = expires_when;
+            if let Some(e) = expires_when {
+                decision.expires_when = if e.trim().is_empty() { None } else { Some(e) };
             }
             decision.updated_at = Utc::now();
             true
@@ -174,26 +205,25 @@ impl DecisionStore {
     }
 
     /// Update an existing decision. Returns true if found.
-    pub fn update_decision(
-        &mut self,
-        id: u64,
-        status: Option<DecisionStatus>,
-        description: Option<String>,
-        confidence: Option<f64>,
-        tags: Option<Vec<String>>,
-    ) -> bool {
+    pub fn update_decision(&mut self, id: u64, update: DecisionUpdate) -> bool {
         if let Some(decision) = self.decisions.iter_mut().find(|d| d.id == id) {
-            if let Some(s) = status {
+            if let Some(s) = update.status {
                 decision.status = s;
             }
-            if let Some(d) = description {
+            if let Some(t) = update.title {
+                decision.title = t;
+            }
+            if let Some(d) = update.description {
                 decision.description = Some(d);
             }
-            if let Some(c) = confidence {
+            if let Some(c) = update.confidence {
                 decision.confidence = c;
             }
-            if let Some(t) = tags {
+            if let Some(t) = update.tags {
                 decision.tags = t;
+            }
+            if let Some(s) = update.session_id {
+                decision.session_id = Some(s);
             }
             decision.updated_at = Utc::now();
             true
@@ -404,6 +434,10 @@ mod tests {
         // Injection carries the resurface cue.
         let injection = store.format_decisions_for_injection().unwrap();
         assert!(injection.contains("(resurface: before changing the session schema)"));
+        // An empty string clears a field; the other stays put.
+        assert!(store.set_decision_schedule(1, Some(String::new()), None));
+        assert!(store.decisions[0].resurface_when.is_none());
+        assert_eq!(store.decisions[0].expires_when.as_deref(), Some("v1.0"));
     }
 
     #[test]
@@ -411,14 +445,54 @@ mod tests {
         let mut store = DecisionStore::default();
         store.add_decision("Test".into(), None, None, None, vec![]);
 
-        assert!(store.update_decision(1, Some(DecisionStatus::Confirmed), None, None, None));
+        assert!(store.update_decision(
+            1,
+            DecisionUpdate {
+                status: Some(DecisionStatus::Confirmed),
+                ..Default::default()
+            },
+        ));
         assert_eq!(store.decisions[0].status, DecisionStatus::Confirmed);
 
-        assert!(store.update_decision(1, None, None, Some(0.8), Some(vec!["tag1".into()])));
+        assert!(store.update_decision(
+            1,
+            DecisionUpdate {
+                confidence: Some(0.8),
+                tags: Some(vec!["tag1".into()]),
+                ..Default::default()
+            },
+        ));
         assert_eq!(store.decisions[0].confidence, 0.8);
         assert_eq!(store.decisions[0].tags, vec!["tag1"]);
 
-        assert!(!store.update_decision(99, Some(DecisionStatus::Confirmed), None, None, None));
+        // Title and session provenance are updatable; unset fields stay put.
+        assert!(store.update_decision(
+            1,
+            DecisionUpdate {
+                title: Some("Renamed".into()),
+                session_id: Some("sess-1".into()),
+                ..Default::default()
+            },
+        ));
+        assert_eq!(store.decisions[0].title, "Renamed");
+        assert_eq!(store.decisions[0].session_id.as_deref(), Some("sess-1"));
+        assert_eq!(store.decisions[0].status, DecisionStatus::Confirmed);
+        assert_eq!(store.decisions[0].confidence, 0.8);
+
+        assert!(!store.update_decision(
+            99,
+            DecisionUpdate {
+                status: Some(DecisionStatus::Confirmed),
+                ..Default::default()
+            },
+        ));
+
+        assert!(DecisionUpdate::default().is_empty());
+        assert!(!DecisionUpdate {
+            title: Some("x".into()),
+            ..Default::default()
+        }
+        .is_empty());
     }
 
     #[test]
@@ -451,9 +525,21 @@ mod tests {
         let mut store = DecisionStore::default();
         store.add_decision("Proposed".into(), None, None, None, vec![]);
         store.add_decision("Confirmed".into(), None, None, None, vec![]);
-        store.update_decision(2, Some(DecisionStatus::Confirmed), None, None, None);
+        store.update_decision(
+            2,
+            DecisionUpdate {
+                status: Some(DecisionStatus::Confirmed),
+                ..Default::default()
+            },
+        );
         store.add_decision("Superseded".into(), None, None, None, vec![]);
-        store.update_decision(3, Some(DecisionStatus::Superseded), None, None, None);
+        store.update_decision(
+            3,
+            DecisionUpdate {
+                status: Some(DecisionStatus::Superseded),
+                ..Default::default()
+            },
+        );
 
         let active = store.active_decisions();
         assert_eq!(active.len(), 2);
@@ -471,7 +557,13 @@ mod tests {
             Some(0.9),
             vec!["memory".into()],
         );
-        store.update_decision(1, Some(DecisionStatus::Confirmed), None, None, None);
+        store.update_decision(
+            1,
+            DecisionUpdate {
+                status: Some(DecisionStatus::Confirmed),
+                ..Default::default()
+            },
+        );
         store.add_decision("Use MVS".into(), None, None, None, vec![]);
 
         let formatted = store.format_decisions_for_injection().unwrap();
@@ -502,7 +594,13 @@ mod tests {
             Some(0.85),
             vec!["tag1".into()],
         );
-        store.update_decision(1, Some(DecisionStatus::Confirmed), None, None, None);
+        store.update_decision(
+            1,
+            DecisionUpdate {
+                status: Some(DecisionStatus::Confirmed),
+                ..Default::default()
+            },
+        );
 
         save_decisions(project_dir, &store).unwrap();
 

@@ -70,8 +70,31 @@ impl NoteStore {
         id
     }
 
+    /// Update an existing note's text and/or session tag. `None` leaves a
+    /// field unchanged. Callers must reject empty text before passing it.
+    /// Returns true if found.
+    pub fn update_note(
+        &mut self,
+        id: u64,
+        text: Option<String>,
+        session_id: Option<String>,
+    ) -> bool {
+        if let Some(note) = self.notes.iter_mut().find(|n| n.id == id) {
+            if let Some(t) = text {
+                note.text = t;
+            }
+            if let Some(s) = session_id {
+                note.session_id = Some(s);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     /// Set the resurface/expiry join keys on a note. `None` leaves a field
-    /// unchanged. Returns true if the note was found.
+    /// unchanged; an empty (or whitespace-only) string clears it. Returns
+    /// true if the note was found.
     pub fn set_note_schedule(
         &mut self,
         id: u64,
@@ -79,11 +102,11 @@ impl NoteStore {
         expires_when: Option<String>,
     ) -> bool {
         if let Some(note) = self.notes.iter_mut().find(|n| n.id == id) {
-            if resurface_when.is_some() {
-                note.resurface_when = resurface_when;
+            if let Some(r) = resurface_when {
+                note.resurface_when = if r.trim().is_empty() { None } else { Some(r) };
             }
-            if expires_when.is_some() {
-                note.expires_when = expires_when;
+            if let Some(e) = expires_when {
+                note.expires_when = if e.trim().is_empty() { None } else { Some(e) };
             }
             true
         } else {
@@ -190,6 +213,26 @@ mod tests {
         assert!(!store.set_note_schedule(99, Some("x".into()), None));
         let injection = store.format_notes_for_injection().unwrap();
         assert!(injection.contains("(resurface: when adding any crypto dependency)"));
+        // An empty string clears a field; the other stays put.
+        assert!(store.set_note_schedule(1, Some(String::new()), None));
+        assert!(store.notes[0].resurface_when.is_none());
+        assert_eq!(store.notes[0].expires_when.as_deref(), Some("next audit"));
+    }
+
+    #[test]
+    fn test_update_note() {
+        let mut store = NoteStore::default();
+        store.add_note("original".into(), None);
+
+        assert!(store.update_note(1, Some("rewritten".into()), None));
+        assert_eq!(store.notes[0].text, "rewritten");
+        assert!(store.notes[0].session_id.is_none());
+
+        assert!(store.update_note(1, None, Some("sess-9".into())));
+        assert_eq!(store.notes[0].text, "rewritten"); // unchanged
+        assert_eq!(store.notes[0].session_id.as_deref(), Some("sess-9"));
+
+        assert!(!store.update_note(99, Some("x".into()), None));
     }
 
     #[test]

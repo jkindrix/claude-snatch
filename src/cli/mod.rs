@@ -2064,7 +2064,7 @@ pub struct GoalsArgs {
     #[arg(short = 'p', long)]
     pub project: Option<String>,
 
-    /// Goal text (required for add).
+    /// Goal text (required for add; optional for update).
     #[arg(short = 't', long)]
     pub text: Option<String>,
 
@@ -2095,30 +2095,30 @@ pub struct DigestArgs {
 /// Arguments for the notes command.
 #[derive(Debug, Parser)]
 pub struct NotesArgs {
-    /// Operation: list, add, remove, clear (default: list).
+    /// Operation: list, add, update, remove, clear (default: list).
     pub operation: Option<String>,
 
     /// Project path filter (substring match).
     #[arg(short = 'p', long)]
     pub project: Option<String>,
 
-    /// Note text (required for add).
+    /// Note text (required for add; optional for update).
     #[arg(short = 't', long)]
     pub text: Option<String>,
 
-    /// Note ID (required for remove).
+    /// Note ID (required for update, remove).
     #[arg(long)]
     pub id: Option<u64>,
 
-    /// Session ID to tag the note with.
+    /// Session ID to tag the note with (for add or update).
     #[arg(long)]
     pub session_id: Option<String>,
 
-    /// Concrete future moment this note must precede (for add or update-by-id).
+    /// Concrete future moment this note must precede (for add/update; pass "" to clear).
     #[arg(long)]
     pub resurface_when: Option<String>,
 
-    /// Condition/version after which this note is stale (for add or update-by-id).
+    /// Condition/version after which this note is stale (for add/update; pass "" to clear).
     #[arg(long)]
     pub expires_when: Option<String>,
 }
@@ -2133,7 +2133,7 @@ pub struct DecisionsArgs {
     #[arg(short = 'p', long)]
     pub project: Option<String>,
 
-    /// Decision title (required for add).
+    /// Decision title (required for add; optional for update).
     #[arg(short = 't', long)]
     pub title: Option<String>,
 
@@ -2169,11 +2169,11 @@ pub struct DecisionsArgs {
     #[arg(long, alias = "session")]
     pub session_id: Option<String>,
 
-    /// Concrete future moment this decision must precede (for add/update).
+    /// Concrete future moment this decision must precede (for add/update; pass "" to clear).
     #[arg(long)]
     pub resurface_when: Option<String>,
 
-    /// Condition/version after which this decision is stale (for add/update).
+    /// Condition/version after which this decision is stale (for add/update; pass "" to clear).
     #[arg(long)]
     pub expires_when: Option<String>,
 

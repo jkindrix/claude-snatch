@@ -112,16 +112,21 @@ impl GoalStore {
         id
     }
 
-    /// Update an existing goal. Returns true if found.
+    /// Update an existing goal. `None` leaves a field unchanged. Callers must
+    /// reject empty text before passing it. Returns true if found.
     pub fn update_goal(
         &mut self,
         id: u64,
         status: Option<GoalStatus>,
+        text: Option<String>,
         progress: Option<String>,
     ) -> bool {
         if let Some(goal) = self.goals.iter_mut().find(|g| g.id == id) {
             if let Some(s) = status {
                 goal.status = s;
+            }
+            if let Some(t) = text {
+                goal.text = t;
             }
             if let Some(p) = progress {
                 goal.progress = Some(p);
@@ -270,18 +275,25 @@ mod tests {
         assert!(store.update_goal(
             1,
             Some(GoalStatus::InProgress),
+            None,
             Some("working on it".into())
         ));
         assert_eq!(store.goals[0].status, GoalStatus::InProgress);
         assert_eq!(store.goals[0].progress.as_deref(), Some("working on it"));
 
         // Update only status
-        assert!(store.update_goal(1, Some(GoalStatus::Done), None));
+        assert!(store.update_goal(1, Some(GoalStatus::Done), None, None));
         assert_eq!(store.goals[0].status, GoalStatus::Done);
         assert_eq!(store.goals[0].progress.as_deref(), Some("working on it")); // unchanged
 
+        // Update only text; status and progress stay put
+        assert!(store.update_goal(1, None, Some("Reworded goal".into()), None));
+        assert_eq!(store.goals[0].text, "Reworded goal");
+        assert_eq!(store.goals[0].status, GoalStatus::Done);
+        assert_eq!(store.goals[0].progress.as_deref(), Some("working on it"));
+
         // Non-existent ID
-        assert!(!store.update_goal(99, Some(GoalStatus::Done), None));
+        assert!(!store.update_goal(99, Some(GoalStatus::Done), None, None));
     }
 
     #[test]
@@ -302,11 +314,11 @@ mod tests {
         let mut store = GoalStore::default();
         store.add_goal("Open goal".into(), None);
         store.add_goal("In progress goal".into(), None);
-        store.update_goal(2, Some(GoalStatus::InProgress), None);
+        store.update_goal(2, Some(GoalStatus::InProgress), None, None);
         store.add_goal("Done goal".into(), None);
-        store.update_goal(3, Some(GoalStatus::Done), None);
+        store.update_goal(3, Some(GoalStatus::Done), None, None);
         store.add_goal("Abandoned goal".into(), None);
-        store.update_goal(4, Some(GoalStatus::Abandoned), None);
+        store.update_goal(4, Some(GoalStatus::Abandoned), None, None);
 
         let active = store.active_goals();
         assert_eq!(active.len(), 2);
@@ -324,7 +336,7 @@ mod tests {
     fn test_format_goals_for_injection_with_goals() {
         let mut store = GoalStore::default();
         store.add_goal("Build MCP server".into(), Some("9 tools shipped".into()));
-        store.update_goal(1, Some(GoalStatus::InProgress), None);
+        store.update_goal(1, Some(GoalStatus::InProgress), None, None);
         store.add_goal("Write tests".into(), None);
 
         let formatted = store.format_goals_for_injection().unwrap();
@@ -339,7 +351,7 @@ mod tests {
     fn test_format_goals_excludes_done() {
         let mut store = GoalStore::default();
         store.add_goal("Done goal".into(), None);
-        store.update_goal(1, Some(GoalStatus::Done), None);
+        store.update_goal(1, Some(GoalStatus::Done), None, None);
 
         assert!(store.format_goals_for_injection().is_none());
     }
@@ -357,7 +369,7 @@ mod tests {
         // Save and reload
         let mut store = GoalStore::default();
         store.add_goal("Test goal".into(), Some("in progress".into()));
-        store.update_goal(1, Some(GoalStatus::InProgress), None);
+        store.update_goal(1, Some(GoalStatus::InProgress), None, None);
 
         save_goals(project_dir, &store).unwrap();
 
@@ -385,7 +397,7 @@ mod tests {
         let mut store = GoalStore::default();
         store.add_goal("Goal 1".into(), None);
         store.add_goal("Goal 2".into(), Some("notes".into()));
-        store.update_goal(2, Some(GoalStatus::Done), Some("all done".into()));
+        store.update_goal(2, Some(GoalStatus::Done), None, Some("all done".into()));
 
         let json = serde_json::to_string_pretty(&store).unwrap();
         let parsed: GoalStore = serde_json::from_str(&json).unwrap();

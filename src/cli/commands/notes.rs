@@ -94,9 +94,10 @@ pub fn run(cli: &Cli, args: &NotesArgs) -> Result<()> {
             let text = args
                 .text
                 .as_deref()
+                .filter(|t| !t.trim().is_empty())
                 .ok_or_else(|| SnatchError::InvalidArgument {
                     name: "text".into(),
-                    reason: "--text is required for add operation".into(),
+                    reason: "a non-empty --text is required for add operation".into(),
                 })?;
 
             let mut store = load_notes(project_dir)?;
@@ -125,6 +126,67 @@ pub fn run(cli: &Cli, args: &NotesArgs) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&output)?);
                 }
                 _ => println!("Added note #{id}: {text}"),
+            }
+        }
+
+        "update" => {
+            let id = args.id.ok_or_else(|| SnatchError::InvalidArgument {
+                name: "id".into(),
+                reason: "--id is required for update operation".into(),
+            })?;
+
+            if args.text.as_deref().is_some_and(|t| t.trim().is_empty()) {
+                return Err(SnatchError::InvalidArgument {
+                    name: "text".into(),
+                    reason: "--text cannot be empty".into(),
+                });
+            }
+
+            if args.text.is_none()
+                && args.session_id.is_none()
+                && args.resurface_when.is_none()
+                && args.expires_when.is_none()
+            {
+                return Err(SnatchError::InvalidArgument {
+                    name: "update".into(),
+                    reason: "At least one of --text, --session-id, --resurface-when, or --expires-when is required".into(),
+                });
+            }
+
+            let mut store = load_notes(project_dir)?;
+            if !store.update_note(id, args.text.clone(), args.session_id.clone()) {
+                return Err(SnatchError::InvalidArgument {
+                    name: "id".into(),
+                    reason: format!("Note #{id} not found"),
+                });
+            }
+            if args.resurface_when.is_some() || args.expires_when.is_some() {
+                store.set_note_schedule(id, args.resurface_when.clone(), args.expires_when.clone());
+            }
+            save_notes(project_dir, &store)?;
+
+            match cli.effective_output() {
+                OutputFormat::Json => {
+                    let note = store.notes.iter().find(|n| n.id == id).unwrap();
+                    let output = NoteMutationOutput {
+                        operation: "update".into(),
+                        project_path,
+                        message: format!("Updated note #{id}"),
+                        note: Some(NoteOutput {
+                            id: note.id,
+                            text: note.text.clone(),
+                            created_at: note.created_at.to_rfc3339(),
+                            session_id: note.session_id.clone(),
+                            resurface_when: note.resurface_when.clone(),
+                            expires_when: note.expires_when.clone(),
+                        }),
+                    };
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                }
+                _ => {
+                    let note = store.notes.iter().find(|n| n.id == id).unwrap();
+                    println!("Updated note #{id}: {}", note.text);
+                }
             }
         }
 
@@ -179,7 +241,9 @@ pub fn run(cli: &Cli, args: &NotesArgs) -> Result<()> {
         other => {
             return Err(SnatchError::InvalidArgument {
                 name: "operation".into(),
-                reason: format!("Unknown operation '{other}'. Use: list, add, remove, clear"),
+                reason: format!(
+                    "Unknown operation '{other}'. Use: list, add, update, remove, clear"
+                ),
             });
         }
     }

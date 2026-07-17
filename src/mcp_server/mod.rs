@@ -1723,13 +1723,17 @@ impl SnatchServer {
                     None => None,
                 };
 
-                if status.is_none() && request.progress.is_none() {
+                if request.text.as_deref().is_some_and(|t| t.trim().is_empty()) {
+                    return ToolOutput::error("'text' cannot be empty");
+                }
+
+                if status.is_none() && request.text.is_none() && request.progress.is_none() {
                     return ToolOutput::error(
-                        "At least one of 'status' or 'progress' is required for update",
+                        "At least one of 'status', 'text', or 'progress' is required for update",
                     );
                 }
 
-                if !store.update_goal(id, status, request.progress) {
+                if !store.update_goal(id, status, request.text, request.progress) {
                     return ToolOutput::error(format!("Goal #{id} not found"));
                 }
 
@@ -1848,7 +1852,7 @@ impl SnatchServer {
 
     /// Manage tactical session notes for a project. Notes capture work state that survives compaction.
     #[tool(
-        description = "Manage tactical session notes for a project. Notes capture mid-work state (\"tried X, failed because Y\") that survives compaction. Operations: list, add, remove, clear."
+        description = "Manage tactical session notes for a project. Notes capture mid-work state (\"tried X, failed because Y\") that survives compaction. Operations: list, add, update, remove, clear."
     )]
     async fn manage_notes(&self, request: ManageNotesRequest) -> ToolOutput {
         use crate::notes::{load_notes, save_notes};
@@ -1929,6 +1933,59 @@ impl SnatchServer {
                 }
             }
 
+            "update" => {
+                let id = match request.id {
+                    Some(id) => id,
+                    None => return ToolOutput::error("'id' is required for update operation"),
+                };
+
+                if request.text.as_deref().is_some_and(|t| t.trim().is_empty()) {
+                    return ToolOutput::error("'text' cannot be empty");
+                }
+
+                if request.text.is_none()
+                    && request.session_id.is_none()
+                    && request.resurface_when.is_none()
+                    && request.expires_when.is_none()
+                {
+                    return ToolOutput::error(
+                        "At least one of 'text', 'session_id', 'resurface_when', or 'expires_when' is required for update",
+                    );
+                }
+
+                if !store.update_note(id, request.text, request.session_id) {
+                    return ToolOutput::error(format!("Note #{id} not found"));
+                }
+                if request.resurface_when.is_some() || request.expires_when.is_some() {
+                    store.set_note_schedule(id, request.resurface_when, request.expires_when);
+                }
+
+                if let Err(e) = save_notes(&resolved.project_dir, &store) {
+                    return ToolOutput::error(format!("Failed to save notes: {e}"));
+                }
+
+                let note = store.notes.iter().find(|n| n.id == id).unwrap();
+                let response = ManageNotesResponse {
+                    operation: "update".into(),
+                    project_path: resolved.project_path,
+                    message: Some(format!("Updated note #{id}")),
+                    notes: None,
+                    note: Some(NoteEntry {
+                        id: note.id,
+                        text: note.text.clone(),
+                        created_at: note.created_at.to_rfc3339(),
+                        session_id: note.session_id.clone(),
+                        resurface_when: note.resurface_when.clone(),
+                        expires_when: note.expires_when.clone(),
+                    }),
+                };
+
+                match ToolOutput::json(&response) {
+                    Ok(output) => output,
+                    Err(e) => ToolOutput::error(format!("JSON error: {e}")),
+                }
+            }
+
             "remove" => {
                 let id = match request.id {
                     Some(id) => id,
@@ -1979,7 +2036,7 @@ impl SnatchServer {
             }
 
             other => ToolOutput::error(format!(
-                "Unknown operation '{other}'. Use: list, add, remove, clear"
+                "Unknown operation '{other}'. Use: list, add, update, remove, clear"
             )),
         }
     }
@@ -1988,7 +2045,7 @@ impl SnatchServer {
         description = "Manage a persistent decision registry for a project. Decisions track design choices with status, confidence, tags, and session provenance. Operations: list, add, update, remove, supersede. For confidence auto-scoring use CLI: snatch decisions score -p <project>."
     )]
     async fn manage_decisions(&self, request: ManageDecisionsRequest) -> ToolOutput {
-        use crate::decisions::{load_decisions, save_decisions, DecisionStatus};
+        use crate::decisions::{load_decisions, save_decisions, DecisionStatus, DecisionUpdate};
 
         let resolved = match resolve_project(self, &request.project) {
             Ok(r) => r,
@@ -2024,8 +2081,13 @@ impl SnatchServer {
 
                 // Filter by status if specified
                 if let Some(ref status_str) = request.status {
-                    if let Some(status) = DecisionStatus::parse(status_str) {
-                        decisions.retain(|d| d.status == status);
+                    match DecisionStatus::parse(status_str) {
+                        Some(status) => decisions.retain(|d| d.status == status),
+                        None => {
+                            return ToolOutput::error(format!(
+                                "Invalid status '{status_str}'. Use: proposed, confirmed, superseded, abandoned"
+                            ))
+                        }
                     }
                 }
 
@@ -2073,8 +2135,21 @@ impl SnatchServer {
 
                 // Apply status if specified
                 if let Some(ref status_str) = request.status {
-                    if let Some(status) = DecisionStatus::parse(status_str) {
-                        store.update_decision(id, Some(status), None, None, None);
+                    match DecisionStatus::parse(status_str) {
+                        Some(status) => {
+                            store.update_decision(
+                                id,
+                                DecisionUpdate {
+                                    status: Some(status),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        None => {
+                            return ToolOutput::error(format!(
+                                "Invalid status '{status_str}'. Use: proposed, confirmed, superseded, abandoned"
+                            ))
+                        }
                     }
                 }
                 if request.resurface_when.is_some() || request.expires_when.is_some() {
@@ -2106,17 +2181,46 @@ impl SnatchServer {
                     None => return ToolOutput::error("'id' is required for update operation"),
                 };
 
-                let status = request
-                    .status
-                    .as_deref()
-                    .and_then(DecisionStatus::parse);
+                let status = match request.status.as_deref() {
+                    Some(s) => match DecisionStatus::parse(s) {
+                        Some(status) => Some(status),
+                        None => {
+                            return ToolOutput::error(format!(
+                                "Invalid status '{s}'. Use: proposed, confirmed, superseded, abandoned"
+                            ))
+                        }
+                    },
+                    None => None,
+                };
+
+                if request.title.as_deref().is_some_and(|t| t.trim().is_empty()) {
+                    return ToolOutput::error("'title' cannot be empty");
+                }
 
                 let tags: Option<Vec<String>> = request
                     .tags
                     .as_deref()
                     .map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
 
-                if !store.update_decision(id, status, request.description, request.confidence, tags) {
+                let update = DecisionUpdate {
+                    status,
+                    title: request.title,
+                    description: request.description,
+                    confidence: request.confidence,
+                    tags,
+                    session_id: request.session_id,
+                };
+
+                if update.is_empty()
+                    && request.resurface_when.is_none()
+                    && request.expires_when.is_none()
+                {
+                    return ToolOutput::error(
+                        "At least one of 'title', 'status', 'description', 'confidence', 'tags', 'session_id', 'resurface_when', or 'expires_when' is required for update",
+                    );
+                }
+
+                if !store.update_decision(id, update) {
                     return ToolOutput::error(format!("Decision #{id} not found"));
                 }
                 if request.resurface_when.is_some() || request.expires_when.is_some() {

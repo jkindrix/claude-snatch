@@ -116,7 +116,7 @@ For recent sessions, recover rationale from message text, tool I/O, and `get_ses
 Goals survive compaction and sessions. Use `manage_goals` to track long-term intentions:
 
 - `manage_goals(operation="add", project="snatch", text="Build digest tool")` — add a goal
-- `manage_goals(operation="update", project="snatch", id=1, status="done", progress="Shipped")` — update progress
+- `manage_goals(operation="update", project="snatch", id=1, status="done", progress="Shipped")` — update progress (update also accepts `text` to reword a goal)
 - `manage_goals(operation="list", project="snatch")` — see all goals
 - `manage_goals(operation="remove", project="snatch", id=1)` — remove a goal
 
@@ -131,11 +131,12 @@ Decisions track design choices with status, confidence, tags, and session proven
 - `manage_decisions(operation="add", project="snatch", title="No Drop trait", status="confirmed", confidence=0.9, tags="memory,traits")` — add
 - `manage_decisions(operation="list", project="snatch")` — see all decisions
 - `manage_decisions(operation="list", project="snatch", status="confirmed")` — filter by status
-- `manage_decisions(operation="update", project="snatch", id=1, status="confirmed")` — update
+- `manage_decisions(operation="update", project="snatch", id=1, status="confirmed")` — update (any field, including `title` and `session_id`)
 - `manage_decisions(operation="supersede", project="snatch", id=1, superseded_by=2)` — supersede
 - `manage_decisions(operation="remove", project="snatch", id=1)` — remove
 
 Status values: `proposed`, `confirmed`, `superseded`, `abandoned`.
+On update, an empty string for `resurface_when`/`expires_when` clears the field.
 Storage: `~/.claude/projects/<project>/memory/decisions.json`
 
 ### Tactical Notes
@@ -144,6 +145,7 @@ Notes capture mid-work state that survives compaction. Unlike goals (strategic, 
 
 - `manage_notes(operation="add", project="snatch", text="Tried redis caching, failed due to connection pooling")` — add a note
 - `manage_notes(operation="list", project="snatch")` — see all notes
+- `manage_notes(operation="update", project="snatch", id=1, text="...")` — rewrite a note (also `session_id`, `resurface_when`, `expires_when`; empty string clears the schedule fields)
 - `manage_notes(operation="remove", project="snatch", id=1)` — remove a specific note
 - `manage_notes(operation="clear", project="snatch")` — clear all notes
 

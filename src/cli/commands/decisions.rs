@@ -4,7 +4,7 @@
 //! compaction and sessions, enabling design decision tracking.
 
 use crate::cli::{Cli, DecisionsArgs, OutputFormat};
-use crate::decisions::{load_decisions, save_decisions, DecisionStatus};
+use crate::decisions::{load_decisions, save_decisions, DecisionStatus, DecisionUpdate};
 use crate::error::{Result, SnatchError};
 
 use super::get_claude_dir;
@@ -197,9 +197,10 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
             let title = args
                 .title
                 .as_deref()
+                .filter(|t| !t.trim().is_empty())
                 .ok_or_else(|| SnatchError::InvalidArgument {
                     name: "title".into(),
-                    reason: "--title is required for add operation".into(),
+                    reason: "a non-empty --title is required for add operation".into(),
                 })?;
 
             let status = if let Some(ref s) = args.status {
@@ -232,7 +233,13 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
             );
 
             if let Some(s) = status {
-                store.update_decision(id, Some(s), None, None, None);
+                store.update_decision(
+                    id,
+                    DecisionUpdate {
+                        status: Some(s),
+                        ..Default::default()
+                    },
+                );
             }
             if args.resurface_when.is_some() || args.expires_when.is_some() {
                 store.set_decision_schedule(
@@ -299,23 +306,36 @@ pub fn run(cli: &Cli, args: &DecisionsArgs) -> Result<()> {
                 )
             };
 
+            if args.title.as_deref().is_some_and(|t| t.trim().is_empty()) {
+                return Err(SnatchError::InvalidArgument {
+                    name: "title".into(),
+                    reason: "--title cannot be empty".into(),
+                });
+            }
+
+            let update = DecisionUpdate {
+                status,
+                title: args.title.clone(),
+                description: args.description.clone(),
+                confidence: args.confidence,
+                tags,
+                session_id: args.session_id.clone(),
+            };
+
             let has_related = !args.related_sessions.is_empty();
-            if status.is_none()
-                && args.description.is_none()
-                && args.confidence.is_none()
-                && tags.is_none()
+            if update.is_empty()
                 && !has_related
                 && args.resurface_when.is_none()
                 && args.expires_when.is_none()
             {
                 return Err(SnatchError::InvalidArgument {
                     name: "update".into(),
-                    reason: "At least one of --status, --description, --confidence, --tag, --related-session, --resurface-when, or --expires-when is required".into(),
+                    reason: "At least one of --title, --status, --description, --confidence, --tag, --session-id, --related-session, --resurface-when, or --expires-when is required".into(),
                 });
             }
 
             let mut store = load_decisions(project_dir)?;
-            if !store.update_decision(id, status, args.description.clone(), args.confidence, tags) {
+            if !store.update_decision(id, update) {
                 return Err(SnatchError::InvalidArgument {
                     name: "id".into(),
                     reason: format!("Decision #{id} not found"),

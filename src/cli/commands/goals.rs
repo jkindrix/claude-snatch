@@ -98,9 +98,10 @@ pub fn run(cli: &Cli, args: &GoalsArgs) -> Result<()> {
             let text = args
                 .text
                 .as_deref()
+                .filter(|t| !t.trim().is_empty())
                 .ok_or_else(|| SnatchError::InvalidArgument {
                     name: "text".into(),
-                    reason: "--text is required for add operation".into(),
+                    reason: "a non-empty --text is required for add operation".into(),
                 })?;
 
             let mut store = load_goals(project_dir)?;
@@ -149,15 +150,22 @@ pub fn run(cli: &Cli, args: &GoalsArgs) -> Result<()> {
                 None => None,
             };
 
-            if status.is_none() && args.progress.is_none() {
+            if args.text.as_deref().is_some_and(|t| t.trim().is_empty()) {
+                return Err(SnatchError::InvalidArgument {
+                    name: "text".into(),
+                    reason: "--text cannot be empty".into(),
+                });
+            }
+
+            if status.is_none() && args.text.is_none() && args.progress.is_none() {
                 return Err(SnatchError::InvalidArgument {
                     name: "update".into(),
-                    reason: "At least one of --status or --progress is required".into(),
+                    reason: "At least one of --status, --text, or --progress is required".into(),
                 });
             }
 
             let mut store = load_goals(project_dir)?;
-            if !store.update_goal(id, status, args.progress.clone()) {
+            if !store.update_goal(id, status, args.text.clone(), args.progress.clone()) {
                 return Err(SnatchError::InvalidArgument {
                     name: "id".into(),
                     reason: format!("Goal #{id} not found"),
