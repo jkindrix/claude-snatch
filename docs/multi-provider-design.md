@@ -1543,8 +1543,14 @@ Decisions taken in-implementation, FLAGGED FOR REVIEW:
       route through the complete ParsedSession bundle and common transforms.
 
 ### Phase C — semantic tuning
-- [ ] Codex prompt-boundary chunking (PromptOrigin axes feed
-      is_prompt_boundary).
+- [x] Codex prompt-boundary chunking (Phase C slice 1): Human/TurnBoundary
+      prompts start chunks; Human/MidTurn steering stays inside the active
+      chunk, while pre-boundary steering remains explicit preamble. Messages,
+      chunks, and MCP use the same semantic rule. A source-derived corpus
+      audit proves the exact boundary set and steering membership across all
+      sessions; a negative control proves mislabeling steering as a boundary
+      fails the audit. Claude's queued-prompt behavior and flagless output
+      shapes remain pinned independently.
 - [ ] Lessons noise filters for Codex tool shapes (content-tuned per
       provider — annotations reduce but do not eliminate this).
 - [ ] Usage semantics via UsageScope/UsageAggregation observations.
@@ -1556,6 +1562,17 @@ Decisions taken in-implementation, FLAGGED FOR REVIEW:
       exposed in B2 — C tunes semantics/presentation only (round-17
       boundary).
 - [ ] Compaction-window presentation.
+
+#### Phase C status (2026-07-17)
+
+Slice 1 implements semantic prompt-boundary chunking without reusing Claude's
+queued-command heuristic. The first corpus audit exposed one real shape absent
+from the initial fixture: a MidTurn prompt before any retained boundary. The
+contract therefore distinguishes active-turn steering (exactly one containing
+chunk) from pre-boundary steering (preamble, never an invented chunk), and both
+shapes are executable tests. Provider-routed `messages --chunk`, `chunks`, and
+MCP chunk selection now share this contract; classic Claude routing remains on
+the established chunker.
 
 ### Phase D — cross-provider UX
 - [ ] Unified project identity across providers (cwd/git), union views

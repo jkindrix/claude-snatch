@@ -1,8 +1,10 @@
 //! Prompt-boundary chunking of a conversation.
 //!
-//! A *chunk* is everything a prompt boundary produced — a typed user prompt
-//! or a queued mid-turn steering prompt, plus all entries up to (not
-//! including) the next prompt boundary on the main thread.
+//! A *chunk* is everything a prompt boundary produced, plus all entries up to
+//! (not including) the next prompt boundary on the main thread. Claude's
+//! queued-command representation remains a boundary for compatibility;
+//! semantically annotated providers use `PromptDelivery`, so true midturn
+//! steering remains inside the active chunk.
 //! Chunks are the retrieval unit for "give me turn N of this session" — one
 //! prompt, the agentic work it triggered, and the response.
 //!
@@ -134,7 +136,7 @@ impl ChunkingResult {
     }
 }
 
-/// Split a conversation into prompt-boundary chunks.
+/// Split a Claude-shaped conversation into prompt-boundary chunks.
 ///
 /// Walks the main thread, starting a chunk at every [`is_human_prompt`]
 /// entry, then assigns each off-main-thread node to the chunk of its nearest
@@ -143,6 +145,72 @@ impl ChunkingResult {
 /// path to the main thread fall back to timestamp-window assignment.
 #[must_use]
 pub fn chunk_conversation(conversation: &Conversation) -> ChunkingResult {
+    chunk_conversation_with(
+        conversation,
+        is_prompt_boundary,
+        |entry| boundary_prompt_text(entry).unwrap_or_default(),
+        |entry| {
+            if queued_human_prompt(entry).is_some() {
+                PromptSource::Queued
+            } else {
+                PromptSource::User
+            }
+        },
+        is_human_prompt,
+        extract_user_prompt_text,
+    )
+}
+
+/// Split a semantically annotated provider conversation into chunks.
+///
+/// Only `Human/TurnBoundary` prompts start chunks. Human `MidTurn` steering
+/// remains a member of the active chunk, matching provider turn semantics
+/// instead of reusing Claude's queued-command heuristic.
+#[must_use]
+pub fn chunk_conversation_semantic(conversation: &Conversation) -> ChunkingResult {
+    let prompt = |entry: &LogEntry| {
+        entry
+            .uuid()
+            .and_then(|uuid| conversation.semantics_for_uuid(uuid))
+            .and_then(|semantics| semantics.prompt)
+    };
+    let boundary = |entry: &LogEntry| {
+        matches!(entry, LogEntry::User(_))
+            && prompt(entry).is_some_and(|prompt| {
+                matches!(
+                    (prompt.authorship, prompt.delivery),
+                    (
+                        crate::provider::PromptAuthorship::Human,
+                        crate::provider::PromptDelivery::TurnBoundary
+                    )
+                )
+            })
+    };
+    chunk_conversation_with(
+        conversation,
+        boundary,
+        |entry| extract_user_prompt_text(entry).unwrap_or_default(),
+        |_| PromptSource::User,
+        boundary,
+        extract_user_prompt_text,
+    )
+}
+
+fn chunk_conversation_with<Boundary, OpeningText, Source, BranchPrompt, BranchText>(
+    conversation: &Conversation,
+    is_boundary: Boundary,
+    opening_text: OpeningText,
+    prompt_source: Source,
+    is_branch_prompt: BranchPrompt,
+    branch_text: BranchText,
+) -> ChunkingResult
+where
+    Boundary: Fn(&LogEntry) -> bool,
+    OpeningText: Fn(&LogEntry) -> String,
+    Source: Fn(&LogEntry) -> PromptSource,
+    BranchPrompt: Fn(&LogEntry) -> bool,
+    BranchText: Fn(&LogEntry) -> Option<String>,
+{
     // Pass 1: chunk index for every main-thread node. None = preamble.
     let main_thread = conversation.main_thread();
     let mut main_chunk: HashMap<&str, Option<usize>> = HashMap::new();
@@ -153,16 +221,11 @@ pub fn chunk_conversation(conversation: &Conversation) -> ChunkingResult {
         let Some(node) = conversation.get_node(uuid) else {
             continue;
         };
-        if is_prompt_boundary(&node.entry) {
-            let prompt_source = if queued_human_prompt(&node.entry).is_some() {
-                PromptSource::Queued
-            } else {
-                PromptSource::User
-            };
+        if is_boundary(&node.entry) {
             chunks.push(SessionChunk {
                 index: chunks.len(),
                 prompt_uuid: uuid.clone(),
-                prompt_text: boundary_prompt_text(&node.entry).unwrap_or_default(),
+                prompt_text: opening_text(&node.entry),
                 start_ts: None,
                 end_ts: None,
                 main_uuids: Vec::new(),
@@ -170,7 +233,7 @@ pub fn chunk_conversation(conversation: &Conversation) -> ChunkingResult {
                 branches: Vec::new(),
                 tool_call_count: 0,
                 error_count: 0,
-                prompt_source,
+                prompt_source: prompt_source(&node.entry),
             });
         }
         let idx = chunks.len().checked_sub(1);
@@ -233,7 +296,7 @@ pub fn chunk_conversation(conversation: &Conversation) -> ChunkingResult {
         };
         let root_is_prompt = conversation
             .get_node(&fork_root)
-            .is_some_and(|n| is_human_prompt(&n.entry));
+            .is_some_and(|n| is_branch_prompt(&n.entry));
         match chunk_idx {
             Some(i) if root_is_prompt => {
                 branch_chunk.insert(fork_root.clone(), Some(i));
@@ -264,7 +327,7 @@ pub fn chunk_conversation(conversation: &Conversation) -> ChunkingResult {
             Some(i) => {
                 let prompt_text = conversation
                     .get_node(&root)
-                    .and_then(|n| extract_user_prompt_text(&n.entry));
+                    .and_then(|n| branch_text(&n.entry));
                 chunks[i].branches.push(ChunkBranch {
                     root_uuid: root,
                     prompt_text,

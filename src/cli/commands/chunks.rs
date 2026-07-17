@@ -1,11 +1,12 @@
 //! Chunks command implementation.
 //!
-//! Lists the prompt-boundary chunks of a session: each human prompt and
+//! Lists the prompt-boundary chunks of a session: each boundary prompt and
 //! everything it produced, with entry/tool counts and any abandoned branches.
+//! Semantic providers keep midturn steering inside the active chunk.
 //! Chunk indices feed the `--chunk` selector on `snatch messages` and the
 //! `chunk` parameter of the MCP `get_session_messages` tool.
 
-use crate::analysis::chunking::chunk_conversation;
+use crate::analysis::chunking::{chunk_conversation, chunk_conversation_semantic};
 use crate::analysis::extraction::truncate_text;
 use crate::cli::{ChunksArgs, Cli, OutputFormat};
 use crate::error::{Result, SnatchError};
@@ -17,6 +18,10 @@ use super::get_claude_dir;
 #[derive(serde::Serialize)]
 struct ChunksOutput {
     session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    qualified_id: Option<String>,
     project_path: String,
     /// Root file id of the resume chain, when chain members were merged.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -76,23 +81,76 @@ fn fmt_span(
 
 /// Run the chunks command.
 pub fn run(cli: &Cli, args: &ChunksArgs) -> Result<()> {
-    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
-
-    let session =
-        claude_dir
-            .find_session(&args.session_id)?
-            .ok_or_else(|| SnatchError::SessionNotFound {
+    let registry = super::helpers::provider_registry(cli);
+    let provider_route = !args.provider.is_empty() || registry.looks_qualified(&args.session_id);
+    let (
+        display_id,
+        session_id,
+        provider,
+        qualified_id,
+        project_path,
+        chain,
+        unparsed,
+        semantic,
+        conversation,
+    ) = if provider_route {
+        super::helpers::refuse_unsupported_flags(
+            "provider-routed chunks",
+            &[("--no-chain", args.no_chain)],
+        )?;
+        let resolution = registry.resolve_with_default_policy(&args.provider, &args.session_id)?;
+        let parsed = crate::provider::registry::cached_parsed_session(
+            crate::cache::global_cache(),
+            resolution.provider,
+            &resolution.key,
+        )?;
+        let project_path = parsed
+            .entries
+            .iter()
+            .find_map(|entry| entry.entry.cwd().map(String::from))
+            .unwrap_or_else(|| "unknown".to_string());
+        let unparsed = parsed.diagnostics.unparseable;
+        let semantic = resolution.provider.capabilities().semantic_annotations;
+        let native_id = resolution.key.native_id.clone();
+        let qualified = resolution.key.to_string();
+        (
+            qualified.clone(),
+            native_id,
+            Some(resolution.key.provider.to_string()),
+            Some(qualified),
+            project_path,
+            None,
+            unparsed,
+            semantic,
+            Conversation::from_parsed_session(parsed)?,
+        )
+    } else {
+        let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
+        let session = claude_dir.find_session(&args.session_id)?.ok_or_else(|| {
+            SnatchError::SessionNotFound {
                 session_id: args.session_id.clone(),
-            })?;
-
-    let project_path = session.project_path().to_string();
-    let chain_aware = !args.no_chain;
-    let (entries, unparsed, chain) = super::helpers::resolve_chain_entries(
-        &claude_dir,
-        &session,
-        chain_aware,
-        cli.max_file_size,
-    )?;
+            }
+        })?;
+        let project_path = session.project_path().to_string();
+        let chain_aware = !args.no_chain;
+        let (entries, unparsed, chain) = super::helpers::resolve_chain_entries(
+            &claude_dir,
+            &session,
+            chain_aware,
+            cli.max_file_size,
+        )?;
+        (
+            args.session_id.clone(),
+            args.session_id.clone(),
+            None,
+            None,
+            project_path,
+            chain,
+            unparsed,
+            false,
+            Conversation::from_entries(entries)?,
+        )
+    };
     if let Some(ref chain) = chain {
         if !cli.quiet {
             eprintln!(
@@ -102,19 +160,24 @@ pub fn run(cli: &Cli, args: &ChunksArgs) -> Result<()> {
             );
         }
     }
-    let conversation = Conversation::from_entries(entries)?;
     if !cli.quiet {
         if let Some(notice) = conversation.duplicate_notice() {
             eprintln!("{notice}");
         }
     }
 
-    let chunking = chunk_conversation(&conversation);
+    let chunking = if semantic {
+        chunk_conversation_semantic(&conversation)
+    } else {
+        chunk_conversation(&conversation)
+    };
 
     match cli.effective_output() {
         OutputFormat::Json => {
             let output = ChunksOutput {
-                session_id: args.session_id.clone(),
+                session_id,
+                provider,
+                qualified_id,
                 project_path,
                 chain_id: chain.as_ref().map(|c| c.root_id.clone()),
                 total_chunks: chunking.len(),
@@ -158,7 +221,7 @@ pub fn run(cli: &Cli, args: &ChunksArgs) -> Result<()> {
 
             println!(
                 "Session {} — {} chunks, {} preamble entries\n",
-                &args.session_id[..8.min(args.session_id.len())],
+                &display_id[..8.min(display_id.len())],
                 chunking.len(),
                 chunking.preamble_uuids.len(),
             );
@@ -210,7 +273,7 @@ pub fn run(cli: &Cli, args: &ChunksArgs) -> Result<()> {
             }
             println!(
                 "\nRetrieve a chunk with: snatch messages {} --chunk <N> (or a range like 2-5)",
-                &args.session_id[..8.min(args.session_id.len())],
+                display_id,
             );
         }
     }

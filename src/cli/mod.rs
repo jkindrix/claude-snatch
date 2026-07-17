@@ -2520,8 +2520,9 @@ pub struct MessagesArgs {
     pub no_chain: bool,
 
     /// Restrict to prompt-boundary chunk(s): a zero-based index like "4" or an
-    /// inclusive range like "2-5". Chunk N is prompt N — typed or queued
-    /// steering — plus everything it produced (list with `snatch chunks`).
+    /// inclusive range like "2-5". Chunk N is boundary prompt N plus
+    /// everything it produced; provider-annotated midturn steering stays
+    /// inside the active chunk (list with `snatch chunks`).
     #[arg(long)]
     pub chunk: Option<String>,
 
@@ -2541,6 +2542,11 @@ pub struct MessagesArgs {
 pub struct ChunksArgs {
     /// Session ID (full UUID or short prefix).
     pub session_id: String,
+
+    /// Source provider (`claude-code`, `codex`, or `all`). Repeat to select
+    /// several providers. A qualified session id also selects its provider.
+    #[arg(long = "provider", value_name = "PROVIDER", action = clap::ArgAction::Append)]
+    pub provider: Vec<String>,
 
     /// Restrict to the single resolved file instead of reconstructing the full
     /// resume chain. By default, a resumed/continued session is shown across all

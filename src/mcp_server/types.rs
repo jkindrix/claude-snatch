@@ -236,12 +236,13 @@ pub struct GetSessionMessagesRequest {
     pub include_subagent_transcripts: Option<bool>,
 
     /// Restrict to prompt-boundary chunk(s): a zero-based index like "4" or an
-    /// inclusive range like "2-5". Chunk N is prompt N — a typed user prompt or
-    /// a queued mid-turn steering prompt — plus everything it produced (tool
-    /// traffic, responses, late async results), up to the next prompt. The
-    /// prompts listed by detail="overview" use the same indices, so overview →
-    /// pick index → chunk retrieval composes. The response carries chunk_info
-    /// describing the selection, including each chunk's prompt_source.
+    /// inclusive range like "2-5". Chunk N is boundary prompt N plus
+    /// everything it produced (tool traffic, responses, late async results),
+    /// up to the next boundary. Claude queued-command prompts remain boundaries
+    /// for compatibility; provider-annotated midturn steering stays inside the
+    /// active chunk. The prompts listed by detail="overview" use the same
+    /// indices, so overview → pick index → chunk retrieval composes. The
+    /// response carries chunk_info describing the selection.
     pub chunk: Option<String>,
 
     /// If true, only return entries carrying failed tool results. Pairs with

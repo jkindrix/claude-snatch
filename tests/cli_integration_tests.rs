@@ -1257,6 +1257,8 @@ fn test_chunks_json_marks_queued_prompt_source() {
         .clone();
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["total_chunks"], 2);
+    assert!(json.get("provider").is_none());
+    assert!(json.get("qualified_id").is_none());
     let chunks = json["chunks"].as_array().unwrap();
     assert_eq!(chunks[0]["prompt_source"], "user");
     assert_eq!(chunks[1]["prompt_source"], "queued");
@@ -2396,6 +2398,34 @@ mod codex_normalization_cli {
     }
 
     #[test]
+    fn chunks_lists_semantic_codex_boundaries() {
+        let claude = setup_fixture_dir();
+        let codex = slice_home();
+        let out = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "chunks", &format!("codex:{THREAD}")])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(value["provider"], "codex");
+        assert_eq!(value["qualified_id"], format!("codex:{THREAD}"));
+        assert_eq!(value["total_chunks"], 1);
+        assert_eq!(value["chunks"][0]["prompt"], "run the tests");
+
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["chunks", &format!("codex:{THREAD}"), "--no-chain"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("not supported with"));
+    }
+
+    #[test]
     fn timeline_reports_one_turn_for_one_human_prompt_amid_harness_context() {
         // Round-22 blocker 3: developer/environment context must not count
         // as human turns.
@@ -2540,17 +2570,55 @@ mod codex_normalization_cli {
             value["timeline"][0]["steering_prompts"],
             serde_json::json!(["also check the docs"])
         );
+
+        let chunk = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", tmp.path())
+            .args([
+                "messages",
+                &format!("codex:{THREAD}"),
+                "--chunk",
+                "0",
+                "--detail",
+                "conversation",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let chunk = String::from_utf8_lossy(&chunk);
+        assert!(chunk.contains("start the task"), "got: {chunk}");
+        assert!(chunk.contains("also check the docs"), "got: {chunk}");
+        assert!(chunk.contains("done, docs checked"), "got: {chunk}");
+
+        let overview = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", tmp.path())
+            .args([
+                "messages",
+                &format!("codex:{THREAD}"),
+                "--detail",
+                "overview",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let overview = String::from_utf8_lossy(&overview);
+        assert!(overview.contains("start the task"), "got: {overview}");
+        assert!(
+            !overview.contains("also check the docs"),
+            "midturn steering is a chunk member, not a boundary: {overview}"
+        );
     }
 
     #[test]
     fn messages_refuses_claude_machinery_flags_on_codex_sessions() {
         let claude = setup_fixture_dir();
         let codex = slice_home();
-        for extra in [
-            &["--chunk", "0"][..],
-            &["--no-chain"],
-            &["--subagent-transcripts"],
-        ] {
+        for extra in [&["--no-chain"][..], &["--subagent-transcripts"]] {
             let mut args = vec!["messages", "codex:0198cccc"];
             args.extend_from_slice(extra);
             snatch_cmd()

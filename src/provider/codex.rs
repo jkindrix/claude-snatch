@@ -1931,6 +1931,58 @@ mod tests {
                         std::sync::Arc::new(session.clone()),
                     )
                     .expect("normalized corpus session reconstructs");
+                    let (all_boundaries, all_midturn) =
+                        independent_prompt_expectations(&raw_records, None);
+                    let expected_chunk_prompts: std::collections::BTreeSet<_> = all_boundaries
+                        .iter()
+                        .map(|ordinal| {
+                            crate::provider::EntryId::deterministic(&d.key, *ordinal, 0).to_string()
+                        })
+                        .collect();
+                    let chunks =
+                        crate::analysis::chunking::chunk_conversation_semantic(&conversation);
+                    let actual_chunk_prompts: std::collections::BTreeSet<_> = chunks
+                        .chunks
+                        .iter()
+                        .map(|chunk| chunk.prompt_uuid.clone())
+                        .collect();
+                    assert_eq!(
+                        actual_chunk_prompts, expected_chunk_prompts,
+                        "semantic chunks must start at exactly the native-derived boundary prompts"
+                    );
+                    for ordinal in &all_midturn {
+                        let steering = crate::provider::EntryId::deterministic(&d.key, *ordinal, 0)
+                            .to_string();
+                        let memberships = chunks
+                            .chunks
+                            .iter()
+                            .filter(|chunk| {
+                                chunk.main_uuids.contains(&steering)
+                                    || chunk.attached_uuids.contains(&steering)
+                            })
+                            .count();
+                        let has_active_boundary =
+                            all_boundaries.range(..*ordinal).next_back().is_some();
+                        if has_active_boundary {
+                            assert_eq!(
+                                memberships, 1,
+                                "post-boundary midturn prompt belongs to exactly one active chunk"
+                            );
+                        } else {
+                            assert_eq!(
+                                memberships, 0,
+                                "pre-boundary midturn prompt must not invent an active chunk"
+                            );
+                            assert!(
+                                chunks.preamble_uuids.contains(&steering),
+                                "pre-boundary midturn prompt must remain explicit preamble"
+                            );
+                        }
+                        assert!(
+                            !actual_chunk_prompts.contains(&steering),
+                            "midturn steering must never become a chunk boundary"
+                        );
+                    }
                     let turns = crate::analysis::timeline::semantic_turns(&conversation);
                     let retained_steering: usize =
                         turns.iter().map(|t| t.steering_messages.len()).sum();
@@ -5571,6 +5623,69 @@ mod tests {
         assert!(audit.violations.is_empty(), "{:?}", audit.violations);
         assert_eq!(audit.boundary_count, 1);
         assert_eq!(audit.midturn_count, 1);
+    }
+
+    #[test]
+    fn semantic_chunking_uses_boundaries_and_keeps_midturn_steering_inside() {
+        let (_tmp, parsed, _raw) = prompt_audit_fixture();
+        let conversation =
+            crate::reconstruction::Conversation::from_parsed_session(std::sync::Arc::new(parsed))
+                .unwrap();
+        let chunks = crate::analysis::chunking::chunk_conversation_semantic(&conversation);
+        assert_eq!(chunks.len(), 1);
+        let boundary = crate::provider::EntryId::deterministic(&key(THREAD_A), 3, 0).to_string();
+        let steering = crate::provider::EntryId::deterministic(&key(THREAD_A), 5, 0).to_string();
+        assert_eq!(chunks.chunks[0].prompt_uuid, boundary);
+        assert!(chunks.chunks[0].main_uuids.contains(&steering));
+        assert_ne!(chunks.chunks[0].prompt_uuid, steering);
+    }
+
+    #[test]
+    fn nc_semantic_chunking_splits_when_steering_is_misdeclared_as_boundary() {
+        let (_tmp, mut parsed, _raw) = prompt_audit_fixture();
+        let steering = crate::provider::EntryId::deterministic(&key(THREAD_A), 5, 0);
+        parsed.semantics.get_mut(&steering).unwrap().prompt =
+            Some(crate::provider::PromptSemantics {
+                authorship: crate::provider::PromptAuthorship::Human,
+                delivery: crate::provider::PromptDelivery::TurnBoundary,
+            });
+        let conversation =
+            crate::reconstruction::Conversation::from_parsed_session(std::sync::Arc::new(parsed))
+                .unwrap();
+        let chunks = crate::analysis::chunking::chunk_conversation_semantic(&conversation);
+        assert_eq!(chunks.len(), 2, "negative control must change allocation");
+        assert_eq!(chunks.chunks[1].prompt_uuid, steering.to_string());
+    }
+
+    #[test]
+    fn pre_boundary_midturn_input_remains_explicit_preamble() {
+        // Corpus exit oracle found one unmatched user event before any retained
+        // boundary. There is no active chunk to own it; it must remain visible
+        // preamble and must not fabricate a turn boundary.
+        let (_tmp, parsed, _raw) = parse_and_raw(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line(
+                "turn_context",
+                serde_json::json!({"turn_id": "turn-1", "model": "gpt-test"}),
+            ),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "user_message", "message": "steer active work",
+                    "images": [], "local_images": [], "text_elements": []}),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "done"}]}),
+            ),
+        ]);
+        let steering = crate::provider::EntryId::deterministic(&key(THREAD_A), 2, 0).to_string();
+        let conversation =
+            crate::reconstruction::Conversation::from_parsed_session(std::sync::Arc::new(parsed))
+                .unwrap();
+        let chunks = crate::analysis::chunking::chunk_conversation_semantic(&conversation);
+        assert!(chunks.is_empty());
+        assert!(chunks.preamble_uuids.contains(&steering));
     }
 
     #[test]

@@ -225,8 +225,7 @@ pub fn run(cli: &Cli, args: &MessagesArgs) -> Result<()> {
 fn run_provider(cli: &Cli, args: &MessagesArgs) -> Result<()> {
     // COMPLETE argument classification (destructured without `..`):
     // generic view options apply to any provider; Claude-specific machinery
-    // (resume chains, subagent transcripts, prompt-boundary chunks — Phase
-    // C owns codex chunking) is refused, never ignored.
+    // (resume chains and subagent transcripts) is refused, never ignored.
     let MessagesArgs {
         session_id: _,
         provider: _,
@@ -240,7 +239,7 @@ fn run_provider(cli: &Cli, args: &MessagesArgs) -> Result<()> {
         before: _,
         subagent_transcripts,
         no_chain,
-        chunk,
+        chunk: _,
         errors_only: _,
         max_text_len: _,
     } = args;
@@ -249,7 +248,6 @@ fn run_provider(cli: &Cli, args: &MessagesArgs) -> Result<()> {
         &[
             ("--subagent-transcripts", *subagent_transcripts),
             ("--no-chain", *no_chain),
-            ("--chunk", chunk.is_some()),
         ],
     )?;
 
@@ -309,17 +307,35 @@ fn render(
     // (permissions, environment, developer instructions) as human
     // (round-22 blocker 3). Claude sessions keep the classic heuristic.
     let semantic = ctx.semantic;
+    let prompt = |e: &LogEntry| {
+        e.uuid()
+            .and_then(|u| conversation.semantics_for_uuid(u))
+            .and_then(|s| s.prompt)
+    };
     let human = |e: &LogEntry| -> bool {
         if semantic {
             matches!(e, LogEntry::User(_))
-                && e.uuid()
-                    .and_then(|u| conversation.semantics_for_uuid(u))
-                    .and_then(|s| s.prompt)
-                    .is_some_and(|p| {
-                        matches!(p.authorship, crate::provider::PromptAuthorship::Human)
-                    })
+                && prompt(e).is_some_and(|p| {
+                    matches!(p.authorship, crate::provider::PromptAuthorship::Human)
+                })
         } else {
             is_human_prompt(e)
+        }
+    };
+    let boundary = |e: &LogEntry| -> bool {
+        if semantic {
+            matches!(e, LogEntry::User(_))
+                && prompt(e).is_some_and(|p| {
+                    matches!(
+                        (p.authorship, p.delivery),
+                        (
+                            crate::provider::PromptAuthorship::Human,
+                            crate::provider::PromptDelivery::TurnBoundary
+                        )
+                    )
+                })
+        } else {
+            is_prompt_boundary(e)
         }
     };
     let detail = args.detail.as_str();
@@ -373,7 +389,11 @@ fn render(
     // membership is tree-based, so late async results belong to the chunk
     // that spawned them (appended after its main-thread members).
     if let Some(ref spec) = args.chunk {
-        let chunking = chunk_conversation(&conversation);
+        let chunking = if semantic {
+            crate::analysis::chunking::chunk_conversation_semantic(conversation)
+        } else {
+            chunk_conversation(conversation)
+        };
         let (start, end) = parse_chunk_spec(spec, chunking.len())
             .map_err(|message| SnatchError::ConfigError { message })?;
         main_entries = entries_for_chunk_range(&conversation, &chunking, start, end);
@@ -459,11 +479,7 @@ fn render(
     // always match chunk indices.
     match detail {
         "overview" => {
-            if semantic {
-                main_entries.retain(|e| human(e));
-            } else {
-                main_entries.retain(|e| is_prompt_boundary(e));
-            }
+            main_entries.retain(|e| boundary(e));
         }
         "conversation" => {
             main_entries.retain(|e| match e {

@@ -617,7 +617,7 @@ impl SnatchServer {
     /// Use detail="overview" for prompt boundaries only, "standard" for user+assistant
     /// text with tool names, or "full" for tool call details.
     #[tool(
-        description = "Read conversation messages from an agent session (Claude Code by default; other providers via provider or a qualified id). Use detail='overview' for human prompts, 'conversation' for user+assistant text (skipping tool-only turns), 'standard' for user+assistant text, and 'full' for tool details. Claude-only chain/subagent/chunk controls are refused on other provider routes until provider-neutral implementations exist. Set include_thinking=true for persisted reasoning, errors_only=true to drill into failed tool calls, and max_text_len to control truncation. Supports pagination with offset/limit."
+        description = "Read conversation messages from an agent session (Claude Code by default; other providers via provider or a qualified id). Use detail='overview' for prompt boundaries, 'conversation' for user+assistant text (skipping tool-only turns), 'standard' for user+assistant text, and 'full' for tool details. Chunk selectors use provider semantics: midturn steering remains inside the active chunk. Claude-only chain/subagent controls are refused on other provider routes. Set include_thinking=true for persisted reasoning, errors_only=true to drill into failed tool calls, and max_text_len to control truncation. Supports pagination with offset/limit."
     )]
     async fn get_session_messages(&self, request: GetSessionMessagesRequest) -> ToolOutput {
         let provider_flags = request.provider.as_deref().unwrap_or(&[]);
@@ -625,13 +625,11 @@ impl SnatchServer {
         let provider_route =
             !provider_flags.is_empty() || registry.looks_qualified(&request.session_id);
         if provider_route
-            && (request.chain_aware.is_some()
-                || request.include_subagent_transcripts == Some(true)
-                || request.chunk.is_some())
+            && (request.chain_aware.is_some() || request.include_subagent_transcripts == Some(true))
         {
             return ToolOutput::error(
-                "provider-routed messages do not support chain_aware, \
-                 include_subagent_transcripts, or chunk yet",
+                "provider-routed messages do not support chain_aware or \
+                 include_subagent_transcripts",
             );
         }
         let chain_aware = request.chain_aware.unwrap_or(true);
@@ -644,18 +642,36 @@ impl SnatchServer {
             Err(e) => return e,
         };
         let semantic = resolved.semantic_annotations;
+        let prompt = |entry: &LogEntry| {
+            entry
+                .uuid()
+                .and_then(|uuid| resolved.conversation.semantics_for_uuid(uuid))
+                .and_then(|semantics| semantics.prompt)
+        };
         let human = |entry: &LogEntry| {
             if semantic {
                 matches!(entry, LogEntry::User(_))
-                    && entry
-                        .uuid()
-                        .and_then(|uuid| resolved.conversation.semantics_for_uuid(uuid))
-                        .and_then(|semantics| semantics.prompt)
-                        .is_some_and(|prompt| {
-                            matches!(prompt.authorship, crate::provider::PromptAuthorship::Human)
-                        })
+                    && prompt(entry).is_some_and(|prompt| {
+                        matches!(prompt.authorship, crate::provider::PromptAuthorship::Human)
+                    })
             } else {
                 is_human_prompt(entry)
+            }
+        };
+        let boundary = |entry: &LogEntry| {
+            if semantic {
+                matches!(entry, LogEntry::User(_))
+                    && prompt(entry).is_some_and(|prompt| {
+                        matches!(
+                            (prompt.authorship, prompt.delivery),
+                            (
+                                crate::provider::PromptAuthorship::Human,
+                                crate::provider::PromptDelivery::TurnBoundary
+                            )
+                        )
+                    })
+            } else {
+                is_prompt_boundary(entry)
             }
         };
 
@@ -709,9 +725,14 @@ impl SnatchServer {
         // them (appended after its main-thread members).
         let chunk_info: Option<ChunkInfo> = if let Some(ref spec) = request.chunk {
             use crate::analysis::chunking::{
-                chunk_conversation, entries_for_chunk_range, parse_chunk_spec,
+                chunk_conversation, chunk_conversation_semantic, entries_for_chunk_range,
+                parse_chunk_spec,
             };
-            let chunking = chunk_conversation(&resolved.conversation);
+            let chunking = if semantic {
+                chunk_conversation_semantic(&resolved.conversation)
+            } else {
+                chunk_conversation(&resolved.conversation)
+            };
             let (start, end) = match parse_chunk_spec(spec, chunking.len()) {
                 Ok(range) => range,
                 Err(message) => return ToolOutput::error(format!("Invalid chunk: {message}")),
@@ -822,11 +843,7 @@ impl SnatchServer {
         // prompts) so its indices always match chunk indices.
         match detail {
             "overview" => {
-                if semantic {
-                    entries.retain(|e| human(e));
-                } else {
-                    entries.retain(|e| is_prompt_boundary(e));
-                }
+                entries.retain(|e| boundary(e));
             }
             "conversation" => {
                 // Human prompts + assistant messages with text content
@@ -3569,26 +3586,61 @@ mod tests {
         );
         assert_eq!(timeline["compaction_events"].as_array().unwrap().len(), 1);
 
-        let refused = server
-            .get_session_messages(GetSessionMessagesRequest {
-                session_id: format!("codex:{thread}"),
-                provider: None,
-                detail: None,
-                message_type: None,
-                limit: None,
-                offset: None,
-                reverse: None,
-                include_thinking: None,
-                chain_aware: None,
-                after_timestamp: None,
-                before_timestamp: None,
-                include_subagent_transcripts: None,
-                chunk: Some("0".to_string()),
-                errors_only: None,
-                max_text_len: None,
-            })
-            .await;
-        assert!(matches!(refused, ToolOutput::RecoverableError { .. }));
+        let chunked = unwrap_output(
+            server
+                .get_session_messages(GetSessionMessagesRequest {
+                    session_id: format!("codex:{thread}"),
+                    provider: None,
+                    detail: None,
+                    message_type: None,
+                    limit: None,
+                    offset: None,
+                    reverse: None,
+                    include_thinking: None,
+                    chain_aware: None,
+                    after_timestamp: None,
+                    before_timestamp: None,
+                    include_subagent_transcripts: None,
+                    chunk: Some("0".to_string()),
+                    errors_only: None,
+                    max_text_len: None,
+                })
+                .await,
+        );
+        let chunked: serde_json::Value = serde_json::from_str(&chunked).unwrap();
+        assert_eq!(chunked["chunk_info"]["total_chunks"], 1);
+        assert_eq!(chunked["chunk_info"]["chunks"][0]["prompt"], "start task");
+        assert!(chunked["messages"]
+            .to_string()
+            .contains("also inspect tests"));
+
+        let overview = unwrap_output(
+            server
+                .get_session_messages(GetSessionMessagesRequest {
+                    session_id: format!("codex:{thread}"),
+                    provider: None,
+                    detail: Some("overview".to_string()),
+                    message_type: None,
+                    limit: None,
+                    offset: None,
+                    reverse: None,
+                    include_thinking: None,
+                    chain_aware: None,
+                    after_timestamp: None,
+                    before_timestamp: None,
+                    include_subagent_transcripts: None,
+                    chunk: None,
+                    errors_only: None,
+                    max_text_len: None,
+                })
+                .await,
+        );
+        let overview: serde_json::Value = serde_json::from_str(&overview).unwrap();
+        assert_eq!(overview["returned"], 1);
+        assert!(overview["messages"].to_string().contains("start task"));
+        assert!(!overview["messages"]
+            .to_string()
+            .contains("also inspect tests"));
     }
 
     #[tokio::test]
