@@ -752,41 +752,44 @@ requirement-evaporation memory: deferred parts must be named in the same
 breath as any completion claim).
 
 ### Phase B2 — provider UX + production routing
-- [ ] `--provider claude-code|codex|all` (repeatable) on CLI; MCP requests
+- [x] `--provider claude-code|codex|all` (repeatable) on CLI; MCP requests
       gain optional `provider`; responses always carry provider + qualified
       session id. Default stays Claude-only until D.
-- [ ] Qualified-id parsing: FromStr/decoding + round-trip tests for the
+- [x] Qualified-id parsing: FromStr/decoding + round-trip tests for the
       escaped encoding BEFORE ids become CLI/MCP inputs (round-6 guardrail).
       Unqualified prefixes are allowed only when unique across the selected
       providers; ambiguity is an error listing the candidates (phase-plan
       original wording, restored round-17).
-- [ ] Provider-selection resolution matrix, specified and tested as a matrix
+- [x] Provider-selection resolution matrix, specified and tested as a matrix
       (round-17): repeated `--provider` flags; `all` mixed with explicit
       providers; a qualified id naming a provider outside the selected set;
       ambiguous unqualified prefixes. Never silently fall back to Claude.
-- [ ] `--provider all` availability semantics defined explicitly (round-17):
+- [x] `--provider all` availability semantics defined explicitly (round-17):
       whether one unavailable provider yields partial results (with a
       diagnostic) or fails atomically — pick one and test it.
-- [ ] Deterministic cross-provider ordering for any merged listing/output
+- [x] Deterministic cross-provider ordering for any merged listing/output
       (round-17).
-- [ ] `snatch providers` command: discovered roots, session counts, format
+- [x] `snatch providers` command: discovered roots, session counts, format
       families, diagnostics.
-- [ ] Production routing through SourceProvider: shared resolver path,
-      library API (`api.rs`) and MCP paths stop calling Session::parse
-      directly; archive/raw provider methods gain production callers
-      (round-10 re-phasing). Route through a provider registry / shared
-      resolver — no accumulation of Codex-specific conditionals at call
-      sites (round-17).
-- [ ] Parsed-session propagation: centralized
+- [~] Production routing through SourceProvider: shared resolver path
+      SHIPPED (ProviderRegistry + resolution matrix; all provider-aware
+      surfaces route through it, zero Codex conditionals at call sites);
+      archive/native/raw methods gained production callers for BOTH
+      providers (export tiers). REMAINING IN B2 SCOPE, tracked open:
+      `api.rs` and the classic (flagless) CLI/MCP paths still call
+      Session::parse directly — they migrate to the provider seam with
+      their surfaces' provider parameters (B3 surface work), per the
+      per-surface threading policy below.
+- [x] Parsed-session propagation: centralized
       `Conversation::from_parsed_session(...)` so provenance, semantics, and
       source cannot be independently forgotten; per-surface source threading
       lands WITH each surface's provider parameter (covers CLI + MCP +
       library/API — the ~28-site deferral inventory, rounds 10/T3).
-- [ ] First production cache consumer uses `parse_cache_token` (round-11
+- [x] First production cache consumer uses `parse_cache_token` (round-11
       guardrail; token already implemented + tested end-to-end). Test the
       consumer with an artifact revision change BETWEEN two lookups —
       stale-hit prevention, not just hit/miss (round-17).
-- [ ] `snatch doctor` surfacing of CodexDriftReport + a provider-neutral
+- [x] `snatch doctor` surfacing of CodexDriftReport + a provider-neutral
       diagnostics hook (round-15 re-phasing). Boundary vs Phase C
       (round-17): B2 exposes the native provider-neutral drift report; C
       tunes semantic/presentation behavior (era bucketing display, etc.) —
@@ -796,13 +799,47 @@ breath as any completion claim).
       rendering), track overflow counts, escape control characters to
       prevent terminal/structured-output injection, emit no session
       ids/paths/field values by default.
-- [ ] `codex` feature becomes default-on at release (round-11).
+- [x] `codex` feature becomes default-on at release (round-11).
 - [ ] Compatibility promise from B2 on: backward-compatible inputs/semantics,
       additive provider metadata permitted; Claude raw-jsonl byte-identical
       permanently (invariant #8 phasing).
-- [ ] Milestone (phase-plan original wording, restored round-17): list/info
+- [x] Milestone (phase-plan original wording, restored round-17): list/info
       + native/raw export work on REAL Codex sessions — a real-session
       demonstration, not fixtures only.
+
+#### B2 status (2026-07-17, milestones 1-6 shipped)
+
+Commits a7dffc7 (checklist amendment), 9ae773e (FromStr + registry +
+`snatch providers`), bfda472 (selection + resolution matrix, 11 tests),
+0587775 (`from_parsed_session` + keyed cache + `cached_session_entries`
+with the revision-change test), aebfd07 (CLI list/info/export provider
+routing, 10 integration tests, real-corpus demonstration), ad673a8 (MCP
+list_sessions/get_session_info provider routing + always-on
+provider/qualified_id response fields), 95176aa (doctor diagnostics hook,
+collection-time security caps with hostile-input test, codex default-on).
+
+Decisions taken in-implementation, FLAGGED FOR REVIEW:
+1. Default policy for qualified ids (`resolve_with_default_policy`): with
+   no `--provider` flag, an UNQUALIFIED reference stays Claude-only (the
+   phase-plan default until D), but a QUALIFIED id (`codex:...`) is itself
+   an explicit provider request and resolves against exactly the provider
+   it names. Rationale: typing the provider's name is as explicit as the
+   flag; no silent fallback exists in either direction. `looks_qualified`
+   only treats a reference as qualified when its first segment names a
+   REGISTERED provider, so Windows paths / legacy colon-bearing references
+   still reach the classic path.
+2. `--provider all` semantics: explicit selections are ATOMIC (any broken
+   or unknown named provider fails the call); `all` is PARTIAL but never
+   silent (skipped providers surfaced with reasons; zero working providers
+   errors; not-found results name unsearched providers).
+3. Prefix resolution: one exact native-id match wins over longer prefix
+   matches; otherwise unique-or-error with qualified candidates listed.
+4. Provider-neutral listing/info intentionally show identity + artifacts
+   + honest entry-type counts only (no titles/timestamps) until B3
+   normalization; Claude-specific filters are refused, not ignored.
+5. Vocabulary caps: 64 distinct keys per drift map, 120 chars per key,
+   dropped/truncated counters, `escape_debug` for control characters —
+   applied in `bump_vocab` during collection.
 
 ### Phase B3 — Codex normalization
 - [ ] Envelope records flip from Unknown{entries} to Mapped with the SAME
