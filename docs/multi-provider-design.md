@@ -471,6 +471,17 @@ directory walks.
    raw-jsonl remains byte-identical permanently. Tests encode these three
    promises separately.
 
+   **Approved pre-1.0 exception (2026-07-21):**
+   `SessionDigestResponse.formatted` became opt-in (`include_formatted`,
+   default false) after a consumer audit found no programmatic consumers —
+   the only client is an adaptive LLM, the structured fields carry the same
+   information, and default-on imposed recurring token waste. Structured
+   fields remain compatible; only the redundant pre-rendered text became
+   opt-in. This is a narrow, recorded exception, not a general weakening of
+   the invariant. Reassess before any public or multi-client distribution.
+   All three `include_formatted` behaviors (omitted → absent, false →
+   absent, true → populated) are test-pinned.
+
 ## Review amendments (2026-07-17)
 
 An external review by a Codex agent (gpt-5.6-sol, xhigh) running in this repo

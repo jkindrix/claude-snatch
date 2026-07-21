@@ -2888,7 +2888,7 @@ impl SnatchServer {
 
     /// Get a compact summary of a session's key topics, files, tools, and decisions.
     #[tool(
-        description = "Get a compact structured digest of a Claude Code or Codex session (select with provider or a qualified id): key/recent prompts, files, tools, confirmed failures vs inferred signals, compactions, and decision keywords. Quoted relays are reduced to their primary preamble and adjacent repeated prompts are compacted without changing the emission total. Set include_formatted=true only when a client needs a duplicate pre-rendered text form."
+        description = "Get a compact structured digest of a Claude Code or Codex session (select with provider or a qualified id): key/recent prompts, files, tools, confirmed failures vs inferred signals, compactions, and decision keywords. Quoted relays are reduced to their primary preamble and adjacent repeated prompts are compacted without changing the emission total. include_formatted defaults to false (the structured fields carry the same information); set it to true only when a client needs a duplicate pre-rendered text form."
     )]
     async fn get_session_digest(&self, request: GetSessionDigestRequest) -> ToolOutput {
         use crate::analysis::digest::{
@@ -5757,6 +5757,53 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["provider"], "claude-code");
         assert_eq!(v["qualified_id"], format!("claude-code:{sid}"));
+    }
+
+    /// Contract pin for the approved pre-1.0 exception to invariant #8:
+    /// `get_session_digest`'s `formatted` field is opt-in. All three inputs
+    /// are pinned so the default can never silently flip.
+    #[tokio::test]
+    async fn get_session_digest_formatted_is_opt_in_across_all_three_inputs() {
+        let sid = "dddddddd-1111-2222-3333-444455556666";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let server = make_server(&tmp);
+        let digest = |include_formatted: Option<bool>| GetSessionDigestRequest {
+            session_id: sid.to_string(),
+            provider: None,
+            max_prompts: None,
+            max_files: None,
+            include_formatted,
+        };
+
+        // omitted -> absent
+        let omitted: serde_json::Value = serde_json::from_str(&unwrap_output(
+            server.get_session_digest(digest(None)).await,
+        ))
+        .unwrap();
+        assert!(
+            omitted.get("formatted").is_none(),
+            "omitted include_formatted must leave formatted absent"
+        );
+
+        // explicit false -> absent
+        let off: serde_json::Value = serde_json::from_str(&unwrap_output(
+            server.get_session_digest(digest(Some(false))).await,
+        ))
+        .unwrap();
+        assert!(
+            off.get("formatted").is_none(),
+            "include_formatted=false must leave formatted absent"
+        );
+
+        // explicit true -> populated string
+        let on: serde_json::Value = serde_json::from_str(&unwrap_output(
+            server.get_session_digest(digest(Some(true))).await,
+        ))
+        .unwrap();
+        assert!(
+            on["formatted"].as_str().is_some_and(|t| !t.is_empty()),
+            "include_formatted=true must populate a non-empty formatted string"
+        );
     }
 
     #[tokio::test]
