@@ -4,9 +4,79 @@
 same day after external review by a Codex agent (gpt-5.6-sol) running inside the
 target tool — review verified point-by-point before adoption (see "Review
 amendments" below).
-**Goal:** goal #18 — extend snatch (CLI + MCP) to ingest and analyze session logs
-from agentic coding tools beyond Claude Code, designed for future extensibility.
-First target: OpenAI Codex CLI.
+**Goal:** goal #18 (SHIPPED via `9031610`) — extend snatch (CLI + MCP) to
+ingest and analyze session logs from agentic coding tools beyond Claude Code.
+First target: OpenAI Codex CLI. Remaining Codex↔Claude parity work is tracked
+as goal #19 — see "Parity status & remaining work" immediately below.
+
+## Parity status & remaining work (2026-07-21)
+
+Goal #18 (Codex ingest + normalization + core surfaces + Phase C/D) shipped
+through commit `9031610`; all gates green, 242/242 real Codex corpus clean.
+This section is the durable record of what is NOT yet at parity, so it is
+not left on the table. Tracked as **goal #19**.
+
+Two honest framings of "how close to Claude↔Codex parity":
+- **By architectural effort** (ingest, normalize, core surfaces, the whole
+  verification harness): ~70–75% — the hard, expensive part is done.
+- **By feature breadth** (how many snatch commands/MCP tools work
+  identically on Codex): ~45% — roughly half the surface is still
+  Claude-only.
+
+**Tier 1 — at parity (deep).** Discovery, parse, normalization into the
+common model with full provenance, and the core surfaces: `list`, `info`,
+`messages`, `timeline`, `chunks`, `export`, `doctor`, `lessons`,
+`providers` (CLI) and `list_sessions`, `get_session_info`,
+`get_session_messages`, `get_session_timeline`, `get_project_history`,
+`get_session_lessons` (MCP). Held to the same rigor as Claude (independent
+usage oracle + 20 negative controls + real-corpus conformance).
+
+**Tier 2 — analysis / search / insight layer: NOT at parity (largest gap).**
+These are Claude-only and would be valuable on Codex sessions:
+- CLI (~15): `search`, `stats`, `summary`, `digest`, `context`, `recent`,
+  `standup`, `diff`, `thread`, `health`, `priorities`, `file-evolution`,
+  `file-history`, `tag`, `extract`.
+- MCP (10 of 20 tools): `search_sessions`, `get_stats`, `get_tool_calls`,
+  `get_session_digest`, `get_file_history`, `thread_topic`,
+  `get_project_health`, `get_event_context`, `suggest_priorities`,
+  `explain_file_evolution`.
+- Most are wiring through the existing seam (`cached_parsed_session` +
+  `resolve_with_default_policy`) instead of `ClaudeDirectory`. Exceptions
+  needing real work: `get_tool_calls` and `file-history`/`file-evolution`
+  depend on constructs Codex logs differently (Claude uses
+  `file-history-snapshot` entries; Codex uses `apply_patch` tool calls) —
+  they need a Codex-native file-change extractor. `thread`/`search` want a
+  cross-provider index.
+
+**Tier 3 — persistent registries: not unified.** `goals`/`notes`/
+`decisions` remain Claude-only storage under `~/.claude`. The Phase D plan
+offered "scope per-provider OR migrate storage"; the lighter scope-to-Claude
+path was taken, so cross-provider or Codex-scoped registries do not exist.
+Needs a storage-model decision.
+
+**Tier 4 — normalization depth.** A class of Codex event families stays
+preserved-`Unknown` (content-complete, and the conformance gate rejects any
+NEW unclassified family — nothing is silently lost) rather than normalized
+into model entries: `exec_command_end`, `patch_apply_end`, `web_search_end`,
+`turn_aborted`, review-mode, thread-settings, `task_started`/`task_complete`,
+and orphan token-counts; `world_state` is a typed checkpoint, not an
+emission. Mapping the analytically valuable ones (especially tool-lifecycle
+→ `get_tool_calls`) is a prerequisite for parts of Tier 2.
+
+**Deliberate deferrals (not gaps — keep unless revisited):** pre-envelope
+legacy Codex files are inventory/native-export only; Codex sessions are
+unpriced; ATIF and OTel GenAI are deferred as optional lossy interchange
+exports; flagless commands stay Claude-only for compatibility and
+cross-provider unions require explicit `--provider all`.
+
+**Known observation:** `list sessions --provider all` scans the entire
+Claude corpus (~15.7k sessions) plus Codex and is slow (>2 min); fine as an
+explicit opt-in, a perf item if it ever becomes interactive.
+
+**Unverified:** spawn lineage is implemented (both denormalized
+`subagent.thread_spawn` shapes, fixture-tested), but the corpus's 16
+lineage edges were forks/copied-history — real spawn-edge exercise is
+unconfirmed.
 
 ## Architecture decision
 
@@ -1693,6 +1763,47 @@ preserved unknown, 2 unparseable). Nested drift checks cover 196,203 records;
 12 explicitly unbaselined variants (1,561 records) remain reported as outside
 that claim. Sixteen lineage edges/fork copies pass the inherited-activity
 audit. Classic export snapshots and provider-routed Claude parity remain green.
+
+#### Post-completion source/performance audit (2026-07-21)
+
+The warning that `--provider all` was slow merely because a union must scan the
+whole corpus was disproven. `collect_unified_projects` inventoried a provider,
+then resolved every discovered session through another complete inventory:
+quadratic discovery for both file providers. A bulk
+`sessions_with_project_context` contract now gives each provider one inventory
+pass. Claude's implementation also reads a bounded 256-KiB/32-line native
+metadata prelude instead of calling `quick_metadata_cached`, which fully parses
+every transcript. On this machine's 15,663-session Claude corpus, the same
+release command improved from a timeout beyond 240 seconds (about 1.1 GiB peak
+RSS) to 0.83 seconds (about 85 MiB); explicit `all` completes in 0.87 seconds.
+An adversarial registry test requires one bulk call and zero per-session
+resolutions, while the Claude test pins `cwd`, branch, start time, and artifact
+size from a valid prelude followed by a large invalid tail.
+
+The semantic audit was independently re-derived against OpenAI Codex
+`rust-v0.144.6`, including the
+[`TokenUsage` definition](https://github.com/openai/codex/blob/rust-v0.144.6/codex-rs/protocol/src/protocol.rs),
+the [rollout persistence policy](https://github.com/openai/codex/blob/rust-v0.144.6/codex-rs/rollout/src/policy.rs),
+and the [session persistence path](https://github.com/openai/codex/blob/rust-v0.144.6/codex-rs/core/src/session/mod.rs).
+The original mutation-tested oracle still had a specification blind spot: it
+projected native `TokenUsage` onto only input/cached/output, so it could not
+detect that `reasoning_output_tokens`, `total_tokens`, and
+`model_context_window` were discarded. An independent native-artifact census
+found 126,582 last/cumulative observations: 86,983 with nonzero reasoning
+output, plus 90 context-fill observations whose 2,630,519 total tokens were
+otherwise projected to zero. Observations now retain all five signed native
+counters and the context-window value; context-fill snapshots have an explicit
+non-summable kind. The source-derived oracle checks every field and a mutation
+control proves dropping them fails.
+
+Finally, drift and semantic coverage are separate machine-visible claims.
+`doctor` now reports `preserved_response_item_types` for source-known response
+families that remain exact `Unknown` entries rather than normalized emissions.
+Thus “zero unknown vocabulary” no longer implies complete semantic modeling;
+the current corpus honestly reports its 87 typed `ghost_snapshot` checkpoints.
+Rate-limit payloads remain source-tier telemetry rather than being copied into
+normalized `LogEntry` values, preserving the raw/native/archive boundary and
+avoiding propagation of account-sensitive state.
 
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".
