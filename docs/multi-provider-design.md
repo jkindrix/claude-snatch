@@ -20,8 +20,8 @@ Two honest framings of "how close to Claude↔Codex parity":
 - **By architectural effort** (ingest, normalize, core surfaces, the whole
   verification harness): ~70–75% — the hard, expensive part is done.
 - **By feature breadth** (how many snatch commands/MCP tools work
-  identically on Codex): ~45% — roughly half the surface is still
-  Claude-only.
+  identically on Codex): still incomplete, but goal #19 is actively burning
+  down the analysis layer rather than treating parity as one binary claim.
 
 **Tier 1 — at parity (deep).** Discovery, parse, normalization into the
 common model with full provenance, and the core surfaces: `list`, `info`,
@@ -31,21 +31,22 @@ common model with full provenance, and the core surfaces: `list`, `info`,
 `get_session_lessons` (MCP). Held to the same rigor as Claude (independent
 usage oracle + 20 negative controls + real-corpus conformance).
 
-**Tier 2 — analysis / search / insight layer: NOT at parity (largest gap).**
-These are Claude-only and would be valuable on Codex sessions:
-- CLI (~15): `search`, `stats`, `summary`, `digest`, `context`, `recent`,
-  `standup`, `diff`, `thread`, `health`, `priorities`, `file-evolution`,
+**Tier 2 — analysis / search / insight layer: PARTIAL parity (largest gap).**
+Provider-qualified and explicitly selected routes now cover CLI `digest` and
+`thread`, plus MCP `get_tool_calls`, `get_session_digest`, and `thread_topic`.
+The remaining Claude-only surfaces are:
+- CLI (~13): `search`, `stats`, `summary`, `context`, `recent`,
+  `standup`, `diff`, `health`, `priorities`, `file-evolution`,
   `file-history`, `tag`, `extract`.
-- MCP (10 of 20 tools): `search_sessions`, `get_stats`, `get_tool_calls`,
-  `get_session_digest`, `get_file_history`, `thread_topic`,
-  `get_project_health`, `get_event_context`, `suggest_priorities`,
+- MCP (7 tools): `search_sessions`, `get_stats`, `get_file_history`,
+  `get_project_health`, `get_event_context`, `suggest_priorities`, and
   `explain_file_evolution`.
 - Most are wiring through the existing seam (`cached_parsed_session` +
   `resolve_with_default_policy`) instead of `ClaudeDirectory`. Exceptions
-  needing real work: `get_tool_calls` and `file-history`/`file-evolution`
-  depend on constructs Codex logs differently (Claude uses
+  needing real work: `file-history`/`file-evolution` depend on constructs
+  Codex logs differently (Claude uses
   `file-history-snapshot` entries; Codex uses `apply_patch` tool calls) —
-  they need a Codex-native file-change extractor. `thread`/`search` want a
+  they need a Codex-native file-change extractor. `search` still wants a
   cross-provider index.
 
 **Tier 3 — persistent registries: not unified.** `goals`/`notes`/
@@ -69,9 +70,11 @@ unpriced; ATIF and OTel GenAI are deferred as optional lossy interchange
 exports; flagless commands stay Claude-only for compatibility and
 cross-provider unions require explicit `--provider all`.
 
-**Known observation:** `list sessions --provider all` scans the entire
-Claude corpus (~15.7k sessions) plus Codex and is slow (>2 min); fine as an
-explicit opt-in, a perf item if it ever becomes interactive.
+**Measured performance:** `list sessions --provider all` still scans the
+entire Claude corpus (~15.7k sessions) plus Codex, but the 2026-07-21 bulk
+inventory fix reduced the release command from >240 seconds/~1.1 GiB RSS to
+0.87 seconds/~85 MiB RSS on this machine. This is a regression benchmark, not
+permission to reintroduce per-session rediscovery.
 
 **Unverified:** spawn lineage is implemented (both denormalized
 `subagent.thread_spawn` shapes, fixture-tested), but the corpus's 16
@@ -1804,6 +1807,63 @@ the current corpus honestly reports its 87 typed `ghost_snapshot` checkpoints.
 Rate-limit payloads remain source-tier telemetry rather than being copied into
 normalized `LogEntry` values, preserving the raw/native/archive boundary and
 avoiding propagation of account-sensitive state.
+
+#### Experiential retrieval audit and remediation (2026-07-21)
+
+A progressive-narrowing evaluation found that the retrieval surfaces were
+economical when used as designed, but exposed four sources of avoidable noise:
+injected/relayed content outranking primary content in topic results; relayed
+external reviews being mislabeled as user corrections; adjacent repeated
+prompt presentation in digests; and apparently contradictory failure totals
+between tool-call and lessons views. It also found that MCP digest returned the
+same payload twice and that the evaluated advanced retrieval tools were still
+Claude-only despite Codex normalization being complete.
+
+The remediation is contract-driven rather than three string patches:
+
+- Visible text now carries presentation provenance (`primary`, `quoted`, or
+  `injected`). Native prompt semantics override text heuristics when available.
+  Topic result limiting prefers primary evidence, but secondary evidence is
+  retained and labeled rather than silently deleted. Markdown fences and
+  blockquotes are presentation evidence only; arbitrary pasted prose is not
+  claimed to have a knowable author.
+- User-correction classification runs only against primary human prose, so a
+  correction word inside a fenced/quoted external review is not attributed to
+  the user. An adjacent primary correction still survives.
+- Digest prompt arrays compact only adjacent equal presentation; the exact
+  `total_prompts` remains an emission count. Text equality is never used as
+  event identity. First/recent windows no longer overlap.
+- All three failure consumers share one taxonomy: `confirmed` failures require
+  a native flag, explicit process status, or structured error; `inferred`
+  signals come from unstructured text. Responses expose both counts and their
+  entry scope. `get_tool_calls(errors_only=true)` remains confirmed-only by
+  default; callers may explicitly select inferred or all. This explains scope
+  differences instead of forcing unlike views to manufacture the same total.
+  A real-corpus challenge found that current Codex `exec`/`wait` host-control
+  outputs embed arbitrary source and diagnostic text; they are therefore typed
+  as orchestration and require structured outer-tool evidence. Unknown tool
+  kinds follow the same conservative policy. Actual shell kinds recognize
+  textual and JSON/metadata exit codes. On the 243-session corpus this changed
+  a sampled session from 103 false inferred failures to zero; the full
+  new-activity census reports 1,263 confirmed failures and 348 inferred
+  `apply_patch` signals. Nested operations whose host wrapper persists no child
+  identity or status are intentionally not fabricated into failures.
+- MCP digest is structured-only by default. Its pre-rendered duplicate is an
+  explicit `include_formatted=true` compatibility option; CLI JSON likewise
+  carries only structured fields.
+- CLI `digest`/`thread` and MCP `get_tool_calls`/`get_session_digest`/
+  `thread_topic` resolve provider-qualified sessions through the retained
+  `ParsedSession` bundle. Threading supports explicit provider unions while
+  parsing and dropping one conversation at a time.
+
+The exit tests are adversarial: provider-authored Codex context must stay
+content-complete yet never become a human digest prompt; injected topic matches
+must be labeled; quoted correction words must not become user corrections; a
+same-scope fixture with one confirmed and one inferred failure must reconcile
+across tools while the default filter returns only the confirmed one; formatted
+digest duplication must be opt-in; and qualified Codex digest/thread routes
+must pass through the actual CLI and MCP entry points. These tests challenge
+the contracts rather than merely snapshotting a happy-path string.
 
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".
