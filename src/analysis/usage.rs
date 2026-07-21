@@ -10,7 +10,9 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use crate::analytics::SessionAnalytics;
-use crate::provider::{ProviderPricing, UsageAggregation, UsageBasis, UsageScope};
+use crate::provider::{
+    ProviderPricing, UsageAggregation, UsageBasis, UsageObservationKind, UsageScope,
+};
 use crate::reconstruction::Conversation;
 
 /// Canonical normalized usage totals consumed by existing analytics.
@@ -47,6 +49,9 @@ pub struct ProviderUsageSummary {
     pub canonical: CanonicalUsageSummary,
     /// Native observation cardinality keyed by `scope/aggregation`.
     pub observation_counts: BTreeMap<&'static str, usize>,
+    /// Native observation cardinality by measurement kind. Context-window
+    /// occupancy is deliberately separate from model-token usage.
+    pub observation_kind_counts: BTreeMap<&'static str, usize>,
     /// Native observation cardinality by input/cache basis.
     pub basis_counts: BTreeMap<&'static str, usize>,
     /// Observations whose fresh-input contribution was ambiguous.
@@ -63,12 +68,18 @@ pub fn provider_usage_summary(
 ) -> ProviderUsageSummary {
     let mut analytics = SessionAnalytics::from_conversation(conversation);
     let mut observation_counts = BTreeMap::new();
+    let mut observation_kind_counts = BTreeMap::new();
     let mut basis_counts = BTreeMap::new();
     let mut ambiguous_observations = 0;
 
     if let Some(bundle) = conversation.provider_bundle() {
         for semantics in bundle.semantics.values() {
             for observation in &semantics.usage {
+                let kind = match observation.kind {
+                    UsageObservationKind::ModelTokens => "model-tokens",
+                    UsageObservationKind::ContextWindow => "context-window",
+                };
+                *observation_kind_counts.entry(kind).or_default() += 1;
                 let axis = match (observation.scope, observation.aggregation) {
                     (UsageScope::Call, UsageAggregation::Delta) => "call/delta",
                     (UsageScope::Call, UsageAggregation::Cumulative) => "call/cumulative",
@@ -110,6 +121,7 @@ pub fn provider_usage_summary(
             total_processed_tokens: usage.total_tokens(),
         },
         observation_counts,
+        observation_kind_counts,
         basis_counts,
         ambiguous_observations,
         pricing: UsagePricingSummary {
@@ -136,6 +148,7 @@ mod tests {
             report.observation_counts.get("session/cumulative"),
             Some(&1)
         );
+        assert_eq!(report.observation_kind_counts.get("model-tokens"), Some(&2));
         assert_eq!(report.ambiguous_observations, 0);
         // The fake intentionally carries native observations but no normalized
         // message usage. Observation values are never summed by this consumer.

@@ -95,7 +95,8 @@ fn encode_locator(path: &Path) -> String {
     }
 }
 
-/// Known rollout vocabularies at rust-v0.144.5 — the drift baseline. These
+/// Known rollout vocabularies revalidated at rust-v0.144.6 — the drift
+/// baseline. These
 /// are NOT load-bearing for parsing (which is shape-based and preserves
 /// everything); they exist so [`CodexProvider::drift_report`] can tell
 /// "known vocabulary" from "schema drift".
@@ -126,6 +127,19 @@ const KNOWN_RESPONSE_ITEM_TYPES: [&str; 16] = [
     "compaction_summary",
     "context_compaction",
     "ghost_snapshot",
+];
+/// Response-item families that become chronological normalized emissions.
+/// Other known families remain byte/content-preserved at the source tier and
+/// as `Unknown` normalized entries; doctor reports them separately so
+/// "known vocabulary" cannot be mistaken for semantic coverage.
+const NORMALIZED_RESPONSE_ITEM_TYPES: [&str; 7] = [
+    "message",
+    "reasoning",
+    "function_call",
+    "function_call_output",
+    "custom_tool_call",
+    "custom_tool_call_output",
+    "web_search_call",
 ];
 const KNOWN_EVENT_MSG_TYPES: [&str; 23] = [
     "token_count",
@@ -186,6 +200,10 @@ pub struct CodexDriftReport {
     pub response_item_types: BTreeMap<String, u64>,
     /// response_item payload types outside the known vocabulary (drift).
     pub unknown_response_item_types: BTreeMap<String, u64>,
+    /// response_item types preserved by normalization without becoming a
+    /// chronological semantic emission. This is a coverage status, not
+    /// schema drift; source-known future types belong here until modeled.
+    pub preserved_response_item_types: BTreeMap<String, u64>,
     /// event_msg payload type counts.
     pub event_msg_types: BTreeMap<String, u64>,
     /// event_msg payload types outside the known vocabulary (drift).
@@ -581,6 +599,49 @@ impl CodexProvider {
             .cloned()
             .ok_or_else(|| ProviderError::NotFound(key.to_string()))?;
         Ok((descriptor, path))
+    }
+
+    fn project_context_for_path(
+        &self,
+        path: &Path,
+    ) -> Result<super::project::SessionProjectContext, ProviderError> {
+        let metadata = std::fs::metadata(path)?;
+        let modified_at = metadata.modified().ok().map(chrono::DateTime::from);
+        let mut context = super::project::SessionProjectContext {
+            modified_at,
+            artifact_bytes: metadata.len(),
+            ..Default::default()
+        };
+        // The child session's own session_meta is first even for the older
+        // embedded-history fork format. Read a bounded prefix so a harmless
+        // metadata prelude does not force a full transcript parse.
+        for value in self.initial_records(path, 32) {
+            let Some(payload) = session_meta_payload(&value) else {
+                continue;
+            };
+            context.cwd = payload
+                .get("cwd")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            context.started_at = value
+                .get("timestamp")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
+                .map(|timestamp| timestamp.with_timezone(&chrono::Utc));
+            if let Some(git) = payload.get("git") {
+                context.git_repository_url = git
+                    .get("repository_url")
+                    .or_else(|| git.get("repositoryUrl"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                context.git_branch = git
+                    .get("branch")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+            }
+            break;
+        }
+        Ok(context)
     }
 
     /// Open a rollout artifact as a line reader: plain passthrough, or a
@@ -1029,6 +1090,14 @@ impl CodexProvider {
                                     pt,
                                 );
                             }
+                            if !NORMALIZED_RESPONSE_ITEM_TYPES.contains(&pt) {
+                                bump_vocab(
+                                    &mut report.preserved_response_item_types,
+                                    &mut report.vocabulary_keys_dropped,
+                                    &mut report.vocabulary_keys_truncated,
+                                    pt,
+                                );
+                            }
                             if pt == "reasoning" {
                                 report.reasoning_items += 1;
                                 let has_summary = payload["summary"].as_array().is_some_and(|sm| {
@@ -1102,48 +1171,38 @@ impl SourceProvider for CodexProvider {
         self.descriptors()
     }
 
+    fn sessions_with_project_context(
+        &self,
+    ) -> Result<super::SessionProjectContexts, ProviderError> {
+        let (descriptors, paths) = self.inventory()?;
+        Ok(descriptors
+            .into_iter()
+            .map(|descriptor| {
+                let context = descriptor
+                    .preferred_artifact()
+                    .ok_or_else(|| {
+                        ProviderError::Other(format!(
+                            "descriptor {} has no artifacts",
+                            descriptor.key
+                        ))
+                    })
+                    .and_then(|preferred| {
+                        paths
+                            .get(&preferred.snapshot.id)
+                            .ok_or_else(|| ProviderError::NotFound(descriptor.key.to_string()))
+                    })
+                    .and_then(|path| self.project_context_for_path(path));
+                (descriptor, context)
+            })
+            .collect())
+    }
+
     fn project_context(
         &self,
         key: &LogicalSessionKey,
     ) -> Result<super::project::SessionProjectContext, ProviderError> {
         let (_, path) = self.resolve(key)?;
-        let metadata = std::fs::metadata(&path)?;
-        let modified_at = metadata.modified().ok().map(chrono::DateTime::from);
-        let mut context = super::project::SessionProjectContext {
-            modified_at,
-            artifact_bytes: metadata.len(),
-            ..Default::default()
-        };
-        // The child session's own session_meta is first even for the older
-        // embedded-history fork format. Read a bounded prefix so a harmless
-        // metadata prelude does not force a full transcript parse.
-        for value in self.initial_records(&path, 32) {
-            let Some(payload) = session_meta_payload(&value) else {
-                continue;
-            };
-            context.cwd = payload
-                .get("cwd")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string);
-            context.started_at = value
-                .get("timestamp")
-                .and_then(serde_json::Value::as_str)
-                .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
-                .map(|timestamp| timestamp.with_timezone(&chrono::Utc));
-            if let Some(git) = payload.get("git") {
-                context.git_repository_url = git
-                    .get("repository_url")
-                    .or_else(|| git.get("repositoryUrl"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string);
-                context.git_branch = git
-                    .get("branch")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string);
-            }
-            break;
-        }
-        Ok(context)
+        self.project_context_for_path(&path)
     }
 
     fn diagnostics(&self) -> Result<Option<serde_json::Value>, ProviderError> {
@@ -3366,6 +3425,34 @@ mod tests {
     }
 
     #[test]
+    fn drift_separates_known_vocabulary_from_normalization_coverage() {
+        let content = [
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            // Persisted and source-known in Codex 0.144.6, but deliberately
+            // preserved as Unknown until the adapter has a semantic mapping.
+            envelope_line(
+                "response_item",
+                serde_json::json!({
+                    "type": "local_shell_call",
+                    "call_id": "call-1",
+                    "status": "completed",
+                    "action": {"type": "exec", "command": ["true"]}
+                }),
+            ),
+        ]
+        .join("\n")
+            + "\n";
+        let (_tmp, provider) = home_with(THREAD_A, content.as_bytes(), false);
+        let report = provider.drift_report().unwrap();
+        assert!(report.unknown_response_item_types.is_empty());
+        assert_eq!(
+            report.preserved_response_item_types.get("local_shell_call"),
+            Some(&1),
+            "known source vocabulary must not imply normalized coverage"
+        );
+    }
+
+    #[test]
     fn drift_buckets_reasoning_availability_by_era() {
         // March (summaries present) vs April (encrypted-only): the aggregate
         // ratio must not be the only signal — the exact original research
@@ -4681,7 +4768,9 @@ mod tests {
         session: &crate::provider::ParsedSession,
         first_new_after_fork: Option<u64>,
     ) -> Vec<String> {
-        use crate::provider::{RecordOutcome, UsageAggregation, UsageBasis, UsageScope};
+        use crate::provider::{
+            RecordOutcome, UsageAggregation, UsageBasis, UsageObservationKind, UsageScope,
+        };
         let mut v: Vec<String> = Vec::new();
 
         // Window index per ordinal (same boundary rule, fresh walk).
@@ -4741,6 +4830,17 @@ mod tests {
                 g("input_tokens"),
                 g("cached_input_tokens"),
                 g("output_tokens"),
+            )
+        };
+        let native = |val: &serde_json::Value, sub: &str| -> (i64, i64, i64, i64, i64) {
+            let usage = &val["payload"]["info"][sub];
+            let get = |key: &str| usage[key].as_i64().unwrap_or(0);
+            (
+                get("input_tokens"),
+                get("cached_input_tokens"),
+                get("output_tokens"),
+                get("reasoning_output_tokens"),
+                get("total_tokens"),
             )
         };
 
@@ -5010,16 +5110,43 @@ mod tests {
                     UsageAggregation::Delta => "last_token_usage",
                     UsageAggregation::Cumulative => "total_token_usage",
                 };
-                let want = triple(src, sub);
-                if (obs.input_tokens, obs.cached_input_tokens, obs.output_tokens) != want {
+                let want = native(src, sub);
+                let actual = (
+                    obs.input_tokens,
+                    obs.cached_input_tokens,
+                    obs.output_tokens,
+                    obs.reasoning_output_tokens,
+                    obs.total_tokens,
+                );
+                if actual != want {
                     v.push(format!(
                         "observation on {eid} record #{} values {:?} != native {want:?}",
-                        obs.record.ordinal,
-                        (obs.input_tokens, obs.cached_input_tokens, obs.output_tokens)
+                        obs.record.ordinal, actual
                     ));
                 }
-                let contradicts = obs.cached_input_tokens > obs.input_tokens;
-                let want_basis = if contradicts {
+                let total_native = native(src, "total_token_usage");
+                let want_kind = if total_native.4 > 0
+                    && total_native.0 == 0
+                    && total_native.1 == 0
+                    && total_native.2 == 0
+                    && total_native.3 == 0
+                {
+                    UsageObservationKind::ContextWindow
+                } else {
+                    UsageObservationKind::ModelTokens
+                };
+                if obs.kind != want_kind {
+                    v.push(format!(
+                        "observation on {eid} record #{} kind {:?} != {want_kind:?}",
+                        obs.record.ordinal, obs.kind
+                    ));
+                }
+                let has_negative = Into::<[i64; 5]>::into(want)
+                    .into_iter()
+                    .any(|counter| counter < 0);
+                let contradicts = want.1 > want.0 || has_negative;
+                let want_basis = if want_kind == UsageObservationKind::ContextWindow || contradicts
+                {
                     UsageBasis::Unknown
                 } else {
                     UsageBasis::InputIncludesCached
@@ -5042,6 +5169,13 @@ mod tests {
                         obs.record.ordinal, obs.ambiguous
                     ));
                 }
+                let want_window = src["payload"]["info"]["model_context_window"].as_i64();
+                if obs.model_context_window != want_window {
+                    v.push(format!(
+                        "observation on {eid} record #{} context window {:?} != native {want_window:?}",
+                        obs.record.ordinal, obs.model_context_window
+                    ));
+                }
             }
         }
 
@@ -5059,7 +5193,15 @@ mod tests {
     /// the owner is unambiguously the nearest-before), two attributed usage
     /// records. Ordinals: 2 = owner of token 3, 6 = owner of token 7.
     fn allocation_fixture() -> Vec<String> {
-        let usage = |i: u64, c: u64, o: u64| serde_json::json!({"input_tokens": i, "cached_input_tokens": c, "output_tokens": o});
+        let usage = |i: u64, c: u64, o: u64| {
+            serde_json::json!({
+                "input_tokens": i,
+                "cached_input_tokens": c,
+                "output_tokens": o,
+                "reasoning_output_tokens": o / 2,
+                "total_tokens": i + o,
+            })
+        };
         vec![
             envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
             envelope_line(
@@ -5075,7 +5217,8 @@ mod tests {
                 "event_msg",
                 serde_json::json!({"type": "token_count", "info": {
                     "last_token_usage": usage(100, 40, 10),
-                    "total_token_usage": usage(100, 40, 10)}}),
+                    "total_token_usage": usage(100, 40, 10),
+                    "model_context_window": 128000}}),
             ),
             envelope_line(
                 "response_item",
@@ -5095,7 +5238,8 @@ mod tests {
                 "event_msg",
                 serde_json::json!({"type": "token_count", "info": {
                     "last_token_usage": usage(120, 40, 10),
-                    "total_token_usage": usage(200, 80, 20)}}),
+                    "total_token_usage": usage(200, 80, 20),
+                    "model_context_window": 128000}}),
             ),
         ]
     }
@@ -5220,6 +5364,23 @@ mod tests {
         let dup = usage[0].clone();
         usage.push(dup);
         assert_rejects(&parsed, &raw, "observations (expected exactly 2)");
+    }
+
+    #[test]
+    fn nc_dropped_native_usage_fields_are_rejected() {
+        let (_tmp, mut parsed, raw) = parse_and_raw(&allocation_fixture());
+        let observation = parsed
+            .semantics
+            .get_mut(&eid(2))
+            .unwrap()
+            .usage
+            .first_mut()
+            .unwrap();
+        observation.reasoning_output_tokens = 0;
+        observation.total_tokens = 0;
+        observation.model_context_window = None;
+        assert_rejects(&parsed, &raw, "values");
+        assert_rejects(&parsed, &raw, "context window");
     }
 
     #[test]
@@ -5994,6 +6155,107 @@ mod tests {
             5,
             "held + backward usage events all attach with N:1 provenance"
         );
+    }
+
+    #[test]
+    fn native_usage_observation_keeps_all_source_counters() {
+        let (_tmp, provider) = normalize_home(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "done"}]}),
+            ),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "token_count", "info": {
+                    "last_token_usage": {
+                        "input_tokens": 100, "cached_input_tokens": 40,
+                        "output_tokens": 25, "reasoning_output_tokens": 7,
+                        "total_tokens": 125
+                    },
+                    "total_token_usage": {
+                        "input_tokens": 100, "cached_input_tokens": 40,
+                        "output_tokens": 25, "reasoning_output_tokens": 7,
+                        "total_tokens": 125
+                    },
+                    "model_context_window": 128000
+                }}),
+            ),
+        ]);
+        let parsed = provider.parse(&key(THREAD_A)).unwrap();
+        let semantics = parsed
+            .semantics
+            .get(&crate::provider::EntryId::deterministic(
+                &key(THREAD_A),
+                1,
+                0,
+            ))
+            .unwrap();
+        assert_eq!(semantics.usage.len(), 2);
+        for observation in &semantics.usage {
+            assert_eq!(
+                observation.kind,
+                crate::provider::UsageObservationKind::ModelTokens
+            );
+            assert_eq!(
+                (
+                    observation.input_tokens,
+                    observation.cached_input_tokens,
+                    observation.output_tokens,
+                    observation.reasoning_output_tokens,
+                    observation.total_tokens,
+                    observation.model_context_window,
+                ),
+                (100, 40, 25, 7, 125, Some(128_000))
+            );
+        }
+    }
+
+    #[test]
+    fn context_fill_is_observed_but_never_counted_as_model_usage() {
+        let (_tmp, provider) = normalize_home(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "done"}]}),
+            ),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "token_count", "info": {
+                    "last_token_usage": {"total_tokens": 64000},
+                    "total_token_usage": {"total_tokens": 64000},
+                    "model_context_window": 128000
+                }}),
+            ),
+        ]);
+        let parsed = provider.parse(&key(THREAD_A)).unwrap();
+        let entry = parsed
+            .entries
+            .iter()
+            .find(|entry| entry.id.ordinal == 1)
+            .unwrap();
+        let crate::model::LogEntry::Assistant(message) = &entry.entry else {
+            panic!("usage owner is not an assistant entry");
+        };
+        assert_eq!(
+            message
+                .message
+                .usage
+                .as_ref()
+                .map(crate::model::usage::Usage::total_tokens),
+            Some(0),
+            "context occupancy is not model work"
+        );
+        let observations = &parsed.semantics[&entry.id].usage;
+        assert_eq!(observations.len(), 2);
+        assert!(observations.iter().all(|observation| {
+            observation.kind == crate::provider::UsageObservationKind::ContextWindow
+                && observation.total_tokens == 64_000
+                && observation.basis == crate::provider::UsageBasis::Unknown
+                && !observation.ambiguous
+        }));
     }
 
     #[test]

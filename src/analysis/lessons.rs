@@ -22,14 +22,14 @@
 
 use std::collections::HashMap;
 
-use crate::model::content::ToolResultContent;
+use crate::model::content::{ToolResult, ToolResultContent};
 use crate::model::message::LogEntry;
 use crate::provider::{ActivityKind, PromptAuthorship, ToolKind, ToolSemantics};
 use crate::reconstruction::Conversation;
 
 use super::extraction::{
-    extract_assistant_summary, extract_tool_input_summary, extract_user_prompt_text,
-    is_human_prompt, truncate_text,
+    extract_assistant_summary, extract_tool_input_summary, is_human_prompt, primary_content_text,
+    truncate_text,
 };
 
 /// Extract plain text from a ToolResultContent value.
@@ -59,6 +59,10 @@ pub struct ErrorFixPair {
     pub input_summary: HashMap<String, String>,
     /// Preview of the error message.
     pub error_preview: String,
+    /// Confidence tier of the failure classification.
+    pub failure_kind: FailureKind,
+    /// Evidence used to classify the failure.
+    pub failure_basis: FailureBasis,
     /// What the assistant did next (text summary of next response).
     pub resolution_summary: Option<String>,
     /// Tools used in the resolution attempt.
@@ -81,10 +85,88 @@ pub struct UserCorrectionEntry {
 pub struct LessonsSummary {
     /// Total error→fix pairs found.
     pub total_errors: usize,
+    /// Failures backed by a native flag, process status, or structured error.
+    pub confirmed_tool_failures: usize,
+    /// Error-like output inferred from text without an authoritative status.
+    pub inferred_failure_signals: usize,
     /// Total user corrections found.
     pub total_corrections: usize,
     /// Tools ranked by error frequency (most error-prone first).
     pub most_error_prone_tools: Vec<(String, usize)>,
+}
+
+/// Confidence tier for one tool-result failure classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureKind {
+    /// Backed by an authoritative native or structured status.
+    Confirmed,
+    /// Inferred from unstructured result text.
+    Inferred,
+}
+
+impl FailureKind {
+    /// Stable human/wire label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::Inferred => "inferred",
+        }
+    }
+}
+
+/// Evidence used to classify a tool result as a failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureBasis {
+    /// Native `is_error=true` marker.
+    NativeErrorFlag,
+    /// Explicit nonzero process exit status.
+    ProcessExit,
+    /// Structured response with a non-null/non-false error field.
+    StructuredError,
+    /// Unstructured error-signature heuristic.
+    TextSignature,
+}
+
+impl FailureBasis {
+    /// Stable human/wire label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeErrorFlag => "native error flag",
+            Self::ProcessExit => "process exit",
+            Self::StructuredError => "structured error",
+            Self::TextSignature => "text signature",
+        }
+    }
+}
+
+/// Classification of one tool result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FailureClassification {
+    /// Confidence tier.
+    pub kind: FailureKind,
+    /// Evidence basis.
+    pub basis: FailureBasis,
+}
+
+/// Counts under the shared failure taxonomy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FailureCounts {
+    /// Authoritatively confirmed tool failures.
+    pub confirmed: usize,
+    /// Heuristically inferred failure signals.
+    pub inferred: usize,
+}
+
+impl FailureCounts {
+    /// All classified failure incidents.
+    #[must_use]
+    pub const fn total(self) -> usize {
+        self.confirmed + self.inferred
+    }
 }
 
 /// Complete lesson extraction result.
@@ -255,10 +337,19 @@ fn is_observational_shell_command(command: &str) -> bool {
 }
 
 fn process_exit_code(content: &str) -> Option<i32> {
-    content.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("Process exited with code ")
+    let line_status = content.lines().find_map(|line| {
+        let line = line.trim();
+        line.strip_prefix("Process exited with code ")
+            .or_else(|| line.strip_prefix("Exit code: "))
             .and_then(|code| code.trim().parse().ok())
+    });
+    line_status.or_else(|| {
+        let value = serde_json::from_str::<serde_json::Value>(content).ok()?;
+        value
+            .get("exit_code")
+            .or_else(|| value.pointer("/metadata/exit_code"))
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok())
     })
 }
 
@@ -273,18 +364,18 @@ fn structured_error(content: &str) -> bool {
 /// census. Explicit process status is authoritative; cumulative/plain output
 /// content is not treated as an error merely because it contains source code,
 /// compiler diagnostics, or words such as "panic".
-fn semantic_tool_result_is_error(
+fn semantic_tool_result_failure(
     semantics: &ToolSemantics,
     input: &serde_json::Value,
     content: &str,
     soft_error_re: Option<&regex::Regex>,
-) -> bool {
+) -> Option<FailureClassification> {
     match &semantics.kind {
         ToolKind::Shell => {
             let command = shell_command(input);
             if let Some(exit) = process_exit_code(content) {
                 if exit == 0 {
-                    return false;
+                    return None;
                 }
                 // `rg`/`grep` use 1 for an ordinary no-match result.
                 if exit == 1
@@ -293,41 +384,78 @@ fn semantic_tool_result_is_error(
                         command.starts_with("rg ") || command.starts_with("grep ")
                     })
                 {
-                    return false;
+                    return None;
                 }
-                return true;
+                return Some(FailureClassification {
+                    kind: FailureKind::Confirmed,
+                    basis: FailureBasis::ProcessExit,
+                });
             }
             if content.contains("Process running with session ID") {
-                return false;
+                return None;
             }
             if command
                 .as_deref()
                 .is_some_and(is_observational_shell_command)
             {
-                return false;
+                return None;
             }
-            soft_error_re.is_some_and(|re| re.is_match(content))
-                || structured_error(content)
-                || content.trim_start().starts_with("Error:")
+            if structured_error(content) {
+                Some(FailureClassification {
+                    kind: FailureKind::Confirmed,
+                    basis: FailureBasis::StructuredError,
+                })
+            } else if content.trim_start().starts_with("Error:")
+                || soft_error_re.is_some_and(|re| re.is_match(content))
+            {
+                Some(FailureClassification {
+                    kind: FailureKind::Inferred,
+                    basis: FailureBasis::TextSignature,
+                })
+            } else {
+                None
+            }
         }
         ToolKind::FileWrite => {
-            content.contains("apply_patch verification failed")
+            if structured_error(content) {
+                Some(FailureClassification {
+                    kind: FailureKind::Confirmed,
+                    basis: FailureBasis::StructuredError,
+                })
+            } else if content.contains("apply_patch verification failed")
                 || content.contains("Failed to find expected")
                 || content.contains("Invalid Context")
                 || content.contains("Patch failed")
-                || structured_error(content)
+            {
+                Some(FailureClassification {
+                    kind: FailureKind::Inferred,
+                    basis: FailureBasis::TextSignature,
+                })
+            } else {
+                None
+            }
         }
-        ToolKind::Mcp | ToolKind::Web => structured_error(content),
+        ToolKind::Mcp | ToolKind::Web | ToolKind::Orchestration | ToolKind::Other(_) => {
+            structured_error(content).then_some(FailureClassification {
+                kind: FailureKind::Confirmed,
+                basis: FailureBasis::StructuredError,
+            })
+        }
         // Read/search results routinely contain source text that matches the
         // soft regex. Only the provider's hard-error bit (handled by the
         // caller) is authoritative for those content-bearing tools.
-        ToolKind::FileRead | ToolKind::Search | ToolKind::Subagent => false,
-        ToolKind::Other(_) => {
-            structured_error(content)
-                || content.trim_start().starts_with("Error:")
-                || soft_error_re.is_some_and(|re| re.is_match(content))
-        }
+        ToolKind::FileRead | ToolKind::Search | ToolKind::Subagent => None,
     }
+}
+
+#[cfg(test)]
+fn semantic_tool_result_is_error(
+    semantics: &ToolSemantics,
+    input: &serde_json::Value,
+    content: &str,
+    soft_error_re: Option<&regex::Regex>,
+) -> bool {
+    semantic_tool_result_failure(semantics, input, content, soft_error_re).is_some()
 }
 
 #[derive(Default)]
@@ -355,6 +483,153 @@ fn build_correction_regex() -> Option<regex::Regex> {
     .case_insensitive(true)
     .build()
     .ok()
+}
+
+fn classify_tool_result_with(
+    tool_name: &str,
+    input: &serde_json::Value,
+    result: &ToolResult,
+    semantics: Option<&ToolSemantics>,
+    semantic_annotations: bool,
+    soft_error_re: Option<&regex::Regex>,
+) -> Option<FailureClassification> {
+    let content = result.content.as_ref().map(tool_result_text);
+
+    if result.is_error == Some(true) {
+        if semantics.is_none()
+            && content
+                .as_deref()
+                .is_some_and(|text| is_likely_false_positive(tool_name, text))
+        {
+            return None;
+        }
+        return Some(FailureClassification {
+            kind: FailureKind::Confirmed,
+            basis: FailureBasis::NativeErrorFlag,
+        });
+    }
+
+    if let Some(semantics) = semantics {
+        return content.as_deref().and_then(|content| {
+            semantic_tool_result_failure(semantics, input, content, soft_error_re)
+        });
+    }
+
+    let content = content.as_deref()?;
+    if semantic_annotations {
+        if structured_error(content) {
+            return Some(FailureClassification {
+                kind: FailureKind::Confirmed,
+                basis: FailureBasis::StructuredError,
+            });
+        }
+        return content
+            .trim_start()
+            .starts_with("Error:")
+            .then_some(FailureClassification {
+                kind: FailureKind::Inferred,
+                basis: FailureBasis::TextSignature,
+            });
+    }
+    if tool_name == "Bash"
+        && input
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(is_readonly_git_command)
+    {
+        return None;
+    }
+    if structured_error(content) {
+        return Some(FailureClassification {
+            kind: FailureKind::Confirmed,
+            basis: FailureBasis::StructuredError,
+        });
+    }
+    soft_error_re
+        .is_some_and(|re| re.is_match(content))
+        .then_some(FailureClassification {
+            kind: FailureKind::Inferred,
+            basis: FailureBasis::TextSignature,
+        })
+}
+
+/// Classify one linked tool result under the shared failure taxonomy.
+#[must_use]
+pub fn classify_tool_result(
+    tool_name: &str,
+    input: &serde_json::Value,
+    result: &ToolResult,
+    semantics: Option<&ToolSemantics>,
+    semantic_annotations: bool,
+) -> Option<FailureClassification> {
+    let soft_error_re = build_soft_error_regex();
+    classify_tool_result_with(
+        tool_name,
+        input,
+        result,
+        semantics,
+        semantic_annotations,
+        soft_error_re.as_ref(),
+    )
+}
+
+/// Provider tool semantics keyed by native call id.
+#[must_use]
+pub fn conversation_tool_semantics(conversation: &Conversation) -> HashMap<String, ToolSemantics> {
+    let mut tools = HashMap::new();
+    let Some(bundle) = conversation.provider_bundle() else {
+        return tools;
+    };
+    for entry_semantics in bundle.semantics.values() {
+        for (call_id, tool) in &entry_semantics.tools {
+            tools.entry(call_id.clone()).or_insert_with(|| tool.clone());
+        }
+    }
+    tools
+}
+
+/// Count classified tool-result failures across an explicit entry scope.
+#[must_use]
+pub fn count_tool_failures<S: std::hash::BuildHasher>(
+    entries: &[&LogEntry],
+    semantics: &HashMap<String, ToolSemantics, S>,
+    semantic_annotations: bool,
+) -> FailureCounts {
+    let mut calls: HashMap<String, (String, serde_json::Value)> = HashMap::new();
+    for entry in entries {
+        if let LogEntry::Assistant(assistant) = entry {
+            for tool in assistant.message.tool_uses() {
+                calls.insert(tool.id.clone(), (tool.name.clone(), tool.input.clone()));
+            }
+        }
+    }
+    let soft_error_re = build_soft_error_regex();
+    let mut counts = FailureCounts::default();
+    for entry in entries {
+        let LogEntry::User(user) = entry else {
+            continue;
+        };
+        for result in user.message.tool_results() {
+            let (tool_name, input) = calls
+                .get(&result.tool_use_id)
+                .cloned()
+                .unwrap_or_else(|| ("unknown".to_string(), serde_json::Value::Null));
+            if let Some(classification) = classify_tool_result_with(
+                &tool_name,
+                &input,
+                result,
+                semantics.get(&result.tool_use_id),
+                semantic_annotations,
+                soft_error_re.as_ref(),
+            ) {
+                match classification.kind {
+                    FailureKind::Confirmed => counts.confirmed += 1,
+                    FailureKind::Inferred => counts.inferred += 1,
+                }
+            }
+        }
+    }
+    counts
 }
 
 /// Score a correction candidate by how strongly it signals a real user
@@ -431,9 +706,6 @@ fn extract_error_fix_pairs_with(
     while i < entries.len() {
         if let LogEntry::User(user) = entries[i] {
             for result in user.message.tool_results() {
-                // Check for hard error (is_error=true)
-                let is_hard_error = result.is_error == Some(true);
-
                 // Look up the tool before classifying content: provider
                 // semantics distinguish shell status wrappers, file-write
                 // failures, and content-bearing read/search/web outputs.
@@ -442,58 +714,17 @@ fn extract_error_fix_pairs_with(
                     .cloned()
                     .unwrap_or_else(|| ("unknown".into(), serde_json::Value::Null, None));
                 let content_text = result.content.as_ref().map(tool_result_text);
-
-                // Check for soft error (error patterns in content)
-                let is_soft_error = if !is_hard_error {
-                    if let Some(context) = semantic {
-                        content_text.as_deref().is_some_and(|text| {
-                            context.tools.get(&result.tool_use_id).map_or_else(
-                                || {
-                                    structured_error(text)
-                                        || text.trim_start().starts_with("Error:")
-                                },
-                                |tool_semantics| {
-                                    semantic_tool_result_is_error(
-                                        tool_semantics,
-                                        &input,
-                                        text,
-                                        soft_error_re.as_ref(),
-                                    )
-                                },
-                            )
-                        })
-                    } else if let (Some(ref re), Some(ref text)) = (&soft_error_re, &content_text) {
-                        re.is_match(text)
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-
-                if !is_hard_error && !is_soft_error {
+                let classification = classify_tool_result_with(
+                    &tool_name,
+                    &input,
+                    result,
+                    semantic.and_then(|context| context.tools.get(&result.tool_use_id)),
+                    semantic.is_some(),
+                    soft_error_re.as_ref(),
+                );
+                let Some(classification) = classification else {
                     continue;
-                }
-
-                // Filter false positives: a soft-error keyword inside read-only git
-                // output (commit messages, diffs) is not a real failure.
-                if semantic.is_none() && is_soft_error && tool_name == "Bash" {
-                    if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
-                        if is_readonly_git_command(cmd) {
-                            continue;
-                        }
-                    }
-                }
-
-                // Filter false positives: successful results spuriously flagged is_error=true,
-                // or soft error patterns matching inside structured response data
-                if semantic.is_none() {
-                    if let Some(ref text) = content_text {
-                        if is_likely_false_positive(&tool_name, text) {
-                            continue;
-                        }
-                    }
-                }
+                };
 
                 let error_preview = content_text
                     .as_deref()
@@ -530,6 +761,8 @@ fn extract_error_fix_pairs_with(
                     tool_name,
                     input_summary,
                     error_preview,
+                    failure_kind: classification.kind,
+                    failure_basis: classification.basis,
                     resolution_summary,
                     resolution_tools,
                 });
@@ -586,7 +819,7 @@ where
                 if !is_human(entry) {
                     continue;
                 }
-                if let Some(text) = extract_user_prompt_text(entry) {
+                if let Some(text) = primary_content_text(entry) {
                     if correction_re.is_match(&text) && text.len() > 10 && !is_summary_text(&text) {
                         scored.push((
                             correction_strength(&text),
@@ -656,6 +889,11 @@ where
 
     // Summary reflects true totals (ranked from all errors, not just the limited set)
     let total_errors = error_fix_pairs.len();
+    let confirmed_tool_failures = error_fix_pairs
+        .iter()
+        .filter(|pair| pair.failure_kind == FailureKind::Confirmed)
+        .count();
+    let inferred_failure_signals = total_errors - confirmed_tool_failures;
     let total_corrections = user_corrections.len();
     let most_error_prone_tools = rank_error_prone_tools(&error_fix_pairs);
 
@@ -666,6 +904,8 @@ where
     LessonResult {
         summary: LessonsSummary {
             total_errors,
+            confirmed_tool_failures,
+            inferred_failure_signals,
             total_corrections,
             most_error_prone_tools,
         },
@@ -785,6 +1025,42 @@ mod tests {
             "42:error[E0308] appears in source",
             Some(&re),
         ));
+        assert!(!semantic_tool_result_is_error(
+            &semantics(ToolKind::Orchestration, "exec"),
+            &serde_json::Value::Null,
+            r#"[{"type":"input_text","text":"Script completed\nOutput:\nerror[E0308] in source"}]"#,
+            Some(&re),
+        ));
+        assert!(!semantic_tool_result_is_error(
+            &semantics(ToolKind::Other("future_tool".into()), "future_tool"),
+            &serde_json::Value::Null,
+            "thread worker panicked in content of unknown meaning",
+            Some(&re),
+        ));
+    }
+
+    #[test]
+    fn semantic_shell_reads_structured_and_text_exit_statuses() {
+        let re = build_soft_error_regex().unwrap();
+        let shell = semantics(ToolKind::Shell, "exec_command");
+        assert!(!semantic_tool_result_is_error(
+            &shell,
+            &serde_json::json!({"cmd": "cargo check"}),
+            r#"{"exit_code":0,"output":"error[E0308] quoted source"}"#,
+            Some(&re),
+        ));
+        assert!(semantic_tool_result_is_error(
+            &shell,
+            &serde_json::json!({"cmd": "cargo check"}),
+            r#"{"chunk_id":"x","exit_code":101,"output":"compile failed"}"#,
+            Some(&re),
+        ));
+        assert!(semantic_tool_result_is_error(
+            &shell,
+            &serde_json::json!({"cmd": "cargo check"}),
+            "Exit code: 2\nFinal output:\ncompile failed",
+            Some(&re),
+        ));
     }
 
     #[test]
@@ -883,47 +1159,35 @@ mod tests {
 
     /// Helper: build a simple assistant text entry.
     fn assistant_text(text: &str) -> LogEntry {
-        let json = format!(
-            r#"{{
-                "type": "assistant",
-                "uuid": "asst-text",
-                "timestamp": "2025-01-01T00:00:02Z",
-                "sessionId": "test-session",
-                "version": "2.0.0",
-                "message": {{
-                    "id": "msg-test",
-                    "type": "message",
-                    "role": "assistant",
-                    "model": "claude-sonnet-4-20250514",
-                    "content": [
-                        {{
-                            "type": "text",
-                            "text": "{text}"
-                        }}
-                    ],
-                    "stop_reason": "end_turn"
-                }}
-            }}"#
-        );
-        serde_json::from_str(&json).expect("failed to parse assistant_text JSON")
+        serde_json::from_value(serde_json::json!({
+            "type": "assistant",
+            "uuid": "asst-text",
+            "timestamp": "2025-01-01T00:00:02Z",
+            "sessionId": "test-session",
+            "version": "2.0.0",
+            "message": {
+                "id": "msg-test",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-20250514",
+                "content": [{"type": "text", "text": text}],
+                "stop_reason": "end_turn"
+            }
+        }))
+        .expect("failed to parse assistant_text JSON")
     }
 
     /// Helper: build a simple user text entry.
     fn user_text(text: &str) -> LogEntry {
-        let json = format!(
-            r#"{{
-                "type": "user",
-                "uuid": "user-text",
-                "timestamp": "2025-01-01T00:00:03Z",
-                "sessionId": "test-session",
-                "version": "2.0.0",
-                "message": {{
-                    "role": "user",
-                    "content": "{text}"
-                }}
-            }}"#
-        );
-        serde_json::from_str(&json).expect("failed to parse user_text JSON")
+        serde_json::from_value(serde_json::json!({
+            "type": "user",
+            "uuid": "user-text",
+            "timestamp": "2025-01-01T00:00:03Z",
+            "sessionId": "test-session",
+            "version": "2.0.0",
+            "message": {"role": "user", "content": text}
+        }))
+        .expect("failed to parse user_text JSON")
     }
 
     #[test]
@@ -1089,6 +1353,39 @@ mod tests {
     }
 
     #[test]
+    fn relayed_review_does_not_become_the_users_correction() {
+        let entries = [
+            assistant_text("Here is the current implementation."),
+            user_text(
+                "I shared the work with another reviewer. Their response follows:\n\
+                 ```\nThis is wrong and you should have done it another way. Stop repeating it.\n```\n\
+                 Please investigate their findings.",
+            ),
+        ];
+        let refs: Vec<&LogEntry> = entries.iter().collect();
+        let corrections = extract_user_corrections(&refs, &LessonOptions::default());
+        assert!(
+            corrections.is_empty(),
+            "quoted reviewer language is not the user's own correction: {corrections:?}"
+        );
+    }
+
+    #[test]
+    fn primary_correction_survives_beside_a_quoted_review() {
+        let entries = [
+            assistant_text("Here is the current implementation."),
+            user_text(
+                "No, stop claiming this is complete.\n```\nThe reviewer also said it is wrong.\n```",
+            ),
+        ];
+        let refs: Vec<&LogEntry> = entries.iter().collect();
+        let corrections = extract_user_corrections(&refs, &LessonOptions::default());
+        assert_eq!(corrections.len(), 1);
+        assert!(corrections[0].user_text.contains("stop claiming"));
+        assert!(!corrections[0].user_text.contains("reviewer also"));
+    }
+
+    #[test]
     fn test_correction_skips_short_text() {
         let entries = [
             assistant_text("working on it"),
@@ -1158,6 +1455,8 @@ mod tests {
                 tool_name: "Bash".into(),
                 input_summary: HashMap::new(),
                 error_preview: "err".into(),
+                failure_kind: FailureKind::Confirmed,
+                failure_basis: FailureBasis::NativeErrorFlag,
                 resolution_summary: None,
                 resolution_tools: vec![],
             },
@@ -1166,6 +1465,8 @@ mod tests {
                 tool_name: "Edit".into(),
                 input_summary: HashMap::new(),
                 error_preview: "err".into(),
+                failure_kind: FailureKind::Confirmed,
+                failure_basis: FailureBasis::NativeErrorFlag,
                 resolution_summary: None,
                 resolution_tools: vec![],
             },
@@ -1174,6 +1475,8 @@ mod tests {
                 tool_name: "Bash".into(),
                 input_summary: HashMap::new(),
                 error_preview: "err".into(),
+                failure_kind: FailureKind::Confirmed,
+                failure_basis: FailureBasis::NativeErrorFlag,
                 resolution_summary: None,
                 resolution_tools: vec![],
             },
@@ -1199,8 +1502,33 @@ mod tests {
         assert_eq!(result.error_fix_pairs.len(), 1);
         assert_eq!(result.user_corrections.len(), 1);
         assert_eq!(result.summary.total_errors, 1);
+        assert_eq!(result.summary.confirmed_tool_failures, 1);
+        assert_eq!(result.summary.inferred_failure_signals, 0);
         assert_eq!(result.summary.total_corrections, 1);
         assert!(!result.summary.most_error_prone_tools.is_empty());
+    }
+
+    #[test]
+    fn shared_failure_taxonomy_separates_confirmed_from_inferred() {
+        let entries = [
+            assistant_with_tool("hard", "Bash", "run hard"),
+            user_tool_result("hard", true, "native failure"),
+            assistant_with_tool("soft", "Bash", "run soft"),
+            user_tool_result("soft", false, "error[E0308]: inferred compiler output"),
+        ];
+        let refs: Vec<&LogEntry> = entries.iter().collect();
+        let result = extract_lessons(&refs, &LessonOptions::default());
+        assert_eq!(result.summary.total_errors, 2);
+        assert_eq!(result.summary.confirmed_tool_failures, 1);
+        assert_eq!(result.summary.inferred_failure_signals, 1);
+        assert_eq!(
+            result.error_fix_pairs[0].failure_kind,
+            FailureKind::Confirmed
+        );
+        assert_eq!(
+            result.error_fix_pairs[1].failure_kind,
+            FailureKind::Inferred
+        );
     }
 
     #[test]

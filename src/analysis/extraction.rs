@@ -8,6 +8,56 @@ use std::collections::{HashMap, HashSet};
 use crate::model::content::ContentBlock;
 use crate::model::message::{LogEntry, SystemSubtype, UserContent};
 
+/// Provenance of a visible text segment within a conversation entry.
+///
+/// This is deliberately about the *presentation source* of text, not who
+/// ultimately authored every quoted word. Native logs can prove that a
+/// harness injected an entry and Markdown can prove that text was presented
+/// as a quote/fence; they cannot reliably identify the author of arbitrary
+/// pasted prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentProvenance {
+    /// Ordinary user/assistant prose outside quoted or fenced blocks.
+    Primary,
+    /// Markdown blockquote or fenced content presented by the speaker.
+    Quoted,
+    /// A structurally harness-generated user-role entry.
+    Injected,
+}
+
+impl ContentProvenance {
+    /// Selection priority when a result limit forces narrowing.
+    #[must_use]
+    pub const fn priority(self) -> u8 {
+        match self {
+            Self::Primary => 0,
+            Self::Quoted => 1,
+            Self::Injected => 2,
+        }
+    }
+}
+
+impl std::fmt::Display for ContentProvenance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::Primary => "primary",
+            Self::Quoted => "quoted",
+            Self::Injected => "injected",
+        };
+        f.write_str(value)
+    }
+}
+
+/// One contiguous visible-text segment and its presentation provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentSegment {
+    /// How the segment entered the visible transcript.
+    pub provenance: ContentProvenance,
+    /// Segment text, retaining line breaks within a provenance run.
+    pub text: String,
+}
+
 /// Truncate text at a word boundary with "..." suffix.
 pub fn truncate_text(text: &str, max_len: usize) -> String {
     let text = text.trim();
@@ -126,6 +176,108 @@ pub fn extract_user_prompt_text(entry: &LogEntry) -> Option<String> {
         },
         _ => None,
     }
+}
+
+/// Extract visible conversational text from a user or assistant entry.
+#[must_use]
+pub fn extract_visible_text(entry: &LogEntry) -> Option<String> {
+    match entry {
+        LogEntry::User(_) => extract_user_prompt_text(entry),
+        LogEntry::Assistant(assistant) => {
+            let text = assistant.message.combined_text();
+            (!text.trim().is_empty()).then_some(text)
+        }
+        _ => None,
+    }
+}
+
+/// Split visible Markdown into primary prose and explicitly quoted/fenced
+/// runs.
+///
+/// Fence delimiter lines belong to the quoted run. Adjacent lines with the
+/// same provenance are coalesced so callers can search without producing one
+/// result per line. This classifies presentation, not ultimate authorship.
+#[must_use]
+pub fn markdown_content_segments(text: &str) -> Vec<ContentSegment> {
+    fn push_line(segments: &mut Vec<ContentSegment>, provenance: ContentProvenance, line: &str) {
+        if let Some(last) = segments.last_mut().filter(|s| s.provenance == provenance) {
+            if !last.text.is_empty() {
+                last.text.push('\n');
+            }
+            last.text.push_str(line);
+        } else {
+            segments.push(ContentSegment {
+                provenance,
+                text: line.to_string(),
+            });
+        }
+    }
+
+    let mut segments = Vec::new();
+    let mut fence: Option<&str> = None;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let delimiter = if trimmed.starts_with("```") {
+            Some("```")
+        } else if trimmed.starts_with("~~~") {
+            Some("~~~")
+        } else {
+            None
+        };
+
+        let provenance = if fence.is_some() || delimiter.is_some() || trimmed.starts_with('>') {
+            ContentProvenance::Quoted
+        } else {
+            ContentProvenance::Primary
+        };
+        push_line(&mut segments, provenance, line);
+
+        if let Some(delimiter) = delimiter {
+            match fence {
+                None => fence = Some(delimiter),
+                Some(open) if open == delimiter => fence = None,
+                Some(_) => {}
+            }
+        }
+    }
+    segments.retain(|segment| !segment.text.trim().is_empty());
+    segments
+}
+
+/// Visible entry text with structural and Markdown presentation provenance.
+#[must_use]
+pub fn entry_content_segments(entry: &LogEntry) -> Vec<ContentSegment> {
+    let Some(text) = extract_visible_text(entry) else {
+        return Vec::new();
+    };
+    if matches!(entry, LogEntry::User(_)) && !is_human_prompt(entry) {
+        return vec![ContentSegment {
+            provenance: ContentProvenance::Injected,
+            text,
+        }];
+    }
+    markdown_content_segments(&text)
+}
+
+/// Primary prose from a visible entry, excluding explicit quotes/fences and
+/// structurally injected content. Returns `None` rather than guessing when an
+/// entry contains only secondary material.
+#[must_use]
+pub fn primary_content_text(entry: &LogEntry) -> Option<String> {
+    let primary = entry_content_segments(entry)
+        .into_iter()
+        .filter(|segment| segment.provenance == ContentProvenance::Primary)
+        .map(|segment| segment.text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!primary.trim().is_empty()).then_some(primary)
+}
+
+/// Compact orientation text: prefer primary prose, but retain the complete
+/// visible text for legitimate prompts expressed entirely as a quote/fence.
+#[must_use]
+pub fn orientation_text(entry: &LogEntry) -> Option<String> {
+    primary_content_text(entry).or_else(|| extract_visible_text(entry))
 }
 
 /// Extract the user-typed prompt from a `queued_command` attachment.
@@ -923,6 +1075,36 @@ mod tests {
             panic!("expected user entry");
         }
         assert!(!is_human_prompt(&entry));
+    }
+
+    #[test]
+    fn content_segments_separate_primary_quoted_and_injected_text() {
+        let relayed = r#"{"uuid":"1","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","version":"2.0","isSidechain":false,"message":{"role":"user","content":"I shared the review below:\n```\nthis quoted agent says the implementation is wrong\n```\nPlease investigate."}}"#;
+        let entry: LogEntry = serde_json::from_str(relayed).unwrap();
+        let segments = entry_content_segments(&entry);
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0].provenance, ContentProvenance::Primary);
+        assert_eq!(segments[1].provenance, ContentProvenance::Quoted);
+        assert_eq!(segments[2].provenance, ContentProvenance::Primary);
+        let primary = primary_content_text(&entry).unwrap();
+        assert!(primary.contains("I shared the review"));
+        assert!(primary.contains("Please investigate"));
+        assert!(!primary.contains("implementation is wrong"));
+
+        let injected = r#"{"uuid":"2","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:01Z","sessionId":"s","version":"2.0","isSidechain":false,"isMeta":true,"message":{"role":"user","content":"provider boilerplate"}}"#;
+        let entry: LogEntry = serde_json::from_str(injected).unwrap();
+        let segments = entry_content_segments(&entry);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].provenance, ContentProvenance::Injected);
+        assert!(primary_content_text(&entry).is_none());
+    }
+
+    #[test]
+    fn orientation_retains_an_entirely_fenced_human_prompt() {
+        let line = r#"{"uuid":"1","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","version":"2.0","isSidechain":false,"message":{"role":"user","content":"```rust\nfn main() {}\n```"}}"#;
+        let entry: LogEntry = serde_json::from_str(line).unwrap();
+        assert!(primary_content_text(&entry).is_none());
+        assert!(orientation_text(&entry).unwrap().contains("fn main"));
     }
 
     #[test]

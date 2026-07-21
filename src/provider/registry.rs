@@ -652,8 +652,8 @@ impl ProviderRegistry {
         > = std::collections::HashMap::new();
 
         for provider in &selected.providers {
-            let mut descriptors = match provider.sessions() {
-                Ok(descriptors) => descriptors,
+            let mut sessions = match provider.sessions_with_project_context() {
+                Ok(sessions) => sessions,
                 Err(error) if atomic => return Err(error),
                 Err(error) => {
                     skipped.push((provider.id(), format!("session scan failed: {error}")));
@@ -661,9 +661,9 @@ impl ProviderRegistry {
                 }
             };
             scanned += 1;
-            descriptors.sort_by(|a, b| a.key.cmp(&b.key));
-            for descriptor in descriptors {
-                let mut context = match provider.project_context(&descriptor.key) {
+            sessions.sort_by(|(a, _), (b, _)| a.key.cmp(&b.key));
+            for (descriptor, context) in sessions {
+                let mut context = match context {
                     Ok(context) => context,
                     Err(error) => {
                         context_warnings.push(ProjectContextWarning {

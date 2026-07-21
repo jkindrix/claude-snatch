@@ -282,6 +282,10 @@ fn provider_diagnostics(cli: &Cli, args: &DoctorArgs) -> Result<()> {
         for (label, key) in [
             ("unknown envelope types", "unknown_envelope_types"),
             ("unknown response_item types", "unknown_response_item_types"),
+            (
+                "preserved/unmodeled response_item types",
+                "preserved_response_item_types",
+            ),
             ("unknown event_msg types", "unknown_event_msg_types"),
             ("unknown field paths", "unknown_field_paths"),
             ("unbaselined payload variants", "unbaselined_payload_types"),

@@ -1567,3 +1567,128 @@ fn collect_lineage_rejects_cross_provider_edge_injection() {
     assert_eq!(union.skipped.len(), 1);
     assert_eq!(union.skipped[0].0, ProviderId("foreign".into()));
 }
+
+#[test]
+fn project_collection_uses_one_bulk_inventory_not_per_session_resolution() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[derive(Default)]
+    struct Calls {
+        bulk: AtomicUsize,
+        sessions: AtomicUsize,
+        contexts: AtomicUsize,
+    }
+
+    struct CountingProvider(Arc<Calls>);
+
+    impl CountingProvider {
+        fn descriptors() -> Vec<SessionDescriptor> {
+            (0..4)
+                .map(|index| SessionDescriptor {
+                    key: LogicalSessionKey {
+                        provider: ProviderId("counting".into()),
+                        namespace: SessionNamespace::global(),
+                        native_id: format!("session-{index}"),
+                    },
+                    artifacts: Vec::new(),
+                })
+                .collect()
+        }
+    }
+
+    impl SourceProvider for CountingProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId("counting".into())
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::default()
+        }
+
+        fn sessions(&self) -> Result<Vec<SessionDescriptor>, ProviderError> {
+            self.0.sessions.fetch_add(1, Ordering::SeqCst);
+            Ok(Self::descriptors())
+        }
+
+        fn sessions_with_project_context(&self) -> Result<SessionProjectContexts, ProviderError> {
+            self.0.bulk.fetch_add(1, Ordering::SeqCst);
+            Ok(Self::descriptors()
+                .into_iter()
+                .map(|descriptor| {
+                    (
+                        descriptor,
+                        Ok(super::project::SessionProjectContext {
+                            cwd: Some("/workspace".into()),
+                            ..Default::default()
+                        }),
+                    )
+                })
+                .collect())
+        }
+
+        fn project_context(
+            &self,
+            _key: &LogicalSessionKey,
+        ) -> Result<super::project::SessionProjectContext, ProviderError> {
+            self.0.contexts.fetch_add(1, Ordering::SeqCst);
+            Ok(super::project::SessionProjectContext::default())
+        }
+
+        fn lineage(&self) -> Result<Vec<LineageEdge>, ProviderError> {
+            Ok(Vec::new())
+        }
+
+        fn parse(&self, key: &LogicalSessionKey) -> Result<ParsedSession, ProviderError> {
+            Err(ProviderError::NotFound(key.to_string()))
+        }
+
+        fn parse_cache_token(&self, key: &LogicalSessionKey) -> Result<String, ProviderError> {
+            Err(ProviderError::NotFound(key.to_string()))
+        }
+
+        fn write_archive(
+            &self,
+            key: &LogicalSessionKey,
+            _out: &mut dyn std::io::Write,
+        ) -> Result<(), ProviderError> {
+            Err(ProviderError::NotFound(key.to_string()))
+        }
+
+        fn write_native(
+            &self,
+            _artifact: &ArtifactId,
+            _out: &mut dyn std::io::Write,
+        ) -> Result<(), ProviderError> {
+            Err(ProviderError::Unsupported {
+                capability: "native export",
+            })
+        }
+
+        fn write_raw_jsonl(
+            &self,
+            _key: &LogicalSessionKey,
+            _out: &mut dyn std::io::Write,
+        ) -> Result<(), ProviderError> {
+            Err(ProviderError::Unsupported {
+                capability: "raw-jsonl export",
+            })
+        }
+    }
+
+    let calls = Arc::new(Calls::default());
+    let mut registry = ProviderRegistry::new();
+    registry
+        .register(RegisteredProvider {
+            id: ProviderId("counting".into()),
+            root: None,
+            provider: Ok(Box::new(CountingProvider(Arc::clone(&calls)))),
+        })
+        .unwrap();
+    let selection = ProviderSelection::Explicit(vec![ProviderId("counting".into())]);
+    let collected = registry.collect_unified_projects(&selection).unwrap();
+    assert_eq!(collected.projects.len(), 1);
+    assert_eq!(calls.bulk.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.sessions.load(Ordering::SeqCst), 0);
+    assert_eq!(calls.contexts.load(Ordering::SeqCst), 0);
+}

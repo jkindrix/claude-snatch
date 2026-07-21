@@ -600,6 +600,9 @@ pub enum ToolKind {
     Subagent,
     /// An MCP tool.
     Mcp,
+    /// A host/orchestrator control tool whose output may embed other tools'
+    /// logs but is not itself evidence that those nested operations failed.
+    Orchestration,
     /// Provider-described.
     Other(String),
 }
@@ -635,6 +638,19 @@ pub enum UsageAggregation {
     Cumulative,
 }
 
+/// What a native usage observation measures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageObservationKind {
+    /// Model-reported token usage. `reasoning_output_tokens` is a detail of
+    /// `output_tokens`, not an additional summable category.
+    ModelTokens,
+    /// Codex's context-manager fill snapshot: `total_tokens` represents
+    /// occupied context while the other token counters are zero. This is
+    /// state/occupancy telemetry, not a model call and must not enter
+    /// canonical work or cost totals.
+    ContextWindow,
+}
+
 /// How a provider's native input-token number relates to its cached-token
 /// number — a provider-neutral distinction.
 ///
@@ -645,7 +661,7 @@ pub enum UsageAggregation {
 ///
 /// Codex policy (source-backed): Codex's own `TokenUsage` defines
 /// non-cached input as `input_tokens − cached_input_tokens`, verified
-/// across tags 0.31…0.144.5, and a census of 61,528 observations found no
+/// across tags 0.31…0.144.6, and a census of 61,528 observations found no
 /// cumulative observation contradicting it. The Codex adapter therefore
 /// treats the basis as [`UsageBasis::InputIncludesCached`] and validates it
 /// PER OBSERVATION, marking an individual observation whose own numbers
@@ -671,6 +687,8 @@ pub enum UsageBasis {
 /// violate the destination type's semantics (round-23 blocker 4).
 #[derive(Debug, Clone)]
 pub struct UsageObservation {
+    /// Whether this is model usage or a context-window occupancy snapshot.
+    pub kind: UsageObservationKind,
     /// What the numbers cover.
     pub scope: UsageScope,
     /// How they aggregate.
@@ -687,12 +705,23 @@ pub struct UsageObservation {
     /// the fresh-input contribution is zeroed in that case; the cached and
     /// output deltas remain well-defined and still contribute.
     pub ambiguous: bool,
-    /// Native input tokens, verbatim (see `basis`).
-    pub input_tokens: u64,
+    /// Native input tokens, verbatim (see `basis`). Codex's protocol uses
+    /// signed counters, so the observation does too even though valid token
+    /// counts are non-negative.
+    pub input_tokens: i64,
     /// Native cached input tokens, verbatim.
-    pub cached_input_tokens: u64,
+    pub cached_input_tokens: i64,
     /// Native output tokens, verbatim.
-    pub output_tokens: u64,
+    pub output_tokens: i64,
+    /// Native reasoning-output detail, verbatim. This is included within
+    /// `output_tokens` by Codex and is never summed a second time.
+    pub reasoning_output_tokens: i64,
+    /// Native total/context counter, verbatim. It is not assumed to equal
+    /// input + output: Codex intentionally emits context-fill snapshots
+    /// where only this field is populated.
+    pub total_tokens: i64,
+    /// Context-window capacity reported alongside this token observation.
+    pub model_context_window: Option<i64>,
 }
 
 /// The Phase A.0 semantic carrier.
@@ -1158,6 +1187,18 @@ pub enum ProviderError {
     Other(String),
 }
 
+/// One provider inventory row with independently fallible project evidence.
+///
+/// Inventory failure is outer; unreadable metadata for one session is inner
+/// so union views can retain that session under a fallback identity.
+pub type SessionProjectContext = (
+    SessionDescriptor,
+    Result<project::SessionProjectContext, ProviderError>,
+);
+
+/// Bulk session/project inventory used by cross-provider union views.
+pub type SessionProjectContexts = Vec<SessionProjectContext>;
+
 impl fmt::Display for ProviderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1252,6 +1293,25 @@ pub trait SourceProvider {
 
     /// Enumerate discovered sessions (logical identity + artifacts).
     fn sessions(&self) -> Result<Vec<SessionDescriptor>, ProviderError>;
+
+    /// Enumerate sessions together with their project evidence.
+    ///
+    /// The default preserves the simple provider contract, but providers
+    /// whose [`SourceProvider::project_context`] implementation resolves a
+    /// key by rescanning the complete store MUST override this method with a
+    /// single-inventory implementation. Project/union views consume this
+    /// method specifically so an `N`-session store is never accidentally
+    /// turned into `N + 1` complete discovery passes.
+    fn sessions_with_project_context(&self) -> Result<SessionProjectContexts, ProviderError> {
+        let descriptors = self.sessions()?;
+        Ok(descriptors
+            .into_iter()
+            .map(|descriptor| {
+                let context = self.project_context(&descriptor.key);
+                (descriptor, context)
+            })
+            .collect())
+    }
 
     /// Typed session-lineage edges across this provider's corpus
     /// (continuations, forks, spawns). Endpoints are normally keys returned

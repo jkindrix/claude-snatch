@@ -36,6 +36,8 @@ struct LessonsOutput {
 #[derive(serde::Serialize)]
 struct LessonsOutputSummary {
     total_errors: usize,
+    confirmed_tool_failures: usize,
+    inferred_failure_signals: usize,
     total_corrections: usize,
     most_error_prone_tools: Vec<(String, usize)>,
 }
@@ -49,6 +51,8 @@ struct ErrorFixOutput {
     tool_name: String,
     input_summary: HashMap<String, String>,
     error_preview: String,
+    failure_kind: crate::analysis::lessons::FailureKind,
+    failure_basis: crate::analysis::lessons::FailureBasis,
     #[serde(skip_serializing_if = "Option::is_none")]
     resolution_summary: Option<String>,
     resolution_tools: Vec<String>,
@@ -177,6 +181,8 @@ pub fn run(cli: &Cli, args: &LessonsArgs) -> Result<()> {
                 qualified_id,
                 summary: LessonsOutputSummary {
                     total_errors: result.summary.total_errors,
+                    confirmed_tool_failures: result.summary.confirmed_tool_failures,
+                    inferred_failure_signals: result.summary.inferred_failure_signals,
                     total_corrections: result.summary.total_corrections,
                     most_error_prone_tools: result.summary.most_error_prone_tools,
                 },
@@ -189,6 +195,8 @@ pub fn run(cli: &Cli, args: &LessonsArgs) -> Result<()> {
                         tool_name: p.tool_name,
                         input_summary: p.input_summary,
                         error_preview: p.error_preview,
+                        failure_kind: p.failure_kind,
+                        failure_basis: p.failure_basis,
                         resolution_summary: p.resolution_summary,
                         resolution_tools: p.resolution_tools,
                     })
@@ -214,8 +222,11 @@ pub fn run(cli: &Cli, args: &LessonsArgs) -> Result<()> {
             }
 
             println!(
-                "Lessons for session {} ({} errors, {} corrections)\n",
-                display_id, result.summary.total_errors, result.summary.total_corrections,
+                "Lessons for session {} ({} confirmed failures, {} inferred signals, {} corrections)\n",
+                display_id,
+                result.summary.confirmed_tool_failures,
+                result.summary.inferred_failure_signals,
+                result.summary.total_corrections,
             );
 
             print_text_lessons(&result);
@@ -272,6 +283,8 @@ fn run_provider_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
     let mut sessions_scanned = 0_usize;
     let mut sessions_with_lessons = 0_usize;
     let mut total_errors = 0_usize;
+    let mut confirmed_tool_failures = 0_usize;
+    let mut inferred_failure_signals = 0_usize;
     let mut total_corrections = 0_usize;
     let mut warnings: Vec<String> = collected
         .context_warnings
@@ -359,6 +372,10 @@ fn run_provider_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
             let Some(result) = result else { continue };
             sessions_scanned += 1;
             total_errors = total_errors.saturating_add(result.summary.total_errors);
+            confirmed_tool_failures =
+                confirmed_tool_failures.saturating_add(result.summary.confirmed_tool_failures);
+            inferred_failure_signals =
+                inferred_failure_signals.saturating_add(result.summary.inferred_failure_signals);
             total_corrections = total_corrections.saturating_add(result.summary.total_corrections);
             if result.error_fix_pairs.is_empty() && result.user_corrections.is_empty() {
                 continue;
@@ -378,6 +395,8 @@ fn run_provider_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
                         tool_name: pair.tool_name,
                         input_summary: pair.input_summary,
                         error_preview: pair.error_preview,
+                        failure_kind: pair.failure_kind,
+                        failure_basis: pair.failure_basis,
                         resolution_summary: pair.resolution_summary,
                         resolution_tools: pair.resolution_tools,
                     }),
@@ -413,6 +432,8 @@ fn run_provider_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
             sessions_with_lessons,
             summary: LessonsOutputSummary {
                 total_errors,
+                confirmed_tool_failures,
+                inferred_failure_signals,
                 total_corrections,
                 most_error_prone_tools: most_error_prone,
             },
@@ -438,16 +459,19 @@ fn run_provider_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
     }
     println!(
         "Lessons across {sessions_scanned} sessions ({sessions_with_lessons} with lessons, \
-         {total_errors} errors, {total_corrections} corrections)\n"
+         {confirmed_tool_failures} confirmed failures, {inferred_failure_signals} inferred signals, \
+         {total_corrections} corrections)\n"
     );
     if !all_error_pairs.is_empty() {
-        println!("Error -> Fix Pairs:\n{}", "-".repeat(60));
+        println!("Failure -> Fix Pairs:\n{}", "-".repeat(60));
         for (index, pair) in all_error_pairs.iter().enumerate() {
             println!(
-                "  {}. [{}] [{}] {}",
+                "  {}. [{}] [{}; {}/{}] {}",
                 index + 1,
                 pair.session_id.as_deref().unwrap_or("?"),
                 pair.tool_name,
+                pair.failure_kind.as_str(),
+                pair.failure_basis.as_str(),
                 pair.error_preview
             );
             if let Some(resolution) = &pair.resolution_summary {
@@ -468,9 +492,9 @@ fn run_provider_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
         }
     }
     if !most_error_prone.is_empty() {
-        println!("Most Error-Prone Tools:");
+        println!("Most Failure-Signaled Tools:");
         for (tool, count) in most_error_prone {
-            println!("  {tool}: {count} error(s)");
+            println!("  {tool}: {count} failure signal(s)");
         }
     }
     for skipped in skipped_providers {
@@ -583,6 +607,8 @@ fn run_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
                 tool_name: p.tool_name,
                 input_summary: p.input_summary,
                 error_preview: p.error_preview,
+                failure_kind: p.failure_kind,
+                failure_basis: p.failure_basis,
                 resolution_summary: p.resolution_summary,
                 resolution_tools: p.resolution_tools,
             });
@@ -613,6 +639,18 @@ fn run_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
                 sessions_with_lessons,
                 summary: LessonsOutputSummary {
                     total_errors: all_error_pairs.len(),
+                    confirmed_tool_failures: all_error_pairs
+                        .iter()
+                        .filter(|pair| {
+                            pair.failure_kind == crate::analysis::lessons::FailureKind::Confirmed
+                        })
+                        .count(),
+                    inferred_failure_signals: all_error_pairs
+                        .iter()
+                        .filter(|pair| {
+                            pair.failure_kind == crate::analysis::lessons::FailureKind::Inferred
+                        })
+                        .count(),
                     total_corrections: all_corrections.len(),
                     most_error_prone_tools: most_error_prone,
                 },
@@ -631,7 +669,7 @@ fn run_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
             }
 
             println!(
-                "Lessons across {} sessions ({} with lessons, {} errors, {} corrections)\n",
+                "Lessons across {} sessions ({} with lessons, {} failure signals, {} corrections)\n",
                 sessions.len(),
                 sessions_with_lessons,
                 all_error_pairs.len(),
@@ -639,7 +677,7 @@ fn run_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
             );
 
             if !all_error_pairs.is_empty() {
-                println!("Error -> Fix Pairs:");
+                println!("Failure -> Fix Pairs:");
                 println!("{}", "-".repeat(60));
                 for (i, pair) in all_error_pairs.iter().enumerate() {
                     let sid = pair
@@ -648,10 +686,12 @@ fn run_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
                         .map(|s| &s[..8.min(s.len())])
                         .unwrap_or("?");
                     println!(
-                        "  {}. [{}] [{}] {}",
+                        "  {}. [{}] [{}; {}/{}] {}",
                         i + 1,
                         sid,
                         pair.tool_name,
+                        pair.failure_kind.as_str(),
+                        pair.failure_basis.as_str(),
                         pair.error_preview
                     );
                     if let Some(ref resolution) = pair.resolution_summary {
@@ -682,9 +722,9 @@ fn run_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
             }
 
             if !most_error_prone.is_empty() {
-                println!("Most Error-Prone Tools:");
+                println!("Most Failure-Signaled Tools:");
                 for (tool, count) in &most_error_prone {
-                    println!("  {tool}: {count} error(s)");
+                    println!("  {tool}: {count} failure signal(s)");
                 }
             }
         }
@@ -696,10 +736,17 @@ fn run_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
 /// Print lessons in text format (shared between single and cross-session modes).
 fn print_text_lessons(result: &LessonResult) {
     if !result.error_fix_pairs.is_empty() {
-        println!("Error -> Fix Pairs:");
+        println!("Failure -> Fix Pairs:");
         println!("{}", "-".repeat(60));
         for (i, pair) in result.error_fix_pairs.iter().enumerate() {
-            println!("  {}. [{}] {}", i + 1, pair.tool_name, pair.error_preview);
+            println!(
+                "  {}. [{}; {}/{}] {}",
+                i + 1,
+                pair.tool_name,
+                pair.failure_kind.as_str(),
+                pair.failure_basis.as_str(),
+                pair.error_preview
+            );
             if let Some(ref resolution) = pair.resolution_summary {
                 println!("     Fix: {resolution}");
             }
@@ -723,9 +770,9 @@ fn print_text_lessons(result: &LessonResult) {
     }
 
     if !result.summary.most_error_prone_tools.is_empty() {
-        println!("Most Error-Prone Tools:");
+        println!("Most Failure-Signaled Tools:");
         for (tool, count) in &result.summary.most_error_prone_tools {
-            println!("  {tool}: {count} error(s)");
+            println!("  {tool}: {count} failure signal(s)");
         }
     }
 }

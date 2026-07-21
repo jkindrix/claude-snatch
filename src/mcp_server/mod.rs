@@ -297,6 +297,261 @@ impl SnatchServer {
         })
     }
 
+    /// Resolve an analytical request through the compatibility provider
+    /// policy: unqualified/flagless stays Claude-only; flags or a qualified
+    /// id use the provider registry. This keeps every migrated MCP surface on
+    /// the same no-fallback resolution contract.
+    fn resolve_analytical_session(
+        &self,
+        provider_flags: &[String],
+        reference: &str,
+    ) -> Result<helpers::ResolvedSession, ToolOutput> {
+        let registry = self.provider_registry();
+        if !provider_flags.is_empty() || registry.looks_qualified(reference) {
+            self.resolve_provider_session(provider_flags, reference)
+        } else {
+            resolve_session(self, reference)
+        }
+    }
+
+    fn provider_thread_result(
+        &self,
+        request: &ThreadTopicRequest,
+        regex: &regex::Regex,
+        params: &crate::analysis::threading::ThreadParams,
+    ) -> Result<
+        (
+            crate::analysis::threading::ThreadResult,
+            Vec<String>,
+            Vec<String>,
+        ),
+        ToolOutput,
+    > {
+        use crate::analysis::threading::{
+            finish_thread_exchanges, thread_one_conversation, ThreadConversation,
+        };
+        use crate::provider::registry::{cached_parsed_session, ProviderSelection};
+        use crate::provider::LineageEdgeKind;
+
+        fn overlaps(
+            conversation: &Conversation,
+            since: Option<chrono::DateTime<chrono::Utc>>,
+            until: Option<chrono::DateTime<chrono::Utc>>,
+        ) -> bool {
+            let mut timestamps = conversation
+                .chronological_entries()
+                .into_iter()
+                .filter_map(crate::model::message::LogEntry::timestamp);
+            let Some(first) = timestamps.next() else {
+                return true;
+            };
+            let (start, end) = timestamps.fold((first, first), |(start, end), timestamp| {
+                (start.min(timestamp), end.max(timestamp))
+            });
+            since.map_or(true, |bound| end >= bound) && until.map_or(true, |bound| start <= bound)
+        }
+
+        let since = request
+            .since
+            .as_deref()
+            .map(parse_timestamp_param)
+            .transpose()
+            .map_err(|error| ToolOutput::error(format!("Date filter error: {error}")))?;
+        let until = request
+            .until
+            .as_deref()
+            .map(parse_timestamp_param)
+            .transpose()
+            .map_err(|error| ToolOutput::error(format!("Date filter error: {error}")))?;
+        let no_subagents = request.no_subagents.unwrap_or(true);
+        let provider_flags = request.provider.as_deref().unwrap_or(&[]);
+        let registry = self.provider_registry();
+        let mut exchanges = Vec::new();
+        let mut warnings = Vec::new();
+        let mut skipped = Vec::new();
+
+        if let Some(session_id) = request.session_id.as_deref() {
+            let resolved = self.resolve_analytical_session(provider_flags, session_id)?;
+            let key: crate::provider::LogicalSessionKey =
+                resolved.qualified_id.parse().map_err(ToolOutput::error)?;
+            if request
+                .project
+                .as_deref()
+                .is_some_and(|project| !resolved.project_path.contains(project))
+                || !overlaps(&resolved.conversation, since, until)
+            {
+                return Ok((
+                    finish_thread_exchanges(Vec::new(), params.limit),
+                    skipped,
+                    warnings,
+                ));
+            }
+            if no_subagents {
+                let provider = registry
+                    .get(&key.provider)
+                    .map_err(|error| ToolOutput::error(error.to_string()))?;
+                let spawned = provider
+                    .lineage()
+                    .map_err(|error| ToolOutput::error(error.to_string()))?
+                    .into_iter()
+                    .any(|edge| {
+                        edge.to == key && matches!(edge.kind, LineageEdgeKind::Spawn { .. })
+                    });
+                if spawned || key.namespace.0.starts_with("subagent:") {
+                    return Ok((
+                        finish_thread_exchanges(Vec::new(), params.limit),
+                        skipped,
+                        warnings,
+                    ));
+                }
+            }
+            exchanges.extend(thread_one_conversation(
+                &ThreadConversation {
+                    provider: &resolved.provider,
+                    qualified_id: &resolved.qualified_id,
+                    session_id: &resolved.session_id,
+                    project: &resolved.project_path,
+                    conversation: &resolved.conversation,
+                    semantic_annotations: resolved.semantic_annotations,
+                },
+                regex,
+                params,
+            ));
+        } else {
+            let selection =
+                ProviderSelection::from_flags(provider_flags).map_err(ToolOutput::error)?;
+            let collected = registry
+                .collect_project_union(&selection)
+                .map_err(|error| ToolOutput::error(error.to_string()))?;
+            skipped.extend(
+                collected
+                    .skipped
+                    .iter()
+                    .map(|(provider, _)| format!("{provider}: unavailable")),
+            );
+            let spawned: std::collections::BTreeSet<_> = collected
+                .lineage
+                .iter()
+                .filter(|edge| matches!(edge.kind, LineageEdgeKind::Spawn { .. }))
+                .map(|edge| edge.to.clone())
+                .collect();
+            for project in &collected.projects {
+                if request
+                    .project
+                    .as_deref()
+                    .is_some_and(|needle| !project.matches(needle))
+                {
+                    continue;
+                }
+                for session in &project.sessions {
+                    let key = &session.descriptor.key;
+                    if no_subagents
+                        && (spawned.contains(key) || key.namespace.0.starts_with("subagent:"))
+                    {
+                        continue;
+                    }
+                    let provider = match registry.get(&key.provider) {
+                        Ok(provider) => provider,
+                        Err(_) => {
+                            warnings.push(format!("{key}: provider unavailable"));
+                            continue;
+                        }
+                    };
+                    let parsed =
+                        match cached_parsed_session(crate::cache::global_cache(), provider, key) {
+                            Ok(parsed) => parsed,
+                            Err(_) => {
+                                warnings.push(format!("{key}: session could not be parsed"));
+                                continue;
+                            }
+                        };
+                    let conversation = match Conversation::from_parsed_session(parsed) {
+                        Ok(conversation) => conversation,
+                        Err(_) => {
+                            warnings
+                                .push(format!("{key}: conversation could not be reconstructed"));
+                            continue;
+                        }
+                    };
+                    if !overlaps(&conversation, since, until) {
+                        continue;
+                    }
+                    let qualified = key.to_string();
+                    let project_path = session
+                        .context
+                        .cwd
+                        .as_deref()
+                        .or(project.display_path.as_deref())
+                        .unwrap_or("unknown");
+                    exchanges.extend(thread_one_conversation(
+                        &ThreadConversation {
+                            provider: &key.provider.0,
+                            qualified_id: &qualified,
+                            session_id: &key.native_id,
+                            project: project_path,
+                            conversation: &conversation,
+                            semantic_annotations: provider.capabilities().semantic_annotations,
+                        },
+                        regex,
+                        params,
+                    ));
+                }
+            }
+        }
+
+        warnings.sort();
+        skipped.sort();
+        Ok((
+            finish_thread_exchanges(exchanges, params.limit),
+            skipped,
+            warnings,
+        ))
+    }
+
+    fn render_thread_result(
+        request: &ThreadTopicRequest,
+        result: crate::analysis::threading::ThreadResult,
+        skipped_providers: Vec<String>,
+        warnings: Vec<String>,
+    ) -> ToolOutput {
+        use crate::cli::helpers::truncate;
+
+        let max_context = request.max_context.unwrap_or(500);
+        let exchanges = result
+            .exchanges
+            .into_iter()
+            .map(|exchange| ThreadExchangeEntry {
+                timestamp: exchange.timestamp.to_rfc3339(),
+                session_id: exchange.session_id,
+                provider: exchange.provider,
+                qualified_id: exchange.qualified_id,
+                project: exchange.project,
+                entry_uuid: exchange.entry_uuid,
+                user_text: exchange.user_text.map(|text| truncate(&text, max_context)),
+                assistant_text: exchange
+                    .assistant_text
+                    .map(|text| truncate(&text, max_context)),
+                thinking_text: exchange
+                    .thinking_text
+                    .map(|text| truncate(&text, max_context)),
+                match_location: exchange.match_location,
+                match_provenance: exchange.match_provenance,
+                match_count: exchange.match_count,
+            })
+            .collect::<Vec<_>>();
+        let response = ThreadTopicResponse {
+            pattern: request.pattern.clone(),
+            total_exchanges: exchanges.len(),
+            session_count: result.session_count,
+            total_matches: result.total_matches,
+            exchanges,
+            skipped_providers,
+            warnings,
+        };
+        ToolOutput::json(&response)
+            .unwrap_or_else(|error| ToolOutput::error(format!("JSON error: {error}")))
+    }
+
     /// Build the provider registry from the server's global options — the
     /// ONE construction path for MCP surfaces (round-18 blocker 4: parsing
     /// limits must never be dropped).
@@ -2102,10 +2357,11 @@ impl SnatchServer {
 
     /// Extract tool invocations from a session with input summaries and error states.
     #[tool(
-        description = "Extract tool invocations from a session. Filter by tool name or errors, or scope to prompt-boundary chunk(s) with chunk='4' / chunk='2-5' (same indices as get_session_messages) for a ground-truth view of what actually ran in a chunk. Returns tool names, input summaries (file paths, commands), and error states. Use to understand what was built or changed, or to audit a chunk's claims against its real commands."
+        description = "Extract tool invocations from a Claude Code or Codex session (select with provider or a qualified id). Filter by tool name or errors, or scope to prompt-boundary chunk(s) with chunk='4' / chunk='2-5'. errors_only defaults to confirmed failures; failure_kind='all' also includes explicitly labeled text-inferred signals. The summary reports both counts for the main-thread scope. Use to audit claims against commands without pulling message bodies."
     )]
     async fn get_tool_calls(&self, request: GetToolCallsRequest) -> ToolOutput {
-        let resolved = match resolve_session(self, &request.session_id) {
+        let provider_flags = request.provider.as_deref().unwrap_or(&[]);
+        let resolved = match self.resolve_analytical_session(provider_flags, &request.session_id) {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -2113,6 +2369,15 @@ impl SnatchServer {
         let limit = request.limit.unwrap_or(100);
         let offset = request.offset.unwrap_or(0);
         let errors_only = request.errors_only.unwrap_or(false);
+        let failure_kind = request.failure_kind.as_deref().unwrap_or("confirmed");
+        if !matches!(failure_kind, "confirmed" | "inferred" | "all") {
+            return ToolOutput::error(
+                "failure_kind must be one of: confirmed, inferred, all".to_string(),
+            );
+        }
+        if request.failure_kind.is_some() && !errors_only {
+            return ToolOutput::error("failure_kind requires errors_only=true".to_string());
+        }
 
         let tool_filter: Option<HashSet<String>> = request
             .tool_filter
@@ -2140,27 +2405,61 @@ impl SnatchServer {
             timestamp: Option<String>,
             tool_name: String,
             input: serde_json::Value,
-            had_error: bool,
+            failure: Option<crate::analysis::lessons::FailureClassification>,
             error_text: Option<String>,
             result_text: Option<String>,
         }
 
         let mut all_calls: Vec<ToolCallWithResult> = Vec::new();
-        let mut tool_result_map: HashMap<String, (bool, Option<String>, Option<String>)> =
-            HashMap::new();
+        let mut call_index: HashMap<String, (String, serde_json::Value)> = HashMap::new();
+        for entry in &main_entries {
+            if let LogEntry::Assistant(assistant) = entry {
+                for tool_use in assistant.message.tool_uses() {
+                    call_index.insert(
+                        tool_use.id.clone(),
+                        (tool_use.name.clone(), tool_use.input.clone()),
+                    );
+                }
+            }
+        }
+        let semantics =
+            crate::analysis::lessons::conversation_tool_semantics(&resolved.conversation);
+        type ToolResultInfo = (
+            Option<crate::analysis::lessons::FailureClassification>,
+            Option<String>,
+            Option<String>,
+        );
+        let mut tool_result_map: HashMap<String, ToolResultInfo> = HashMap::new();
 
         // First pass: collect tool results from user messages
         for entry in &main_entries {
             if let LogEntry::User(user) = entry {
                 for result in user.message.tool_results() {
-                    let is_err = result.is_error == Some(true);
-                    let (err_text, res_text) = if is_err {
-                        (extract_error_preview(result, 300), None)
+                    let (tool_name, input) = call_index
+                        .get(&result.tool_use_id)
+                        .cloned()
+                        .unwrap_or_else(|| ("unknown".to_string(), serde_json::Value::Null));
+                    let failure = crate::analysis::lessons::classify_tool_result(
+                        &tool_name,
+                        &input,
+                        result,
+                        semantics.get(&result.tool_use_id),
+                        resolved.semantic_annotations,
+                    );
+                    let display = result
+                        .content
+                        .as_ref()
+                        .map(|content| content.to_display_string(false));
+                    let (err_text, res_text) = if failure.is_some() {
+                        (
+                            display.as_deref().map(|text| truncate_text(text, 300)),
+                            None,
+                        )
                     } else {
                         (None, extract_result_preview(result, 500))
                     };
                     tool_result_map
-                        .insert(result.tool_use_id.clone(), (is_err, err_text, res_text));
+                        .insert(result.tool_use_id.clone(), (failure, err_text, res_text));
                 }
             }
         }
@@ -2170,16 +2469,16 @@ impl SnatchServer {
             if let LogEntry::Assistant(assistant) = entry {
                 let timestamp = entry.timestamp().map(|t| t.to_rfc3339());
                 for tool_use in assistant.message.tool_uses() {
-                    let (had_error, error_text, result_text) = tool_result_map
+                    let (failure, error_text, result_text) = tool_result_map
                         .get(&tool_use.id)
                         .cloned()
-                        .unwrap_or((false, None, None));
+                        .unwrap_or((None, None, None));
 
                     all_calls.push(ToolCallWithResult {
                         timestamp: timestamp.clone(),
                         tool_name: tool_use.name.clone(),
                         input: tool_use.input.clone(),
-                        had_error,
+                        failure,
                         error_text,
                         result_text,
                     });
@@ -2191,8 +2490,33 @@ impl SnatchServer {
         if let Some(ref filter) = tool_filter {
             all_calls.retain(|c| filter.contains(&c.tool_name));
         }
+        let confirmed_tool_failures = all_calls
+            .iter()
+            .filter(|call| {
+                call.failure.is_some_and(|failure| {
+                    failure.kind == crate::analysis::lessons::FailureKind::Confirmed
+                })
+            })
+            .count();
+        let inferred_failure_signals = all_calls
+            .iter()
+            .filter(|call| {
+                call.failure.is_some_and(|failure| {
+                    failure.kind == crate::analysis::lessons::FailureKind::Inferred
+                })
+            })
+            .count();
         if errors_only {
-            all_calls.retain(|c| c.had_error);
+            all_calls.retain(|call| match (failure_kind, call.failure) {
+                ("confirmed", Some(failure)) => {
+                    failure.kind == crate::analysis::lessons::FailureKind::Confirmed
+                }
+                ("inferred", Some(failure)) => {
+                    failure.kind == crate::analysis::lessons::FailureKind::Inferred
+                }
+                ("all", Some(_)) => true,
+                _ => false,
+            });
         }
 
         let total_tool_calls = all_calls.len();
@@ -2205,7 +2529,7 @@ impl SnatchServer {
 
         for call in &all_calls {
             *by_tool.entry(call.tool_name.clone()).or_default() += 1;
-            if call.had_error {
+            if call.failure.is_some() {
                 error_count += 1;
             }
             if let Some(fp) = call.input.get("file_path").and_then(|v| v.as_str()) {
@@ -2238,7 +2562,9 @@ impl SnatchServer {
                     timestamp: call.timestamp,
                     tool_name: call.tool_name,
                     input_summary,
-                    had_error: call.had_error,
+                    had_error: call.failure.is_some(),
+                    failure_kind: call.failure.map(|failure| failure.kind),
+                    failure_basis: call.failure.map(|failure| failure.basis),
                     error_preview: call.error_text,
                     result_preview: call.result_text,
                 }
@@ -2254,6 +2580,8 @@ impl SnatchServer {
 
         let response = ToolCallsResponse {
             session_id: resolved.session_id,
+            provider: resolved.provider,
+            qualified_id: resolved.qualified_id,
             total_tool_calls,
             returned,
             tool_calls: paginated,
@@ -2262,6 +2590,10 @@ impl SnatchServer {
                 files_written: written,
                 files_edited: edited,
                 error_count,
+                confirmed_tool_failures,
+                inferred_failure_signals,
+                selected_failure_kind: failure_kind.to_string(),
+                entry_scope: "main_thread".to_string(),
             },
         };
 
@@ -2329,6 +2661,8 @@ impl SnatchServer {
                     tool_name: p.tool_name,
                     input_summary: p.input_summary,
                     error_preview: p.error_preview,
+                    failure_kind: p.failure_kind,
+                    failure_basis: p.failure_basis,
                     resolution_summary: p.resolution_summary,
                     resolution_tools: p.resolution_tools,
                 })
@@ -2344,6 +2678,14 @@ impl SnatchServer {
                 .collect(),
             summary: LessonsSummary {
                 total_errors: result.summary.total_errors,
+                confirmed_tool_failures: result.summary.confirmed_tool_failures,
+                inferred_failure_signals: result.summary.inferred_failure_signals,
+                entry_scope: if resolved.semantic_annotations {
+                    "new_activity_whole_conversation"
+                } else {
+                    "whole_conversation"
+                }
+                .to_string(),
                 total_corrections: result.summary.total_corrections,
                 most_error_prone_tools: result.summary.most_error_prone_tools,
             },
@@ -2546,18 +2888,18 @@ impl SnatchServer {
 
     /// Get a compact summary of a session's key topics, files, tools, and decisions.
     #[tool(
-        description = "Get a compact digest of a session: key prompts, files touched, top tools, errors, compaction events, and decision keywords from thinking blocks (keywords are empty for recent sessions — thinking text is not persisted; a thinking_note explains)."
+        description = "Get a compact structured digest of a Claude Code or Codex session (select with provider or a qualified id): key/recent prompts, files, tools, confirmed failures vs inferred signals, compactions, and decision keywords. Quoted relays are reduced to their primary preamble and adjacent repeated prompts are compacted without changing the emission total. Set include_formatted=true only when a client needs a duplicate pre-rendered text form."
     )]
     async fn get_session_digest(&self, request: GetSessionDigestRequest) -> ToolOutput {
-        use crate::analysis::digest::{build_digest, format_digest, DigestOptions};
+        use crate::analysis::digest::{
+            build_digest_from_conversation, format_digest, DigestOptions,
+        };
 
-        let resolved = match resolve_session(self, &request.session_id) {
+        let provider_flags = request.provider.as_deref().unwrap_or(&[]);
+        let resolved = match self.resolve_analytical_session(provider_flags, &request.session_id) {
             Ok(r) => r,
             Err(e) => return e,
         };
-
-        let all_entries = resolved.conversation.chronological_entries();
-        let entry_refs: Vec<&LogEntry> = all_entries.clone();
 
         let opts = DigestOptions {
             max_prompts: request.max_prompts.unwrap_or(3),
@@ -2565,11 +2907,20 @@ impl SnatchServer {
             ..DigestOptions::default()
         };
 
-        let digest = build_digest(&entry_refs, &opts);
-        let formatted = format_digest(&digest, opts.max_chars);
+        let digest = build_digest_from_conversation(
+            &resolved.conversation,
+            &opts,
+            resolved.semantic_annotations,
+        );
+        let formatted = request
+            .include_formatted
+            .unwrap_or(false)
+            .then(|| format_digest(&digest, opts.max_chars));
 
         let response = SessionDigestResponse {
             session_id: resolved.session_id,
+            provider: resolved.provider,
+            qualified_id: resolved.qualified_id,
             project_path: resolved.project_path,
             key_prompts: digest.key_prompts,
             recent_prompts: digest.recent_prompts,
@@ -2577,6 +2928,9 @@ impl SnatchServer {
             files_touched: digest.files_touched,
             top_tools: digest.top_tools,
             error_count: digest.error_count,
+            confirmed_tool_failures: digest.confirmed_tool_failures,
+            inferred_failure_signals: digest.inferred_failure_signals,
+            failure_entry_scope: "whole_conversation".to_string(),
             compaction_count: digest.compaction_count,
             thinking_keywords: digest.thinking_keywords,
             thinking_note: digest.thinking_note,
@@ -3156,16 +3510,10 @@ impl SnatchServer {
     /// Cross-session topic threading: search for a pattern across sessions and
     /// return chronologically-ordered exchanges with conversation context.
     #[tool(
-        description = "Cross-session topic threading. Searches all sessions for a regex pattern and returns chronologically-ordered exchanges with surrounding user/assistant context. Use to trace how a topic evolved across sessions — 'show me every time we discussed X'. Set decisions_only=true to filter to decision points. Set include_thinking=true to search reasoning blocks (text present only in sessions from old Claude Code, ~2.1.4x and earlier)."
+        description = "Cross-session topic threading over Claude Code by default or explicit provider selections (provider=['all'] for a union; qualified ids route directly). Returns a chronological thread with match_provenance. When limited, primary prose is selected before quoted or harness-injected text, but secondary-only evidence is retained. Use decisions_only for decision points and include_thinking for persisted reasoning."
     )]
     async fn thread_topic(&self, request: ThreadTopicRequest) -> ToolOutput {
         use crate::analysis::threading::{thread_topic, ThreadParams};
-        use crate::cli::helpers::truncate;
-
-        let claude_dir = match self.get_claude_dir() {
-            Ok(dir) => dir,
-            Err(e) => return ToolOutput::error(e),
-        };
 
         let pattern = &request.pattern;
         let ignore_case = true;
@@ -3175,6 +3523,37 @@ impl SnatchServer {
         {
             Ok(r) => r,
             Err(e) => return ToolOutput::error(format!("Invalid regex pattern: {e}")),
+        };
+
+        let provider_flags = request.provider.as_deref().unwrap_or(&[]);
+        let registry = self.provider_registry();
+        let provider_route = !provider_flags.is_empty()
+            || request
+                .session_id
+                .as_deref()
+                .is_some_and(|session_id| registry.looks_qualified(session_id));
+        if provider_route {
+            let max_context = request.max_context.unwrap_or(500);
+            let params = ThreadParams {
+                include_thinking: request.include_thinking.unwrap_or(false),
+                limit: request.limit.unwrap_or(30),
+                max_user_context: max_context,
+                max_assistant_context: max_context,
+                max_thinking_context: max_context,
+                role_filter: None,
+                decisions_only: request.decisions_only.unwrap_or(false),
+            };
+            return match self.provider_thread_result(&request, &regex, &params) {
+                Ok((result, skipped, warnings)) => {
+                    Self::render_thread_result(&request, result, skipped, warnings)
+                }
+                Err(error) => error,
+            };
+        }
+
+        let claude_dir = match self.get_claude_dir() {
+            Ok(dir) => dir,
+            Err(e) => return ToolOutput::error(e),
         };
 
         // Collect sessions with filters
@@ -3224,34 +3603,7 @@ impl SnatchServer {
 
         let result = thread_topic(&sessions, &regex, &params, self.max_file_size);
 
-        let exchanges: Vec<ThreadExchangeEntry> = result
-            .exchanges
-            .into_iter()
-            .map(|e| ThreadExchangeEntry {
-                timestamp: e.timestamp.to_rfc3339(),
-                session_id: e.session_id,
-                project: e.project,
-                entry_uuid: e.entry_uuid,
-                user_text: e.user_text.map(|t| truncate(&t, max_context)),
-                assistant_text: e.assistant_text.map(|t| truncate(&t, max_context)),
-                thinking_text: e.thinking_text.map(|t| truncate(&t, max_context)),
-                match_location: e.match_location,
-                match_count: e.match_count,
-            })
-            .collect();
-
-        let response = ThreadTopicResponse {
-            pattern: request.pattern,
-            total_exchanges: exchanges.len(),
-            session_count: result.session_count,
-            total_matches: result.total_matches,
-            exchanges,
-        };
-
-        match ToolOutput::json(&response) {
-            Ok(output) => output,
-            Err(e) => ToolOutput::error(format!("JSON error: {e}")),
-        }
+        Self::render_thread_result(&request, result, Vec::new(), Vec::new())
     }
 
     // ========================================================================
@@ -4056,6 +4408,70 @@ mod tests {
     }
 
     #[cfg(feature = "codex")]
+    fn setup_codex_tool_dir() -> (TempDir, String) {
+        let tmp = TempDir::new().unwrap();
+        let day = tmp.path().join("sessions/2026/07/17");
+        std::fs::create_dir_all(&day).unwrap();
+        let thread = "019f7000-0000-7000-8000-000000000099";
+        let line = |kind: &str, payload: serde_json::Value| {
+            serde_json::json!({
+                "timestamp": "2026-07-17T00:00:00Z",
+                "type": kind,
+                "payload": payload,
+            })
+            .to_string()
+        };
+        let content = [
+            line(
+                "session_meta",
+                serde_json::json!({"id": thread, "cwd": "/tmp/mcp-codex-tool"}),
+            ),
+            line(
+                "turn_context",
+                serde_json::json!({"turn_id": "turn-1", "model": "gpt-test"}),
+            ),
+            line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "injected provider instructions"}]}),
+            ),
+            line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "run the failing check"}]}),
+            ),
+            line(
+                "event_msg",
+                serde_json::json!({"type": "user_message", "message": "run the failing check",
+                    "images": [], "local_images": [], "text_elements": []}),
+            ),
+            line(
+                "response_item",
+                serde_json::json!({"type": "function_call", "name": "exec_command",
+                    "call_id": "call-1", "arguments": "{\"cmd\":\"cargo check\"}"}),
+            ),
+            line(
+                "response_item",
+                serde_json::json!({"type": "function_call_output", "call_id": "call-1",
+                    "output": "Process exited with code 101\nFinal output:\ncompile failed"}),
+            ),
+            line(
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "the check failed"}]}),
+            ),
+        ]
+        .join("\n")
+            + "\n";
+        std::fs::write(
+            day.join(format!("rollout-2026-07-17T00-00-00-{thread}.jsonl")),
+            content,
+        )
+        .unwrap();
+        (tmp, thread.to_string())
+    }
+
+    #[cfg(feature = "codex")]
     fn setup_codex_fork_dir_with_cwd(cwd: &str) -> (TempDir, String, String) {
         let tmp = TempDir::new().unwrap();
         let day = tmp.path().join("sessions/2026/07/17");
@@ -4419,6 +4835,157 @@ mod tests {
             .contains("also inspect tests"));
     }
 
+    #[cfg(feature = "codex")]
+    #[tokio::test]
+    async fn advanced_retrieval_routes_codex_and_labels_failure_basis() {
+        let claude_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        let claude = setup_claude_dir(claude_id, PROJECT_PATH, &minimal_session_jsonl(claude_id));
+        let (codex, thread) = setup_codex_tool_dir();
+        let server = make_server(&claude).with_codex_dir(codex.path());
+        let qualified = format!("codex:{thread}");
+
+        let resolved = match server.resolve_analytical_session(&[], &qualified) {
+            Ok(resolved) => resolved,
+            Err(ToolOutput::RecoverableError { message, .. }) => {
+                panic!("Codex fixture should resolve: {message}")
+            }
+            Err(ToolOutput::Success(_)) => panic!("resolver returned a success as an error"),
+        };
+        let chronological_text = resolved
+            .conversation
+            .chronological_entries()
+            .into_iter()
+            .filter_map(crate::analysis::extraction::extract_visible_text)
+            .collect::<Vec<_>>();
+        assert!(
+            chronological_text
+                .iter()
+                .any(|text| text == "injected provider instructions"),
+            "harness entry must remain content-complete: {chronological_text:?}"
+        );
+        let main_text = resolved
+            .conversation
+            .main_thread_entries()
+            .into_iter()
+            .filter_map(crate::analysis::extraction::extract_visible_text)
+            .collect::<Vec<_>>();
+        assert!(
+            main_text
+                .iter()
+                .any(|text| text == "injected provider instructions"),
+            "harness entry unexpectedly left the main thread: {main_text:?}"
+        );
+
+        let tool_calls = unwrap_output(
+            server
+                .get_tool_calls(GetToolCallsRequest {
+                    session_id: qualified.clone(),
+                    provider: None,
+                    tool_filter: None,
+                    errors_only: Some(true),
+                    failure_kind: None,
+                    chunk: None,
+                    limit: None,
+                    offset: None,
+                })
+                .await,
+        );
+        let tool_calls: serde_json::Value = serde_json::from_str(&tool_calls).unwrap();
+        assert_eq!(tool_calls["provider"], "codex");
+        assert_eq!(tool_calls["qualified_id"], qualified);
+        assert_eq!(tool_calls["summary"]["confirmed_tool_failures"], 1);
+        assert_eq!(tool_calls["summary"]["inferred_failure_signals"], 0);
+        assert_eq!(tool_calls["tool_calls"][0]["failure_kind"], "confirmed");
+        assert_eq!(tool_calls["tool_calls"][0]["failure_basis"], "process_exit");
+
+        let digest = unwrap_output(
+            server
+                .get_session_digest(GetSessionDigestRequest {
+                    session_id: qualified.clone(),
+                    provider: None,
+                    max_prompts: None,
+                    max_files: None,
+                    include_formatted: None,
+                })
+                .await,
+        );
+        let digest: serde_json::Value = serde_json::from_str(&digest).unwrap();
+        assert_eq!(digest["provider"], "codex");
+        assert_eq!(digest["confirmed_tool_failures"], 1);
+        assert_eq!(digest["total_prompts"], 1);
+        assert!(
+            !digest["key_prompts"]
+                .to_string()
+                .contains("injected provider instructions"),
+            "provider-authored harness context must not become a human prompt"
+        );
+        assert!(
+            digest.get("formatted").is_none(),
+            "structured is the lean default"
+        );
+
+        let formatted = unwrap_output(
+            server
+                .get_session_digest(GetSessionDigestRequest {
+                    session_id: qualified.clone(),
+                    provider: None,
+                    max_prompts: None,
+                    max_files: None,
+                    include_formatted: Some(true),
+                })
+                .await,
+        );
+        let formatted: serde_json::Value = serde_json::from_str(&formatted).unwrap();
+        assert!(formatted["formatted"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()));
+
+        let thread_output = unwrap_output(
+            server
+                .thread_topic(ThreadTopicRequest {
+                    pattern: "failing check".to_string(),
+                    provider: None,
+                    project: None,
+                    session_id: Some(qualified.clone()),
+                    include_thinking: None,
+                    no_subagents: Some(false),
+                    since: None,
+                    until: None,
+                    decisions_only: None,
+                    limit: None,
+                    max_context: None,
+                })
+                .await,
+        );
+        let thread_output: serde_json::Value = serde_json::from_str(&thread_output).unwrap();
+        assert_eq!(thread_output["total_exchanges"], 1);
+        assert_eq!(thread_output["exchanges"][0]["provider"], "codex");
+        assert_eq!(thread_output["exchanges"][0]["match_provenance"], "primary");
+
+        let injected_thread = unwrap_output(
+            server
+                .thread_topic(ThreadTopicRequest {
+                    pattern: "injected provider instructions".to_string(),
+                    provider: None,
+                    project: None,
+                    session_id: Some(qualified),
+                    include_thinking: None,
+                    no_subagents: Some(false),
+                    since: None,
+                    until: None,
+                    decisions_only: None,
+                    limit: None,
+                    max_context: None,
+                })
+                .await,
+        );
+        let injected_thread: serde_json::Value = serde_json::from_str(&injected_thread).unwrap();
+        assert_eq!(
+            injected_thread["exchanges"][0]["match_provenance"], "injected",
+            "{injected_thread}"
+        );
+    }
+
     #[tokio::test]
     async fn test_list_sessions_returns_fixture() {
         let sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -4641,8 +5208,10 @@ mod tests {
             server
                 .get_session_digest(GetSessionDigestRequest {
                     session_id: sid.to_string(),
+                    provider: None,
                     max_prompts: None,
                     max_files: None,
+                    include_formatted: None,
                 })
                 .await,
         );
@@ -4739,8 +5308,10 @@ mod tests {
             server
                 .get_tool_calls(GetToolCallsRequest {
                     session_id: sid.to_string(),
+                    provider: None,
                     tool_filter: None,
                     errors_only: None,
+                    failure_kind: None,
                     chunk: None,
                     limit: None,
                     offset: None,
@@ -4757,6 +5328,19 @@ mod tests {
         );
         let results = format!(
             r#"{{"type":"user","uuid":"u2","parentUuid":"a1","timestamp":"2026-06-09T18:00:01Z","sessionId":"{session_id}","version":"2.1.0","isSidechain":false,"message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_R","content":"FILE_CONTENTS_MARKER"}},{{"type":"tool_result","tool_use_id":"toolu_B","is_error":true,"content":"BASH_ERROR_MARKER"}},{{"type":"tool_result","tool_use_id":"toolu_A","content":[{{"type":"text","text":"AGENT_RESULT_MARKER"}}]}}]}}}}"#
+        );
+        format!("{assistant}\n{results}\n")
+    }
+
+    /// One native-confirmed failure and one text-inferred failure. Keeping
+    /// both in one main-thread fixture makes cross-tool count comparisons
+    /// meaningful rather than accidentally comparing different scopes.
+    fn failure_taxonomy_session_jsonl(session_id: &str) -> String {
+        let assistant = format!(
+            r#"{{"type":"assistant","uuid":"a1","parentUuid":null,"timestamp":"2026-06-09T18:00:00Z","sessionId":"{session_id}","version":"2.1.0","isSidechain":false,"message":{{"id":"m1","type":"message","role":"assistant","model":"claude","content":[{{"type":"tool_use","id":"toolu_confirmed","name":"Bash","input":{{"command":"false"}}}},{{"type":"tool_use","id":"toolu_inferred","name":"Bash","input":{{"command":"cargo test"}}}}]}}}}"#
+        );
+        let results = format!(
+            r#"{{"type":"user","uuid":"u2","parentUuid":"a1","timestamp":"2026-06-09T18:00:01Z","sessionId":"{session_id}","version":"2.1.0","isSidechain":false,"message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_confirmed","is_error":true,"content":"native failure"}},{{"type":"tool_result","tool_use_id":"toolu_inferred","content":"thread worker panicked at assertion"}}]}}}}"#
         );
         format!("{assistant}\n{results}\n")
     }
@@ -4870,8 +5454,10 @@ mod tests {
             server
                 .get_tool_calls(GetToolCallsRequest {
                     session_id: sid.to_string(),
+                    provider: None,
                     tool_filter: None,
                     errors_only: None,
+                    failure_kind: None,
                     chunk: None,
                     limit: None,
                     offset: None,
@@ -4887,6 +5473,90 @@ mod tests {
             "success output missing"
         );
         assert!(text.contains("BASH_ERROR_MARKER"), "error preview missing");
+    }
+
+    #[tokio::test]
+    async fn failure_taxonomy_is_consistent_and_filterable_across_tools() {
+        let sid = "eeeeeeee-1111-2222-3333-444444444444";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &failure_taxonomy_session_jsonl(sid));
+        let server = make_server(&tmp);
+
+        let confirmed = unwrap_output(
+            server
+                .get_tool_calls(GetToolCallsRequest {
+                    session_id: sid.to_string(),
+                    provider: None,
+                    tool_filter: None,
+                    errors_only: Some(true),
+                    failure_kind: None,
+                    chunk: None,
+                    limit: None,
+                    offset: None,
+                })
+                .await,
+        );
+        let confirmed: serde_json::Value = serde_json::from_str(&confirmed).unwrap();
+        assert_eq!(confirmed["returned"], 1);
+        assert_eq!(confirmed["tool_calls"][0]["failure_kind"], "confirmed");
+        assert_eq!(confirmed["summary"]["confirmed_tool_failures"], 1);
+        assert_eq!(confirmed["summary"]["inferred_failure_signals"], 1);
+        assert_eq!(confirmed["summary"]["entry_scope"], "main_thread");
+
+        let all = unwrap_output(
+            server
+                .get_tool_calls(GetToolCallsRequest {
+                    session_id: sid.to_string(),
+                    provider: None,
+                    tool_filter: None,
+                    errors_only: Some(true),
+                    failure_kind: Some("all".to_string()),
+                    chunk: None,
+                    limit: None,
+                    offset: None,
+                })
+                .await,
+        );
+        let all: serde_json::Value = serde_json::from_str(&all).unwrap();
+        assert_eq!(all["returned"], 2);
+        assert!(all["tool_calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|call| call["failure_kind"] == "inferred"
+                && call["failure_basis"] == "text_signature"));
+
+        let lessons = unwrap_output(
+            server
+                .get_session_lessons(GetSessionLessonsRequest {
+                    session_id: sid.to_string(),
+                    provider: None,
+                    category: Some("errors".to_string()),
+                    limit: None,
+                })
+                .await,
+        );
+        let lessons: serde_json::Value = serde_json::from_str(&lessons).unwrap();
+        assert_eq!(lessons["summary"]["confirmed_tool_failures"], 1);
+        assert_eq!(lessons["summary"]["inferred_failure_signals"], 1);
+        assert_eq!(lessons["summary"]["entry_scope"], "whole_conversation");
+
+        let invalid = server
+            .get_tool_calls(GetToolCallsRequest {
+                session_id: sid.to_string(),
+                provider: None,
+                tool_filter: None,
+                errors_only: Some(false),
+                failure_kind: Some("all".to_string()),
+                chunk: None,
+                limit: None,
+                offset: None,
+            })
+            .await;
+        assert!(matches!(
+            invalid,
+            ToolOutput::RecoverableError { message, .. }
+                if message.contains("requires errors_only=true")
+        ));
     }
 
     #[tokio::test]

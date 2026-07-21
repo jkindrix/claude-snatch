@@ -315,6 +315,7 @@ impl SourceProvider for FakeProvider {
                 tools,
                 usage: vec![
                     UsageObservation {
+                        kind: super::UsageObservationKind::ModelTokens,
                         scope: UsageScope::Call,
                         aggregation: UsageAggregation::Delta,
                         record: rec(2),
@@ -323,8 +324,12 @@ impl SourceProvider for FakeProvider {
                         input_tokens: 10,
                         cached_input_tokens: 0,
                         output_tokens: 5,
+                        reasoning_output_tokens: 1,
+                        total_tokens: 15,
+                        model_context_window: Some(128_000),
                     },
                     UsageObservation {
+                        kind: super::UsageObservationKind::ModelTokens,
                         scope: UsageScope::Session,
                         aggregation: UsageAggregation::Cumulative,
                         record: rec(2),
@@ -333,6 +338,9 @@ impl SourceProvider for FakeProvider {
                         input_tokens: 200,
                         cached_input_tokens: 0,
                         output_tokens: 50,
+                        reasoning_output_tokens: 10,
+                        total_tokens: 250,
+                        model_context_window: Some(128_000),
                     },
                 ],
                 ..Default::default()

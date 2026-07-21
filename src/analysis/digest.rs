@@ -7,12 +7,39 @@
 use std::collections::HashMap;
 
 use crate::model::message::LogEntry;
+use crate::provider::ToolSemantics;
+use crate::reconstruction::Conversation;
+
+use super::lessons::{conversation_tool_semantics, count_tool_failures};
 
 use super::extraction::{
-    extract_files_from_tools, extract_thinking_text, extract_tool_names, extract_user_prompt_text,
-    find_compaction_events, has_tool_errors, is_human_prompt, thinking_redaction_note,
-    truncate_text,
+    extract_files_from_tools, extract_thinking_text, extract_tool_names, find_compaction_events,
+    is_human_prompt, orientation_text, thinking_redaction_note, truncate_text,
 };
+
+fn collapse_consecutive_prompts(prompts: &[String]) -> Vec<String> {
+    let mut collapsed: Vec<(String, usize)> = Vec::new();
+    for prompt in prompts {
+        if let Some((_, count)) = collapsed
+            .last_mut()
+            .filter(|(existing, _)| existing == prompt)
+        {
+            *count += 1;
+        } else {
+            collapsed.push((prompt.clone(), 1));
+        }
+    }
+    collapsed
+        .into_iter()
+        .map(|(prompt, count)| {
+            if count == 1 {
+                prompt
+            } else {
+                format!("{prompt} [repeated {count}×]")
+            }
+        })
+        .collect()
+}
 
 /// Options for building a session digest.
 #[derive(Debug, Clone)]
@@ -53,6 +80,10 @@ pub struct SessionDigest {
     pub top_tools: Vec<(String, usize)>,
     /// Number of tool errors in the session.
     pub error_count: usize,
+    /// Failures backed by native/status/structured evidence.
+    pub confirmed_tool_failures: usize,
+    /// Error-like output inferred from unstructured text.
+    pub inferred_failure_signals: usize,
     /// Number of compaction events.
     pub compaction_count: usize,
     /// Decision-related keywords from thinking blocks.
@@ -78,26 +109,67 @@ const DECISION_PATTERNS: &[&str] = &[
 
 /// Build a session digest from conversation entries.
 pub fn build_digest(entries: &[&LogEntry], opts: &DigestOptions) -> SessionDigest {
+    build_digest_with(entries, opts, &HashMap::new(), false, None)
+}
+
+/// Build a digest using provider tool semantics retained by a conversation.
+#[must_use]
+pub fn build_digest_from_conversation(
+    conversation: &Conversation,
+    opts: &DigestOptions,
+    semantic_annotations: bool,
+) -> SessionDigest {
+    let entries = conversation.chronological_entries();
+    let semantics = conversation_tool_semantics(conversation);
+    build_digest_with(
+        &entries,
+        opts,
+        &semantics,
+        semantic_annotations,
+        semantic_annotations.then_some(conversation),
+    )
+}
+
+fn build_digest_with(
+    entries: &[&LogEntry],
+    opts: &DigestOptions,
+    semantics: &HashMap<String, ToolSemantics>,
+    semantic_annotations: bool,
+    semantic_conversation: Option<&Conversation>,
+) -> SessionDigest {
     // 1. Collect all human prompts, then take first N and last N
     let mut all_prompts = Vec::new();
     for entry in entries {
-        if is_human_prompt(entry) {
-            if let Some(text) = extract_user_prompt_text(entry) {
+        let human = semantic_conversation.map_or_else(
+            || is_human_prompt(entry),
+            |conversation| {
+                matches!(entry, LogEntry::User(_))
+                    && entry
+                        .uuid()
+                        .and_then(|uuid| conversation.semantics_for_uuid(uuid))
+                        .and_then(|semantics| semantics.prompt)
+                        .is_some_and(|prompt| {
+                            prompt.authorship == crate::provider::PromptAuthorship::Human
+                        })
+            },
+        );
+        if human {
+            if let Some(text) = orientation_text(entry) {
                 all_prompts.push(truncate_text(&text, 100));
             }
         }
     }
     let total_prompts = all_prompts.len();
 
-    let key_prompts: Vec<String> = all_prompts.iter().take(opts.max_prompts).cloned().collect();
+    let key_end = total_prompts.min(opts.max_prompts);
+    let key_prompts = collapse_consecutive_prompts(&all_prompts[..key_end]);
 
-    // Last N prompts (excluding any that overlap with key_prompts)
-    let recent_prompts: Vec<String> = if total_prompts > opts.max_prompts {
-        all_prompts
-            .iter()
-            .skip(total_prompts.saturating_sub(opts.max_prompts))
-            .cloned()
-            .collect()
+    // Last N prompt emissions, excluding the first-N emission window. Collapse
+    // adjacent identical presentation while retaining total_prompts as the
+    // exact emission count; equal prompts are never treated as one event.
+    let recent_prompts = if total_prompts > key_end {
+        let recent_start = key_end.max(total_prompts.saturating_sub(opts.max_prompts));
+        collapse_consecutive_prompts(&all_prompts[recent_start..])
     } else {
         Vec::new() // All prompts already in key_prompts
     };
@@ -118,19 +190,8 @@ pub fn build_digest(entries: &[&LogEntry], opts: &DigestOptions) -> SessionDiges
     top_tools.truncate(5);
 
     // 4. Error count
-    let mut error_count = 0;
-    // Check consecutive pairs (each user entry may contain tool results)
-    for window in entries.windows(2) {
-        if has_tool_errors(&[window[0]]) {
-            error_count += 1;
-        }
-    }
-    // Check last entry too
-    if let Some(last) = entries.last() {
-        if has_tool_errors(&[*last]) {
-            error_count += 1;
-        }
-    }
+    let failures = count_tool_failures(entries, semantics, semantic_annotations);
+    let error_count = failures.total();
 
     // 5. Compaction count
     let compaction_events = find_compaction_events(entries);
@@ -169,6 +230,8 @@ pub fn build_digest(entries: &[&LogEntry], opts: &DigestOptions) -> SessionDiges
         files_touched: files,
         top_tools,
         error_count,
+        confirmed_tool_failures: failures.confirmed,
+        inferred_failure_signals: failures.inferred,
         compaction_count,
         thinking_keywords,
         thinking_note: thinking_redaction_note(entries),
@@ -185,10 +248,11 @@ pub fn format_digest(digest: &SessionDigest, max_chars: usize) -> String {
 
     // Recent prompts first — most important for post-compaction orientation
     if !digest.recent_prompts.is_empty() {
-        let start = digest.total_prompts - digest.recent_prompts.len() + 1;
         lines.push(format!("Recent prompts ({} total):", digest.total_prompts));
-        for (i, p) in digest.recent_prompts.iter().enumerate() {
-            lines.push(format!("  {}. {p}", start + i));
+        for prompt in &digest.recent_prompts {
+            // Presentation compaction can collapse adjacent equal emissions;
+            // bullets avoid inventing an ordinal after that collapse.
+            lines.push(format!("  - {prompt}"));
         }
     }
 
@@ -200,8 +264,8 @@ pub fn format_digest(digest: &SessionDigest, max_chars: usize) -> String {
             "First prompts:".to_string()
         };
         lines.push(header);
-        for (i, p) in digest.key_prompts.iter().enumerate() {
-            lines.push(format!("  {}. {p}", i + 1));
+        for prompt in &digest.key_prompts {
+            lines.push(format!("  - {prompt}"));
         }
     }
 
@@ -218,8 +282,17 @@ pub fn format_digest(digest: &SessionDigest, max_chars: usize) -> String {
         lines.push(format!("Tools: {}", tools.join(", ")));
     }
 
-    if digest.error_count > 0 {
-        lines.push(format!("Errors: {}", digest.error_count));
+    if digest.confirmed_tool_failures > 0 {
+        lines.push(format!(
+            "Confirmed tool failures: {}",
+            digest.confirmed_tool_failures
+        ));
+    }
+    if digest.inferred_failure_signals > 0 {
+        lines.push(format!(
+            "Inferred failure signals: {}",
+            digest.inferred_failure_signals
+        ));
     }
 
     if digest.compaction_count > 0 {
@@ -245,6 +318,20 @@ pub fn format_digest(digest: &SessionDigest, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn user_entry(uuid: &str, content: &str) -> LogEntry {
+        serde_json::from_value(serde_json::json!({
+            "uuid": uuid,
+            "parentUuid": null,
+            "type": "user",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "sessionId": "s",
+            "version": "2.0",
+            "isSidechain": false,
+            "message": {"role": "user", "content": content}
+        }))
+        .unwrap()
+    }
 
     #[test]
     fn test_default_options() {
@@ -289,6 +376,63 @@ mod tests {
     }
 
     #[test]
+    fn digest_summarizes_relay_preamble_not_the_quoted_review() {
+        let entry = user_entry(
+            "1",
+            "I shared the work with a reviewer:\n```\nwrong wrong wrong provider boilerplate\n```\nPlease investigate.",
+        );
+        let digest = build_digest(&[&entry], &DigestOptions::default());
+        assert_eq!(digest.total_prompts, 1);
+        assert_eq!(digest.key_prompts.len(), 1);
+        assert!(digest.key_prompts[0].contains("I shared the work"));
+        assert!(!digest.key_prompts[0].contains("provider boilerplate"));
+    }
+
+    #[test]
+    fn digest_compacts_adjacent_repetition_without_merging_emissions() {
+        let entries = [
+            user_entry("1", "first"),
+            user_entry("2", "second"),
+            user_entry("3", "third"),
+            user_entry("4", "fourth"),
+            user_entry("5", "same prompt"),
+            user_entry("6", "same prompt"),
+            user_entry("7", "same prompt"),
+        ];
+        let refs: Vec<&LogEntry> = entries.iter().collect();
+        let digest = build_digest(
+            &refs,
+            &DigestOptions {
+                max_prompts: 3,
+                ..Default::default()
+            },
+        );
+        assert_eq!(digest.total_prompts, 7, "emission count remains exact");
+        assert_eq!(digest.key_prompts, vec!["first", "second", "third"]);
+        assert_eq!(digest.recent_prompts, vec!["same prompt [repeated 3×]"]);
+    }
+
+    #[test]
+    fn digest_first_and_recent_windows_do_not_overlap() {
+        let entries = [
+            user_entry("1", "one"),
+            user_entry("2", "two"),
+            user_entry("3", "three"),
+            user_entry("4", "four"),
+        ];
+        let refs: Vec<&LogEntry> = entries.iter().collect();
+        let digest = build_digest(
+            &refs,
+            &DigestOptions {
+                max_prompts: 3,
+                ..Default::default()
+            },
+        );
+        assert_eq!(digest.key_prompts, vec!["one", "two", "three"]);
+        assert_eq!(digest.recent_prompts, vec!["four"]);
+    }
+
+    #[test]
     fn test_format_digest_empty() {
         let digest = SessionDigest {
             key_prompts: vec![],
@@ -297,6 +441,8 @@ mod tests {
             files_touched: vec![],
             top_tools: vec![],
             error_count: 0,
+            confirmed_tool_failures: 0,
+            inferred_failure_signals: 0,
             compaction_count: 0,
             thinking_keywords: vec![],
             thinking_note: None,
@@ -314,6 +460,8 @@ mod tests {
             files_touched: vec!["auth.rs".into(), "tests.rs".into()],
             top_tools: vec![("Edit".into(), 5), ("Read".into(), 3)],
             error_count: 2,
+            confirmed_tool_failures: 1,
+            inferred_failure_signals: 1,
             compaction_count: 1,
             thinking_keywords: vec!["decided".into(), "because".into()],
             thinking_note: None,
@@ -331,7 +479,8 @@ mod tests {
         assert!(recent_pos < first_pos);
         assert!(formatted.contains("Files: auth.rs, tests.rs"));
         assert!(formatted.contains("Tools: Edit(5), Read(3)"));
-        assert!(formatted.contains("Errors: 2"));
+        assert!(formatted.contains("Confirmed tool failures: 1"));
+        assert!(formatted.contains("Inferred failure signals: 1"));
         assert!(formatted.contains("Compactions: 1"));
         assert!(formatted.contains("Decisions: decided, because"));
     }
@@ -345,6 +494,8 @@ mod tests {
             files_touched: vec![],
             top_tools: vec![],
             error_count: 0,
+            confirmed_tool_failures: 0,
+            inferred_failure_signals: 0,
             compaction_count: 0,
             thinking_keywords: vec![],
             thinking_note: None,
@@ -372,6 +523,8 @@ mod tests {
             ],
             top_tools: vec![("Edit".into(), 100)],
             error_count: 0,
+            confirmed_tool_failures: 0,
+            inferred_failure_signals: 0,
             compaction_count: 0,
             thinking_keywords: vec![],
             thinking_note: None,

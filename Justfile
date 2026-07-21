@@ -61,8 +61,9 @@ nextest:
 # Test feature combinations
 test-features:
     {{cargo}} test --no-default-features -j {{jobs}}
-    {{cargo}} test --no-default-features --features tui -j {{jobs}}
     {{cargo}} test --no-default-features --features mmap -j {{jobs}}
+    {{cargo}} test --no-default-features --features mcp -j {{jobs}}
+    {{cargo}} test --no-default-features --features codex -j {{jobs}}
     {{cargo}} test --all-features -j {{jobs}}
 
 # ─────────────────────────────────────────────────────────────────────────────

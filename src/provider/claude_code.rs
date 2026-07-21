@@ -22,7 +22,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::time::UNIX_EPOCH;
 
 use super::{
@@ -226,6 +226,65 @@ impl ClaudeCodeProvider {
         Ok((descriptor, session))
     }
 
+    fn project_context_for_session(
+        session: &Session,
+    ) -> Result<super::project::SessionProjectContext, ProviderError> {
+        // Project grouping needs only the small metadata prelude, not a
+        // fully parsed transcript. `quick_metadata_cached()` currently parses
+        // every entry; calling it for a large corpus made an otherwise linear
+        // union scan take tens of seconds and peak above 1 GiB. Bound both
+        // bytes and lines so one hostile/huge first record cannot recreate
+        // that behavior.
+        const PREFIX_BYTES: u64 = 256 * 1024;
+        const PREFIX_LINES: usize = 32;
+        let file = File::open(session.path())?;
+        let mut reader = BufReader::new(file).take(PREFIX_BYTES);
+        let mut line = Vec::new();
+        let mut cwd = None;
+        let mut git_branch = None;
+        let mut started_at = None;
+        for _ in 0..PREFIX_LINES {
+            line.clear();
+            if reader.read_until(b'\n', &mut line)? == 0 {
+                break;
+            }
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&line) else {
+                continue;
+            };
+            cwd = cwd.or_else(|| {
+                value
+                    .get("cwd")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            });
+            git_branch = git_branch.or_else(|| {
+                value
+                    .get("gitBranch")
+                    .or_else(|| value.get("git_branch"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            });
+            started_at = started_at.or_else(|| {
+                value
+                    .get("timestamp")
+                    .and_then(|v| v.as_str())
+                    .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
+                    .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
+            });
+            if cwd.is_some() && git_branch.is_some() && started_at.is_some() {
+                break;
+            }
+        }
+        Ok(super::project::SessionProjectContext {
+            cwd: Some(cwd.unwrap_or_else(|| session.project_path().to_string())),
+            git_branch,
+            started_at,
+            modified_at: Some(session.modified_datetime()),
+            artifact_bytes: session.file_size(),
+            ..Default::default()
+        })
+    }
+
     fn stream_file(path: &std::path::Path, out: &mut dyn Write) -> Result<(), ProviderError> {
         let mut file = File::open(path)?;
         std::io::copy(&mut file, out)?;
@@ -253,27 +312,41 @@ impl SourceProvider for ClaudeCodeProvider {
         Ok(self.descriptors()?.into_iter().map(|(d, _)| d).collect())
     }
 
+    fn sessions_with_project_context(
+        &self,
+    ) -> Result<super::SessionProjectContexts, ProviderError> {
+        self.descriptors()?
+            .into_iter()
+            .map(|(descriptor, sessions)| {
+                let preferred = descriptor
+                    .preferred_artifact()
+                    .ok_or_else(|| {
+                        ProviderError::Other(format!(
+                            "descriptor {} has no artifacts",
+                            descriptor.key
+                        ))
+                    })?
+                    .snapshot
+                    .id
+                    .clone();
+                let session = descriptor
+                    .artifacts
+                    .iter()
+                    .position(|artifact| artifact.snapshot.id == preferred)
+                    .and_then(|index| sessions.get(index))
+                    .ok_or_else(|| ProviderError::NotFound(descriptor.key.to_string()));
+                let context = session.and_then(Self::project_context_for_session);
+                Ok((descriptor, context))
+            })
+            .collect()
+    }
+
     fn project_context(
         &self,
         key: &LogicalSessionKey,
     ) -> Result<super::project::SessionProjectContext, ProviderError> {
         let (_, session) = self.resolve(key)?;
-        let metadata = session
-            .quick_metadata_cached()
-            .map_err(|error| ProviderError::Other(error.to_string()))?;
-        Ok(super::project::SessionProjectContext {
-            cwd: Some(
-                metadata
-                    .extracted_cwd
-                    .unwrap_or_else(|| session.project_path().to_string()),
-            ),
-            git_branch: metadata.git_branch,
-            started_at: metadata.start_time,
-            ended_at: metadata.end_time,
-            modified_at: Some(session.modified_datetime()),
-            artifact_bytes: session.file_size(),
-            ..Default::default()
-        })
+        Self::project_context_for_session(&session)
     }
 
     fn parse_cache_token(&self, key: &LogicalSessionKey) -> Result<String, ProviderError> {
@@ -668,6 +741,38 @@ mod tests {
         assert_eq!(a.len(), 1, "one logical descriptor, not duplicates");
         assert_eq!(a[0].artifacts.len(), 2, "both copies as artifacts");
         assert!(a[0].validate().is_empty());
+    }
+
+    #[test]
+    fn bulk_project_context_comes_from_bounded_native_prelude() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("projects").join("-tmp-fast-project");
+        std::fs::create_dir_all(&project).unwrap();
+        let path = project.join(format!("{SESSION_A}.jsonl"));
+        let first = format!(
+            r#"{{"type":"user","uuid":"u1","parentUuid":null,"timestamp":"2026-02-03T04:05:06Z","sessionId":"{SESSION_A}","version":"2.1.0","cwd":"/tmp/authoritative","gitBranch":"feature/fast-union","message":{{"role":"user","content":"hello"}}}}"#
+        );
+        let mut bytes = first.into_bytes();
+        bytes.push(b'\n');
+        // A large, invalid transcript tail must be irrelevant to project
+        // inventory; the old full-parser path needlessly consumed it.
+        bytes.resize(bytes.len() + 512 * 1024, b'x');
+        std::fs::write(&path, &bytes).unwrap();
+
+        let provider = ClaudeCodeProvider::new(ClaudeDirectory::from_path(tmp.path()).unwrap());
+        let rows = provider.sessions_with_project_context().unwrap();
+        let (_, context) = rows
+            .into_iter()
+            .find(|(descriptor, _)| descriptor.key.native_id == SESSION_A)
+            .unwrap();
+        let context = context.unwrap();
+        assert_eq!(context.cwd.as_deref(), Some("/tmp/authoritative"));
+        assert_eq!(context.git_branch.as_deref(), Some("feature/fast-union"));
+        assert_eq!(
+            context.started_at.unwrap().to_rfc3339(),
+            "2026-02-03T04:05:06+00:00"
+        );
+        assert_eq!(context.artifact_bytes, bytes.len() as u64);
     }
 
     #[test]

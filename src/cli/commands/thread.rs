@@ -7,7 +7,7 @@
 use std::io::IsTerminal;
 
 use indicatif::{ProgressBar, ProgressStyle};
-use regex::RegexBuilder;
+use regex::{Regex, RegexBuilder};
 
 use crate::analysis::threading::{thread_topic, ThreadParams, ThreadedExchange};
 use crate::cli::{Cli, ThreadArgs};
@@ -32,32 +32,6 @@ pub fn run(cli: &Cli, args: &ThreadArgs) -> Result<()> {
             reason: e.to_string(),
         })?;
 
-    let sessions = helpers::collect_sessions(
-        cli,
-        &SessionCollectParams {
-            session: args.session.as_deref(),
-            project: args.project.as_deref(),
-            since: args.since.as_deref(),
-            until: args.until.as_deref(),
-            recent: args.recent,
-            no_subagents: args.no_subagents,
-        },
-    )?;
-
-    let session_count = sessions.len();
-    let show_progress = session_count > 10 && std::io::stderr().is_terminal() && !cli.quiet;
-    if show_progress {
-        let pb = ProgressBar::new(session_count as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.cyan} [{bar:40.cyan/dim}] {pos}/{len} sessions")
-                .unwrap()
-                .progress_chars("█▓░"),
-        );
-        // Progress display for user feedback — threading itself handles iteration
-        pb.finish_and_clear();
-    }
-
     let limit = if args.no_limit {
         usize::MAX
     } else {
@@ -73,11 +47,46 @@ pub fn run(cli: &Cli, args: &ThreadArgs) -> Result<()> {
         role_filter: args.role.clone(),
         decisions_only: args.decisions_only,
     };
+    let registry = helpers::provider_registry(cli);
+    let provider_route = !args.provider.is_empty()
+        || args
+            .session
+            .as_deref()
+            .is_some_and(|session| registry.looks_qualified(session));
+    let result = if provider_route {
+        provider_thread_topic(cli, args, &regex, &params)?
+    } else {
+        let sessions = helpers::collect_sessions(
+            cli,
+            &SessionCollectParams {
+                session: args.session.as_deref(),
+                project: args.project.as_deref(),
+                since: args.since.as_deref(),
+                until: args.until.as_deref(),
+                recent: args.recent,
+                no_subagents: args.no_subagents,
+            },
+        )?;
 
-    let result = thread_topic(&sessions, &regex, &params, cli.max_file_size);
+        let session_count = sessions.len();
+        let show_progress = session_count > 10 && std::io::stderr().is_terminal() && !cli.quiet;
+        if show_progress {
+            let pb = ProgressBar::new(session_count as u64);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.cyan} [{bar:40.cyan/dim}] {pos}/{len} sessions")
+                    .unwrap()
+                    .progress_chars("█▓░"),
+            );
+            pb.finish_and_clear();
+        }
+        thread_topic(&sessions, &regex, &params, cli.max_file_size)
+    };
 
     if result.exchanges.is_empty() {
-        if !cli.quiet {
+        if cli.effective_output() == crate::cli::OutputFormat::Json {
+            println!("[]");
+        } else if !cli.quiet {
             println!("No matches found for pattern: {}", args.pattern);
         }
         return Ok(());
@@ -104,6 +113,195 @@ pub fn run(cli: &Cli, args: &ThreadArgs) -> Result<()> {
     Ok(())
 }
 
+fn provider_thread_topic(
+    cli: &Cli,
+    args: &ThreadArgs,
+    regex: &Regex,
+    params: &ThreadParams,
+) -> Result<crate::analysis::threading::ThreadResult> {
+    use crate::analysis::threading::{
+        finish_thread_exchanges, thread_one_conversation, ThreadConversation,
+    };
+    use crate::provider::registry::{cached_parsed_session, ProviderSelection};
+    use crate::provider::LineageEdgeKind;
+    use crate::reconstruction::Conversation;
+
+    fn context_overlaps(
+        context: &crate::provider::project::SessionProjectContext,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+        until: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> bool {
+        let start = context.started_at.or(context.modified_at);
+        let end = context.ended_at.or(context.modified_at).or(start);
+        since.map_or(true, |bound| end.map_or(true, |end| end >= bound))
+            && until.map_or(true, |bound| start.map_or(true, |start| start <= bound))
+    }
+
+    let since = args
+        .since
+        .as_deref()
+        .map(super::parse_date_filter)
+        .transpose()?
+        .map(chrono::DateTime::<chrono::Utc>::from);
+    let until = args
+        .until
+        .as_deref()
+        .map(super::parse_date_filter)
+        .transpose()?
+        .map(chrono::DateTime::<chrono::Utc>::from);
+    let registry = helpers::provider_registry(cli);
+    let mut exchanges = Vec::new();
+
+    if let Some(session_id) = args.session.as_deref() {
+        let resolution = registry.resolve_with_default_policy(&args.provider, session_id)?;
+        let key = resolution.key.clone();
+        if args.no_subagents {
+            let spawned =
+                resolution.provider.lineage()?.into_iter().any(|edge| {
+                    edge.to == key && matches!(edge.kind, LineageEdgeKind::Spawn { .. })
+                });
+            if spawned || key.namespace.0.starts_with("subagent:") {
+                return Ok(finish_thread_exchanges(Vec::new(), params.limit));
+            }
+        }
+        let parsed = cached_parsed_session(
+            crate::cache::global_cache(),
+            resolution.provider,
+            &resolution.key,
+        )?;
+        let context = crate::provider::project::SessionProjectContext::from_parsed(&parsed);
+        if args.project.as_deref().is_some_and(|project| {
+            !context
+                .cwd
+                .as_deref()
+                .is_some_and(|cwd| cwd.contains(project))
+        }) || !context_overlaps(&context, since, until)
+        {
+            return Ok(finish_thread_exchanges(Vec::new(), params.limit));
+        }
+        let conversation = Conversation::from_parsed_session(parsed)?;
+        let qualified = resolution.key.to_string();
+        exchanges.extend(thread_one_conversation(
+            &ThreadConversation {
+                provider: &resolution.key.provider.0,
+                qualified_id: &qualified,
+                session_id: &resolution.key.native_id,
+                project: context.cwd.as_deref().unwrap_or("unknown"),
+                conversation: &conversation,
+                semantic_annotations: resolution.provider.capabilities().semantic_annotations,
+            },
+            regex,
+            params,
+        ));
+        return Ok(finish_thread_exchanges(exchanges, params.limit));
+    }
+
+    let selection = ProviderSelection::from_flags(&args.provider).map_err(|reason| {
+        SnatchError::InvalidArgument {
+            name: "--provider".to_string(),
+            reason,
+        }
+    })?;
+    let collected = registry.collect_project_union(&selection)?;
+    let spawned: std::collections::BTreeSet<_> = collected
+        .lineage
+        .iter()
+        .filter(|edge| matches!(edge.kind, LineageEdgeKind::Spawn { .. }))
+        .map(|edge| edge.to.clone())
+        .collect();
+    let mut candidates = Vec::new();
+    for project in &collected.projects {
+        if args
+            .project
+            .as_deref()
+            .is_some_and(|needle| !project.matches(needle))
+        {
+            continue;
+        }
+        for session in &project.sessions {
+            let key = &session.descriptor.key;
+            if args.no_subagents
+                && (spawned.contains(key) || key.namespace.0.starts_with("subagent:"))
+            {
+                continue;
+            }
+            if context_overlaps(&session.context, since, until) {
+                candidates.push((
+                    session.clone(),
+                    project
+                        .display_path
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                ));
+            }
+        }
+    }
+    candidates.sort_by(|(left, _), (right, _)| {
+        right
+            .context
+            .modified_at
+            .or(right.context.ended_at)
+            .or(right.context.started_at)
+            .cmp(
+                &left
+                    .context
+                    .modified_at
+                    .or(left.context.ended_at)
+                    .or(left.context.started_at),
+            )
+            .then_with(|| left.descriptor.key.cmp(&right.descriptor.key))
+    });
+    if let Some(recent) = args.recent {
+        candidates.truncate(recent);
+    }
+
+    for (session, display_path) in candidates {
+        let key = &session.descriptor.key;
+        let provider = match registry.get(&key.provider) {
+            Ok(provider) => provider,
+            Err(_) => continue,
+        };
+        let parsed = match cached_parsed_session(crate::cache::global_cache(), provider, key) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                if !cli.quiet {
+                    eprintln!("warning: {key}: session could not be parsed");
+                }
+                continue;
+            }
+        };
+        let conversation = match Conversation::from_parsed_session(parsed) {
+            Ok(conversation) => conversation,
+            Err(_) => {
+                if !cli.quiet {
+                    eprintln!("warning: {key}: conversation could not be reconstructed");
+                }
+                continue;
+            }
+        };
+        let qualified = key.to_string();
+        let project = session.context.cwd.as_deref().unwrap_or(&display_path);
+        exchanges.extend(thread_one_conversation(
+            &ThreadConversation {
+                provider: &key.provider.0,
+                qualified_id: &qualified,
+                session_id: &key.native_id,
+                project,
+                conversation: &conversation,
+                semantic_annotations: provider.capabilities().semantic_annotations,
+            },
+            regex,
+            params,
+        ));
+    }
+    if !cli.quiet {
+        for (provider, _) in collected.skipped {
+            eprintln!("warning: provider {provider} unavailable");
+        }
+    }
+    Ok(finish_thread_exchanges(exchanges, params.limit))
+}
+
 fn output_json(exchanges: &[ThreadedExchange]) {
     let entries: Vec<serde_json::Value> = exchanges
         .iter()
@@ -111,9 +309,12 @@ fn output_json(exchanges: &[ThreadedExchange]) {
             let mut obj = serde_json::json!({
                 "timestamp": e.timestamp.to_rfc3339(),
                 "session_id": e.session_id,
+                "provider": e.provider,
+                "qualified_id": e.qualified_id,
                 "entry_uuid": e.entry_uuid,
                 "project": e.project,
                 "match_location": e.match_location,
+                "match_provenance": e.match_provenance,
                 "match_count": e.match_count,
             });
             if let Some(ref text) = e.user_text {
@@ -172,9 +373,10 @@ fn output_text(
 
         println!();
         println!(
-            "  {} | {} in {} ({} match{})",
+            "  {} | {} ({}) in {} ({} match{})",
             date,
             exchange.match_location,
+            exchange.match_provenance,
             exchange.short_id,
             exchange.match_count,
             if exchange.match_count == 1 { "" } else { "es" }

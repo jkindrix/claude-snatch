@@ -691,11 +691,19 @@ pub struct GetToolCallsRequest {
     /// Session ID (full or prefix).
     pub session_id: String,
 
+    /// Source provider selection. A qualified session id also selects it.
+    pub provider: Option<Vec<String>>,
+
     /// Filter by tool name (comma-separated). If omitted, returns all.
     pub tool_filter: Option<String>,
 
     /// Only include tool calls that resulted in errors.
     pub errors_only: Option<bool>,
+
+    /// With errors_only, select "confirmed" (default), "inferred", or
+    /// "all". Confirmed means native/status/structured evidence; inferred
+    /// means unstructured text signatures.
+    pub failure_kind: Option<String>,
 
     /// Restrict to prompt-boundary chunk(s): "4" or "2-5" (same indices as
     /// get_session_messages). Ground-truth view of what actually ran in a
@@ -719,6 +727,10 @@ pub struct ToolCallEntry {
     pub input_summary: std::collections::HashMap<String, String>,
     pub had_error: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<crate::analysis::lessons::FailureKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_basis: Option<crate::analysis::lessons::FailureBasis>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error_preview: Option<String>,
     /// Truncated preview of a successful tool result's output (absent on error).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -732,12 +744,22 @@ pub struct ToolCallsSummary {
     pub files_written: Vec<String>,
     pub files_edited: Vec<String>,
     pub error_count: usize,
+    /// All confirmed failures in the tool/name/chunk scope, before the
+    /// errors_only confidence filter.
+    pub confirmed_tool_failures: usize,
+    /// All inferred failure signals in that same scope.
+    pub inferred_failure_signals: usize,
+    /// Scope used by errors_only: confirmed, inferred, or all.
+    pub selected_failure_kind: String,
+    pub entry_scope: String,
 }
 
 /// Response for get_tool_calls.
 #[derive(Debug, Serialize)]
 pub struct ToolCallsResponse {
     pub session_id: String,
+    pub provider: String,
+    pub qualified_id: String,
     pub total_tool_calls: usize,
     pub returned: usize,
     pub tool_calls: Vec<ToolCallEntry>,
@@ -778,6 +800,10 @@ pub struct ErrorFixLesson {
     pub input_summary: std::collections::HashMap<String, String>,
     /// Preview of the error message.
     pub error_preview: String,
+    /// Confirmed failure or inferred failure signal.
+    pub failure_kind: crate::analysis::lessons::FailureKind,
+    /// Native/status/structured/text evidence basis.
+    pub failure_basis: crate::analysis::lessons::FailureBasis,
     /// What the assistant did next (text summary of next response).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution_summary: Option<String>,
@@ -814,6 +840,9 @@ pub struct SessionLessonsResponse {
 #[derive(Debug, Serialize)]
 pub struct LessonsSummary {
     pub total_errors: usize,
+    pub confirmed_tool_failures: usize,
+    pub inferred_failure_signals: usize,
+    pub entry_scope: String,
     pub total_corrections: usize,
     pub most_error_prone_tools: Vec<(String, usize)>,
 }
@@ -887,24 +916,37 @@ pub struct GetSessionDigestRequest {
     /// Session ID (full or prefix).
     pub session_id: String,
 
+    /// Source provider selection. A qualified session id also selects it.
+    pub provider: Option<Vec<String>>,
+
     /// Maximum key prompts to include. Default: 3.
     pub max_prompts: Option<usize>,
 
     /// Maximum files to include. Default: 10.
     pub max_files: Option<usize>,
+
+    /// Include a pre-rendered text duplicate of the structured digest.
+    /// Default: false. Request only for clients that cannot render fields.
+    pub include_formatted: Option<bool>,
 }
 
 /// Response for get_session_digest.
 #[derive(Debug, Serialize)]
 pub struct SessionDigestResponse {
     pub session_id: String,
+    pub provider: String,
+    pub qualified_id: String,
     pub project_path: String,
     pub key_prompts: Vec<String>,
     pub recent_prompts: Vec<String>,
     pub total_prompts: usize,
     pub files_touched: Vec<String>,
     pub top_tools: Vec<(String, usize)>,
+    /// Compatibility total: confirmed failures plus inferred signals.
     pub error_count: usize,
+    pub confirmed_tool_failures: usize,
+    pub inferred_failure_signals: usize,
+    pub failure_entry_scope: String,
     pub compaction_count: usize,
     pub thinking_keywords: Vec<String>,
     /// Set when thinking blocks exist but are all empty (recent Claude Code
@@ -912,7 +954,8 @@ pub struct SessionDigestResponse {
     /// `thinking_keywords` is empty.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_note: Option<String>,
-    pub formatted: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formatted: Option<String>,
 }
 
 // ============================================================================
@@ -1109,6 +1152,10 @@ pub struct ThreadTopicRequest {
     /// Search pattern (regex supported).
     pub pattern: String,
 
+    /// Source providers to search. Omit for the classic Claude-only route;
+    /// use `["all"]` for an explicit cross-provider thread.
+    pub provider: Option<Vec<String>>,
+
     /// Filter by project path (substring match).
     pub project: Option<String>,
 
@@ -1143,6 +1190,8 @@ pub struct ThreadTopicRequest {
 pub struct ThreadExchangeEntry {
     pub timestamp: String,
     pub session_id: String,
+    pub provider: String,
+    pub qualified_id: String,
     pub project: String,
     pub entry_uuid: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1152,6 +1201,10 @@ pub struct ThreadExchangeEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_text: Option<String>,
     pub match_location: String,
+    /// Best available evidence source for the match: primary, quoted, or
+    /// injected. Result limiting prefers primary while retaining secondary
+    /// matches when no primary match exists.
+    pub match_provenance: crate::analysis::extraction::ContentProvenance,
     pub match_count: usize,
 }
 
@@ -1163,6 +1216,10 @@ pub struct ThreadTopicResponse {
     pub session_count: usize,
     pub total_matches: usize,
     pub exchanges: Vec<ThreadExchangeEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_providers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 // ============================================================================

@@ -1522,6 +1522,9 @@ mod codex_provider_cli {
                 "{{\"timestamp\":\"2026-07-16T10:00:01.000Z\",\"type\":\"response_item\",",
                 "\"payload\":{{\"type\":\"message\",\"role\":\"user\",",
                 "\"content\":[{{\"type\":\"input_text\",\"text\":\"hello codex user@example.com\"}}]}}}}\n",
+                "{{\"timestamp\":\"2026-07-16T10:00:01.000Z\",\"type\":\"event_msg\",",
+                "\"payload\":{{\"type\":\"user_message\",\"message\":\"hello codex user@example.com\",",
+                "\"images\":[],\"local_images\":[],\"text_elements\":[]}}}}\n",
             ),
             id = CODEX_THREAD,
             cwd = cwd,
@@ -1549,6 +1552,63 @@ mod codex_provider_cli {
             .assert()
             .success()
             .stdout(predicate::str::contains(format!("codex:{CODEX_THREAD}")));
+    }
+
+    #[test]
+    fn digest_and_thread_route_qualified_codex_sessions() {
+        let claude = setup_fixture_dir();
+        let (codex, _) = setup_codex_home();
+        let target = format!("codex:{CODEX_THREAD}");
+
+        let digest = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "digest", &target])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let digest: serde_json::Value = serde_json::from_slice(&digest).unwrap();
+        assert_eq!(digest["provider"], "codex");
+        assert_eq!(digest["qualified_id"], target);
+        assert_eq!(digest["total_prompts"], 1);
+        assert!(digest.get("formatted").is_none());
+
+        let thread = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "thread", "hello codex", "--session", &target])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let thread: serde_json::Value = serde_json::from_slice(&thread).unwrap();
+        assert_eq!(thread[0]["provider"], "codex");
+        assert_eq!(thread[0]["qualified_id"], target);
+        assert_eq!(thread[0]["match_provenance"], "primary");
+
+        let no_match = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "-o",
+                "json",
+                "thread",
+                "definitely-not-in-the-session",
+                "--session",
+                &target,
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&no_match).unwrap(),
+            serde_json::json!([])
+        );
     }
 
     #[test]
@@ -1634,7 +1694,7 @@ mod codex_provider_cli {
             // Provenance survives into the production consumer (round-18);
             // B3 slice 1 maps the user message and preserves session_meta.
             .stdout(predicate::str::contains(
-                "Record dispositions: mapped 1, suppressed 0, unknown 1, recovered 0, unparseable 0",
+                "Record dispositions: mapped 1, suppressed 1, unknown 1, recovered 0, unparseable 0",
             ));
     }
 
@@ -2221,6 +2281,7 @@ fn export_list_templates_rejects_qualified_session_reference() {
 /// never expose raw provider reasons or filesystem paths, on stdout or
 /// stderr. `snatch providers` stays the intentionally detailed surface.
 #[test]
+#[cfg(feature = "codex")]
 fn doctor_error_paths_never_leak_paths() {
     const SENTINEL: &str = "sentinel-secret-root";
     let scratch = TempDir::new().unwrap();

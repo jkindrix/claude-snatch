@@ -2100,6 +2100,11 @@ pub struct DigestArgs {
     /// Session ID (full UUID or short prefix).
     pub session_id: String,
 
+    /// Source provider (`claude-code` or `codex`). A qualified session id
+    /// also selects its provider.
+    #[arg(long = "provider", value_name = "PROVIDER", action = clap::ArgAction::Append)]
+    pub provider: Vec<String>,
+
     /// Maximum key prompts to include.
     #[arg(short = 'n', long, default_value = "3")]
     pub max_prompts: usize,
@@ -2200,6 +2205,11 @@ pub struct DecisionsArgs {
 pub struct ThreadArgs {
     /// Search pattern (regex supported).
     pub pattern: String,
+
+    /// Source provider (`claude-code`, `codex`, or `all`). Repeat to select
+    /// several providers. A qualified --session also selects its provider.
+    #[arg(long = "provider", value_name = "PROVIDER", action = clap::ArgAction::Append)]
+    pub provider: Vec<String>,
 
     /// Search in specific project.
     #[arg(short = 'p', long)]

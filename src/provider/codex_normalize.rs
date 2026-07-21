@@ -51,7 +51,8 @@ use super::{
     ActivityKind, CompactionKind, CompactionSemantics, CompactionWindow, EntryId, EntrySemantics,
     IdentifiedEntry, IngestionDiagnostics, LogicalSessionKey, PromptAuthorship, PromptDelivery,
     PromptSemantics, RecordDisposition, RecordOutcome, RecordRef, StateCheckpointKind,
-    SuppressionReason, ToolKind, ToolSemantics, UsageAggregation, UsageObservation, UsageScope,
+    SuppressionReason, ToolKind, ToolSemantics, UsageAggregation, UsageObservation,
+    UsageObservationKind, UsageScope,
 };
 
 /// Output of normalizing the parsed record stream.
@@ -261,27 +262,12 @@ fn plan_window(window: &[(RecordRef, Value)], plan: &mut MatchPlan) {
     }
 }
 
-/// Raw cumulative usage triple straight from a codex usage object.
+/// Non-negative counters used only for canonical, summable usage.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct RawUsage {
     input: u64,
     cached: u64,
     output: u64,
-}
-
-impl RawUsage {
-    fn read(v: Option<&Value>) -> Self {
-        let get = |k: &str| {
-            v.and_then(|u| u.get(k))
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-        };
-        RawUsage {
-            input: get("input_tokens"),
-            cached: get("cached_input_tokens"),
-            output: get("output_tokens"),
-        }
-    }
 }
 
 /// A usage event waiting for its assistant emission (round-22: token
@@ -294,18 +280,60 @@ struct PendingUsage {
     value: Value,
     window: u64,
     canonical: Usage,
+    observation_kind: UsageObservationKind,
     last_obs: ObservationNumbers,
     total_obs: ObservationNumbers,
+    model_context_window: Option<i64>,
     /// The cumulative transition's fresh delta was uninterpretable.
     ambiguous_transition: bool,
 }
 
-/// Raw native numbers destined for an observation.
+/// Complete native Codex `TokenUsage` numbers destined for an observation.
 #[derive(Clone, Copy)]
 struct ObservationNumbers {
-    input: u64,
-    cached: u64,
-    output: u64,
+    input: i64,
+    cached: i64,
+    output: i64,
+    reasoning_output: i64,
+    total: i64,
+}
+
+impl ObservationNumbers {
+    fn read(value: Option<&Value>) -> Self {
+        let get = |key: &str| {
+            value
+                .and_then(|usage| usage.get(key))
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+        };
+        Self {
+            input: get("input_tokens"),
+            cached: get("cached_input_tokens"),
+            output: get("output_tokens"),
+            reasoning_output: get("reasoning_output_tokens"),
+            total: get("total_tokens"),
+        }
+    }
+
+    fn canonical(self) -> RawUsage {
+        RawUsage {
+            input: u64::try_from(self.input).unwrap_or(0),
+            cached: u64::try_from(self.cached).unwrap_or(0),
+            output: u64::try_from(self.output).unwrap_or(0),
+        }
+    }
+
+    fn contradicts_input_basis(self) -> bool {
+        self.input < 0 || self.cached < 0 || self.cached > self.input
+    }
+
+    fn has_negative_counter(self) -> bool {
+        self.input < 0
+            || self.cached < 0
+            || self.output < 0
+            || self.reasoning_output < 0
+            || self.total < 0
+    }
 }
 
 /// Session-level state threaded through the linear walk.
@@ -820,6 +848,7 @@ fn classify_tool(name: &str) -> ToolKind {
         "read_file" | "view_image" => ToolKind::FileRead,
         "web_search" | "browser.search" | "web.run" => ToolKind::Web,
         "grep" | "find" | "search" => ToolKind::Search,
+        "exec" | "wait" | "update_plan" => ToolKind::Orchestration,
         n if n.starts_with("mcp") || n.contains("__") => ToolKind::Mcp,
         other => ToolKind::Other(other.to_string()),
     }
@@ -986,11 +1015,22 @@ fn handle_token_count(
         });
         return;
     };
-    let total = RawUsage::read(info.get("total_token_usage"));
-    let last = RawUsage::read(info.get("last_token_usage"));
+    let total_obs = ObservationNumbers::read(info.get("total_token_usage"));
+    let last_obs = ObservationNumbers::read(info.get("last_token_usage"));
+    let total = total_obs.canonical();
+    let observation_kind = if total_obs.total > 0
+        && total_obs.input == 0
+        && total_obs.cached == 0
+        && total_obs.output == 0
+        && total_obs.reasoning_output == 0
+    {
+        UsageObservationKind::ContextWindow
+    } else {
+        UsageObservationKind::ModelTokens
+    };
     // The basis is SOURCE-BACKED, not detected (round-24): Codex's own
     // TokenUsage defines non-cached input as input_tokens −
-    // cached_input_tokens across every audited tag (0.31 … 0.144.5), and
+    // cached_input_tokens across every audited tag (0.31 … 0.144.6), and
     // the corpus census found zero cumulative observations contradicting
     // it. It is validated PER OBSERVATION: an observation whose own
     // numbers contradict the basis (cached > input — four Call
@@ -1041,16 +1081,10 @@ fn handle_token_count(
         value: value.clone(),
         window: state.window,
         canonical,
-        last_obs: ObservationNumbers {
-            input: last.input,
-            cached: last.cached,
-            output: last.output,
-        },
-        total_obs: ObservationNumbers {
-            input: total.input,
-            cached: total.cached,
-            output: total.output,
-        },
+        observation_kind,
+        last_obs,
+        total_obs,
+        model_context_window: info.get("model_context_window").and_then(Value::as_i64),
         ambiguous_transition,
     };
     match state.last_assistant {
@@ -1083,15 +1117,17 @@ fn attach_usage(pending: PendingUsage, idx: usize, out: &mut NormalizeOutput) {
         // observation whose own numbers contradict the includes-cached
         // basis is Unknown/ambiguous; the Cumulative observation is also
         // ambiguous when its transition's fresh delta was uninterpretable.
-        let obs_basis = |n: &ObservationNumbers| {
-            if n.cached > n.input {
+        let obs_basis = |kind: UsageObservationKind, n: ObservationNumbers| {
+            if kind == UsageObservationKind::ContextWindow || n.contradicts_input_basis() {
                 super::UsageBasis::Unknown
             } else {
                 super::UsageBasis::InputIncludesCached
             }
         };
-        let last_contradicts = pending.last_obs.cached > pending.last_obs.input;
-        let total_contradicts = pending.total_obs.cached > pending.total_obs.input;
+        let last_contradicts =
+            pending.last_obs.contradicts_input_basis() || pending.last_obs.has_negative_counter();
+        let total_contradicts =
+            pending.total_obs.contradicts_input_basis() || pending.total_obs.has_negative_counter();
         for (scope, aggregation, numbers, ambiguous) in [
             (
                 UsageScope::Call,
@@ -1107,14 +1143,18 @@ fn attach_usage(pending: PendingUsage, idx: usize, out: &mut NormalizeOutput) {
             ),
         ] {
             sem.usage.push(UsageObservation {
+                kind: pending.observation_kind,
                 scope,
                 aggregation,
                 record: pending.record.clone(),
-                basis: obs_basis(&numbers),
+                basis: obs_basis(pending.observation_kind, numbers),
                 ambiguous,
                 input_tokens: numbers.input,
                 cached_input_tokens: numbers.cached,
                 output_tokens: numbers.output,
+                reasoning_output_tokens: numbers.reasoning_output,
+                total_tokens: numbers.total,
+                model_context_window: pending.model_context_window,
             });
         }
     }
@@ -1265,4 +1305,17 @@ fn push_unknown(
         entry: LogEntry::Unknown(value),
     });
     id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_host_control_tools_are_not_shell_commands() {
+        assert_eq!(classify_tool("exec"), ToolKind::Orchestration);
+        assert_eq!(classify_tool("wait"), ToolKind::Orchestration);
+        assert_eq!(classify_tool("update_plan"), ToolKind::Orchestration);
+        assert_eq!(classify_tool("exec_command"), ToolKind::Shell);
+    }
 }
