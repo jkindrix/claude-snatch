@@ -1376,6 +1376,83 @@ impl SourceProvider for FailingSessionsProvider {
     }
 }
 
+/// Inventories successfully but fails the compact evidence read. This is a
+/// different runtime boundary from `sessions()` and must retain the same
+/// explicit-atomic / all-partial contract.
+struct FailingProjectionProvider;
+
+impl FailingProjectionProvider {
+    fn key() -> LogicalSessionKey {
+        LogicalSessionKey {
+            provider: ProviderId("projection-fail".into()),
+            namespace: SessionNamespace::global(),
+            native_id: "one".into(),
+        }
+    }
+}
+
+impl SourceProvider for FailingProjectionProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId("projection-fail".into())
+    }
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::default()
+    }
+    fn sessions(&self) -> Result<Vec<SessionDescriptor>, ProviderError> {
+        Ok(vec![SessionDescriptor {
+            key: Self::key(),
+            artifacts: vec![],
+        }])
+    }
+    fn lineage(&self) -> Result<Vec<LineageEdge>, ProviderError> {
+        Ok(vec![])
+    }
+    fn file_change_projection(
+        &self,
+        _descriptor: &SessionDescriptor,
+    ) -> Result<FileChangeProjection, ProviderError> {
+        Err(ProviderError::Other("projection sentinel".into()))
+    }
+    fn project_context(
+        &self,
+        _key: &LogicalSessionKey,
+    ) -> Result<super::project::SessionProjectContext, ProviderError> {
+        Ok(super::project::SessionProjectContext {
+            cwd: Some("/tmp/projection-fail".into()),
+            ..Default::default()
+        })
+    }
+    fn parse(&self, key: &LogicalSessionKey) -> Result<ParsedSession, ProviderError> {
+        Err(ProviderError::NotFound(key.to_string()))
+    }
+    fn parse_cache_token(&self, key: &LogicalSessionKey) -> Result<String, ProviderError> {
+        Err(ProviderError::NotFound(key.to_string()))
+    }
+    fn write_archive(
+        &self,
+        key: &LogicalSessionKey,
+        _out: &mut dyn std::io::Write,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::NotFound(key.to_string()))
+    }
+    fn write_native(
+        &self,
+        _artifact: &ArtifactId,
+        _out: &mut dyn std::io::Write,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::Unsupported {
+            capability: "native export",
+        })
+    }
+    fn write_raw_jsonl(
+        &self,
+        key: &LogicalSessionKey,
+        _out: &mut dyn std::io::Write,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::NotFound(key.to_string()))
+    }
+}
+
 fn registry_with_flaky() -> ProviderRegistry {
     let mut r = ProviderRegistry::new();
     r.register(RegisteredProvider {
@@ -1520,6 +1597,39 @@ fn collect_diagnostics_mirrors_the_contract() {
     assert!(only_flaky
         .collect_selected_diagnostics(&ProviderSelection::All)
         .is_err());
+}
+
+#[test]
+fn compact_projection_failure_is_atomic_explicit_and_reported_under_all() {
+    let mut registry = ProviderRegistry::new();
+    registry.register(fake_entry()).unwrap();
+    registry
+        .register(RegisteredProvider {
+            id: FailingProjectionProvider.id(),
+            root: None,
+            provider: Ok(Box::new(FailingProjectionProvider)),
+        })
+        .unwrap();
+
+    let explicit = ProviderSelection::Explicit(vec![FailingProjectionProvider.id()]);
+    let error = registry
+        .visit_project_file_changes(&explicit, None, true, |_, _, _| {})
+        .err()
+        .expect("an explicit projection failure must abort")
+        .to_string();
+    assert!(error.contains("projection sentinel"), "got: {error}");
+
+    let mut visited = 0;
+    let report = registry
+        .visit_project_file_changes(&ProviderSelection::All, None, true, |_, descriptor, _| {
+            assert_eq!(descriptor.key.provider, ProviderId("fake".into()));
+            visited += 1;
+        })
+        .expect("the healthy provider must survive an all-selection failure");
+    assert!(visited > 0);
+    assert_eq!(report.warnings.len(), 1);
+    assert!(report.warnings[0].contains("projection-fail:one"));
+    assert!(!report.warnings[0].contains("projection sentinel"));
 }
 
 #[test]

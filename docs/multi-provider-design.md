@@ -17,8 +17,8 @@ commands/tools are routed today. This section is the DURABLE roadmap: the
 tier framework, the deliberate deferrals with their rationale, and the
 architectural gaps — content worth keeping in git so the plan survives even
 if the registry is lost (see "Registry Blast Radius" in CLAUDE.md). The
-per-tool lists below are a **dated snapshot (audited against commit `f99da5c`,
-2026-07-22), not a live ledger** — consult goal #19 for current status
+per-tool lists below are a **dated snapshot (audited through the file-change
+routing slice on 2026-07-22), not a live ledger** — consult goal #19 for current status
 rather than trusting these lists to stay in lock-step.
 
 Goal #18 (Codex ingest + normalization + core surfaces + Phase C/D) shipped
@@ -47,18 +47,18 @@ Provider-qualified and explicitly selected routes now cover CLI `digest` and
 `thread`, plus MCP `get_tool_calls`, `get_session_digest`, and `thread_topic`.
 The complete CLI audit is:
 
-- **Already routed (11):** `list`, `info`, `providers`, `doctor`, `lessons`,
-  `digest`, `thread`, `timeline`, `messages`, `chunks`, and `export`.
+- **Already routed (13):** `list`, `info`, `providers`, `doctor`, `lessons`,
+  `digest`, `thread`, `timeline`, `messages`, `chunks`, `file-history`,
+  `file-evolution`, and `export`.
 - **Provider-neutral analysis/discovery candidates (11):** `recent`, `pick`,
   `stats`, `summary`, `standup`, `diff`, `context`, `code`, `prompts`,
   `health`, and `priorities`. These share canonical entries or descriptors,
   but project/union modes still need provider-qualified identity, lineage,
   partial-success, and missing-capability semantics; they are not all thin
   flag wiring.
-- **New provider capability or infrastructure required (10):** `search` and
-  `index` need a versioned cross-provider index; `file-history`,
-  `file-evolution`, and `recover` need evidence-bounded file-change/recovery
-  semantics; `chain` needs typed lineage rather than Claude continuation-only
+- **New provider capability or infrastructure required (8):** `search` and
+  `index` need a versioned cross-provider index; `recover` needs an
+  evidence-bounded recovery contract; `chain` needs typed lineage rather than Claude continuation-only
   assumptions; `grab` needs provider-neutral session-graph bundling; `watch`
   needs an active-artifact stream capability; and `validate`/`cleanup` need
   provider-owned validation and destructive-artifact contracts.
@@ -72,10 +72,10 @@ The complete CLI audit is:
   `config`, `completions`, `quickstart`, and `serve-mcp` do not select session
   providers (the cache manager itself already includes provider bundles).
 
-The MCP server exposes 19 tools, not 20. Nine are provider-routed, seven still
+The MCP server exposes 19 tools, not 20. Eleven are provider-routed, five still
 directly use `ClaudeDirectory`/classic resolution (`get_stats`,
-`search_sessions`, `get_file_history`, `get_project_health`,
-`suggest_priorities`, `explain_file_evolution`, and `get_event_context`), and
+`search_sessions`, `get_project_health`, `suggest_priorities`, and
+`get_event_context`), and
 three registry tools are explicitly Claude-storage-scoped. In particular,
 `get_event_context` does not gain provider support merely because its
 `session_id` is a string: it has no provider input and calls the classic
@@ -2030,7 +2030,8 @@ the model-authored declaration, determines whether application succeeded.
 
 `ParsedSession` now carries a session-level `FileChangeObservation` projection
 rather than copying change fields onto whichever entry happens to be nearby.
-Each observation names the owning ToolUse, call id and stable operation index;
+Each observation names its owning normalized entry, provider-native operation
+id, and stable operation index;
 the full record carrying the change; the distinct result record when needed;
 native source and move paths; add/delete/update kind; full-content, patch, or
 path-only coverage; evidence grade (`StructuredLifecycle` or
@@ -2052,7 +2053,60 @@ outcome sources fail. On the live preferred-artifact corpus it reconciled all
 (778 from structured lifecycle evidence, 6,161 from patch declarations), zero
 unparsed calls, zero unknown outcomes, and one explicitly counted partial item
 (a native empty update declaration). This establishes the evidence layer; the
-file-history/evolution consumers are routed only in the next bounded commit.
+file-history/evolution consumers were routed in the following bounded slice.
+
+#### File-change consumer routing and narrowing (2026-07-22)
+
+Explicit provider routes now back CLI `file-history`/`file-evolution` and MCP
+`get_file_history`/`explain_file_evolution`; flagless Claude routes retain their
+legacy response shapes. Claude file-history snapshots join the same evidence
+model with a provider-native operation id, optional observation time and
+version, `FileHistorySnapshot` evidence, and applied outcome. Snapshot owners
+are validated against their native record independently of ToolUse-owned patch
+operations. Both providers have compact projection implementations whose
+fixture outputs must equal full normalization, while the real Codex corpus
+conformance checks that equality for every session.
+
+The registry performs progressive narrowing rather than normalizing every
+conversation in a union. File history scans provider-owned compact evidence;
+file evolution first matches that evidence and fully parses only candidate
+sessions. Descriptor-aware parse and revision-token methods reuse inventory
+results instead of rediscovering the complete store per session. Cache size
+estimation includes normalized message and patch bodies, and streaming corpus
+visitors reuse warm entries without filling the cache with misses.
+
+Provider file-history results separate applied modifications from
+failed/declined/unknown attempts, apply one deterministic limit across both
+outcomes, retain complete totals, and state the evidence boundary: arbitrary
+shell writes are not inferred. File-evolution context uses semantic turn ids
+on annotated providers rather than adjacent-entry assumptions. Generic tests
+pin explicit-provider failures as atomic and `all` projection failures as
+partial-but-reported; routed-Claude tests pin legacy compatibility.
+
+The Claude compact reader drains irrelevant large JSONL records without
+line-sized allocation and parses only bounded-prefix snapshot candidates. A
+native audit found 42,875 snapshot records with a maximum discriminator offset
+of 2,859 bytes and none at or beyond the tested 64 KiB bound; fixtures exercise
+chunk crossing, malformed records, false-positive text, truncated prefixes,
+and later-record recovery. Cumulative snapshot states are deduplicated before
+they enter the corpus index, retaining the earliest deterministic observation.
+
+Measured on the current local corpus (roughly 15.7k Claude sessions plus 243
+Codex sessions), an explicit all-provider empty-pattern history scan improved
+from more than two minutes/about 760 MiB RSS to about 25.2 seconds/250 MiB RSS
+while reporting 13,731 files, 86,742 applied observations, and 352 attempts.
+The counts can grow while active artifacts append; the performance result is a
+regression baseline, not a frozen corpus census. A narrowed all-provider
+evolution lookup completed in about 2.2 seconds. The remaining history latency
+is the honest cost of reading every selected artifact to produce complete
+totals; a future persistent file-evidence index may improve repeated global
+queries without weakening revision invalidation or provenance.
+
+At exit, the opt-in native conformance parsed 243/243 Codex sessions with zero
+provenance failures: 6,809 patch calls, 7,056 typed changes (895 structured +
+6,161 declaration-derived), zero unparsed calls, zero unknown outcomes, and one
+explicitly counted partial item. Two physically unparseable records remain
+accounted for by ingestion diagnostics.
 
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".

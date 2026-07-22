@@ -16,7 +16,7 @@
 //! Compressed input is decoded through a streaming reader with
 //! `window_log_max` and a decompressed-output limit — never `decode_all`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -24,10 +24,10 @@ use std::time::UNIX_EPOCH;
 
 use super::{
     ActivityKind, ArtifactForm, ArtifactId, ArtifactRevision, ArtifactSnapshot, FieldDerivation,
-    FieldDerivationMethod, IngestionDiagnostics, LineageEdge, LineageEdgeKind, LogicalSessionKey,
-    NormalizedField, ParseDiagnostic, ParsedSession, ProviderCapabilities, ProviderError,
-    ProviderId, RecordDisposition, RecordOutcome, RecordRef, SessionArtifact, SessionDescriptor,
-    SessionNamespace, SourceProvider,
+    FieldDerivationMethod, FileChangeProjection, IngestionDiagnostics, LineageEdge,
+    LineageEdgeKind, LogicalSessionKey, NormalizedField, ParseDiagnostic, ParsedSession,
+    ProviderCapabilities, ProviderError, ProviderId, RecordDisposition, RecordOutcome, RecordRef,
+    SessionArtifact, SessionDescriptor, SessionNamespace, SourceProvider,
 };
 
 /// Default cap on decompressed bytes per session (decompression-bomb guard).
@@ -1151,6 +1151,198 @@ impl CodexProvider {
         }
         Ok(report)
     }
+
+    /// Resolve a descriptor produced by the current inventory without a
+    /// second full tree walk. Encoded/non-local locator edge cases fall back
+    /// to the established artifact map so path fidelity is never weakened.
+    fn path_for_discovered(
+        &self,
+        descriptor: &SessionDescriptor,
+    ) -> Result<PathBuf, ProviderError> {
+        if descriptor.key.provider != ProviderId::codex()
+            || descriptor.key.namespace != SessionNamespace::global()
+        {
+            return Err(ProviderError::NotFound(descriptor.key.to_string()));
+        }
+        let preferred = descriptor.preferred_artifact().ok_or_else(|| {
+            ProviderError::Other(format!("descriptor {} has no artifacts", descriptor.key))
+        })?;
+        let candidate = PathBuf::from(&preferred.snapshot.id.locator);
+        let direct = preferred.snapshot.id.provider_instance == encode_locator(&self.codex_home)
+            && candidate.starts_with(&self.codex_home)
+            && std::fs::symlink_metadata(&candidate)
+                .is_ok_and(|metadata| metadata.file_type().is_file());
+        if direct {
+            return Ok(candidate);
+        }
+        self.resolve(&descriptor.key).map(|(_, path)| path)
+    }
+
+    fn cache_token_for_path(
+        &self,
+        descriptor: &SessionDescriptor,
+        path: &Path,
+    ) -> Result<String, ProviderError> {
+        let key = &descriptor.key;
+        // Inherited-history classification depends on the embedded parent
+        // prefix. Include that parent's descriptor state in the CHILD token
+        // so a parent appearing, disappearing, or changing cannot serve a
+        // stale cached activity classification.
+        let initial = self.initial_records(path, 2);
+        let parent_dependency = initial
+            .first()
+            .zip(initial.get(1))
+            .and_then(|(first, second)| embedded_fork_parent(key, first, second))
+            .map(|parent_id| {
+                let state = self
+                    .resolve(&self.key_for(&parent_id))
+                    .map(|(parent, _)| super::descriptor_state_token(&parent))
+                    .unwrap_or_else(|_| "missing".to_string());
+                format!(
+                    "id={}:{};state={}:{}",
+                    parent_id.len(),
+                    parent_id,
+                    state.len(),
+                    state
+                )
+            })
+            .unwrap_or_else(|| "none".to_string());
+        Ok(format!(
+            "v2\x1ecodex\x1e{}\x1emax_c={}\x1emax_d={}\x1ewlog={WINDOW_LOG_MAX}\x1eparent={}:{}",
+            super::descriptor_state_token(descriptor),
+            self.max_compressed,
+            self.max_decompressed,
+            parent_dependency.len(),
+            parent_dependency
+        ))
+    }
+
+    fn parse_path(
+        &self,
+        descriptor: SessionDescriptor,
+        path: &Path,
+    ) -> Result<ParsedSession, ProviderError> {
+        let key = &descriptor.key;
+        if self.sniff_format(path)? == FormatFamily::Legacy {
+            return Err(ProviderError::Unsupported {
+                capability: "legacy pre-envelope rollout normalization (Codex ≤0.31.0); \
+                             native/raw export remains available",
+            });
+        }
+
+        let artifact_id = descriptor
+            .preferred_artifact()
+            .ok_or_else(|| ProviderError::Other(format!("descriptor {key} has no artifacts")))?
+            .snapshot
+            .id
+            .clone();
+        let mut reader = self.open_records(path)?;
+        let mut parsed_records: Vec<(RecordRef, serde_json::Value)> = Vec::new();
+        let mut record_dispositions = Vec::new();
+        let mut diagnostics = IngestionDiagnostics::default();
+
+        // Byte-level records: content-level damage in one record must not
+        // lose later records. Only an unrecoverable decoder I/O error stops
+        // the stream because a compressed frame cannot be resynchronized.
+        let mut buf: Vec<u8> = Vec::new();
+        let mut ordinal: u64 = 0;
+        loop {
+            let record = RecordRef {
+                artifact: artifact_id.clone(),
+                ordinal,
+            };
+            buf.clear();
+            let n = match reader.read_until(b'\n', &mut buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    diagnostics.unparseable += 1;
+                    record_dispositions.push(RecordDisposition {
+                        record,
+                        outcome: RecordOutcome::Unparseable {
+                            error: ParseDiagnostic {
+                                message: format!("read error: {e}"),
+                            },
+                        },
+                    });
+                    break;
+                }
+            };
+            if n == 0 {
+                break;
+            }
+            ordinal += 1;
+            if buf.iter().all(|b| b.is_ascii_whitespace()) {
+                diagnostics.suppressed += 1;
+                record_dispositions.push(RecordDisposition {
+                    record,
+                    outcome: RecordOutcome::Suppressed {
+                        reason: super::SuppressionReason::Other("blank line".into()),
+                    },
+                });
+                continue;
+            }
+            match serde_json::from_slice::<serde_json::Value>(&buf) {
+                Ok(value) => parsed_records.push((record, value)),
+                Err(e) => {
+                    diagnostics.unparseable += 1;
+                    record_dispositions.push(RecordDisposition {
+                        record,
+                        outcome: RecordOutcome::Unparseable {
+                            error: ParseDiagnostic {
+                                message: e.to_string(),
+                            },
+                        },
+                    });
+                }
+            }
+        }
+
+        let inherited_range = self.copied_history_range(key, &parsed_records);
+        let mut normalized = super::codex_normalize::normalize(
+            key,
+            &parsed_records,
+            inherited_range.map(|range| (range.first, range.last)),
+        );
+        if let Some(range) = inherited_range {
+            Self::mark_inherited_history(range, &artifact_id, &mut normalized);
+        }
+        record_dispositions.extend(normalized.record_dispositions);
+        record_dispositions.sort_by_key(|disposition| disposition.record.ordinal);
+        diagnostics.mapped += normalized.diagnostics.mapped;
+        diagnostics.suppressed += normalized.diagnostics.suppressed;
+        diagnostics.unknown += normalized.diagnostics.unknown;
+        diagnostics.recovered += normalized.diagnostics.recovered;
+        diagnostics.unparseable += normalized.diagnostics.unparseable;
+
+        Ok(ParsedSession {
+            descriptor,
+            entries: normalized.entries,
+            entry_origins: normalized.entry_origins,
+            record_dispositions,
+            field_derivations: vec![
+                FieldDerivation {
+                    field: NormalizedField::Uuid,
+                    method: FieldDerivationMethod::DeterministicEntryId,
+                },
+                FieldDerivation {
+                    field: NormalizedField::ParentUuid,
+                    method: FieldDerivationMethod::PreviousNormalizedEmission,
+                },
+                FieldDerivation {
+                    field: NormalizedField::LogicalParentUuid,
+                    method: FieldDerivationMethod::PreviousNormalizedEmission,
+                },
+                FieldDerivation {
+                    field: NormalizedField::MessageId,
+                    method: FieldDerivationMethod::DeterministicEntryId,
+                },
+            ],
+            semantics: normalized.semantics,
+            file_changes: normalized.file_changes,
+            file_change_diagnostics: normalized.file_change_diagnostics,
+            diagnostics,
+        })
+    }
 }
 
 impl SourceProvider for CodexProvider {
@@ -1214,42 +1406,49 @@ impl SourceProvider for CodexProvider {
 
     fn parse_cache_token(&self, key: &LogicalSessionKey) -> Result<String, ProviderError> {
         let (descriptor, path) = self.resolve(key)?;
-        // Inherited-history classification depends on the embedded parent
-        // prefix. Include that parent's descriptor state in the CHILD token
-        // so a parent appearing, disappearing, or changing cannot serve a
-        // stale cached activity classification.
-        let initial = self.initial_records(&path, 2);
-        let parent_dependency = initial
-            .first()
-            .zip(initial.get(1))
-            .and_then(|(first, second)| embedded_fork_parent(key, first, second))
-            .map(|parent_id| {
-                let state = self
-                    .resolve(&self.key_for(&parent_id))
-                    .map(|(parent, _)| super::descriptor_state_token(&parent))
-                    .unwrap_or_else(|_| "missing".to_string());
-                format!(
-                    "id={}:{};state={}:{}",
-                    parent_id.len(),
-                    parent_id,
-                    state.len(),
-                    state
-                )
-            })
-            .unwrap_or_else(|| "none".to_string());
-        Ok(format!(
-            "v2\x1ecodex\x1e{}\x1emax_c={}\x1emax_d={}\x1ewlog={WINDOW_LOG_MAX}\x1eparent={}:{}",
-            super::descriptor_state_token(&descriptor),
-            self.max_compressed,
-            self.max_decompressed,
-            parent_dependency.len(),
-            parent_dependency
-        ))
+        self.cache_token_for_path(&descriptor, &path)
+    }
+
+    fn parse_cache_token_for_descriptor(
+        &self,
+        descriptor: &SessionDescriptor,
+    ) -> Result<String, ProviderError> {
+        let path = self.path_for_discovered(descriptor)?;
+        self.cache_token_for_path(descriptor, &path)
     }
 
     fn parse(&self, key: &LogicalSessionKey) -> Result<ParsedSession, ProviderError> {
         let (descriptor, path) = self.resolve(key)?;
+        self.parse_path(descriptor, &path)
+    }
 
+    fn parse_discovered(
+        &self,
+        descriptor: &SessionDescriptor,
+    ) -> Result<ParsedSession, ProviderError> {
+        let path = self.path_for_discovered(descriptor)?;
+        self.parse_path(descriptor.clone(), &path)
+    }
+
+    fn file_change_projection(
+        &self,
+        descriptor: &SessionDescriptor,
+    ) -> Result<FileChangeProjection, ProviderError> {
+        let path = self.path_for_discovered(descriptor)?;
+        let initial = self.initial_records(&path, 2);
+        if initial
+            .first()
+            .zip(initial.get(1))
+            .and_then(|(first, second)| embedded_fork_parent(&descriptor.key, first, second))
+            .is_some()
+        {
+            // The old fork format needs a complete parent-prefix proof before
+            // inherited changes can be excluded. It is rare and correctness
+            // wins over the lightweight path for those sessions.
+            return self
+                .parse_path(descriptor.clone(), &path)
+                .map(FileChangeProjection::from_parsed);
+        }
         if self.sniff_format(&path)? == FormatFamily::Legacy {
             return Err(ProviderError::Unsupported {
                 capability: "legacy pre-envelope rollout normalization (Codex ≤0.31.0); \
@@ -1257,137 +1456,91 @@ impl SourceProvider for CodexProvider {
             });
         }
 
-        // The record artifact id comes from the RESOLVED descriptor — never
-        // reconstructed from a path (a lossy reconstruction made every
-        // RecordRef name a nonexistent artifact under non-UTF-8 homes).
-        let artifact_id = descriptor
+        let artifact = descriptor
             .preferred_artifact()
-            .ok_or_else(|| ProviderError::Other(format!("descriptor {key} has no artifacts")))?
+            .ok_or_else(|| {
+                ProviderError::Other(format!("descriptor {} has no artifacts", descriptor.key))
+            })?
             .snapshot
             .id
             .clone();
         let mut reader = self.open_records(&path)?;
-        let mut parsed_records: Vec<(RecordRef, serde_json::Value)> = Vec::new();
-        let mut record_dispositions = Vec::new();
-        let mut diagnostics = IngestionDiagnostics::default();
-
-        // Byte-level records: content-level damage (invalid UTF-8, bad JSON)
-        // in one record must not lose later records — only unrecoverable
-        // decoder I/O errors stop the stream (a compressed stream cannot be
-        // resynchronized past a bad frame).
-        let mut buf: Vec<u8> = Vec::new();
-        let mut ordinal: u64 = 0;
+        let mut line = Vec::new();
+        let mut ordinal = 0_u64;
+        let mut patch_calls = BTreeSet::new();
+        let mut relevant = Vec::new();
         loop {
-            let record = RecordRef {
-                artifact: artifact_id.clone(),
-                ordinal,
-            };
-            buf.clear();
-            let n = match reader.read_until(b'\n', &mut buf) {
-                Ok(n) => n,
-                Err(e) => {
-                    diagnostics.unparseable += 1;
-                    record_dispositions.push(RecordDisposition {
-                        record,
-                        outcome: RecordOutcome::Unparseable {
-                            error: ParseDiagnostic {
-                                message: format!("read error: {e}"),
-                            },
-                        },
-                    });
-                    break;
-                }
-            };
-            if n == 0 {
+            line.clear();
+            let read = reader.read_until(b'\n', &mut line)?;
+            if read == 0 {
                 break;
             }
-            ordinal += 1;
-            if buf.iter().all(|b| b.is_ascii_whitespace()) {
-                diagnostics.suppressed += 1;
-                record_dispositions.push(RecordDisposition {
-                    record,
-                    outcome: RecordOutcome::Suppressed {
-                        reason: super::SuppressionReason::Other("blank line".into()),
-                    },
-                });
+            let current = ordinal;
+            ordinal = ordinal.saturating_add(1);
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&line) else {
                 continue;
-            }
-            match serde_json::from_slice::<serde_json::Value>(&buf) {
-                Ok(value) => {
-                    // B3: parsed records are collected and normalized after
-                    // the read loop (a record's primary entry keeps the B1
-                    // deterministic id `(ordinal, 0)`; true 1:N projections
-                    // use stable additional subindices).
-                    parsed_records.push((record, value));
-                }
-                Err(e) => {
-                    // Partial trailing line of an ACTIVE session is expected;
-                    // any mid-file damage is also honestly unparseable.
-                    diagnostics.unparseable += 1;
-                    record_dispositions.push(RecordDisposition {
-                        record,
-                        outcome: RecordOutcome::Unparseable {
-                            error: ParseDiagnostic {
-                                message: e.to_string(),
-                            },
-                        },
-                    });
+            };
+            let envelope = value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let payload = value.get("payload").unwrap_or(&value);
+            let payload_type = payload
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let boundary = super::codex_normalize::is_window_boundary(envelope, payload_type);
+            let patch_call = envelope == "response_item"
+                && payload_type == "custom_tool_call"
+                && payload.get("name").and_then(serde_json::Value::as_str) == Some("apply_patch");
+            if patch_call {
+                if let Some(call_id) = payload.get("call_id").and_then(serde_json::Value::as_str) {
+                    patch_calls.insert(call_id.to_string());
                 }
             }
+            let patch_output = envelope == "response_item"
+                && payload_type == "custom_tool_call_output"
+                && payload
+                    .get("call_id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|call_id| patch_calls.contains(call_id));
+            let patch_event = envelope == "event_msg" && payload_type == "patch_apply_end";
+            if patch_call || patch_output || patch_event {
+                relevant.push((
+                    RecordRef {
+                        artifact: artifact.clone(),
+                        ordinal: current,
+                    },
+                    value,
+                ));
+            } else if boundary {
+                relevant.push((
+                    RecordRef {
+                        artifact: artifact.clone(),
+                        ordinal: current,
+                    },
+                    serde_json::json!({
+                        "timestamp": value.get("timestamp"),
+                        "type": envelope,
+                        "payload": {"type": payload_type},
+                    }),
+                ));
+            }
         }
-
-        // Old-format forks copy a prefix of the parent's rollout after the
-        // child's own metadata. Prove that prefix against the available
-        // parent before normalizing: its end is also a semantic window
-        // boundary, preventing dedup/usage attribution from crossing from
-        // inherited history into new fork work.
-        let inherited_range = self.copied_history_range(key, &parsed_records);
-
-        // Normalize the parsed stream (B3) and merge with the
-        // read-level dispositions (blank/torn/unreadable) collected above.
-        let mut normalized = super::codex_normalize::normalize(
-            key,
-            &parsed_records,
-            inherited_range.map(|r| (r.first, r.last)),
-        );
-        if let Some(range) = inherited_range {
-            Self::mark_inherited_history(range, &artifact_id, &mut normalized);
-        }
-        record_dispositions.extend(normalized.record_dispositions);
-        record_dispositions.sort_by_key(|d| d.record.ordinal);
-        diagnostics.mapped += normalized.diagnostics.mapped;
-        diagnostics.suppressed += normalized.diagnostics.suppressed;
-        diagnostics.unknown += normalized.diagnostics.unknown;
-        diagnostics.recovered += normalized.diagnostics.recovered;
-        diagnostics.unparseable += normalized.diagnostics.unparseable;
-
-        Ok(ParsedSession {
-            descriptor,
-            entries: normalized.entries,
-            entry_origins: normalized.entry_origins,
-            record_dispositions,
-            field_derivations: vec![
-                FieldDerivation {
-                    field: NormalizedField::Uuid,
-                    method: FieldDerivationMethod::DeterministicEntryId,
-                },
-                FieldDerivation {
-                    field: NormalizedField::ParentUuid,
-                    method: FieldDerivationMethod::PreviousNormalizedEmission,
-                },
-                FieldDerivation {
-                    field: NormalizedField::LogicalParentUuid,
-                    method: FieldDerivationMethod::PreviousNormalizedEmission,
-                },
-                FieldDerivation {
-                    field: NormalizedField::MessageId,
-                    method: FieldDerivationMethod::DeterministicEntryId,
-                },
-            ],
-            semantics: normalized.semantics,
-            file_changes: normalized.file_changes,
-            file_change_diagnostics: normalized.file_change_diagnostics,
-            diagnostics,
+        let (changes, _) =
+            super::codex_normalize::project_file_changes_only(&descriptor.key, &relevant);
+        let owner_timestamps = changes
+            .iter()
+            .filter_map(|change| {
+                change
+                    .observed_at
+                    .map(|timestamp| (change.owner.clone(), timestamp))
+            })
+            .collect();
+        Ok(FileChangeProjection {
+            changes,
+            inherited_owners: BTreeSet::new(),
+            owner_timestamps,
         })
     }
 
@@ -2321,6 +2474,11 @@ mod tests {
                         "file-change audit failed: {} violation(s)",
                         file_change_audit.len()
                     );
+                    let compact = p.file_change_projection(d).unwrap();
+                    assert_eq!(
+                        compact.changes, session.file_changes,
+                        "compact file-change projection diverged from complete normalization"
+                    );
                     file_change_totals.patch_calls += session.file_change_diagnostics.patch_calls;
                     file_change_totals.calls_with_changes +=
                         session.file_change_diagnostics.calls_with_changes;
@@ -3052,6 +3210,23 @@ mod tests {
         // resolution goes through the preserved PathBuf, never the string.
         let parsed = p.parse(&key(THREAD_A)).unwrap();
         assert_eq!(parsed.record_dispositions.len(), 4);
+        let discovered = p.parse_discovered(&sessions[0]).unwrap();
+        assert_eq!(discovered.descriptor, parsed.descriptor);
+        assert_eq!(discovered.record_dispositions, parsed.record_dispositions);
+        assert_eq!(discovered.entries.len(), parsed.entries.len());
+        for (direct, resolved) in discovered.entries.iter().zip(&parsed.entries) {
+            assert_eq!(direct.id, resolved.id);
+            assert_eq!(
+                serde_json::to_value(&direct.entry).unwrap(),
+                serde_json::to_value(&resolved.entry).unwrap(),
+                "descriptor-aware parsing must preserve raw paths"
+            );
+        }
+        assert_eq!(
+            p.parse_cache_token_for_descriptor(&sessions[0]).unwrap(),
+            p.parse_cache_token(&key(THREAD_A)).unwrap(),
+            "descriptor-aware revision tokens must match key-based resolution"
+        );
         // Every provenance reference names an artifact that actually exists
         // in the descriptor (against 48513e3 this failed: parse
         // reconstructed a lossy id that matched nothing).
@@ -4307,7 +4482,7 @@ mod tests {
     #[derive(Debug)]
     struct AuditFileChange {
         owner_ordinal: u64,
-        call_id: String,
+        operation_id: String,
         change_index: u32,
         record_ordinal: u64,
         outcome_record_ordinal: Option<u64>,
@@ -4317,6 +4492,7 @@ mod tests {
         detail: crate::provider::FileChangeDetail,
         evidence: crate::provider::FileChangeEvidence,
         outcome: crate::provider::FileChangeOutcome,
+        observed_at: Option<chrono::DateTime<chrono::Utc>>,
     }
 
     #[derive(Default)]
@@ -4579,6 +4755,16 @@ mod tests {
     ) -> (Vec<AuditFileChange>, crate::provider::FileChangeDiagnostics) {
         type Native<'a> = (u64, &'a serde_json::Value);
         let lifecycle = independent_lifecycle_expectations(raw, first_new_after_fork);
+        let observed_at: std::collections::BTreeMap<_, _> = raw
+            .iter()
+            .map(|(ordinal, value)| {
+                let timestamp = value["timestamp"]
+                    .as_str()
+                    .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
+                    .map(|timestamp| timestamp.with_timezone(&chrono::Utc));
+                (*ordinal, timestamp)
+            })
+            .collect();
         let paired_patch: std::collections::BTreeMap<u64, &AuditLifecycleExpectation<'_>> =
             lifecycle
                 .iter()
@@ -4640,6 +4826,9 @@ mod tests {
             }
             for (index, (path, move_path, kind, detail)) in parsed.changes.into_iter().enumerate() {
                 match evidence {
+                    crate::provider::FileChangeEvidence::FileHistorySnapshot => {
+                        unreachable!("native patch audit does not emit snapshots")
+                    }
                     crate::provider::FileChangeEvidence::StructuredLifecycle => {
                         diagnostics.structured_changes += 1;
                     }
@@ -4649,7 +4838,7 @@ mod tests {
                 }
                 expected.push(AuditFileChange {
                     owner_ordinal,
-                    call_id: call_id.clone(),
+                    operation_id: call_id.clone(),
                     change_index: u32::try_from(index).unwrap_or(u32::MAX),
                     record_ordinal,
                     outcome_record_ordinal,
@@ -4659,6 +4848,7 @@ mod tests {
                     detail,
                     evidence,
                     outcome,
+                    observed_at: observed_at.get(&record_ordinal).copied().flatten(),
                 });
             }
         };
@@ -4763,7 +4953,7 @@ mod tests {
                 (
                     (
                         change.owner.clone(),
-                        change.call_id.clone(),
+                        change.operation_id.clone(),
                         change.change_index,
                     ),
                     change,
@@ -4773,12 +4963,16 @@ mod tests {
         let mut expected_keys = std::collections::BTreeSet::new();
         for change in expected {
             let owner = EntryId::deterministic(key, change.owner_ordinal, 0);
-            let identity = (owner.clone(), change.call_id.clone(), change.change_index);
+            let identity = (
+                owner.clone(),
+                change.operation_id.clone(),
+                change.change_index,
+            );
             expected_keys.insert(identity.clone());
             let Some(observed) = actual.get(&identity) else {
                 violations.push(format!(
                     "file-change owner {owner} call {} index {} is missing",
-                    change.call_id, change.change_index
+                    change.operation_id, change.change_index
                 ));
                 continue;
             };
@@ -4802,13 +4996,13 @@ mod tests {
             if Some(&observed.record) != expected_record.as_ref() {
                 violations.push(format!(
                     "file-change call {} index {} names the wrong evidence record",
-                    change.call_id, change.change_index
+                    change.operation_id, change.change_index
                 ));
             }
             if observed.outcome_record != expected_outcome_record {
                 violations.push(format!(
                     "file-change call {} index {} names the wrong outcome record",
-                    change.call_id, change.change_index
+                    change.operation_id, change.change_index
                 ));
             }
             if observed.path != change.path
@@ -4817,10 +5011,12 @@ mod tests {
                 || observed.detail != change.detail
                 || observed.evidence != change.evidence
                 || observed.outcome != change.outcome
+                || observed.observed_at != change.observed_at
+                || observed.native_version.is_some()
             {
                 violations.push(format!(
                     "file-change call {} index {} fields differ from native evidence",
-                    change.call_id, change.change_index
+                    change.operation_id, change.change_index
                 ));
             }
         }
@@ -5284,7 +5480,7 @@ mod tests {
 
     #[test]
     fn file_change_projection_prefers_structured_and_covers_declarations() {
-        let (_tmp, parsed, raw) = lifecycle_fixture();
+        let (tmp, parsed, raw) = lifecycle_fixture();
         let violations = audit_file_changes(&key(THREAD_A), &raw, &parsed, None);
         assert!(violations.is_empty(), "{violations:?}");
         assert_eq!(parsed.file_change_diagnostics.patch_calls, 2);
@@ -5294,8 +5490,15 @@ mod tests {
             change.evidence == crate::provider::FileChangeEvidence::StructuredLifecycle
                 && change.outcome == crate::provider::FileChangeOutcome::Applied
         }));
+        let provider = CodexProvider::new(tmp.path());
+        let descriptor = provider.sessions().unwrap().remove(0);
+        let compact = provider.file_change_projection(&descriptor).unwrap();
+        assert_eq!(
+            compact.changes, parsed.file_changes,
+            "lightweight projection must match complete normalization"
+        );
 
-        let (_tmp, parsed, raw) = declaration_file_change_fixture();
+        let (tmp, parsed, raw) = declaration_file_change_fixture();
         let violations = audit_file_changes(&key(THREAD_A), &raw, &parsed, None);
         assert!(violations.is_empty(), "{violations:?}");
         assert_eq!(parsed.file_change_diagnostics.patch_calls, 2);
@@ -5311,6 +5514,16 @@ mod tests {
         assert_eq!(
             parsed.file_changes[3].outcome,
             crate::provider::FileChangeOutcome::Failed
+        );
+        let provider = CodexProvider::new(tmp.path());
+        let descriptor = provider.sessions().unwrap().remove(0);
+        assert_eq!(
+            provider
+                .file_change_projection(&descriptor)
+                .unwrap()
+                .changes,
+            parsed.file_changes,
+            "declaration fallback must stay identical on the compact path"
         );
     }
 

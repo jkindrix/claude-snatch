@@ -2358,6 +2358,11 @@ pub struct FileEvolutionArgs {
     /// Filter to sessions until this date.
     #[arg(long)]
     pub until: Option<String>,
+
+    /// Source providers to search (repeatable; "all" = every installed
+    /// provider). Omit for the classic Claude-only route.
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
 }
 
 /// Arguments for the priorities command.

@@ -566,6 +566,197 @@ impl SnatchServer {
         )
     }
 
+    fn provider_file_history(&self, request: GetFileHistoryRequest) -> ToolOutput {
+        use crate::file_index::{ProviderFileIndexBuilder, ProviderFileModification};
+        use crate::provider::registry::ProviderSelection;
+        use crate::provider::FileChangeOutcome;
+
+        let Some(flags) = request.provider.as_ref() else {
+            return ToolOutput::error("provider selection missing");
+        };
+        if flags.is_empty() {
+            return ToolOutput::error("provider must name at least one provider or 'all'");
+        }
+        let selection = match ProviderSelection::from_flags(flags) {
+            Ok(selection) => selection,
+            Err(error) => return ToolOutput::error(error),
+        };
+        let registry = self.provider_registry();
+        let mut builder = ProviderFileIndexBuilder::default();
+        let collected = match registry.visit_project_file_changes(
+            &selection,
+            request.project.as_deref(),
+            false,
+            |project_path, descriptor, projection| {
+                builder.add_projection(project_path, &descriptor.key, &projection);
+            },
+        ) {
+            Ok(collected) => collected,
+            Err(error) => return ToolOutput::error(error.to_string()),
+        };
+        let index = builder.build();
+        let limit = request.limit.unwrap_or(50);
+        let matches = index.search_limited(&request.path, limit);
+        let entry = |path: &str, change: &ProviderFileModification| FileModificationEntry {
+            file_path: path.to_string(),
+            session_id: change.session.native_id.clone(),
+            project_path: change.project_path.clone(),
+            message_id: change.entry_id.to_string(),
+            timestamp: change.timestamp.map(|timestamp| timestamp.to_rfc3339()),
+            version: change.version,
+            provider: Some(change.session.provider.to_string()),
+            qualified_id: Some(change.session.to_string()),
+            entry_id: Some(change.entry_id.to_string()),
+            operation_id: Some(change.operation_id.clone()),
+            kind: Some(change.kind.as_str().to_string()),
+            move_path: change.move_path.clone(),
+            evidence: Some(change.evidence.as_str().to_string()),
+            outcome: Some(change.outcome.as_str().to_string()),
+            coverage: Some(change.coverage.clone()),
+            record_ordinal: Some(change.record.ordinal),
+            outcome_record_ordinal: change.outcome_record.as_ref().map(|record| record.ordinal),
+        };
+        let mut modifications = Vec::new();
+        let mut attempts = Vec::new();
+        for (path, change) in &matches.selected {
+            if change.outcome == FileChangeOutcome::Applied {
+                modifications.push(entry(path, change));
+            } else {
+                attempts.push(entry(path, change));
+            }
+        }
+        let response = GetFileHistoryResponse {
+            path_query: request.path,
+            total_files: matches.total_files,
+            total_modifications: matches.total_modifications,
+            returned: modifications.len() + attempts.len(),
+            modifications,
+            attempts,
+            total_attempts: Some(matches.total_attempts),
+            skipped_providers: collected
+                .skipped
+                .iter()
+                .map(|(provider, _)| format!("{provider}: unavailable"))
+                .collect(),
+            warnings: collected.warnings,
+            coverage_note: Some(
+                "Structured patch/snapshot evidence only; arbitrary shell writes are not inferred."
+                    .into(),
+            ),
+        };
+        ToolOutput::json(&response)
+            .unwrap_or_else(|error| ToolOutput::error(format!("JSON error: {error}")))
+    }
+
+    fn provider_file_evolution(&self, request: ExplainFileEvolutionRequest) -> ToolOutput {
+        use crate::analysis::file_evolution::{
+            analyze_provider_file_evolution, FileEvolutionParams, ProviderChangeEvent,
+        };
+        use crate::file_index::parsed_session_time_range;
+        use crate::provider::registry::{ParsedProjectSession, ProviderSelection};
+
+        let Some(flags) = request.provider.as_ref() else {
+            return ToolOutput::error("provider selection missing");
+        };
+        if flags.is_empty() {
+            return ToolOutput::error("provider must name at least one provider or 'all'");
+        }
+        let selection = match ProviderSelection::from_flags(flags) {
+            Ok(selection) => selection,
+            Err(error) => return ToolOutput::error(error),
+        };
+        let period = request.period.as_deref().unwrap_or("30d");
+        let cutoff = match period_cutoff(period) {
+            Ok(cutoff) => cutoff,
+            Err(error) => return ToolOutput::error(format!("Invalid period: {error}")),
+        };
+        let registry = self.provider_registry();
+        let mut sessions = Vec::new();
+        let collected = match registry.visit_matching_file_change_sessions(
+            &selection,
+            Some(&request.project),
+            !request.no_subagents.unwrap_or(true),
+            &request.file_pattern,
+            |project_path, parsed| {
+                let in_range = cutoff.map_or(true, |bound| {
+                    parsed_session_time_range(&parsed).is_some_and(|(_, end)| end >= bound)
+                });
+                if in_range {
+                    sessions.push(ParsedProjectSession {
+                        project_path: project_path.to_string(),
+                        parsed,
+                    });
+                }
+            },
+        ) {
+            Ok(collected) => collected,
+            Err(error) => return ToolOutput::error(error.to_string()),
+        };
+        let params = FileEvolutionParams {
+            file_pattern: request.file_pattern.clone(),
+            limit: request.limit.unwrap_or(30),
+            max_text_len: 500,
+            include_thinking: request.include_thinking.unwrap_or(true),
+            context_window: request.context_window.unwrap_or(1),
+        };
+        let views: Vec<_> = sessions
+            .iter()
+            .map(|session| (session.project_path.as_str(), session.parsed.as_ref()))
+            .collect();
+        let results = analyze_provider_file_evolution(&views, &params);
+        let event = |change: ProviderChangeEvent| ChangeEventEntry {
+            timestamp: change.timestamp.map(|timestamp| timestamp.to_rfc3339()),
+            session_id: change.session_id,
+            message_id: change.entry_id.clone(),
+            version: change.version,
+            provider: Some(change.provider),
+            qualified_id: Some(change.qualified_id),
+            project_path: Some(change.project_path),
+            entry_id: Some(change.entry_id),
+            operation_id: Some(change.operation_id),
+            kind: Some(change.kind.as_str().to_string()),
+            move_path: change.move_path,
+            evidence: Some(change.evidence.as_str().to_string()),
+            outcome: Some(change.outcome.as_str().to_string()),
+            coverage: Some(change.coverage),
+            record_ordinal: Some(change.record_ordinal),
+            outcome_record_ordinal: change.outcome_record_ordinal,
+            user_prompt: change.user_prompt,
+            assistant_response: change.assistant_response,
+            thinking: change.thinking,
+            tools_used: change.tools_used,
+            had_errors: change.had_errors,
+        };
+        let response = ExplainFileEvolutionResponse {
+            project_path: request.project,
+            file_pattern: request.file_pattern,
+            period: period.to_string(),
+            files: results
+                .into_iter()
+                .map(|result| FileEvolutionEntry {
+                    file_path: result.file_path,
+                    total_changes: result.total_changes,
+                    sessions_involved: result.sessions_involved,
+                    changes: result.changes.into_iter().map(&event).collect(),
+                    total_attempts: Some(result.total_attempts),
+                    attempts: result.attempts.into_iter().map(&event).collect(),
+                })
+                .collect(),
+            skipped_providers: collected
+                .skipped
+                .iter()
+                .map(|(provider, _)| format!("{provider}: unavailable"))
+                .collect(),
+            warnings: collected.warnings,
+            coverage_note: Some(
+                "Structured patch/snapshot evidence only; arbitrary shell writes are not inferred."
+                    .into(),
+            ),
+        };
+        ToolOutput::json(&response)
+            .unwrap_or_else(|error| ToolOutput::error(format!("JSON error: {error}")))
+    }
+
     /// Provider-neutral project history used when the request explicitly
     /// selects one or more providers. The classic flagless implementation
     /// remains byte-for-byte compatible in the tool method below.
@@ -3471,13 +3662,18 @@ impl SnatchServer {
         }
     }
 
-    /// Look up which sessions modified a file. Returns file modification history
-    /// from file-history-snapshot entries — the reverse index from file path to sessions.
+    /// Look up which sessions modified a file. The flagless compatibility
+    /// route uses Claude file-history snapshots; explicit providers use the
+    /// evidence-bounded provider projection.
     #[tool(
-        description = "Look up which sessions modified a file path. Uses file-history-snapshot entries to build a reverse index. Returns session IDs, timestamps, and version numbers for each modification. Use to answer 'when was this file changed?' or 'which session introduced this code?'"
+        description = "Look up which sessions modified a file path. Omit provider for the classic Claude snapshot index, or set provider for source-backed cross-provider patch/snapshot evidence. Provider results distinguish applied modifications from failed/declined/unknown attempts and state that arbitrary shell writes are not inferred."
     )]
     async fn get_file_history(&self, request: GetFileHistoryRequest) -> ToolOutput {
         use crate::file_index::FileIndex;
+
+        if request.provider.is_some() {
+            return self.provider_file_history(request);
+        }
 
         let claude_dir = match self.get_claude_dir() {
             Ok(dir) => dir,
@@ -3520,8 +3716,19 @@ impl SnatchServer {
                     session_id: m.session_id.clone(),
                     project_path: m.project_path.clone(),
                     message_id: m.message_id.clone(),
-                    timestamp: m.timestamp.to_rfc3339(),
-                    version: m.version,
+                    timestamp: Some(m.timestamp.to_rfc3339()),
+                    version: Some(m.version),
+                    provider: None,
+                    qualified_id: None,
+                    entry_id: None,
+                    operation_id: None,
+                    kind: None,
+                    move_path: None,
+                    evidence: None,
+                    outcome: None,
+                    coverage: None,
+                    record_ordinal: None,
+                    outcome_record_ordinal: None,
                 });
             }
             if modifications.len() >= limit {
@@ -3536,6 +3743,11 @@ impl SnatchServer {
             total_modifications,
             returned,
             modifications,
+            attempts: Vec::new(),
+            total_attempts: None,
+            skipped_providers: Vec::new(),
+            warnings: Vec::new(),
+            coverage_note: None,
         };
 
         match ToolOutput::json(&response) {
@@ -3872,10 +4084,14 @@ impl SnatchServer {
 
     /// Explain why a file changed over time.
     #[tool(
-        description = "Explain how and why a file evolved across sessions. For each modification, shows the user prompt that triggered it, the assistant's response, thinking/rationale (if available), and tools used. Answers 'why did this file end up this way?' by combining file history with conversation context. Returns chronologically ordered change events."
+        description = "Explain how and why a file evolved across sessions. Omit provider for the classic Claude snapshot route, or set provider for source-backed cross-provider patch/snapshot evidence. Applied changes and non-applied attempts are separate; arbitrary shell writes are not inferred."
     )]
     async fn explain_file_evolution(&self, request: ExplainFileEvolutionRequest) -> ToolOutput {
         use crate::analysis::file_evolution::{analyze_file_evolution, FileEvolutionParams};
+
+        if request.provider.is_some() {
+            return self.provider_file_evolution(request);
+        }
 
         let claude_dir = match self.get_claude_dir() {
             Ok(dir) => dir,
@@ -3928,10 +4144,22 @@ impl SnatchServer {
                         .changes
                         .into_iter()
                         .map(|c| ChangeEventEntry {
-                            timestamp: c.timestamp.to_rfc3339(),
+                            timestamp: Some(c.timestamp.to_rfc3339()),
                             session_id: c.session_id,
                             message_id: c.message_id,
-                            version: c.version,
+                            version: Some(c.version),
+                            provider: None,
+                            qualified_id: None,
+                            project_path: None,
+                            entry_id: None,
+                            operation_id: None,
+                            kind: None,
+                            move_path: None,
+                            evidence: None,
+                            outcome: None,
+                            coverage: None,
+                            record_ordinal: None,
+                            outcome_record_ordinal: None,
                             user_prompt: c.user_prompt,
                             assistant_response: c.assistant_response,
                             thinking: c.thinking,
@@ -3939,8 +4167,13 @@ impl SnatchServer {
                             had_errors: c.had_errors,
                         })
                         .collect(),
+                    total_attempts: None,
+                    attempts: Vec::new(),
                 })
                 .collect(),
+            skipped_providers: Vec::new(),
+            warnings: Vec::new(),
+            coverage_note: None,
         };
 
         match ToolOutput::json(&response) {
@@ -4445,6 +4678,73 @@ mod tests {
     }
 
     #[cfg(feature = "codex")]
+    fn setup_codex_file_change_dir() -> (TempDir, String) {
+        let tmp = TempDir::new().unwrap();
+        let day = tmp.path().join("sessions/2026/07/17");
+        std::fs::create_dir_all(&day).unwrap();
+        let thread = "019f7000-0000-7000-8000-000000000077";
+        let line = |timestamp: &str, kind: &str, payload: serde_json::Value| {
+            serde_json::json!({"timestamp": timestamp, "type": kind, "payload": payload})
+                .to_string()
+        };
+        let applied = serde_json::json!({
+            "output": "Success. Updated files.",
+            "metadata": {"exit_code": 0}
+        })
+        .to_string();
+        let content = [
+            line(
+                "2026-07-17T00:00:00Z",
+                "session_meta",
+                serde_json::json!({"id": thread, "cwd": "/tmp/mcp-files"}),
+            ),
+            line(
+                "2026-07-17T00:00:01Z",
+                "turn_context",
+                serde_json::json!({"turn_id": "turn-files", "model": "gpt-test"}),
+            ),
+            line(
+                "2026-07-17T00:00:02Z",
+                "response_item",
+                serde_json::json!({"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "change the files"}]}),
+            ),
+            line(
+                "2026-07-17T00:00:03Z",
+                "response_item",
+                serde_json::json!({"type": "custom_tool_call", "name": "apply_patch",
+                    "call_id": "patch-ok", "input": "*** Begin Patch\n*** Update File: src/a.rs\n@@\n-old\n+new\n*** End Patch\n"}),
+            ),
+            line(
+                "2026-07-17T00:00:04Z",
+                "response_item",
+                serde_json::json!({"type": "custom_tool_call_output", "call_id": "patch-ok",
+                    "output": applied}),
+            ),
+            line(
+                "2026-07-17T00:00:05Z",
+                "response_item",
+                serde_json::json!({"type": "custom_tool_call", "name": "apply_patch",
+                    "call_id": "patch-failed", "input": "*** Begin Patch\n*** Update File: src/0-b.rs\n@@\n-old\n+new\n*** End Patch\n"}),
+            ),
+            line(
+                "2026-07-17T00:00:06Z",
+                "response_item",
+                serde_json::json!({"type": "custom_tool_call_output", "call_id": "patch-failed",
+                    "output": "apply_patch verification failed: missing context"}),
+            ),
+        ]
+        .join("\n")
+            + "\n";
+        std::fs::write(
+            day.join(format!("rollout-2026-07-17T00-00-00-{thread}.jsonl")),
+            content,
+        )
+        .unwrap();
+        (tmp, thread.into())
+    }
+
+    #[cfg(feature = "codex")]
     fn setup_codex_tool_dir() -> (TempDir, String) {
         let tmp = TempDir::new().unwrap();
         let day = tmp.path().join("sessions/2026/07/17");
@@ -4683,6 +4983,120 @@ mod tests {
             .map(String::as_str)
             .collect()
         );
+    }
+
+    #[cfg(feature = "codex")]
+    #[tokio::test]
+    async fn provider_file_surfaces_separate_modifications_from_attempts() {
+        let claude = setup_claude_dir(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            PROJECT_PATH,
+            &minimal_session_jsonl("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        );
+        let (codex, _thread) = setup_codex_file_change_dir();
+        let server = make_server(&claude).with_codex_dir(codex.path());
+
+        let history = unwrap_output(
+            server
+                .get_file_history(GetFileHistoryRequest {
+                    path: "src/".into(),
+                    project: Some("/tmp/mcp-files".into()),
+                    limit: Some(50),
+                    provider: Some(vec!["codex".into()]),
+                })
+                .await,
+        );
+        let history: serde_json::Value = serde_json::from_str(&history).unwrap();
+        assert_eq!(history["total_modifications"], 1);
+        assert_eq!(history["total_attempts"], 1);
+        assert_eq!(history["modifications"][0]["outcome"], "applied");
+        assert_eq!(history["attempts"][0]["outcome"], "failed");
+        assert!(history["modifications"][0]["version"].is_null());
+
+        let limited = unwrap_output(
+            server
+                .get_file_history(GetFileHistoryRequest {
+                    path: "src/".into(),
+                    project: Some("/tmp/mcp-files".into()),
+                    limit: Some(1),
+                    provider: Some(vec!["codex".into()]),
+                })
+                .await,
+        );
+        let limited: serde_json::Value = serde_json::from_str(&limited).unwrap();
+        assert_eq!(limited["returned"], 1);
+        assert_eq!(limited["modifications"].as_array().unwrap().len(), 0);
+        assert_eq!(limited["attempts"][0]["outcome"], "failed");
+
+        let evolution = unwrap_output(
+            server
+                .explain_file_evolution(ExplainFileEvolutionRequest {
+                    file_pattern: "src/".into(),
+                    project: "/tmp/mcp-files".into(),
+                    period: Some("all".into()),
+                    limit: Some(30),
+                    include_thinking: Some(false),
+                    context_window: Some(2),
+                    no_subagents: Some(true),
+                    provider: Some(vec!["codex".into()]),
+                })
+                .await,
+        );
+        let evolution: serde_json::Value = serde_json::from_str(&evolution).unwrap();
+        assert_eq!(evolution["files"].as_array().unwrap().len(), 2);
+        assert!(evolution["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file["total_changes"] == 1));
+        assert!(evolution["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file["total_attempts"] == 1));
+        assert!(evolution["coverage_note"]
+            .as_str()
+            .unwrap()
+            .contains("shell writes"));
+    }
+
+    #[tokio::test]
+    async fn flagless_file_history_preserves_legacy_wire_shape() {
+        let session_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        let snapshot = serde_json::json!({
+            "type": "file-history-snapshot",
+            "messageId": "snapshot-message",
+            "isSnapshotUpdate": false,
+            "snapshot": {
+                "messageId": "snapshot-message",
+                "timestamp": "2026-07-17T00:00:00Z",
+                "trackedFileBackups": {
+                    "/tmp/project/src/lib.rs": {
+                        "backupFileName": "lib.rs@v4",
+                        "version": 4,
+                        "backupTime": "2026-07-17T00:00:01Z"
+                    }
+                }
+            }
+        });
+        let claude = setup_claude_dir(session_id, PROJECT_PATH, &format!("{snapshot}\n"));
+        let server = make_server(&claude);
+        let output = unwrap_output(
+            server
+                .get_file_history(GetFileHistoryRequest {
+                    path: "src/lib.rs".into(),
+                    project: None,
+                    limit: Some(50),
+                    provider: None,
+                })
+                .await,
+        );
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["modifications"][0]["version"], 4);
+        assert!(value["modifications"][0]["timestamp"].is_string());
+        assert!(value["modifications"][0].get("provider").is_none());
+        assert!(value.get("attempts").is_none());
+        assert!(value.get("coverage_note").is_none());
     }
 
     #[cfg(feature = "codex")]

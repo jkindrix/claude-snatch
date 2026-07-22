@@ -45,6 +45,37 @@ fn setup_fixture_dir() -> TempDir {
     tmp
 }
 
+fn setup_file_snapshot_dir() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let project_dir = tmp
+        .path()
+        .join("projects")
+        .join(encode_project_path(PROJECT_PATH));
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let snapshot = serde_json::json!({
+        "type": "file-history-snapshot",
+        "messageId": "snapshot-message",
+        "isSnapshotUpdate": false,
+        "snapshot": {
+            "messageId": "snapshot-message",
+            "timestamp": "2025-01-15T10:00:00Z",
+            "trackedFileBackups": {
+                "/work/src/lib.rs": {
+                    "backupFileName": "lib.rs@v3",
+                    "version": 3,
+                    "backupTime": "2025-01-15T10:00:01Z"
+                }
+            }
+        }
+    });
+    std::fs::write(
+        project_dir.join(format!("{SESSION_ID}.jsonl")),
+        format!("{snapshot}\n"),
+    )
+    .unwrap();
+    tmp
+}
+
 /// Add a minimal searchable session to the standard test project.
 fn write_search_session(tmp: &TempDir, session_id: &str, text: &str, model: Option<&str>) {
     let encoded = encode_project_path(PROJECT_PATH);
@@ -121,6 +152,26 @@ fn test_list_sessions_json_contains_session_id() {
         // "aaaaaaaa" is the short-ID prefix of SESSION_ID and will appear in
         // the JSON whether the field uses full or short UUIDs.
         .stdout(predicate::str::contains("aaaaaaaa"));
+}
+
+#[test]
+fn flagless_file_history_keeps_the_classic_json_shape() {
+    let tmp = setup_file_snapshot_dir();
+    let output = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["-o", "json", "file-history", "src/lib.rs"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let rows = value
+        .as_array()
+        .expect("classic route remains a bare array");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["version"], 3);
+    assert!(rows[0].get("provider").is_none());
 }
 
 // =============================================================================
@@ -2745,6 +2796,49 @@ mod codex_normalization_cli {
         tmp
     }
 
+    fn file_changes_home() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        let day = tmp.path().join("sessions/2026/07/16");
+        std::fs::create_dir_all(&day).unwrap();
+        let applied = serde_json::json!({
+            "output": "Success. Updated files.",
+            "metadata": {"exit_code": 0, "duration_seconds": 0.1}
+        })
+        .to_string();
+        let lines = [
+            serde_json::json!({"timestamp": "2026-07-16T10:00:00Z", "type": "session_meta",
+                "payload": {"id": THREAD, "cwd": "/tmp/p", "cli_version": "0.9"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:01Z", "type": "turn_context",
+                "payload": {"turn_id": "t-files", "model": "gpt-test"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:02Z", "type": "response_item",
+                "payload": {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "move the module"}]}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:03Z", "type": "response_item",
+                "payload": {"type": "custom_tool_call", "name": "apply_patch", "call_id": "patch-ok",
+                    "input": "*** Begin Patch\n*** Update File: src/old.rs\n*** Move to: src/new.rs\n@@\n-old\n+new\n*** End Patch\n"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:04Z", "type": "response_item",
+                "payload": {"type": "custom_tool_call_output", "call_id": "patch-ok", "output": applied}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:05Z", "type": "response_item",
+                "payload": {"type": "custom_tool_call", "name": "apply_patch", "call_id": "patch-fail",
+                    "input": "*** Begin Patch\n*** Update File: src/0-retry.rs\n@@\n-old\n+new\n*** End Patch\n"}}),
+            serde_json::json!({"timestamp": "2026-07-16T10:00:06Z", "type": "response_item",
+                "payload": {"type": "custom_tool_call_output", "call_id": "patch-fail",
+                    "output": "apply_patch verification failed: missing context"}}),
+        ];
+        let content = lines
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(
+            day.join(format!("rollout-2026-07-16T10-00-00-{THREAD}.jsonl")),
+            content,
+        )
+        .unwrap();
+        tmp
+    }
+
     #[test]
     fn messages_renders_normalized_codex_conversation() {
         let claude = setup_fixture_dir();
@@ -2766,6 +2860,96 @@ mod codex_normalization_cli {
             .stdout(predicate::str::contains("(gpt-test)"))
             .stdout(predicate::str::contains("shell"))
             .stdout(predicate::str::contains("Plan the test run"));
+    }
+
+    #[test]
+    fn file_history_separates_applied_changes_from_failed_attempts() {
+        let claude = setup_fixture_dir();
+        let codex = file_changes_home();
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "file-history", "src/", "--provider", "codex"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["total_modifications"], 1);
+        assert_eq!(value["total_attempts"], 1);
+        assert_eq!(value["modifications"][0]["outcome"], "applied");
+        assert_eq!(value["modifications"][0]["move_path"], "src/new.rs");
+        assert_eq!(value["attempts"][0]["outcome"], "failed");
+        assert!(value["modifications"][0]["version"].is_null());
+        assert!(value["coverage_note"]
+            .as_str()
+            .unwrap()
+            .contains("shell writes"));
+
+        let limited = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "-o",
+                "json",
+                "file-history",
+                "src/",
+                "--provider",
+                "codex",
+                "--limit",
+                "1",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let limited: serde_json::Value = serde_json::from_slice(&limited).unwrap();
+        assert_eq!(limited["returned"], 1);
+        assert_eq!(limited["modifications"].as_array().unwrap().len(), 0);
+        assert_eq!(limited["attempts"][0]["outcome"], "failed");
+    }
+
+    #[test]
+    fn file_evolution_uses_provider_entry_identity_without_fabricating_versions() {
+        let claude = setup_fixture_dir();
+        let codex = file_changes_home();
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "-o",
+                "json",
+                "file-evolution",
+                "src/",
+                "/tmp/p",
+                "--provider",
+                "codex",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["files"].as_array().unwrap().len(), 2);
+        let applied = value["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| file["total_changes"] == 1)
+            .unwrap();
+        assert_eq!(applied["changes"][0]["provider"], "codex");
+        assert_eq!(applied["changes"][0]["operation_id"], "patch-ok");
+        assert!(applied["changes"][0]["version"].is_null());
+        let failed = value["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| file["total_attempts"] == 1)
+            .unwrap();
+        assert_eq!(failed["attempts"][0]["outcome"], "failed");
     }
 
     #[test]

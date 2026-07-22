@@ -72,7 +72,7 @@ pub(super) struct NormalizeOutput {
 }
 
 /// A record that starts a new matching window (turn/request boundary).
-fn is_window_boundary(envelope_type: &str, payload_type: &str) -> bool {
+pub(super) fn is_window_boundary(envelope_type: &str, payload_type: &str) -> bool {
     matches!(envelope_type, "session_meta" | "turn_context" | "compacted")
         || (envelope_type == "event_msg" && payload_type == "task_started")
 }
@@ -538,6 +538,7 @@ fn emit_file_changes(
     call_id: String,
     record: RecordRef,
     outcome_record: Option<RecordRef>,
+    observed_at: Option<DateTime<Utc>>,
     evidence: FileChangeEvidence,
     outcome: FileChangeOutcome,
     parsed: ParsedFileChanges,
@@ -554,12 +555,15 @@ fn emit_file_changes(
     }
     for (change_index, change) in parsed.changes.into_iter().enumerate() {
         match evidence {
+            FileChangeEvidence::FileHistorySnapshot => {
+                unreachable!("native patch projection does not emit snapshots")
+            }
             FileChangeEvidence::StructuredLifecycle => diagnostics.structured_changes += 1,
             FileChangeEvidence::PatchDeclaration => diagnostics.declaration_changes += 1,
         }
         observations.push(FileChangeObservation {
             owner: owner.clone(),
-            call_id: call_id.clone(),
+            operation_id: call_id.clone(),
             change_index: u32::try_from(change_index).unwrap_or(u32::MAX),
             record: record.clone(),
             outcome_record: outcome_record.clone(),
@@ -569,6 +573,8 @@ fn emit_file_changes(
             detail: change.detail,
             evidence,
             outcome,
+            observed_at,
+            native_version: None,
         });
     }
 }
@@ -583,6 +589,7 @@ fn project_file_changes(
     struct Native<'a> {
         record: &'a RecordRef,
         payload: &'a Value,
+        observed_at: Option<DateTime<Utc>>,
     }
 
     type WindowCall = (u64, String);
@@ -600,20 +607,43 @@ fn project_file_changes(
             window = window.saturating_add(1);
         }
         let (envelope, payload, payload_type) = envelope_parts(value);
+        let observed_at = value
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
+            .map(|timestamp| timestamp.with_timezone(&Utc));
         if envelope == "response_item"
             && payload_type == "custom_tool_call"
             && payload.get("name").and_then(Value::as_str) == Some("apply_patch")
         {
-            calls.push((window, Native { record, payload }));
+            calls.push((
+                window,
+                Native {
+                    record,
+                    payload,
+                    observed_at,
+                },
+            ));
         } else if envelope == "response_item" && payload_type == "custom_tool_call_output" {
             if let Some(call_id) = payload.get("call_id").and_then(Value::as_str) {
                 outputs
                     .entry((window, call_id.to_string()))
                     .or_default()
-                    .push(Native { record, payload });
+                    .push(Native {
+                        record,
+                        payload,
+                        observed_at,
+                    });
             }
         } else if envelope == "event_msg" && payload_type == "patch_apply_end" {
-            patch_events.insert(record.ordinal, Native { record, payload });
+            patch_events.insert(
+                record.ordinal,
+                Native {
+                    record,
+                    payload,
+                    observed_at,
+                },
+            );
         }
     }
 
@@ -648,6 +678,7 @@ fn project_file_changes(
                     call_id,
                     event.record.clone(),
                     Some(event.record.clone()),
+                    event.observed_at,
                     FileChangeEvidence::StructuredLifecycle,
                     lifecycle_file_outcome(event.payload),
                     structured,
@@ -687,6 +718,7 @@ fn project_file_changes(
             call_id,
             call.record.clone(),
             outcome_record,
+            call.observed_at,
             FileChangeEvidence::PatchDeclaration,
             outcome,
             declared,
@@ -714,6 +746,7 @@ fn project_file_changes(
             call_id,
             event.record.clone(),
             Some(event.record.clone()),
+            event.observed_at,
             FileChangeEvidence::StructuredLifecycle,
             lifecycle_file_outcome(event.payload),
             structured_file_changes(event.payload),
@@ -726,6 +759,19 @@ fn project_file_changes(
             .then_with(|| left.change_index.cmp(&right.change_index))
     });
     (observations, diagnostics)
+}
+
+/// Project only file-change evidence from a record subset that retains every
+/// semantic window boundary, apply-patch declaration/output, and structured
+/// patch lifecycle event. This avoids constructing normalized conversations
+/// for corpus-wide path discovery while reusing the exact production pairing
+/// and outcome rules.
+pub(super) fn project_file_changes_only(
+    key: &LogicalSessionKey,
+    records: &[(RecordRef, Value)],
+) -> (Vec<FileChangeObservation>, FileChangeDiagnostics) {
+    let lifecycle = plan_lifecycle(records, None);
+    project_file_changes(records, &lifecycle, key, None)
 }
 
 fn claim(pool: &mut [Candidate], text: &str) -> Option<u64> {

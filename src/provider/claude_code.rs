@@ -25,16 +25,104 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::time::UNIX_EPOCH;
 
+use serde::Deserialize;
+
 use super::{
-    ArtifactForm, ArtifactId, ArtifactRevision, ArtifactSnapshot, EntryId, FileChangeDiagnostics,
-    IdentifiedEntry, IngestionDiagnostics, LineageEdge, LineageEdgeKind, LogicalSessionKey,
-    ParseDiagnostic, ParsedSession, ProviderCapabilities, ProviderError, ProviderId,
-    RecordDisposition, RecordOutcome, RecordRef, SessionArtifact, SessionDescriptor,
-    SessionNamespace, SourceProvider, SuppressionReason,
+    ArtifactForm, ArtifactId, ArtifactRevision, ArtifactSnapshot, EntryId, FileChangeDetail,
+    FileChangeDiagnostics, FileChangeEvidence, FileChangeKind, FileChangeObservation,
+    FileChangeOutcome, FileChangeProjection, IdentifiedEntry, IngestionDiagnostics, LineageEdge,
+    LineageEdgeKind, LogicalSessionKey, ParseDiagnostic, ParsedSession, ProviderCapabilities,
+    ProviderError, ProviderId, RecordDisposition, RecordOutcome, RecordRef, SessionArtifact,
+    SessionDescriptor, SessionNamespace, SourceProvider, SuppressionReason,
 };
 use crate::discovery::chain::extract_session_link;
 use crate::discovery::{ClaudeDirectory, Session};
 use crate::model::LogEntry;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotProjectionLine {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    message_id: Option<String>,
+    snapshot: Option<crate::model::message::SnapshotData>,
+}
+
+fn contains_snapshot_discriminator(prefix: &[u8]) -> bool {
+    const KEY: &[u8] = b"\"type\"";
+    const VALUE: &[u8] = b"file-history-snapshot";
+    for (start, _) in prefix
+        .windows(KEY.len())
+        .enumerate()
+        .filter(|(_, window)| *window == KEY)
+    {
+        let mut cursor = start + KEY.len();
+        while prefix.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if prefix.get(cursor) != Some(&b':') {
+            continue;
+        }
+        cursor += 1;
+        while prefix.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if prefix.get(cursor) != Some(&b'\"') {
+            continue;
+        }
+        cursor += 1;
+        if prefix
+            .get(cursor..)
+            .and_then(|rest| rest.strip_prefix(VALUE))
+            .is_some_and(|rest| rest.first() == Some(&b'\"'))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Read one physical JSONL record, retaining it only when its bounded prefix
+/// carries Claude's top-level snapshot discriminator. Claude writes `type`
+/// in the record header; 64 KiB is deliberately far beyond observed headers.
+/// A false-positive string merely causes one extra parse, while unrelated
+/// giant tool outputs are drained without a line-sized allocation.
+fn read_snapshot_candidate<R: BufRead>(
+    reader: &mut R,
+    record: &mut Vec<u8>,
+) -> std::io::Result<Option<bool>> {
+    const HEADER_LIMIT: usize = 64 * 1024;
+    record.clear();
+    let mut read_any = false;
+    let mut candidate = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(read_any.then_some(candidate));
+        }
+        read_any = true;
+        let through_newline = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |index| index + 1);
+        let chunk = &available[..through_newline];
+        let ended = chunk.last() == Some(&b'\n');
+        if candidate {
+            record.extend_from_slice(chunk);
+        } else if record.len() < HEADER_LIMIT {
+            let keep = (HEADER_LIMIT - record.len()).min(chunk.len());
+            record.extend_from_slice(&chunk[..keep]);
+            candidate = contains_snapshot_discriminator(record);
+            if candidate && keep < chunk.len() {
+                record.extend_from_slice(&chunk[keep..]);
+            }
+        }
+        reader.consume(through_newline);
+        if ended {
+            return Ok(Some(candidate));
+        }
+    }
+}
 use crate::parser::salvage_torn_line;
 
 /// Provider-qualified logical identity of any discovered Claude Code session.
@@ -65,6 +153,189 @@ pub struct ClaudeCodeProvider {
     /// (bytes; `None` = unlimited). Immutable provider configuration,
     /// mirroring the CLI's `--max-file-size` until limits are threaded.
     max_file_size: Option<u64>,
+}
+
+fn record_snapshot_changes(
+    entry: &LogEntry,
+    owner: &EntryId,
+    record: &RecordRef,
+    observations: &mut Vec<FileChangeObservation>,
+    diagnostics: &mut FileChangeDiagnostics,
+) {
+    let LogEntry::FileHistorySnapshot(snapshot) = entry else {
+        return;
+    };
+    diagnostics.snapshot_records += 1;
+    for (index, (path, backup)) in snapshot.snapshot.tracked_file_backups.iter().enumerate() {
+        diagnostics.snapshot_changes += 1;
+        observations.push(FileChangeObservation {
+            owner: owner.clone(),
+            operation_id: snapshot.message_id.clone(),
+            change_index: u32::try_from(index).unwrap_or(u32::MAX),
+            record: record.clone(),
+            outcome_record: Some(record.clone()),
+            path: path.clone(),
+            move_path: None,
+            kind: if backup.backup_file_name.is_none() {
+                FileChangeKind::Add
+            } else {
+                FileChangeKind::Update
+            },
+            detail: FileChangeDetail::PathOnly,
+            evidence: FileChangeEvidence::FileHistorySnapshot,
+            outcome: FileChangeOutcome::Applied,
+            observed_at: Some(backup.backup_time),
+            native_version: Some(backup.version),
+        });
+    }
+}
+
+fn parse_claude_records(
+    key: &LogicalSessionKey,
+    descriptor: SessionDescriptor,
+    path: &std::path::Path,
+    max_file_size: Option<u64>,
+) -> Result<ParsedSession, ProviderError> {
+    if let Some(max) = max_file_size {
+        let len = std::fs::metadata(path)?.len();
+        if max > 0 && len > max {
+            return Err(ProviderError::Other(format!(
+                "session file {} exceeds max_file_size ({len} > {max} bytes)",
+                path.display()
+            )));
+        }
+    }
+    let artifact_id = descriptor
+        .preferred_artifact()
+        .ok_or_else(|| ProviderError::Other(format!("descriptor {key} has no artifacts")))?
+        .snapshot
+        .id
+        .clone();
+    let reader = BufReader::new(File::open(path)?);
+    let mut entries = Vec::new();
+    let mut entry_origins = BTreeMap::new();
+    let mut record_dispositions = Vec::new();
+    let mut diagnostics = IngestionDiagnostics::default();
+    let mut file_changes = Vec::new();
+    let mut file_change_diagnostics = FileChangeDiagnostics::default();
+
+    for (ordinal, line) in reader.lines().enumerate() {
+        let ordinal = ordinal as u64;
+        let record = RecordRef {
+            artifact: artifact_id.clone(),
+            ordinal,
+        };
+        // Line-read errors (e.g. invalid UTF-8) skip the record and
+        // continue, mirroring the lenient parser — one corrupt line must
+        // not turn a working session into total failure.
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                diagnostics.unparseable += 1;
+                record_dispositions.push(RecordDisposition {
+                    record,
+                    outcome: RecordOutcome::Unparseable {
+                        error: ParseDiagnostic {
+                            message: format!("I/O error: {e}"),
+                        },
+                    },
+                });
+                continue;
+            }
+        };
+        if line.trim().is_empty() {
+            diagnostics.suppressed += 1;
+            record_dispositions.push(RecordDisposition {
+                record,
+                outcome: RecordOutcome::Suppressed {
+                    reason: SuppressionReason::Other("blank line".into()),
+                },
+            });
+            continue;
+        }
+        match serde_json::from_str::<LogEntry>(&line) {
+            Ok(entry) => {
+                let id = EntryId::deterministic(key, ordinal, 0);
+                let unmodeled = matches!(entry, LogEntry::Unknown(_));
+                record_snapshot_changes(
+                    &entry,
+                    &id,
+                    &record,
+                    &mut file_changes,
+                    &mut file_change_diagnostics,
+                );
+                entries.push(IdentifiedEntry {
+                    id: id.clone(),
+                    entry,
+                });
+                entry_origins.insert(id.clone(), vec![record.clone()]);
+                let outcome = if unmodeled {
+                    diagnostics.unknown += 1;
+                    RecordOutcome::Unknown { entries: vec![id] }
+                } else {
+                    diagnostics.mapped += 1;
+                    RecordOutcome::Mapped(vec![id])
+                };
+                record_dispositions.push(RecordDisposition { record, outcome });
+            }
+            Err(e) => {
+                // Torn/fused line? Mirror the established parser's salvage
+                // before declaring the record unparseable.
+                let salvaged = salvage_torn_line(&line);
+                if salvaged.is_empty() {
+                    diagnostics.unparseable += 1;
+                    record_dispositions.push(RecordDisposition {
+                        record,
+                        outcome: RecordOutcome::Unparseable {
+                            error: ParseDiagnostic {
+                                message: e.to_string(),
+                            },
+                        },
+                    });
+                } else {
+                    diagnostics.recovered += 1;
+                    let mut ids = Vec::new();
+                    for (sub, entry) in salvaged.into_iter().enumerate() {
+                        let id = EntryId::deterministic(key, ordinal, sub as u32);
+                        record_snapshot_changes(
+                            &entry,
+                            &id,
+                            &record,
+                            &mut file_changes,
+                            &mut file_change_diagnostics,
+                        );
+                        entries.push(IdentifiedEntry {
+                            id: id.clone(),
+                            entry,
+                        });
+                        entry_origins.insert(id.clone(), vec![record.clone()]);
+                        ids.push(id);
+                    }
+                    record_dispositions.push(RecordDisposition {
+                        record,
+                        outcome: RecordOutcome::Recovered {
+                            entries: ids,
+                            error: ParseDiagnostic {
+                                message: e.to_string(),
+                            },
+                        },
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(ParsedSession {
+        descriptor,
+        entries,
+        entry_origins,
+        record_dispositions,
+        field_derivations: Vec::new(),
+        semantics: BTreeMap::new(),
+        file_changes,
+        file_change_diagnostics,
+        diagnostics,
+    })
 }
 
 impl ClaudeCodeProvider {
@@ -290,6 +561,32 @@ impl ClaudeCodeProvider {
         std::io::copy(&mut file, out)?;
         Ok(())
     }
+
+    /// Resolve the preferred artifact of a descriptor from the current
+    /// inventory without rescanning every project. Lossy/non-local locator
+    /// edge cases fall back to the established inventory-backed resolver.
+    fn path_for_discovered(
+        &self,
+        descriptor: &SessionDescriptor,
+    ) -> Result<std::path::PathBuf, ProviderError> {
+        if descriptor.key.provider != ProviderId::claude_code() {
+            return Err(ProviderError::NotFound(descriptor.key.to_string()));
+        }
+        let preferred = descriptor.preferred_artifact().ok_or_else(|| {
+            ProviderError::Other(format!("descriptor {} has no artifacts", descriptor.key))
+        })?;
+        let expected_instance = self.claude_dir.root().display().to_string();
+        let candidate = std::path::PathBuf::from(&preferred.snapshot.id.locator);
+        let direct = preferred.snapshot.id.provider_instance == expected_instance
+            && candidate.starts_with(self.claude_dir.root())
+            && std::fs::symlink_metadata(&candidate)
+                .is_ok_and(|metadata| metadata.file_type().is_file());
+        if direct {
+            return Ok(candidate);
+        }
+        self.resolve(&descriptor.key)
+            .map(|(_, session)| session.path().to_path_buf())
+    }
 }
 
 impl SourceProvider for ClaudeCodeProvider {
@@ -351,135 +648,120 @@ impl SourceProvider for ClaudeCodeProvider {
 
     fn parse_cache_token(&self, key: &LogicalSessionKey) -> Result<String, ProviderError> {
         let (descriptor, _) = self.resolve(key)?;
+        self.parse_cache_token_for_descriptor(&descriptor)
+    }
+
+    fn parse_cache_token_for_descriptor(
+        &self,
+        descriptor: &SessionDescriptor,
+    ) -> Result<String, ProviderError> {
+        if descriptor.key.provider != ProviderId::claude_code() {
+            return Err(ProviderError::NotFound(descriptor.key.to_string()));
+        }
         Ok(format!(
             "v1\x1eclaude-code\x1e{}\x1emax_file={:?}",
-            super::descriptor_state_token(&descriptor),
+            super::descriptor_state_token(descriptor),
             self.max_file_size
         ))
     }
 
     fn parse(&self, key: &LogicalSessionKey) -> Result<ParsedSession, ProviderError> {
         let (descriptor, session) = self.resolve(key)?;
+        parse_claude_records(key, descriptor, session.path(), self.max_file_size)
+    }
+
+    fn parse_discovered(
+        &self,
+        descriptor: &SessionDescriptor,
+    ) -> Result<ParsedSession, ProviderError> {
+        let path = self.path_for_discovered(descriptor)?;
+        parse_claude_records(
+            &descriptor.key,
+            descriptor.clone(),
+            &path,
+            self.max_file_size,
+        )
+    }
+
+    fn file_change_projection(
+        &self,
+        descriptor: &SessionDescriptor,
+    ) -> Result<FileChangeProjection, ProviderError> {
+        let path = self.path_for_discovered(descriptor)?;
         if let Some(max) = self.max_file_size {
-            let len = std::fs::metadata(session.path())?.len();
+            let len = std::fs::metadata(&path)?.len();
             if max > 0 && len > max {
                 return Err(ProviderError::Other(format!(
                     "session file {} exceeds max_file_size ({len} > {max} bytes)",
-                    session.path().display()
+                    path.display()
                 )));
             }
         }
-        let artifact_id = self.artifact_for(&session).snapshot.id.clone();
-
-        let reader = BufReader::new(File::open(session.path())?);
-        let mut entries = Vec::new();
-        let mut entry_origins = BTreeMap::new();
-        let mut record_dispositions = Vec::new();
-        let mut diagnostics = IngestionDiagnostics::default();
-
-        for (ordinal, line) in reader.lines().enumerate() {
-            let ordinal = ordinal as u64;
-            let record = RecordRef {
-                artifact: artifact_id.clone(),
-                ordinal,
-            };
-            // Line-read errors (e.g. invalid UTF-8) skip the record and
-            // continue, mirroring the lenient parser — one corrupt line must
-            // not turn a working session into total failure.
-            let line = match line {
-                Ok(l) => l,
-                Err(e) => {
-                    diagnostics.unparseable += 1;
-                    record_dispositions.push(RecordDisposition {
-                        record,
-                        outcome: RecordOutcome::Unparseable {
-                            error: ParseDiagnostic {
-                                message: format!("I/O error: {e}"),
-                            },
-                        },
-                    });
-                    continue;
-                }
-            };
-            if line.trim().is_empty() {
-                diagnostics.suppressed += 1;
-                record_dispositions.push(RecordDisposition {
-                    record,
-                    outcome: RecordOutcome::Suppressed {
-                        reason: SuppressionReason::Other("blank line".into()),
-                    },
-                });
+        let artifact = descriptor
+            .preferred_artifact()
+            .ok_or_else(|| {
+                ProviderError::Other(format!("descriptor {} has no artifacts", descriptor.key))
+            })?
+            .snapshot
+            .id
+            .clone();
+        let mut reader = BufReader::new(File::open(path)?);
+        let mut line = Vec::new();
+        let mut ordinal = 0_u64;
+        let mut projection = FileChangeProjection::default();
+        while let Some(candidate) = read_snapshot_candidate(&mut reader, &mut line)? {
+            let current = ordinal;
+            ordinal = ordinal.saturating_add(1);
+            if !candidate {
                 continue;
             }
-            match serde_json::from_str::<LogEntry>(&line) {
-                Ok(entry) => {
-                    let id = EntryId::deterministic(key, ordinal, 0);
-                    let unmodeled = matches!(entry, LogEntry::Unknown(_));
-                    entries.push(IdentifiedEntry {
-                        id: id.clone(),
-                        entry,
-                    });
-                    entry_origins.insert(id.clone(), vec![record.clone()]);
-                    let outcome = if unmodeled {
-                        diagnostics.unknown += 1;
-                        RecordOutcome::Unknown { entries: vec![id] }
+            let Ok(native) = serde_json::from_slice::<SnapshotProjectionLine>(&line) else {
+                continue;
+            };
+            if native.kind.as_deref() != Some("file-history-snapshot") {
+                continue;
+            }
+            let operation_id = native.message_id.ok_or_else(|| {
+                ProviderError::Other(format!(
+                    "file-history-snapshot record #{current} has no messageId"
+                ))
+            })?;
+            let snapshot = native.snapshot.ok_or_else(|| {
+                ProviderError::Other(format!(
+                    "file-history-snapshot record #{current} has no snapshot"
+                ))
+            })?;
+            let owner = EntryId::deterministic(&descriptor.key, current, 0);
+            projection
+                .owner_timestamps
+                .insert(owner.clone(), snapshot.timestamp);
+            let record = RecordRef {
+                artifact: artifact.clone(),
+                ordinal: current,
+            };
+            for (index, (path, backup)) in snapshot.tracked_file_backups.into_iter().enumerate() {
+                projection.changes.push(FileChangeObservation {
+                    owner: owner.clone(),
+                    operation_id: operation_id.clone(),
+                    change_index: u32::try_from(index).unwrap_or(u32::MAX),
+                    record: record.clone(),
+                    outcome_record: Some(record.clone()),
+                    path,
+                    move_path: None,
+                    kind: if backup.backup_file_name.is_none() {
+                        FileChangeKind::Add
                     } else {
-                        diagnostics.mapped += 1;
-                        RecordOutcome::Mapped(vec![id])
-                    };
-                    record_dispositions.push(RecordDisposition { record, outcome });
-                }
-                Err(e) => {
-                    // Torn/fused line? Mirror the established parser's
-                    // salvage before declaring the record unparseable.
-                    let salvaged = salvage_torn_line(&line);
-                    if salvaged.is_empty() {
-                        diagnostics.unparseable += 1;
-                        record_dispositions.push(RecordDisposition {
-                            record,
-                            outcome: RecordOutcome::Unparseable {
-                                error: ParseDiagnostic {
-                                    message: e.to_string(),
-                                },
-                            },
-                        });
-                    } else {
-                        diagnostics.recovered += 1;
-                        let mut ids = Vec::new();
-                        for (sub, entry) in salvaged.into_iter().enumerate() {
-                            let id = EntryId::deterministic(key, ordinal, sub as u32);
-                            entries.push(IdentifiedEntry {
-                                id: id.clone(),
-                                entry,
-                            });
-                            entry_origins.insert(id.clone(), vec![record.clone()]);
-                            ids.push(id);
-                        }
-                        record_dispositions.push(RecordDisposition {
-                            record,
-                            outcome: RecordOutcome::Recovered {
-                                entries: ids,
-                                error: ParseDiagnostic {
-                                    message: e.to_string(),
-                                },
-                            },
-                        });
-                    }
-                }
+                        FileChangeKind::Update
+                    },
+                    detail: FileChangeDetail::PathOnly,
+                    evidence: FileChangeEvidence::FileHistorySnapshot,
+                    outcome: FileChangeOutcome::Applied,
+                    observed_at: Some(backup.backup_time),
+                    native_version: Some(backup.version),
+                });
             }
         }
-
-        Ok(ParsedSession {
-            descriptor,
-            entries,
-            entry_origins,
-            record_dispositions,
-            field_derivations: Vec::new(),
-            semantics: BTreeMap::new(),
-            file_changes: Vec::new(),
-            file_change_diagnostics: FileChangeDiagnostics::default(),
-            diagnostics,
-        })
+        Ok(projection)
     }
 
     fn lineage(&self) -> Result<Vec<LineageEdge>, ProviderError> {
@@ -616,6 +898,85 @@ mod tests {
     const SESSION_B: &str = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
     const SESSION_GONE: &str = "99999999-9999-9999-9999-999999999999";
     const SESSION_UTF8: &str = "e8e8e8e8-aaaa-bbbb-cccc-444444444444";
+
+    /// Independently derive the snapshot projection from native JSON. This
+    /// intentionally does not use the production snapshot mapper or generic
+    /// provenance validator, so wrong path/version projections cannot make a
+    /// confirmatory test pass by agreeing with themselves.
+    fn audit_native_snapshot_projection(native: &str, parsed: &ParsedSession) -> Vec<String> {
+        let mut expected = Vec::new();
+        for (ordinal, line) in native.lines().enumerate() {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if value.get("type").and_then(serde_json::Value::as_str)
+                != Some("file-history-snapshot")
+            {
+                continue;
+            }
+            let operation = value
+                .get("messageId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap();
+            let backups = value
+                .pointer("/snapshot/trackedFileBackups")
+                .and_then(serde_json::Value::as_object)
+                .unwrap();
+            for (path, backup) in backups {
+                expected.push((
+                    u64::try_from(ordinal).unwrap(),
+                    operation.to_string(),
+                    path.clone(),
+                    if backup
+                        .get("backupFileName")
+                        .is_some_and(serde_json::Value::is_null)
+                    {
+                        FileChangeKind::Add
+                    } else {
+                        FileChangeKind::Update
+                    },
+                    backup
+                        .get("backupTime")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap()
+                        .parse::<chrono::DateTime<chrono::Utc>>()
+                        .unwrap(),
+                    u32::try_from(
+                        backup
+                            .get("version")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap(),
+                    )
+                    .unwrap(),
+                ));
+            }
+        }
+        expected.sort();
+
+        let mut actual: Vec<_> = parsed
+            .file_changes
+            .iter()
+            .filter(|change| change.evidence == FileChangeEvidence::FileHistorySnapshot)
+            .map(|change| {
+                (
+                    change.record.ordinal,
+                    change.operation_id.clone(),
+                    change.path.clone(),
+                    change.kind,
+                    change.observed_at.unwrap(),
+                    change.native_version.unwrap(),
+                )
+            })
+            .collect();
+        actual.sort();
+        if actual == expected {
+            Vec::new()
+        } else {
+            vec![format!(
+                "native snapshot projection mismatch: expected {expected:?}, got {actual:?}"
+            )]
+        }
+    }
 
     fn user_line(uuid: &str, session: &str, text: &str) -> String {
         format!(
@@ -819,7 +1180,24 @@ mod tests {
 
         // Characterization: same entries the established path produces
         // (including salvage — both paths recover the torn line).
-        let (_, session) = p.resolve(&key(SESSION_A)).unwrap();
+        let (descriptor, session) = p.resolve(&key(SESSION_A)).unwrap();
+        let discovered = p.parse_discovered(&descriptor).unwrap();
+        assert_eq!(discovered.descriptor, parsed.descriptor);
+        assert_eq!(discovered.record_dispositions, parsed.record_dispositions);
+        assert_eq!(discovered.entries.len(), parsed.entries.len());
+        for (direct, resolved) in discovered.entries.iter().zip(&parsed.entries) {
+            assert_eq!(direct.id, resolved.id);
+            assert_eq!(
+                serde_json::to_value(&direct.entry).unwrap(),
+                serde_json::to_value(&resolved.entry).unwrap(),
+                "descriptor-aware parsing must match key-based resolution"
+            );
+        }
+        assert_eq!(
+            p.parse_cache_token_for_descriptor(&descriptor).unwrap(),
+            p.parse_cache_token(&key(SESSION_A)).unwrap(),
+            "descriptor-aware revision tokens must match key-based resolution"
+        );
         let baseline = session.parse().unwrap();
         assert_eq!(parsed.entries.len(), baseline.len());
         for (mine, theirs) in parsed.entries.iter().zip(baseline.iter()) {
@@ -857,6 +1235,132 @@ mod tests {
             })
             .expect("torn line recovered");
         assert_eq!(recovered, 1, "the clean tail entry is salvaged");
+    }
+
+    #[test]
+    fn file_history_snapshots_project_provider_neutral_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("projects/-tmp-snapshots");
+        std::fs::create_dir_all(&project).unwrap();
+        let native = serde_json::json!({
+            "type": "file-history-snapshot",
+            "messageId": "snapshot-1",
+            "isSnapshotUpdate": false,
+            "snapshot": {
+                "messageId": "snapshot-1",
+                "timestamp": "2026-07-22T10:00:00Z",
+                "trackedFileBackups": {
+                    "/work/new.rs": {
+                        "backupFileName": null,
+                        "version": 1,
+                        "backupTime": "2026-07-22T10:00:01Z"
+                    },
+                    "/work/existing.rs": {
+                        "backupFileName": "existing.rs@v2",
+                        "version": 2,
+                        "backupTime": "2026-07-22T10:00:02Z"
+                    }
+                }
+            }
+        })
+        .to_string()
+            + "\n";
+        std::fs::write(project.join(format!("{SESSION_A}.jsonl")), &native).unwrap();
+        let provider = ClaudeCodeProvider::new(ClaudeDirectory::from_path(tmp.path()).unwrap());
+        let parsed = provider.parse(&key(SESSION_A)).unwrap();
+        let descriptor = provider.sessions().unwrap().remove(0);
+        let compact = provider.file_change_projection(&descriptor).unwrap();
+        assert!(
+            parsed.validate_provenance().is_empty(),
+            "{:?}",
+            parsed.validate_provenance()
+        );
+        assert_eq!(parsed.file_change_diagnostics.snapshot_records, 1);
+        assert_eq!(parsed.file_change_diagnostics.snapshot_changes, 2);
+        assert_eq!(parsed.file_changes.len(), 2);
+        assert_eq!(parsed.file_changes[0].operation_id, "snapshot-1");
+        assert_eq!(parsed.file_changes[0].kind, FileChangeKind::Add);
+        assert_eq!(parsed.file_changes[0].native_version, Some(1));
+        assert_eq!(parsed.file_changes[1].kind, FileChangeKind::Update);
+        assert_eq!(parsed.file_changes[1].native_version, Some(2));
+        assert!(parsed.file_changes.iter().all(|change| change.evidence
+            == FileChangeEvidence::FileHistorySnapshot
+            && change.outcome == FileChangeOutcome::Applied
+            && change.outcome_record.as_ref() == Some(&change.record)));
+        assert_eq!(
+            compact.changes, parsed.file_changes,
+            "lightweight snapshot projection must match the complete parser"
+        );
+        assert!(audit_native_snapshot_projection(&native, &parsed).is_empty());
+
+        let mut wrong_path = parsed.clone();
+        wrong_path.file_changes[0].path = "/work/wrong.rs".into();
+        assert!(audit_native_snapshot_projection(&native, &wrong_path)
+            .iter()
+            .any(|violation| violation.contains("projection mismatch")));
+
+        let mut wrong_version = parsed.clone();
+        wrong_version.file_changes[0].native_version = Some(99);
+        assert!(audit_native_snapshot_projection(&native, &wrong_version)
+            .iter()
+            .any(|violation| violation.contains("projection mismatch")));
+
+        let mut forged = parsed;
+        forged.file_changes[0].operation_id = "different-snapshot".into();
+        assert!(forged
+            .validate_provenance()
+            .iter()
+            .any(|violation| violation.contains("does not contain snapshot")));
+    }
+
+    #[test]
+    fn lightweight_snapshot_scan_skips_large_and_malformed_records_without_losing_later_evidence() {
+        assert!(!contains_snapshot_discriminator(
+            br#"{"type":"user","content":"file-history-snapshot"}"#
+        ));
+        assert!(!contains_snapshot_discriminator(b"{}\n"));
+        assert!(!contains_snapshot_discriminator(br#"{"type":"fi"#));
+        assert!(contains_snapshot_discriminator(
+            br#"{"type" : "file-history-snapshot","messageId":"x"}"#
+        ));
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("projects/-tmp-snapshots");
+        std::fs::create_dir_all(&project).unwrap();
+        let irrelevant = serde_json::json!({
+            "type": "user",
+            "messageId": "not-a-snapshot",
+            "message": {"content": format!("file-history-snapshot {}", "x".repeat(1_000_000))}
+        });
+        let snapshot = serde_json::json!({
+            "type": "file-history-snapshot",
+            "messageId": "snapshot-late",
+            "snapshot": {
+                "messageId": "snapshot-late",
+                "timestamp": "2026-07-22T10:00:00Z",
+                "trackedFileBackups": {
+                    "/work/late.rs": {
+                        "backupFileName": null,
+                        "version": 1,
+                        "backupTime": "2026-07-22T10:00:01Z"
+                    }
+                }
+            }
+        });
+        // Exercise a discriminator spanning several BufReader chunks near
+        // the documented bound. The native corpus audit currently sees a
+        // maximum byte offset of 2,859 across 42,875 snapshot records.
+        let snapshot = format!("{}{}", " ".repeat(60 * 1024), snapshot);
+        std::fs::write(
+            project.join(format!("{SESSION_A}.jsonl")),
+            format!("{irrelevant}\n{{broken\n{snapshot}\n"),
+        )
+        .unwrap();
+        let provider = ClaudeCodeProvider::new(ClaudeDirectory::from_path(tmp.path()).unwrap());
+        let descriptor = provider.sessions().unwrap().remove(0);
+        let compact = provider.file_change_projection(&descriptor).unwrap();
+        assert_eq!(compact.changes.len(), 1);
+        assert_eq!(compact.changes[0].path, "/work/late.rs");
+        assert_eq!(compact.changes[0].record.ordinal, 2);
     }
 
     #[test]

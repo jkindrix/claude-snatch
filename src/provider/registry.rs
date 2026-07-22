@@ -523,6 +523,33 @@ pub struct CollectedProjectUnion {
     pub context_warnings: Vec<ProjectContextWarning>,
 }
 
+/// One complete parsed bundle with the project label selected by the unified
+/// project resolver.
+pub struct ParsedProjectSession {
+    /// Display/project path used by analysis filters and responses.
+    pub project_path: String,
+    /// Complete cached provider bundle.
+    pub parsed: std::sync::Arc<super::ParsedSession>,
+}
+
+/// Parsed project sessions under the registry's atomic-vs-partial contract.
+pub struct CollectedParsedProjectSessions {
+    /// Successfully parsed sessions in deterministic project/session order.
+    pub sessions: Vec<ParsedProjectSession>,
+    /// Providers skipped during construction, inventory, or lineage scans.
+    pub skipped: Vec<(ProviderId, String)>,
+    /// Individual sessions retained by inventory but unavailable to analysis.
+    pub warnings: Vec<String>,
+}
+
+/// Outcome of streaming parsed project sessions through a visitor.
+pub struct ParsedProjectVisitReport {
+    /// Providers skipped during construction, inventory, or lineage scans.
+    pub skipped: Vec<(ProviderId, String)>,
+    /// Individual sessions retained by inventory but unavailable to analysis.
+    pub warnings: Vec<String>,
+}
+
 impl ProviderRegistry {
     /// Collect session descriptors across a selection.
     ///
@@ -770,6 +797,229 @@ impl ProviderRegistry {
             context_warnings: projects.context_warnings,
         })
     }
+
+    /// Collect complete provider bundles for analysis surfaces.
+    ///
+    /// The provider scan and lineage graph use [`Self::collect_project_union`].
+    /// Explicit selections remain atomic when any retained session fails to
+    /// parse; `all` skips that session with a qualified, non-sensitive warning.
+    /// Spawned sessions are filtered only when requested, using typed lineage.
+    pub fn collect_parsed_project_sessions(
+        &self,
+        selection: &ProviderSelection,
+        cache: &crate::cache::CacheManager,
+        project_filter: Option<&str>,
+        include_subagents: bool,
+    ) -> Result<CollectedParsedProjectSessions, ProviderError> {
+        let mut sessions = Vec::new();
+        let report = self.visit_parsed_project_sessions(
+            selection,
+            cache,
+            project_filter,
+            include_subagents,
+            |project_path, parsed| {
+                sessions.push(ParsedProjectSession {
+                    project_path: project_path.to_string(),
+                    parsed,
+                });
+            },
+        )?;
+        Ok(CollectedParsedProjectSessions {
+            sessions,
+            skipped: report.skipped,
+            warnings: report.warnings,
+        })
+    }
+
+    /// Stream complete parsed bundles through a callback without retaining
+    /// the whole selected corpus at once.
+    ///
+    /// Selection, lineage, project filtering, subagent filtering, cache
+    /// validation, and partial-vs-atomic error behavior are identical to
+    /// [`Self::collect_parsed_project_sessions`]. Analysis surfaces whose
+    /// aggregate is compact should prefer this form.
+    pub fn visit_parsed_project_sessions<F>(
+        &self,
+        selection: &ProviderSelection,
+        cache: &crate::cache::CacheManager,
+        project_filter: Option<&str>,
+        include_subagents: bool,
+        mut visit: F,
+    ) -> Result<ParsedProjectVisitReport, ProviderError>
+    where
+        F: FnMut(&str, std::sync::Arc<super::ParsedSession>),
+    {
+        let collected = self.collect_project_union(selection)?;
+        let atomic = matches!(selection, ProviderSelection::Explicit(_));
+        let spawned: std::collections::BTreeSet<_> = collected
+            .lineage
+            .iter()
+            .filter(|edge| matches!(edge.kind, super::LineageEdgeKind::Spawn { .. }))
+            .map(|edge| edge.to.clone())
+            .collect();
+        let mut warnings: Vec<String> = collected
+            .context_warnings
+            .iter()
+            .map(|warning| format!("{}: project context unavailable", warning.key))
+            .collect();
+        for project in &collected.projects {
+            if project_filter.is_some_and(|filter| !project.matches(filter)) {
+                continue;
+            }
+            let project_path = project
+                .display_path
+                .clone()
+                .unwrap_or_else(|| project.identity.to_string());
+            for session in &project.sessions {
+                let key = &session.descriptor.key;
+                if !include_subagents && spawned.contains(key) {
+                    continue;
+                }
+                let provider = self.get(&key.provider)?;
+                match streaming_parsed_session(cache, provider, &session.descriptor) {
+                    Ok(parsed) => {
+                        let path = session.context.cwd.as_deref().unwrap_or(&project_path);
+                        visit(path, parsed);
+                    }
+                    Err(error) if atomic => {
+                        return Err(ProviderError::Other(format!(
+                            "session {key} could not be parsed: {error}"
+                        )))
+                    }
+                    Err(_) => warnings.push(format!("{key}: session could not be parsed")),
+                }
+            }
+        }
+        warnings.sort();
+        warnings.dedup();
+        Ok(ParsedProjectVisitReport {
+            skipped: collected.skipped,
+            warnings,
+        })
+    }
+
+    /// Stream compact provider-owned file-change projections without
+    /// constructing unrelated conversation entries.
+    ///
+    /// Selection, project/subagent filtering, and explicit-vs-`all` failure
+    /// behavior match [`Self::visit_parsed_project_sessions`].
+    pub fn visit_project_file_changes<F>(
+        &self,
+        selection: &ProviderSelection,
+        project_filter: Option<&str>,
+        include_subagents: bool,
+        mut visit: F,
+    ) -> Result<ParsedProjectVisitReport, ProviderError>
+    where
+        F: FnMut(&str, &super::SessionDescriptor, super::FileChangeProjection),
+    {
+        let collected = self.collect_project_union(selection)?;
+        let atomic = matches!(selection, ProviderSelection::Explicit(_));
+        let spawned: std::collections::BTreeSet<_> = collected
+            .lineage
+            .iter()
+            .filter(|edge| matches!(edge.kind, super::LineageEdgeKind::Spawn { .. }))
+            .map(|edge| edge.to.clone())
+            .collect();
+        let mut warnings: Vec<String> = collected
+            .context_warnings
+            .iter()
+            .map(|warning| format!("{}: project context unavailable", warning.key))
+            .collect();
+        for project in &collected.projects {
+            if project_filter.is_some_and(|filter| !project.matches(filter)) {
+                continue;
+            }
+            let project_path = project
+                .display_path
+                .clone()
+                .unwrap_or_else(|| project.identity.to_string());
+            for session in &project.sessions {
+                let key = &session.descriptor.key;
+                if !include_subagents && spawned.contains(key) {
+                    continue;
+                }
+                let provider = self.get(&key.provider)?;
+                match provider.file_change_projection(&session.descriptor) {
+                    Ok(projection) => visit(&project_path, &session.descriptor, projection),
+                    Err(error) if atomic => {
+                        return Err(ProviderError::Other(format!(
+                            "session {key} file changes could not be read: {error}"
+                        )))
+                    }
+                    Err(_) => {
+                        warnings.push(format!("{key}: session file changes could not be read"));
+                    }
+                }
+            }
+        }
+        warnings.sort();
+        warnings.dedup();
+        Ok(ParsedProjectVisitReport {
+            skipped: collected.skipped,
+            warnings,
+        })
+    }
+
+    /// Parse only sessions whose compact native projection contains a
+    /// non-inherited change matching `path_pattern`.
+    ///
+    /// This is the progressive-narrowing path for conversation-rich file
+    /// evolution: cheap evidence first, full transcript only after a match.
+    pub fn visit_matching_file_change_sessions<F>(
+        &self,
+        selection: &ProviderSelection,
+        project_filter: Option<&str>,
+        include_subagents: bool,
+        path_pattern: &str,
+        mut visit: F,
+    ) -> Result<ParsedProjectVisitReport, ProviderError>
+    where
+        F: FnMut(&str, std::sync::Arc<super::ParsedSession>),
+    {
+        let mut candidates = Vec::new();
+        let mut report = self.visit_project_file_changes(
+            selection,
+            project_filter,
+            include_subagents,
+            |project_path, descriptor, projection| {
+                let matching = projection.changes.iter().any(|change| {
+                    !projection.inherited_owners.contains(&change.owner)
+                        && (change.path.contains(path_pattern)
+                            || change
+                                .move_path
+                                .as_deref()
+                                .is_some_and(|path| path.contains(path_pattern)))
+                });
+                if matching {
+                    candidates.push((project_path.to_string(), descriptor.clone()));
+                }
+            },
+        )?;
+        let atomic = matches!(selection, ProviderSelection::Explicit(_));
+        for (project_path, descriptor) in candidates {
+            let provider = self.get(&descriptor.key.provider)?;
+            match provider
+                .parse_discovered(&descriptor)
+                .map_err(crate::error::SnatchError::from)
+                .and_then(|parsed| validate_provider_session(provider, parsed))
+            {
+                Ok(parsed) => visit(&project_path, std::sync::Arc::new(parsed)),
+                Err(error) if atomic => {
+                    return Err(ProviderError::Other(format!(
+                        "session {} could not be parsed: {error}",
+                        descriptor.key
+                    )))
+                }
+                Err(_) => report
+                    .warnings
+                    .push(format!("{}: session could not be parsed", descriptor.key)),
+            }
+        }
+        report.warnings.sort();
+        report.warnings.dedup();
+        Ok(report)
+    }
 }
 
 fn no_provider_succeeded(skipped: &[(ProviderId, String)]) -> ProviderError {
@@ -799,19 +1049,47 @@ pub fn cached_parsed_session(
 ) -> crate::error::Result<std::sync::Arc<super::ParsedSession>> {
     let token = provider.parse_cache_token(key)?;
     cache.get_or_parse_provider_session(key, &token, || {
-        let parsed = provider.parse(key)?;
-        let violations = parsed.validate_provenance();
-        if !violations.is_empty() {
-            return Err(ProviderError::Other(format!(
-                "provider '{}' returned invalid normalized provenance ({} violation{})",
-                provider.id(),
-                violations.len(),
-                if violations.len() == 1 { "" } else { "s" }
-            ))
-            .into());
-        }
-        Ok(parsed)
+        parse_and_validate_provider_session(provider, key)
     })
+}
+
+/// Parse one bundle for a streaming corpus scan without inserting cache
+/// misses. A warm, revision-matching cache entry is still reused.
+fn streaming_parsed_session(
+    cache: &crate::cache::CacheManager,
+    provider: &dyn SourceProvider,
+    descriptor: &super::SessionDescriptor,
+) -> crate::error::Result<std::sync::Arc<super::ParsedSession>> {
+    let token = provider.parse_cache_token_for_descriptor(descriptor)?;
+    if let Some(parsed) = cache.get_provider_session_if_cached(&descriptor.key, &token) {
+        return Ok(parsed);
+    }
+    let parsed = provider.parse_discovered(descriptor)?;
+    validate_provider_session(provider, parsed).map(std::sync::Arc::new)
+}
+
+fn parse_and_validate_provider_session(
+    provider: &dyn SourceProvider,
+    key: &LogicalSessionKey,
+) -> crate::error::Result<super::ParsedSession> {
+    validate_provider_session(provider, provider.parse(key)?)
+}
+
+fn validate_provider_session(
+    provider: &dyn SourceProvider,
+    parsed: super::ParsedSession,
+) -> crate::error::Result<super::ParsedSession> {
+    let violations = parsed.validate_provenance();
+    if !violations.is_empty() {
+        return Err(ProviderError::Other(format!(
+            "provider '{}' returned invalid normalized provenance ({} violation{})",
+            provider.id(),
+            violations.len(),
+            if violations.len() == 1 { "" } else { "s" }
+        ))
+        .into());
+    }
+    Ok(parsed)
 }
 
 /// Uniqueness rule shared by qualified-prefix and unqualified resolution:

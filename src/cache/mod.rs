@@ -501,8 +501,39 @@ impl ProviderParsedCache {
     }
 
     fn size_estimate(parsed: &crate::provider::ParsedSession) -> usize {
-        // Rough: entries dominate; provenance/semantics ride along.
-        parsed.entries.len() * 1536 + 4096
+        // Serialized native content is a much safer lower bound than a flat
+        // per-entry estimate: one transcript entry can carry megabytes of
+        // tool output. Double the serialized length to cover decoded String,
+        // Vec, map, and enum allocation overhead, then separately count the
+        // provider sidecars retained beside the normalized entries.
+        let mut size = 4096usize;
+        for identified in &parsed.entries {
+            let encoded = serde_json::to_vec(&identified.entry)
+                .map_or(0, |bytes| bytes.len())
+                .saturating_mul(2);
+            size = size
+                .saturating_add(512)
+                .saturating_add(identified.id.to_string().len())
+                .saturating_add(encoded);
+        }
+        size = size
+            .saturating_add(parsed.record_dispositions.len().saturating_mul(192))
+            .saturating_add(parsed.entry_origins.len().saturating_mul(192))
+            .saturating_add(parsed.semantics.len().saturating_mul(512));
+        for change in &parsed.file_changes {
+            let detail = match &change.detail {
+                crate::provider::FileChangeDetail::FullContent(content)
+                | crate::provider::FileChangeDetail::Patch(content) => content.len(),
+                crate::provider::FileChangeDetail::PathOnly => 0,
+            };
+            size = size
+                .saturating_add(512)
+                .saturating_add(change.operation_id.len())
+                .saturating_add(change.path.len())
+                .saturating_add(change.move_path.as_ref().map_or(0, String::len))
+                .saturating_add(detail);
+        }
+        size
     }
 
     /// Get a cached bundle, valid only while the parse cache token matches.
@@ -654,6 +685,21 @@ impl CacheManager {
         self.provider_sessions
             .insert_keyed(key, current_revision.to_string(), parsed.clone());
         Ok(parsed)
+    }
+
+    /// Get an already-cached provider bundle without inserting on a miss.
+    ///
+    /// Corpus-wide streaming analyses use this to benefit from warm entries
+    /// without flooding the LRU with one-off parses and retaining the tail of
+    /// a large scan after each bundle has been consumed.
+    pub fn get_provider_session_if_cached(
+        &self,
+        key: &LogicalSessionKey,
+        current_revision: &str,
+    ) -> Option<Arc<crate::provider::ParsedSession>> {
+        self.enabled
+            .then(|| self.provider_sessions.get_keyed(key, current_revision))
+            .flatten()
     }
 
     /// Invalidate all stale entries.
@@ -1233,8 +1279,8 @@ mod tests {
             .provider_sessions
             .insert_keyed(&key_small, "rev".into(), bundle.clone());
         let mut big_bundle = (*bundle).clone();
-        while big_bundle.entries.len() < 70 {
-            big_bundle.entries.extend(bundle.entries.iter().cloned()); // ~70*1536 > 90 KB
+        while big_bundle.entries.len() < 400 {
+            big_bundle.entries.extend(bundle.entries.iter().cloned());
         }
         let key_big = LogicalSessionKey {
             provider: crate::provider::ProviderId("fake".into()),
@@ -1256,6 +1302,69 @@ mod tests {
                 .get_keyed(&key_big, "rev")
                 .is_none(),
             "oversized provider bundle must be refused"
+        );
+
+        // Variable-size file evidence counts too: a bundle with only a few
+        // entries but one huge native patch must not bypass the budget.
+        let mut evidence_bundle = (*bundle).clone();
+        let owner = evidence_bundle.entries[2].id.clone();
+        let record = evidence_bundle.entry_origins[&owner][0].clone();
+        evidence_bundle
+            .file_changes
+            .push(crate::provider::FileChangeObservation {
+                owner,
+                operation_id: "call-7".into(),
+                change_index: 0,
+                record: record.clone(),
+                outcome_record: Some(record),
+                path: "src/large.rs".into(),
+                move_path: None,
+                kind: crate::provider::FileChangeKind::Update,
+                detail: crate::provider::FileChangeDetail::Patch("x".repeat(100_000)),
+                evidence: crate::provider::FileChangeEvidence::StructuredLifecycle,
+                outcome: crate::provider::FileChangeOutcome::Applied,
+                observed_at: None,
+                native_version: None,
+            });
+        let key_evidence = LogicalSessionKey {
+            provider: crate::provider::ProviderId("fake".into()),
+            namespace: crate::provider::SessionNamespace("ns-evidence".into()),
+            native_id: "42".into(),
+        };
+        manager.provider_sessions.insert_keyed(
+            &key_evidence,
+            "rev".into(),
+            Arc::new(evidence_bundle),
+        );
+        assert!(
+            manager
+                .provider_sessions
+                .get_keyed(&key_evidence, "rev")
+                .is_none(),
+            "oversized file evidence must be included in the budget estimate"
+        );
+
+        // Variable-size normalized entry bodies count too. A flat
+        // per-entry multiplier previously admitted multi-megabyte tool
+        // output while claiming the partition was below budget.
+        let mut body_bundle = (*bundle).clone();
+        body_bundle.entries[0].entry = crate::model::LogEntry::Unknown(
+            serde_json::json!({"tool_output": "x".repeat(100_000)}),
+        );
+        let key_body = LogicalSessionKey {
+            provider: crate::provider::ProviderId("fake".into()),
+            namespace: crate::provider::SessionNamespace("ns-body".into()),
+            native_id: "42".into(),
+        };
+        manager
+            .provider_sessions
+            .insert_keyed(&key_body, "rev".into(), Arc::new(body_bundle));
+        assert!(
+            manager
+                .provider_sessions
+                .get_keyed(&key_body, "rev")
+                .is_none(),
+            "oversized normalized content must be included in the budget estimate"
         );
 
         // Replacing a cached identity with an OVERSIZED revision removes the

@@ -1154,6 +1154,10 @@ pub struct GetFileHistoryRequest {
 
     /// Maximum results to return. Default: 50.
     pub limit: Option<usize>,
+
+    /// Source providers to search. Omit for the classic Claude-only route;
+    /// use `["all"]` for an explicit cross-provider query.
+    pub provider: Option<Vec<String>>,
 }
 
 /// A file modification entry in responses.
@@ -1163,8 +1167,30 @@ pub struct FileModificationEntry {
     pub session_id: String,
     pub project_path: String,
     pub message_id: String,
-    pub timestamp: String,
-    pub version: u32,
+    pub timestamp: Option<String>,
+    pub version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qualified_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub move_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_ordinal: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome_record_ordinal: Option<u64>,
 }
 
 // ============================================================================
@@ -1448,15 +1474,43 @@ pub struct ExplainFileEvolutionRequest {
 
     /// Exclude subagent sessions. Default: true.
     pub no_subagents: Option<bool>,
+
+    /// Source providers to search. Omit for the classic Claude-only route;
+    /// use `["all"]` for an explicit cross-provider query.
+    pub provider: Option<Vec<String>>,
 }
 
 /// A change event in file evolution response.
 #[derive(Debug, Serialize)]
 pub struct ChangeEventEntry {
-    pub timestamp: String,
+    pub timestamp: Option<String>,
     pub session_id: String,
     pub message_id: String,
-    pub version: u32,
+    pub version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qualified_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub move_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_ordinal: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome_record_ordinal: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1475,6 +1529,10 @@ pub struct FileEvolutionEntry {
     pub total_changes: usize,
     pub sessions_involved: usize,
     pub changes: Vec<ChangeEventEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_attempts: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<ChangeEventEntry>,
 }
 
 /// Response for explain_file_evolution.
@@ -1484,6 +1542,12 @@ pub struct ExplainFileEvolutionResponse {
     pub file_pattern: String,
     pub period: String,
     pub files: Vec<FileEvolutionEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_providers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage_note: Option<String>,
 }
 
 /// Response for get_file_history.
@@ -1494,4 +1558,14 @@ pub struct GetFileHistoryResponse {
     pub total_modifications: usize,
     pub returned: usize,
     pub modifications: Vec<FileModificationEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<FileModificationEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_attempts: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_providers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage_note: Option<String>,
 }

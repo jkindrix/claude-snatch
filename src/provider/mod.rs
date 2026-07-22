@@ -649,6 +649,9 @@ impl FileChangeKind {
 /// Strength/source of the evidence behind a file-change observation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FileChangeEvidence {
+    /// Provider-persisted file-history snapshot. This evidence records a
+    /// tracked file state/version directly rather than a tool invocation.
+    FileHistorySnapshot,
     /// Provider-persisted structured change data from an execution lifecycle
     /// record. This is the strongest form and supersedes a model-authored
     /// declaration for the same call.
@@ -663,6 +666,7 @@ impl FileChangeEvidence {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::FileHistorySnapshot => "file_history_snapshot",
             Self::StructuredLifecycle => "structured_lifecycle",
             Self::PatchDeclaration => "patch_declaration",
         }
@@ -726,10 +730,11 @@ impl FileChangeDetail {
 /// stays at the provider source and remains reachable through these references.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileChangeObservation {
-    /// Normalized ToolUse entry that owns this operation.
+    /// Normalized entry that owns this operation/evidence.
     pub owner: EntryId,
-    /// Native tool-call identifier.
-    pub call_id: String,
+    /// Provider-native operation identity: a tool-call id for invocation
+    /// evidence or snapshot message id for snapshot evidence.
+    pub operation_id: String,
     /// Zero-based operation position within the native patch evidence. This
     /// keeps repeated operations on the same path distinct without relying on
     /// path equality as identity.
@@ -750,11 +755,56 @@ pub struct FileChangeObservation {
     pub evidence: FileChangeEvidence,
     /// Source-backed application outcome.
     pub outcome: FileChangeOutcome,
+    /// Native observation time, when the evidence supplies one.
+    pub observed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Provider-native version number, when one exists.
+    pub native_version: Option<u32>,
+}
+
+/// Compact provider-owned file-change projection for corpus-wide discovery.
+///
+/// It intentionally carries only the normalized evidence plus the small
+/// owner annotations consumers need to exclude inherited history and recover
+/// timestamps. Full conversation entries remain available through
+/// [`ParsedSession`] after a path match narrows the candidate set.
+#[derive(Debug, Clone, Default)]
+pub struct FileChangeProjection {
+    /// Source-backed file-change observations.
+    pub changes: Vec<FileChangeObservation>,
+    /// Owners copied from a parent/fork and excluded from new-work views.
+    pub inherited_owners: BTreeSet<EntryId>,
+    /// Best normalized timestamp for each owning entry.
+    pub owner_timestamps: BTreeMap<EntryId, chrono::DateTime<chrono::Utc>>,
+}
+
+impl FileChangeProjection {
+    /// Compact a complete parsed bundle without changing evidence identity.
+    #[must_use]
+    pub fn from_parsed(parsed: ParsedSession) -> Self {
+        let inherited_owners = parsed
+            .semantics
+            .iter()
+            .filter(|(_, semantics)| semantics.activity == ActivityKind::InheritedHistory)
+            .map(|(entry, _)| entry.clone())
+            .collect();
+        let owner_timestamps = parsed
+            .entries
+            .iter()
+            .filter_map(|entry| entry.entry.timestamp().map(|time| (entry.id.clone(), time)))
+            .collect();
+        Self {
+            changes: parsed.file_changes,
+            inherited_owners,
+            owner_timestamps,
+        }
+    }
 }
 
 /// Coverage/accounting for a session's file-change projection.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FileChangeDiagnostics {
+    /// Native file-history snapshot records inspected.
+    pub snapshot_records: usize,
     /// Canonical patch calls/operations inspected (paired lifecycle records
     /// count with their authoritative call, never a second time).
     pub patch_calls: usize,
@@ -774,6 +824,8 @@ pub struct FileChangeDiagnostics {
     pub structured_changes: usize,
     /// Typed changes sourced from patch declarations.
     pub declaration_changes: usize,
+    /// Typed changes sourced from file-history snapshots.
+    pub snapshot_changes: usize,
 }
 
 /// Provider-neutral family of a native tool lifecycle observation.
@@ -1107,7 +1159,7 @@ pub struct ParsedSession {
     pub field_derivations: Vec<FieldDerivation>,
     /// Adapter-asserted semantics, keyed by entry id.
     pub semantics: BTreeMap<EntryId, EntrySemantics>,
-    /// Evidence-bounded file changes owned by normalized tool calls.
+    /// Evidence-bounded file changes owned by normalized entries.
     pub file_changes: Vec<FileChangeObservation>,
     /// Coverage/accounting for [`ParsedSession::file_changes`].
     pub file_change_diagnostics: FileChangeDiagnostics,
@@ -1342,11 +1394,10 @@ impl ParsedSession {
         }
 
         // File-change evidence is session-level because its declaration and
-        // outcome may live on two different normalized entries. The owning
-        // entry must contain the named ToolUse; the change record must be its
-        // origin; and a distinct outcome record must map to a matching
-        // ToolResult. This keeps the projection source-addressable without
-        // pretending that a result record produced the call entry itself.
+        // outcome may live on two different normalized entries. Invocation
+        // evidence is owned by the named ToolUse; snapshot evidence is owned
+        // by its snapshot entry. The change record must be an owner origin,
+        // and a distinct invocation outcome must map to a matching ToolResult.
         let entry_by_id: BTreeMap<&EntryId, &LogEntry> = self
             .entries
             .iter()
@@ -1355,12 +1406,13 @@ impl ParsedSession {
         let mut seen_changes = BTreeSet::new();
         let mut covered_calls = BTreeSet::new();
         let mut unknown_outcome_calls = BTreeSet::new();
+        let mut snapshot_changes = 0_usize;
         let mut structured_changes = 0_usize;
         let mut declaration_changes = 0_usize;
         for change in &self.file_changes {
             let dedup_key = (
                 &change.owner,
-                change.call_id.as_str(),
+                change.operation_id.as_str(),
                 change.change_index,
                 &change.record,
                 change.path.as_str(),
@@ -1369,43 +1421,70 @@ impl ParsedSession {
             );
             if !seen_changes.insert(dedup_key) {
                 violations.push(format!(
-                    "file change for call {} on entry {} repeats {:?} {}",
-                    change.call_id, change.owner, change.kind, change.path
+                    "file change for operation {} on entry {} repeats {:?} {}",
+                    change.operation_id, change.owner, change.kind, change.path
                 ));
             }
-            covered_calls.insert((&change.owner, change.call_id.as_str()));
-            if change.outcome == FileChangeOutcome::Unknown {
-                unknown_outcome_calls.insert((&change.owner, change.call_id.as_str()));
-            }
             match change.evidence {
+                FileChangeEvidence::FileHistorySnapshot => snapshot_changes += 1,
                 FileChangeEvidence::StructuredLifecycle => structured_changes += 1,
                 FileChangeEvidence::PatchDeclaration => declaration_changes += 1,
+            }
+            if change.evidence != FileChangeEvidence::FileHistorySnapshot {
+                covered_calls.insert((&change.owner, change.operation_id.as_str()));
+                if change.outcome == FileChangeOutcome::Unknown {
+                    unknown_outcome_calls.insert((&change.owner, change.operation_id.as_str()));
+                }
             }
 
             check_artifact(&change.record, "file-change evidence", &mut violations);
             if !entry_ids.contains(&change.owner) {
                 violations.push(format!(
-                    "file change for call {} names missing owner {}",
-                    change.call_id, change.owner
+                    "file change for operation {} names missing owner {}",
+                    change.operation_id, change.owner
                 ));
                 continue;
             }
             match self.entry_origins.get(&change.owner) {
                 Some(origins) if origins.contains(&change.record) => {}
                 _ => violations.push(format!(
-                    "file change for call {} on entry {} names record #{} which is not one of the entry's origins",
-                    change.call_id, change.owner, change.record.ordinal
+                    "file change for operation {} on entry {} names record #{} which is not one of the entry's origins",
+                    change.operation_id, change.owner, change.record.ordinal
                 )),
             }
-            let owns_call = entry_by_id.get(&change.owner).is_some_and(|entry| {
-                matches!(entry, LogEntry::Assistant(message)
-                    if message.message.tool_uses().iter().any(|tool| tool.id == change.call_id))
-            });
-            if !owns_call {
-                violations.push(format!(
-                    "file change owner {} does not contain ToolUse {}",
-                    change.owner, change.call_id
-                ));
+            let owner_entry = entry_by_id.get(&change.owner).copied();
+            match change.evidence {
+                FileChangeEvidence::FileHistorySnapshot => {
+                    let owns_snapshot = matches!(owner_entry,
+                        Some(LogEntry::FileHistorySnapshot(snapshot))
+                            if snapshot.message_id == change.operation_id);
+                    if !owns_snapshot {
+                        violations.push(format!(
+                            "file change owner {} does not contain snapshot {}",
+                            change.owner, change.operation_id
+                        ));
+                    }
+                    if change.outcome_record.as_ref() != Some(&change.record)
+                        || change.outcome != FileChangeOutcome::Applied
+                        || change.observed_at.is_none()
+                        || change.native_version.is_none()
+                    {
+                        violations.push(format!(
+                            "snapshot file change {} lacks its applied record, time, or native version",
+                            change.operation_id
+                        ));
+                    }
+                }
+                FileChangeEvidence::StructuredLifecycle | FileChangeEvidence::PatchDeclaration => {
+                    let owns_call = matches!(owner_entry, Some(LogEntry::Assistant(message))
+                        if message.message.tool_uses().iter().any(|tool| tool.id == change.operation_id));
+                    if !owns_call {
+                        violations.push(format!(
+                            "file change owner {} does not contain ToolUse {}",
+                            change.owner, change.operation_id
+                        ));
+                    }
+                }
             }
 
             if let Some(outcome) = &change.outcome_record {
@@ -1415,7 +1494,7 @@ impl ParsedSession {
                 {
                     violations.push(format!(
                         "structured file change for call {} must use its lifecycle record as the outcome source",
-                        change.call_id
+                        change.operation_id
                     ));
                 }
                 if change.evidence == FileChangeEvidence::PatchDeclaration
@@ -1423,7 +1502,7 @@ impl ParsedSession {
                 {
                     violations.push(format!(
                         "declared file change for call {} cannot use its declaration as execution outcome evidence",
-                        change.call_id
+                        change.operation_id
                     ));
                 }
                 if outcome == &change.record {
@@ -1443,7 +1522,7 @@ impl ParsedSession {
                             entry_by_id.get(entry_id).is_some_and(|entry| {
                                 matches!(entry, LogEntry::User(message)
                                 if message.message.tool_results().iter().any(|result| {
-                                    result.tool_use_id == change.call_id
+                                    result.tool_use_id == change.operation_id
                                 }))
                             })
                         })
@@ -1451,19 +1530,19 @@ impl ParsedSession {
                     if !matching_result {
                         violations.push(format!(
                             "file change outcome record #{} does not produce ToolResult {}",
-                            outcome.ordinal, change.call_id
+                            outcome.ordinal, change.operation_id
                         ));
                     }
                 }
             } else if change.evidence == FileChangeEvidence::StructuredLifecycle {
                 violations.push(format!(
                     "structured file change for call {} is missing its lifecycle outcome source",
-                    change.call_id
+                    change.operation_id
                 ));
             } else if change.outcome != FileChangeOutcome::Unknown {
                 violations.push(format!(
                     "file change for call {} claims outcome {} without an outcome record",
-                    change.call_id,
+                    change.operation_id,
                     change.outcome.as_str()
                 ));
             }
@@ -1472,8 +1551,10 @@ impl ParsedSession {
         let expected_change_count = self
             .file_change_diagnostics
             .structured_changes
-            .saturating_add(self.file_change_diagnostics.declaration_changes);
+            .saturating_add(self.file_change_diagnostics.declaration_changes)
+            .saturating_add(self.file_change_diagnostics.snapshot_changes);
         if expected_change_count != self.file_changes.len()
+            || snapshot_changes != self.file_change_diagnostics.snapshot_changes
             || structured_changes != self.file_change_diagnostics.structured_changes
             || declaration_changes != self.file_change_diagnostics.declaration_changes
             || covered_calls.len() != self.file_change_diagnostics.calls_with_changes
@@ -1485,10 +1566,11 @@ impl ParsedSession {
                 != self.file_change_diagnostics.patch_calls
         {
             violations.push(format!(
-                "file-change diagnostics {:?} do not match {} observations across {} covered calls ({} structured, {} declarations, {} unknown-outcome calls)",
+                "file-change diagnostics {:?} do not match {} observations across {} covered calls ({} snapshots, {} structured, {} declarations, {} unknown-outcome calls)",
                 self.file_change_diagnostics,
                 self.file_changes.len(),
                 covered_calls.len(),
+                snapshot_changes,
                 structured_changes,
                 declaration_changes,
                 unknown_outcome_calls.len()
@@ -1764,6 +1846,33 @@ pub trait SourceProvider {
     /// semantics.
     fn parse(&self, key: &LogicalSessionKey) -> Result<ParsedSession, ProviderError>;
 
+    /// Parse a descriptor returned by this provider's current inventory.
+    ///
+    /// The default preserves the key-based contract. Filesystem providers
+    /// should override this when resolving a key would rescan the complete
+    /// store: corpus visitors already hold the discovered descriptor, and an
+    /// inventory rescan per session turns a linear analysis into quadratic
+    /// work.
+    fn parse_discovered(
+        &self,
+        descriptor: &SessionDescriptor,
+    ) -> Result<ParsedSession, ProviderError> {
+        self.parse(&descriptor.key)
+    }
+
+    /// Produce the compact file-change projection for one discovered
+    /// descriptor. The default derives it from a complete parse; providers
+    /// with a cheaper authoritative native record should override this so a
+    /// corpus-wide path lookup never constructs unrelated conversations.
+    fn file_change_projection(
+        &self,
+        descriptor: &SessionDescriptor,
+    ) -> Result<FileChangeProjection, ProviderError> {
+        Ok(FileChangeProjection::from_parsed(
+            self.parse_discovered(descriptor)?,
+        ))
+    }
+
     /// Project evidence for a session. Providers should override this with a
     /// cheap native metadata read when available; the default parses the
     /// complete bundle and derives cwd/git evidence without dropping unknown
@@ -1783,6 +1892,16 @@ pub trait SourceProvider {
     /// configurations with different safety limits must never share a
     /// cached parse.
     fn parse_cache_token(&self, key: &LogicalSessionKey) -> Result<String, ProviderError>;
+
+    /// Cache token for a descriptor returned by the current inventory.
+    /// Providers may override this alongside [`Self::parse_discovered`] to
+    /// avoid repeating discovery for every item in a corpus scan.
+    fn parse_cache_token_for_descriptor(
+        &self,
+        descriptor: &SessionDescriptor,
+    ) -> Result<String, ProviderError> {
+        self.parse_cache_token(&descriptor.key)
+    }
 
     /// Universal lossless tier: write a provider-defined bundle (with
     /// manifest) for the session. Must be lossless: the session's native
