@@ -295,6 +295,7 @@ impl SnatchServer {
             provider: resolution.key.provider.to_string(),
             qualified_id: resolution.key.to_string(),
             semantic_annotations: resolution.provider.capabilities().semantic_annotations,
+            pricing: resolution.provider.capabilities().pricing,
         })
     }
 
@@ -1342,37 +1343,46 @@ impl SnatchServer {
     }
 
     /// Get usage statistics for sessions, projects, or globally.
-    #[tool(description = "Get usage statistics for sessions, projects, or globally")]
+    #[tool(
+        description = "Get usage statistics for one session, a project, or globally. Session stats support provider selection or a provider-qualified id; provider project/global unions are deliberately separate and refused for now. Provider pricing policy is explicit, so an unpriced source never reports a fabricated zero."
+    )]
     async fn get_stats(&self, request: GetStatsRequest) -> ToolOutput {
-        let claude_dir = match self.get_claude_dir() {
-            Ok(dir) => dir,
-            Err(e) => return ToolOutput::error(e),
-        };
+        let GetStatsRequest {
+            session_id,
+            provider,
+            project,
+        } = request;
+        let provider_flags = provider.as_deref().unwrap_or(&[]);
+        let registry = self.provider_registry();
+        let provider_route = !provider_flags.is_empty()
+            || session_id
+                .as_deref()
+                .is_some_and(|reference| registry.looks_qualified(reference));
+        if provider_route && session_id.is_none() {
+            return ToolOutput::error(
+                "provider-routed stats currently requires session_id; project/global routing is a separate union slice",
+            );
+        }
+        if provider_route && project.is_some() {
+            return ToolOutput::error(
+                "provider-routed session stats does not accept project; refused rather than ignored",
+            );
+        }
 
-        let response = if let Some(session_id) = request.session_id {
-            let session = match claude_dir.find_session(&session_id) {
-                Ok(Some(s)) => s,
-                Ok(None) => return ToolOutput::error(format!("Session not found: {session_id}")),
-                Err(e) => return ToolOutput::error(format!("Failed to find session: {e}")),
+        if let Some(session_id) = session_id {
+            let resolved = match self.resolve_analytical_session(provider_flags, &session_id) {
+                Ok(resolved) => resolved,
+                Err(error) => return error,
             };
-
-            let entries = match session.parse_with_options(self.max_file_size) {
-                Ok(e) => e,
-                Err(e) => return ToolOutput::error(format!("Failed to parse session: {e}")),
-            };
-
-            let conversation = match Conversation::from_entries(entries) {
-                Ok(c) => c,
-                Err(e) => {
-                    return ToolOutput::error(format!("Failed to reconstruct conversation: {e}"))
-                }
-            };
-
-            let analytics = SessionAnalytics::from_conversation(&conversation);
-            let summary = analytics.summary_report();
-
-            StatsResponse {
+            let summary = resolved.analytics.summary_report();
+            let usage = crate::analysis::usage::provider_usage_summary(
+                &resolved.conversation,
+                resolved.pricing,
+            );
+            let response = StatsResponse {
                 scope: "session".to_string(),
+                provider: provider_route.then_some(resolved.provider),
+                qualified_id: provider_route.then_some(resolved.qualified_id),
                 sessions: Some(1),
                 total_tokens: summary.total_tokens,
                 input_tokens: summary.input_tokens,
@@ -1382,50 +1392,65 @@ impl SnatchServer {
                 total_processed_tokens: summary.total_processed_tokens,
                 messages: summary.total_messages,
                 tool_invocations: summary.tool_invocations,
-                estimated_cost: summary.estimated_cost,
-            }
-        } else {
-            let sessions = match claude_dir.all_sessions() {
-                Ok(s) => s,
-                Err(e) => return ToolOutput::error(format!("Failed to list sessions: {e}")),
+                estimated_cost: usage.pricing.estimated_cost,
+                pricing_policy: provider_route.then(|| usage.pricing.policy.to_string()),
+                unpriced_models: if provider_route {
+                    usage.pricing.unpriced_models
+                } else {
+                    Vec::new()
+                },
             };
+            return ToolOutput::json(&response).unwrap_or_else(|error| {
+                ToolOutput::error(format!("JSON serialization error: {error}"))
+            });
+        }
 
-            let (scope, target_sessions): (String, Vec<_>) = if let Some(project) = request.project
-            {
-                let filtered: Vec<_> = sessions
-                    .iter()
-                    .filter(|s| s.project_path().contains(&project))
-                    .collect();
-                (project, filtered)
-            } else {
-                ("global".to_string(), sessions.iter().collect())
-            };
+        let claude_dir = match self.get_claude_dir() {
+            Ok(dir) => dir,
+            Err(e) => return ToolOutput::error(e),
+        };
+        let sessions = match claude_dir.all_sessions() {
+            Ok(s) => s,
+            Err(e) => return ToolOutput::error(format!("Failed to list sessions: {e}")),
+        };
 
-            let summaries: Vec<_> = target_sessions
+        let (scope, target_sessions): (String, Vec<_>) = if let Some(project) = project {
+            let filtered: Vec<_> = sessions
                 .iter()
-                .filter_map(|session| {
-                    let entries = session.parse_with_options(self.max_file_size).ok()?;
-                    let conversation = Conversation::from_entries(entries).ok()?;
-                    let analytics = SessionAnalytics::from_conversation(&conversation);
-                    Some(analytics.summary_report())
-                })
+                .filter(|s| s.project_path().contains(&project))
                 .collect();
+            (project, filtered)
+        } else {
+            ("global".to_string(), sessions.iter().collect())
+        };
 
-            let agg = AnalyticsSummary::aggregate(&summaries);
+        let summaries: Vec<_> = target_sessions
+            .iter()
+            .filter_map(|session| {
+                let entries = session.parse_with_options(self.max_file_size).ok()?;
+                let conversation = Conversation::from_entries(entries).ok()?;
+                let analytics = SessionAnalytics::from_conversation(&conversation);
+                Some(analytics.summary_report())
+            })
+            .collect();
 
-            StatsResponse {
-                scope,
-                sessions: Some(target_sessions.len()),
-                total_tokens: agg.total_tokens,
-                input_tokens: agg.input_tokens,
-                output_tokens: agg.output_tokens,
-                cache_read_tokens: agg.cache_read_tokens,
-                cache_creation_tokens: agg.cache_creation_tokens,
-                total_processed_tokens: agg.total_processed_tokens,
-                messages: agg.total_messages,
-                tool_invocations: agg.tool_invocations,
-                estimated_cost: agg.estimated_cost,
-            }
+        let agg = AnalyticsSummary::aggregate(&summaries);
+        let response = StatsResponse {
+            scope,
+            provider: None,
+            qualified_id: None,
+            sessions: Some(target_sessions.len()),
+            total_tokens: agg.total_tokens,
+            input_tokens: agg.input_tokens,
+            output_tokens: agg.output_tokens,
+            cache_read_tokens: agg.cache_read_tokens,
+            cache_creation_tokens: agg.cache_creation_tokens,
+            total_processed_tokens: agg.total_processed_tokens,
+            messages: agg.total_messages,
+            tool_invocations: agg.tool_invocations,
+            estimated_cost: agg.estimated_cost,
+            pricing_policy: None,
+            unpriced_models: Vec::new(),
         };
 
         match ToolOutput::json(&response) {
@@ -5738,15 +5763,93 @@ mod tests {
         let sid = "66666666-aaaa-bbbb-cccc-dddddddddddd";
         let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
         let server = make_server(&tmp);
-        let text = unwrap_output(
+        let classic = unwrap_output(
             server
                 .get_stats(GetStatsRequest {
                     session_id: Some(sid.to_string()),
+                    provider: None,
                     project: None,
                 })
                 .await,
         );
-        assert!(!text.is_empty());
+        let classic: serde_json::Value = serde_json::from_str(&classic).unwrap();
+        assert!(classic.get("provider").is_none());
+        assert!(classic.get("qualified_id").is_none());
+        assert!(classic.get("pricing_policy").is_none());
+        assert!(classic.get("unpriced_models").is_none());
+
+        let routed = unwrap_output(
+            server
+                .get_stats(GetStatsRequest {
+                    session_id: Some(sid.to_string()),
+                    provider: Some(vec!["claude-code".into()]),
+                    project: None,
+                })
+                .await,
+        );
+        let mut routed: serde_json::Value = serde_json::from_str(&routed).unwrap();
+        assert_eq!(routed["provider"], "claude-code");
+        assert_eq!(routed["qualified_id"], format!("claude-code:{sid}"));
+        assert_eq!(routed["pricing_policy"], "known-model-rates");
+        let object = routed.as_object_mut().unwrap();
+        object.remove("provider");
+        object.remove("qualified_id");
+        object.remove("pricing_policy");
+        object.remove("unpriced_models");
+        assert_eq!(routed, classic);
+    }
+
+    #[cfg(feature = "codex")]
+    #[tokio::test]
+    async fn provider_stats_keep_canonical_usage_unpriced_and_validate_scope() {
+        let claude_id = "66666666-aaaa-bbbb-cccc-dddddddddddd";
+        let claude = setup_claude_dir(claude_id, PROJECT_PATH, &minimal_session_jsonl(claude_id));
+        let (codex, thread) = setup_codex_dir();
+        let server = make_server(&claude).with_codex_dir(codex.path());
+        let qualified = format!("codex:{thread}");
+
+        let output = unwrap_output(
+            server
+                .get_stats(GetStatsRequest {
+                    session_id: Some(qualified.clone()),
+                    provider: None,
+                    project: None,
+                })
+                .await,
+        );
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["provider"], "codex");
+        assert_eq!(value["qualified_id"], qualified);
+        assert_eq!(value["pricing_policy"], "unpriced");
+        assert!(value["estimated_cost"].is_null());
+        assert_eq!(value["unpriced_models"], serde_json::json!(["gpt-test"]));
+        assert_eq!(value["input_tokens"], 40);
+        assert_eq!(value["cache_read_tokens"], 60);
+        assert_eq!(value["output_tokens"], 25);
+        assert_eq!(value["total_tokens"], 65);
+        assert_eq!(value["total_processed_tokens"], 125);
+
+        let missing_session = server
+            .get_stats(GetStatsRequest {
+                session_id: None,
+                provider: Some(vec!["codex".into()]),
+                project: None,
+            })
+            .await;
+        assert!(format!("{missing_session:?}").contains("requires session_id"));
+
+        let mixed_scope = server
+            .get_stats(GetStatsRequest {
+                session_id: Some(format!("codex:{thread}")),
+                provider: Some(vec!["codex".into()]),
+                project: Some("ignored-project".into()),
+            })
+            .await;
+        let message = format!("{mixed_scope:?}");
+        assert!(
+            message.contains("does not accept project"),
+            "got: {message}"
+        );
     }
 
     #[tokio::test]

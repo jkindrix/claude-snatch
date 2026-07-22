@@ -17,19 +17,19 @@ commands/tools are routed today. This section is the DURABLE roadmap: the
 tier framework, the deliberate deferrals with their rationale, and the
 architectural gaps — content worth keeping in git so the plan survives even
 if the registry is lost (see "Registry Blast Radius" in CLAUDE.md). The
-per-tool lists below are a **dated snapshot (audited through the file-change
-routing slice on 2026-07-22), not a live ledger** — consult goal #19 for current status
-rather than trusting these lists to stay in lock-step.
+per-tool lists below are a **dated snapshot (audited through the session-stats
+routing slice on 2026-07-22), not a live ledger** — consult goal #19 for
+current status rather than trusting these lists to stay in lock-step.
 
 Goal #18 (Codex ingest + normalization + core surfaces + Phase C/D) shipped
 through commit `9031610`. Two honest framings of "how close to Claude↔Codex
 parity":
 - **By architectural effort** (ingest, normalize, core surfaces, the whole
   verification harness): ~70–75% — the hard, expensive part is done.
-- **By user-facing surface count:** 11 of 42 CLI commands route session data
+- **By user-facing surface count:** 14 of 42 CLI commands route session data
   through providers, 23 session-data commands remain unrouted, three
   registries are deliberately Claude-storage-scoped, and five commands are
-  provider-independent. MCP has 9 routed tools, 7 unrouted tools, and 3
+  provider-independent. MCP has 12 routed tools, 4 unrouted tools, and 3
   deliberately Claude-storage-scoped registry tools. Raw command counts do
   not measure depth, but they prevent broad parity claims from hiding omitted
   surfaces.
@@ -43,15 +43,16 @@ common model with full provenance, and the core surfaces: `list`, `info`,
 usage oracle + 20 negative controls + real-corpus conformance).
 
 **Tier 2 — analysis / search / insight layer: PARTIAL parity (largest gap).**
-Provider-qualified and explicitly selected routes now cover CLI `digest` and
-`thread`, plus MCP `get_tool_calls`, `get_session_digest`, and `thread_topic`.
+Provider-qualified and explicitly selected routes now cover CLI `digest`,
+`thread`, and session-mode `stats`, plus MCP `get_tool_calls`,
+`get_session_digest`, `thread_topic`, and session-mode `get_stats`.
 The complete CLI audit is:
 
-- **Already routed (13):** `list`, `info`, `providers`, `doctor`, `lessons`,
+- **Already routed (14):** `list`, `info`, `providers`, `doctor`, `lessons`,
   `digest`, `thread`, `timeline`, `messages`, `chunks`, `file-history`,
-  `file-evolution`, and `export`.
-- **Provider-neutral analysis/discovery candidates (11):** `recent`, `pick`,
-  `stats`, `summary`, `standup`, `diff`, `context`, `code`, `prompts`,
+  `file-evolution`, `stats`, and `export`.
+- **Provider-neutral analysis/discovery candidates (10):** `recent`, `pick`,
+  `summary`, `standup`, `diff`, `context`, `code`, `prompts`,
   `health`, and `priorities`. These share canonical entries or descriptors,
   but project/union modes still need provider-qualified identity, lineage,
   partial-success, and missing-capability semantics; they are not all thin
@@ -72,10 +73,9 @@ The complete CLI audit is:
   `config`, `completions`, `quickstart`, and `serve-mcp` do not select session
   providers (the cache manager itself already includes provider bundles).
 
-The MCP server exposes 19 tools, not 20. Eleven are provider-routed, five still
-directly use `ClaudeDirectory`/classic resolution (`get_stats`,
-`search_sessions`, `get_project_health`, `suggest_priorities`, and
-`get_event_context`), and
+The MCP server exposes 19 tools, not 20. Twelve are provider-routed, four still
+directly use `ClaudeDirectory`/classic resolution (`search_sessions`,
+`get_project_health`, `suggest_priorities`, and `get_event_context`), and
 three registry tools are explicitly Claude-storage-scoped. In particular,
 `get_event_context` does not gain provider support merely because its
 `session_id` is a string: it has no provider input and calls the classic
@@ -86,6 +86,14 @@ tool-lifecycle records first; build one evidence-bounded file-change layer for
 all file consumers; route canonical session analyses; then project unions and
 the shared search index. Source-mutating and live-tail capabilities require
 their own contracts and must not be implied by read-only ingestion support.
+
+The session-local stage is deliberately split after its opening audit:
+single-session `stats` is a canonical-entry consumer and routes now;
+single-session `prompts`/`code` need a content-provenance re-audit;
+`context`/`get_event_context` need semantic windows rather than the current
+adjacent-entry approximation; and `diff` needs a two-target/native-artifact
+contract. Multi-session prompt aggregation belongs with project unions, not
+the single-session slice.
 
 **Tier 3 — persistent registries: not unified.** `goals`/`notes`/
 `decisions` remain Claude-only storage under `~/.claude`. The Phase D plan
@@ -2107,6 +2115,34 @@ provenance failures: 6,809 patch calls, 7,056 typed changes (895 structured +
 6,161 declaration-derived), zero unparsed calls, zero unknown outcomes, and one
 explicitly counted partial item. Two physically unparseable records remain
 accounted for by ingestion diagnostics.
+
+#### Session-local stats routing (2026-07-22)
+
+CLI session-mode `stats` and MCP `get_stats` now resolve qualified ids and
+explicit provider selections through `ProviderRegistry`, use the
+provider-keyed complete `ParsedSession` cache, and reconstruct through
+`Conversation::from_parsed_session`. Canonical token totals come from the
+normalized conversation; native observations remain reconciliation evidence,
+not a second summation source. The provider capability declares pricing:
+known-rate providers retain their existing estimate, while an unpriced
+provider returns `estimated_cost: null`, its policy, and the model names that
+were deliberately excluded.
+
+This is intentionally a session-only slice. Project/global unions,
+billing-history modes, block/timeline/graph modes, `--costs`, and `--sparkline`
+are refused on provider-routed calls rather than ignored. Complete argument
+destructuring makes a future CLI field a compile-time classification task.
+Flagless Claude JSON omits the additive provider fields and is pinned equal to
+the routed-Claude numeric response after those fields are removed. CLI and MCP
+fixtures independently assert 40 fresh input, 60 cached input, 25 output, 125
+total processed tokens, and unavailable pricing from one native token record.
+A live 40 MB session also completed through the route with its native model
+reported unpriced.
+
+The slice also tightened the shared qualification predicate: a reference is
+qualified only when it contains a delimiter and its first segment names a
+registered provider. A bare native prefix equal to a provider name can no
+longer be misrouted as a malformed qualified id.
 
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".

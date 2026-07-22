@@ -780,6 +780,40 @@ fn test_stats_json_contains_token_counts() {
         .stdout(predicate::str::contains("65"));
 }
 
+#[test]
+fn provider_routed_claude_stats_preserve_flagless_numeric_output() {
+    let tmp = setup_fixture_dir();
+    let missing_codex = tmp.path().join("no-codex-home");
+    let run = |provider: bool| {
+        let mut cmd = snatch_cmd();
+        cmd.env("SNATCH_CLAUDE_DIR", tmp.path())
+            .env("CODEX_HOME", &missing_codex)
+            .args(["-o", "json", "stats", SESSION_ID]);
+        if provider {
+            cmd.args(["--provider", "claude-code"]);
+        }
+        let output = cmd.assert().success().get_output().stdout.clone();
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+    };
+
+    let classic = run(false);
+    assert!(classic.get("provider").is_none());
+    assert!(classic.get("qualified_id").is_none());
+    assert!(classic.get("pricing_policy").is_none());
+    assert!(classic.get("unpriced_models").is_none());
+
+    let mut routed = run(true);
+    assert_eq!(routed["provider"], "claude-code");
+    assert_eq!(routed["qualified_id"], format!("claude-code:{SESSION_ID}"));
+    assert_eq!(routed["pricing_policy"], "known-model-rates");
+    let object = routed.as_object_mut().unwrap();
+    object.remove("provider");
+    object.remove("qualified_id");
+    object.remove("pricing_policy");
+    object.remove("unpriced_models");
+    assert_eq!(routed, classic);
+}
+
 /// Regression for #25: `--models` must emit a per-model breakdown for a single
 /// session, and must not appear without the flag.
 #[test]
@@ -2981,6 +3015,78 @@ mod codex_normalization_cli {
             value["usage"]["pricing"]["unpriced_models"],
             serde_json::json!(["gpt-test"])
         );
+    }
+
+    #[test]
+    fn stats_routes_qualified_session_with_canonical_unpriced_usage() {
+        let claude = setup_fixture_dir();
+        let codex = slice_home();
+        let qualified = format!("codex:{THREAD}");
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "stats", &qualified])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["provider"], "codex");
+        assert_eq!(value["qualified_id"], qualified);
+        assert_eq!(value["pricing_policy"], "unpriced");
+        assert!(value["estimated_cost"].is_null());
+        assert_eq!(value["unpriced_models"], serde_json::json!(["gpt-test"]));
+        assert_eq!(value["input_tokens"], 40);
+        assert_eq!(value["cache_read_tokens"], 60);
+        assert_eq!(value["output_tokens"], 25);
+        assert_eq!(value["total_tokens"], 65);
+        assert_eq!(value["total_processed_tokens"], 125);
+        // Canonical message entries: prompt, reasoning, tool call, tool
+        // result, and assistant text. Turns are a separate semantic axis.
+        assert_eq!(value["messages"], 5);
+        assert_eq!(value["tool_invocations"], 1);
+    }
+
+    #[test]
+    fn provider_stats_require_a_session_and_refuse_every_unsupported_mode() {
+        let claude = setup_fixture_dir();
+        let codex = slice_home();
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["stats", "--provider", "codex"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("requires one session"));
+
+        let qualified = format!("codex:{THREAD}");
+        let unsupported: &[(&str, &[&str])] = &[
+            ("--project", &["--project", "some-project"]),
+            ("--global", &["--global"]),
+            ("--costs", &["--costs"]),
+            ("--blocks", &["--blocks"]),
+            ("--token-limit", &["--token-limit", "100"]),
+            ("--sparkline", &["--sparkline"]),
+            ("--history", &["--history"]),
+            ("--record", &["--record"]),
+            ("--weekly", &["--weekly"]),
+            ("--monthly", &["--monthly"]),
+            ("--csv", &["--csv"]),
+            ("--clear-history", &["--clear-history"]),
+            ("--timeline", &["--timeline"]),
+            ("--graph", &["--graph"]),
+        ];
+        for (flag, extra) in unsupported {
+            snatch_cmd()
+                .env("SNATCH_CLAUDE_DIR", claude.path())
+                .env("CODEX_HOME", codex.path())
+                .args(["stats", &qualified, "--provider", "codex"])
+                .args(*extra)
+                .assert()
+                .failure()
+                .stderr(predicate::str::contains(*flag));
+        }
     }
 
     #[test]

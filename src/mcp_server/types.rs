@@ -153,6 +153,10 @@ pub struct GetStatsRequest {
     /// Session ID for session-specific stats.
     pub session_id: Option<String>,
 
+    /// Provider selection for session-specific stats. Project/global provider
+    /// unions are intentionally deferred to their cross-session slice.
+    pub provider: Option<Vec<String>>,
+
     /// Project path filter for project-specific stats.
     pub project: Option<String>,
 }
@@ -161,6 +165,10 @@ pub struct GetStatsRequest {
 #[derive(Debug, Serialize)]
 pub struct StatsResponse {
     pub scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qualified_id: Option<String>,
     pub sessions: Option<usize>,
     pub total_tokens: u64,
     pub input_tokens: u64,
@@ -171,6 +179,10 @@ pub struct StatsResponse {
     pub messages: usize,
     pub tool_invocations: usize,
     pub estimated_cost: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pricing_policy: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unpriced_models: Vec<String>,
 }
 
 // ============================================================================

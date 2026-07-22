@@ -433,10 +433,9 @@ impl ProviderRegistry {
     /// contain `:` (Windows paths, project filters) without ever
     /// misrouting `provider:...` to the legacy Claude path.
     pub fn looks_qualified(&self, reference: &str) -> bool {
-        reference
-            .split(':')
-            .next()
-            .is_some_and(|first| self.entry(&ProviderId(first.to_string())).is_some())
+        reference.split_once(':').is_some_and(|(first, _)| {
+            !first.is_empty() && self.entry(&ProviderId(first.to_string())).is_some()
+        })
     }
 
     /// Resolve with the compatibility default: with no `--provider` flags an

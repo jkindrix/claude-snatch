@@ -67,6 +67,8 @@ pub struct ResolvedSession {
     /// Whether provider semantic annotations are complete enough to replace
     /// Claude-shaped prompt/turn heuristics.
     pub semantic_annotations: bool,
+    /// Provider-declared pricing policy for canonical usage.
+    pub pricing: crate::provider::ProviderPricing,
 }
 
 /// Resolve a session ID to a parsed conversation.
@@ -101,6 +103,7 @@ pub fn resolve_session(
         provider: "claude-code".to_string(),
         qualified_id: crate::provider::claude_code::logical_key(&session).to_string(),
         semantic_annotations: false,
+        pricing: crate::provider::ProviderPricing::KnownModelRates,
     })
 }
 
@@ -175,6 +178,7 @@ pub fn resolve_session_with_chain(
                     }
                     .to_string(),
                     semantic_annotations: false,
+                    pricing: crate::provider::ProviderPricing::KnownModelRates,
                 });
             }
         }

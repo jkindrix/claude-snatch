@@ -167,6 +167,7 @@ pub fn run(cli: &Cli, args: &PickArgs) -> Result<()> {
             let stats_args = crate::cli::StatsArgs {
                 project: None,
                 session: Some(session_id.to_string()),
+                provider: Vec::new(),
                 global: false,
                 tools: true,
                 models: false,

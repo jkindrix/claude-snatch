@@ -1129,6 +1129,12 @@ pub struct StatsArgs {
     /// Optional - shows global stats if not specified.
     pub session: Option<String>,
 
+    /// Route session stats through a session-log provider. Project/global,
+    /// billing-history, and graph modes remain on their classic routes until
+    /// their cross-session contracts are migrated.
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
+
     /// Show stats for specific project(s).
     ///
     /// Accepts a single project name, comma-separated list, or can be repeated.

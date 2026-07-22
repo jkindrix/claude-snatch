@@ -272,6 +272,14 @@ fn compute_stats_parallel(sessions: &[Session], max_file_size: Option<u64>) -> P
 
 /// Run the stats command.
 pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
+    let provider_route = !args.provider.is_empty()
+        || args.session.as_deref().is_some_and(|reference| {
+            reference.contains(':')
+                && super::helpers::provider_registry(cli).looks_qualified(reference)
+        });
+    if provider_route {
+        return run_provider_session(cli, args);
+    }
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
 
     // Handle cost history clear
@@ -404,7 +412,7 @@ pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
         let conversation = Conversation::from_entries(entries)?;
         let analytics = SessionAnalytics::from_conversation(&conversation);
 
-        output_session_stats(cli, args, &analytics)?;
+        output_session_stats(cli, args, &analytics, None)?;
     } else if let Some(project_filters) = &args.project {
         // Stats for specific project(s)
         let projects = claude_dir.projects()?;
@@ -460,15 +468,99 @@ pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
     Ok(())
 }
 
+struct ProviderSessionStats {
+    provider: String,
+    qualified_id: String,
+    usage: crate::analysis::usage::ProviderUsageSummary,
+}
+
+fn run_provider_session(cli: &Cli, args: &StatsArgs) -> Result<()> {
+    // Complete classification: adding a future StatsArgs field is a compile
+    // error here until its provider behavior is decided.
+    let StatsArgs {
+        session,
+        provider: _,
+        project,
+        global,
+        tools: _,
+        models: _,
+        costs,
+        blocks,
+        token_limit,
+        all: _,
+        sparkline,
+        history,
+        days: _,
+        record,
+        weekly,
+        monthly,
+        csv,
+        clear_history,
+        timeline,
+        granularity: _,
+        graph,
+        graph_width: _,
+    } = args;
+    super::helpers::refuse_unsupported_flags(
+        "provider-routed session stats",
+        &[
+            ("--project", project.is_some()),
+            ("--global", *global),
+            ("--costs", *costs),
+            ("--blocks", *blocks),
+            ("--token-limit", token_limit.is_some()),
+            ("--sparkline", *sparkline),
+            ("--history", *history),
+            ("--record", *record),
+            ("--weekly", *weekly),
+            ("--monthly", *monthly),
+            ("--csv", *csv),
+            ("--clear-history", *clear_history),
+            ("--timeline", *timeline),
+            ("--graph", *graph),
+        ],
+    )?;
+    let reference = session.as_deref().ok_or_else(|| SnatchError::InvalidArgument {
+        name: "session".into(),
+        reason: "provider-routed stats currently requires one session; project/global routing is a separate union slice".into(),
+    })?;
+    let registry = super::helpers::provider_registry(cli);
+    let resolution = registry.resolve_with_default_policy(&args.provider, reference)?;
+    let parsed = crate::provider::registry::cached_parsed_session(
+        crate::cache::global_cache(),
+        resolution.provider,
+        &resolution.key,
+    )?;
+    let conversation = Conversation::from_parsed_session(parsed)?;
+    let analytics = SessionAnalytics::from_conversation(&conversation);
+    let context = ProviderSessionStats {
+        provider: resolution.key.provider.to_string(),
+        qualified_id: resolution.key.to_string(),
+        usage: crate::analysis::usage::provider_usage_summary(
+            &conversation,
+            resolution.provider.capabilities().pricing,
+        ),
+    };
+    output_session_stats(cli, args, &analytics, Some(&context))
+}
+
 /// Output session statistics.
-fn output_session_stats(cli: &Cli, args: &StatsArgs, analytics: &SessionAnalytics) -> Result<()> {
+fn output_session_stats(
+    cli: &Cli,
+    args: &StatsArgs,
+    analytics: &SessionAnalytics,
+    provider: Option<&ProviderSessionStats>,
+) -> Result<()> {
     let summary = analytics.summary_report();
+    let estimated_cost = provider
+        .map(|context| context.usage.pricing.estimated_cost)
+        .unwrap_or(summary.estimated_cost);
 
     match cli.effective_output() {
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&StatsOutput::from_session(analytics))?
+                serde_json::to_string_pretty(&StatsOutput::from_session(analytics, provider))?
             );
         }
         OutputFormat::Tsv => {
@@ -482,8 +574,13 @@ fn output_session_stats(cli: &Cli, args: &StatsArgs, analytics: &SessionAnalytic
             println!("messages\t{}", summary.total_messages);
             println!("tool_invocations\t{}", summary.tool_invocations);
             println!("cache_hit_rate\t{:.2}", summary.cache_hit_rate);
-            if let Some(cost) = summary.estimated_cost {
+            if let Some(cost) = estimated_cost {
                 println!("estimated_cost\t{cost:.4}");
+            }
+            if let Some(context) = provider {
+                println!("provider\t{}", context.provider);
+                println!("qualified_id\t{}", context.qualified_id);
+                println!("pricing_policy\t{}", context.usage.pricing.policy);
             }
         }
         OutputFormat::Compact => {
@@ -492,8 +589,13 @@ fn output_session_stats(cli: &Cli, args: &StatsArgs, analytics: &SessionAnalytic
                 summary.total_tokens,
                 summary.total_messages,
                 summary.tool_invocations,
-                summary.cost_string()
+                estimated_cost
+                    .map(|cost| format!("${cost:.4}"))
+                    .unwrap_or_else(|| "N/A".into())
             );
+            if let Some(context) = provider {
+                println!("provider:{} id:{}", context.provider, context.qualified_id);
+            }
         }
         OutputFormat::Text => {
             println!("Session Statistics");
@@ -598,7 +700,21 @@ fn output_session_stats(cli: &Cli, args: &StatsArgs, analytics: &SessionAnalytic
             }
 
             // Cost
-            println!("Estimated Cost: {}", summary.cost_string());
+            let cost = estimated_cost
+                .map(|cost| format!("${cost:.4}"))
+                .unwrap_or_else(|| "N/A".into());
+            println!("Estimated Cost: {cost}");
+            if let Some(context) = provider {
+                println!("Provider: {}", context.provider);
+                println!("Qualified ID: {}", context.qualified_id);
+                println!("Pricing Policy: {}", context.usage.pricing.policy);
+                if !context.usage.pricing.unpriced_models.is_empty() {
+                    println!(
+                        "Cost Coverage: unavailable for {}",
+                        context.usage.pricing.unpriced_models.join(", ")
+                    );
+                }
+            }
 
             // Errors
             if summary.error_count > 0 {
@@ -1391,6 +1507,10 @@ fn output_blocks_stats(cli: &Cli, args: &StatsArgs, sessions: &[Session]) -> Res
 #[derive(Debug, serde::Serialize)]
 struct StatsOutput {
     scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    qualified_id: Option<String>,
     sessions: Option<usize>,
     total_tokens: u64,
     input_tokens: u64,
@@ -1402,13 +1522,19 @@ struct StatsOutput {
     tool_invocations: usize,
     cache_hit_rate: Option<f64>,
     estimated_cost: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pricing_policy: Option<&'static str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unpriced_models: Vec<String>,
 }
 
 impl StatsOutput {
-    fn from_session(analytics: &SessionAnalytics) -> Self {
+    fn from_session(analytics: &SessionAnalytics, provider: Option<&ProviderSessionStats>) -> Self {
         let summary = analytics.summary_report();
         Self {
             scope: "session".to_string(),
+            provider: provider.map(|context| context.provider.clone()),
+            qualified_id: provider.map(|context| context.qualified_id.clone()),
             sessions: Some(1),
             total_tokens: summary.total_tokens,
             input_tokens: summary.input_tokens,
@@ -1419,13 +1545,21 @@ impl StatsOutput {
             messages: summary.total_messages,
             tool_invocations: summary.tool_invocations,
             cache_hit_rate: Some(summary.cache_hit_rate),
-            estimated_cost: summary.estimated_cost,
+            estimated_cost: provider
+                .map(|context| context.usage.pricing.estimated_cost)
+                .unwrap_or(summary.estimated_cost),
+            pricing_policy: provider.map(|context| context.usage.pricing.policy),
+            unpriced_models: provider
+                .map(|context| context.usage.pricing.unpriced_models.clone())
+                .unwrap_or_default(),
         }
     }
 
     fn from_project(analytics: &ProjectAnalytics, scope: &str) -> Self {
         Self {
             scope: scope.to_string(),
+            provider: None,
+            qualified_id: None,
             sessions: Some(analytics.session_count),
             total_tokens: analytics.total_usage.usage.work_tokens(),
             input_tokens: analytics.total_usage.usage.input_tokens,
@@ -1445,6 +1579,8 @@ impl StatsOutput {
             tool_invocations: analytics.message_counts.tool_uses,
             cache_hit_rate: None,
             estimated_cost: analytics.total_usage.estimated_cost,
+            pricing_policy: None,
+            unpriced_models: Vec::new(),
         }
     }
 }
@@ -2464,7 +2600,7 @@ mod tests {
     #[test]
     fn test_stats_output_from_session() {
         let analytics = SessionAnalytics::default();
-        let output = StatsOutput::from_session(&analytics);
+        let output = StatsOutput::from_session(&analytics, None);
 
         assert_eq!(output.scope, "session");
         assert_eq!(output.sessions, Some(1));
@@ -2493,6 +2629,8 @@ mod tests {
     fn test_stats_output_serialization() {
         let output = StatsOutput {
             scope: "session".to_string(),
+            provider: None,
+            qualified_id: None,
             sessions: Some(5),
             total_tokens: 1000,
             input_tokens: 600,
@@ -2504,12 +2642,18 @@ mod tests {
             tool_invocations: 3,
             cache_hit_rate: Some(0.75),
             estimated_cost: Some(0.05),
+            pricing_policy: None,
+            unpriced_models: Vec::new(),
         };
 
         let json = serde_json::to_string(&output).unwrap();
         assert!(json.contains("\"scope\":\"session\""));
         assert!(json.contains("\"total_tokens\":1000"));
         assert!(json.contains("\"cache_hit_rate\":0.75"));
+        assert!(!json.contains("\"provider\""));
+        assert!(!json.contains("\"qualified_id\""));
+        assert!(!json.contains("\"pricing_policy\""));
+        assert!(!json.contains("\"unpriced_models\""));
     }
 
     #[test]

@@ -1018,6 +1018,15 @@ fn qualified_id_naming_unavailable_or_unknown_provider_is_precise() {
 }
 
 #[test]
+fn registered_provider_name_without_delimiter_is_not_a_qualified_id() {
+    let r = matrix_registry();
+    assert!(!r.looks_qualified("fake"));
+    assert!(!r.looks_qualified("small"));
+    assert!(r.looks_qualified("fake:install-a:42"));
+    assert!(r.looks_qualified("small:we%3Aird"));
+}
+
+#[test]
 fn native_ids_with_encoded_colons_resolve_via_qualified_form() {
     let r = matrix_registry();
     // small owns native id "we:ird"; its qualified form escapes the colon.
