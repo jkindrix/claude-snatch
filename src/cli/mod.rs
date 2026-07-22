@@ -1508,7 +1508,7 @@ pub enum IndexSubcommand {
     /// Clear the search index.
     Clear,
 
-    /// Search the index (faster than regex search).
+    /// Search the committed provider index.
     Search(IndexSearchArgs),
 }
 

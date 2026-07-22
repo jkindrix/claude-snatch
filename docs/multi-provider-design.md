@@ -2579,18 +2579,25 @@ occurrence counting. This deliberately makes projected block/emission
 boundaries authoritative: equal repeated segments remain independent, tool
 results carried by user entries participate in tool scope, and binary images
 remain omitted with coverage rather than searched as base64. Unicode case and
-word-boundary handling is character-safe. Schema version 3 adds a validated
-normalized `entry_order`; escaped `EntryId` strings remain identities and are
-never misused as sortable numeric ordinals.
+word-boundary handling is character-safe. Schema version 4 adds a validated
+normalized `entry_order` plus completeness markers for safe literal
+acceleration; escaped `EntryId` strings remain identities and are never
+misused as sortable numeric ordinals.
 
-The indexed query engine narrows only exact typed Tantivy fields (provider,
+The indexed query engine narrows exact typed Tantivy fields (provider,
 qualified session/root, project key, message type, time, activity, spawn),
 then applies all substring/semantic filters and positive/exclusion matching to
-the stored payload—no user filter is interpolated into query syntax and no
-tokenized full-text term is trusted as a necessary candidate. Candidate
-payloads stream one document at a time with Tantivy's deleted-document bitset
-enforced; the query retains only the bounded `offset + limit` result window
-rather than materializing every candidate projection. Results expose
+the stored payload—no user filter is interpolated into query syntax. A plain
+ASCII-alphanumeric regex of at least three bytes may additionally narrow on
+lowercased token substrings. Completeness does not rest on Tantivy's default
+tokenizer: each semantic scope records a fallback marker for tokenizer-dropped
+40-byte tokens and non-ASCII alphanumeric tokens (needed for Unicode-aware
+case folding), and those documents remain candidates. Metacharacter regex and
+fuzzy matching deliberately retain the exact filtered stored-projection scan.
+Candidate payloads stream one document at a time with Tantivy's
+deleted-document bitset enforced; the query retains only the bounded `offset +
+limit` result window rather than materializing every candidate projection.
+Results expose
 matching-line and occurrence cardinality separately, use deterministic source
 or relevance ordering with bounded pages/windows, keep specifically selected
 sessions content-complete, and default cross-session queries to new,
@@ -2657,8 +2664,40 @@ pagination and qualified provenance, qualified-id routing without `provider`, ty
 chain-aware versus single-session search, and invalid-option refusal. The
 cross-provider test removes both source roots after building and still queries
 successfully, proving that request execution performs no live source
-rediscovery or parsing. Unit 6 (real-corpus performance/parity exit audit) is
-next.
+rediscovery or parsing.
+
+Unit 6 is complete. The exit audit used a disposable configured index rather
+than the user's default cache and measured 15,946 logical sessions / 3,596,819
+normalized entries with complete two-provider coverage. A full explicit
+rebuild took 91.27 seconds, peaked at about 3.18 GiB RSS, and produced a 2.6
+GiB snapshot. This remains an intentionally heavyweight maintenance operation.
+The incremental union update took 2.68 seconds while replacing the one active
+session; before the manifest-query fix, the same shape took 23.70 seconds.
+Manifest and build reads now query their exact `doc_kind` term instead of
+loading every entry document.
+
+The common plain-literal union query took 0.36 seconds instead of 53.14
+seconds, while retaining complete coverage (5,949 matching lines / 6,976
+occurrences across 918 sessions at the final live-corpus measurement). The
+accelerator is adversarially tested against long tokenizer-dropped identifiers,
+wrong semantic scopes, exact-case filtering, and Unicode case-fold equivalents;
+the exact stored-projection matcher remains authoritative. A metacharacter
+regex over the entire 3.6-million-entry snapshot still took 12.50 seconds and
+about 1.74 GiB RSS. The same query with `--project claude-snatch` took 0.75
+seconds after project-only selection was corrected to prefilter exact committed
+session keys. This is the supported progressive-narrowing contract; arbitrary
+regex and fuzzy search are not falsely advertised as constant-time.
+
+Routed-Claude parity was rechecked on a real selected session for a literal,
+metacharacter regex, Unicode-insensitive case, thinking, tools, and assistant
+type filtering. Direct and indexed occurrence totals matched in all six cases
+(including 595/595, 678/678, 51/51, and 3,963/3,963). Ordinary JSON result
+pages no longer repeat the complete per-session aggregation table: a 20-result
+union page fell from roughly 75 KiB to 31 KiB, while explicit count/files/
+aggregate modes retain their requested summaries. Combined with Unit 5's
+source-deletion test and the bounded result heap, these measurements close the
+P1.5 no-rediscovery, performance, parity, cross-provider, and output-economy
+exit requirements.
 
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".

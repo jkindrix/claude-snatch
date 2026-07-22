@@ -270,7 +270,19 @@ pub(super) fn output_search_response(
     response: &crate::index::query::IndexedSearchResponse,
 ) -> Result<()> {
     match cli.effective_output() {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(response)?),
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "total_matches": response.total_matches,
+                "total_occurrences": response.total_occurrences,
+                "sessions_matched": response.sessions_matched,
+                "returned": response.returned,
+                "offset": response.offset,
+                "limit": response.limit,
+                "matches": &response.matches,
+                "coverage": &response.coverage,
+            }))?
+        ),
         OutputFormat::Tsv => {
             println!("provider\tsession\tproject\tentry\ttype\tlocation\tscore\tline");
             for hit in &response.matches {

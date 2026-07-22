@@ -762,10 +762,7 @@ fn indexed_session_filter(
         .as_deref()
         .map(|reference| super::index::resolve_indexed_session(index, selection, reference))
         .transpose()?;
-    let restrict = resolved_session.is_some()
-        || args.since.is_some()
-        || args.until.is_some()
-        || args.recent.is_some();
+    let restrict = indexed_search_needs_session_prefilter(args, resolved_session.is_some());
     if !restrict {
         return Ok((Vec::new(), false, false));
     }
@@ -823,6 +820,14 @@ fn indexed_session_filter(
     keys.dedup();
     let scope_filter = resolved_session.is_none() || keys.is_empty();
     Ok((keys, true, scope_filter))
+}
+
+fn indexed_search_needs_session_prefilter(args: &SearchArgs, resolved_session: bool) -> bool {
+    resolved_session
+        || args.project.is_some()
+        || args.since.is_some()
+        || args.until.is_some()
+        || args.recent.is_some()
 }
 
 fn indexed_matcher(args: &SearchArgs) -> Result<ExactSearchMatcher> {
@@ -1862,7 +1867,27 @@ fn format_match_label(entry_type: &str, location: &str) -> String {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::trivial_regex)]
+    use clap::Parser as _;
+
     use super::*;
+
+    #[test]
+    fn project_alone_activates_indexed_session_prefilter() {
+        let cli = crate::cli::Cli::try_parse_from([
+            "snatch",
+            "search",
+            "needle",
+            "--provider",
+            "all",
+            "--project",
+            "target-project",
+        ])
+        .unwrap();
+        let Some(crate::cli::Commands::Search(args)) = cli.command else {
+            panic!("expected search command");
+        };
+        assert!(indexed_search_needs_session_prefilter(&args, false));
+    }
 
     #[test]
     fn test_matches_git_branch_exact() {

@@ -22,6 +22,22 @@ use super::provider::{
     PROVIDER_INDEX_SCHEMA_VERSION,
 };
 
+/// Return a lowercase literal that Tantivy can use as a complete candidate
+/// accelerator. A plain ASCII-alphanumeric regex cannot cross tokenizer
+/// boundaries, so every exact match must occur inside one indexed token (or
+/// inside a tokenizer-dropped long token). The schema's fallback marker also
+/// retains non-ASCII tokens for Unicode-aware case-insensitive regex.
+fn literal_candidate_accelerator(matcher: &ExactSearchMatcher) -> Option<String> {
+    let ExactSearchMatcher::Regex(regex) = matcher else {
+        return None;
+    };
+    let pattern = regex.as_str();
+    (pattern.len() >= 3
+        && pattern.is_ascii()
+        && pattern.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+    .then(|| pattern.to_ascii_lowercase())
+}
+
 /// Maximum number of results returned in one page.
 pub const MAX_INDEXED_SEARCH_PAGE_SIZE: usize = 10_000;
 /// Maximum ordered result window retained while producing a deterministic page.
@@ -705,6 +721,7 @@ impl ProviderSearchIndex {
         } else {
             Some(false)
         };
+        let literal_token_contains = literal_candidate_accelerator(&request.matcher);
         let candidate_filter = IndexedEntryCandidateFilter {
             providers: searched.clone(),
             session_keys,
@@ -723,6 +740,8 @@ impl ProviderSearchIndex {
                 .filters
                 .timestamp_until
                 .map(|value| value.timestamp_millis()),
+            literal_scope: literal_token_contains.as_ref().map(|_| request.scope),
+            literal_token_contains,
         };
 
         let mut total_matches = 0_usize;
@@ -872,7 +891,7 @@ impl ProviderSearchIndex {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use chrono::TimeZone as _;
     use tempfile::tempdir;
@@ -1064,6 +1083,104 @@ mod tests {
         assert_eq!(index.query(&query).unwrap().total_matches, 2);
         query.filters.restrict_session_keys = true;
         assert_eq!(index.query(&query).unwrap().total_matches, 0);
+    }
+
+    #[test]
+    fn literal_accelerator_narrows_candidates_without_losing_long_tokens() {
+        let dir = tempdir().unwrap();
+        let index = ProviderSearchIndex::open(dir.path().join("index")).unwrap();
+        let session = key("alpha", "literal-candidates");
+        let long_token = format!("{}provider{}", "a".repeat(40), "z".repeat(40));
+        let entries = vec![
+            entry(
+                &session,
+                0,
+                SearchSegmentKind::AssistantText,
+                "myprovidername",
+            ),
+            entry(&session, 1, SearchSegmentKind::AssistantText, "unrelated"),
+            entry(&session, 2, SearchSegmentKind::AssistantText, &long_token),
+            entry(
+                &session,
+                3,
+                SearchSegmentKind::AssistantText,
+                "MYPROVIDERNAME",
+            ),
+            entry(
+                &session,
+                4,
+                SearchSegmentKind::ToolResult,
+                "tool-provider-result",
+            ),
+            entry(
+                &session,
+                5,
+                SearchSegmentKind::AssistantText,
+                "Unicode fold: ſſſ",
+            ),
+        ];
+        index
+            .apply_generation(
+                &[batch(&session, "g1", entries)],
+                &[],
+                &build("g1", &["alpha"], &["alpha"], Vec::new()),
+            )
+            .unwrap();
+
+        let mut default_candidates = BTreeSet::new();
+        index
+            .visit_candidate_entries(
+                &IndexedEntryCandidateFilter {
+                    providers: vec!["alpha".to_string()],
+                    literal_token_contains: Some("provider".to_string()),
+                    literal_scope: Some(SearchScope::Default),
+                    ..IndexedEntryCandidateFilter::default()
+                },
+                |candidate| {
+                    default_candidates.insert(candidate.entry_order);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            default_candidates,
+            BTreeSet::from([0, 2, 3, 5]),
+            "the term query must narrow unrelated/tool entries while long-token and Unicode-case fallbacks remain complete"
+        );
+
+        let mut tool_candidates = BTreeSet::new();
+        index
+            .visit_candidate_entries(
+                &IndexedEntryCandidateFilter {
+                    providers: vec!["alpha".to_string()],
+                    literal_token_contains: Some("provider".to_string()),
+                    literal_scope: Some(SearchScope::Tools),
+                    ..IndexedEntryCandidateFilter::default()
+                },
+                |candidate| {
+                    tool_candidates.insert(candidate.entry_order);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(tool_candidates, BTreeSet::from([4]));
+
+        let exact = index.query(&request("alpha", "provider")).unwrap();
+        assert_eq!(exact.total_matches, 2);
+        assert!(exact.matches.iter().any(|result| result.entry_order == 2));
+
+        let regex_fallback = index.query(&request("alpha", "prov.der")).unwrap();
+        assert_eq!(regex_fallback.total_matches, 2);
+
+        let mut insensitive = request("alpha", "provider");
+        insensitive.matcher = ExactSearchMatcher::regex("provider", true).unwrap();
+        assert_eq!(index.query(&insensitive).unwrap().total_matches, 3);
+
+        let mut unicode_fold = request("alpha", "sss");
+        unicode_fold.matcher = ExactSearchMatcher::regex("sss", true).unwrap();
+        let unicode_fold = index.query(&unicode_fold).unwrap();
+        assert_eq!(unicode_fold.total_matches, 1);
+        assert_eq!(unicode_fold.matches[0].entry_order, 5);
     }
 
     #[test]

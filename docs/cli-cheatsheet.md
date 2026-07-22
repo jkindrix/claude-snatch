@@ -124,21 +124,28 @@ snatch search "pattern" --sort        # sort by relevance
 snatch search "pattern" --min-tokens 500   # minimum token count
 snatch search "pattern" --max-tokens 10000 # maximum token count
 
-Full-text index (alias: idx) — faster than regex
+Provider search index (alias: idx)
 
 snatch index build                    # build/update the search index
+snatch index build --provider all     # update every provider partition
 snatch index build -p myproject       # build index for one project
 snatch index rebuild                  # rebuild from scratch
-snatch index rebuild -p myproject     # rebuild for one project
+snatch index rebuild --provider all   # replace with a complete union snapshot
 snatch index status                   # show index status
 snatch index clear                    # clear the index
 snatch index search "query"           # search the index
+snatch search "query" --provider all  # provider-aware indexed search
+snatch search "regex.*" --provider all -p myproject  # narrow complex regex first
 snatch index search "query" -n 20     # limit results
 snatch index search "query" -t user   # filter by message type
 snatch index search "query" -m opus   # filter by model
 snatch index search "query" -s <ID>   # filter by session
 snatch index search "query" --tool-name Bash  # filter by tool
 snatch index search "query" --thinking  # include thinking blocks
+
+Plain ASCII literals use a safe token accelerator. Complex regex and fuzzy
+matching remain exact stored-projection scans; narrow them by project,
+session, date, or recent-session selection on large snapshots.
 
 ---
 Exporting

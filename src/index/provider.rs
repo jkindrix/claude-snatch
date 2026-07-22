@@ -16,14 +16,15 @@ use chrono::{DateTime, Utc};
 use parking_lot::{RwLock, RwLockWriteGuard};
 use serde::{Deserialize, Serialize};
 use tantivy::collector::DocSetCollector;
-use tantivy::query::{AllQuery, BooleanQuery, EnableScoring, Query, RangeQuery, TermQuery};
+use tantivy::query::{BooleanQuery, EnableScoring, Query, RangeQuery, RegexQuery, TermQuery};
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, Value, FAST, INDEXED, STORED, STRING, TEXT,
 };
 use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 
 use crate::analysis::search::{
-    project_entry_for_search, EntrySearchProjection, SearchProjectionCoverage, SearchSegmentKind,
+    project_entry_for_search, EntrySearchProjection, SearchProjectionCoverage, SearchScope,
+    SearchSegmentKind,
 };
 use crate::error::{Result, SnatchError};
 use crate::model::LogEntry;
@@ -32,7 +33,7 @@ use crate::provider::{
 };
 
 /// Current provider-index schema. A change requires an explicit rebuild.
-pub const PROVIDER_INDEX_SCHEMA_VERSION: u64 = 3;
+pub const PROVIDER_INDEX_SCHEMA_VERSION: u64 = 4;
 
 const WRITER_MEMORY_BYTES: usize = 50_000_000;
 
@@ -56,6 +57,9 @@ mod fields {
     pub const TEXT: &str = "text";
     pub const REASONING: &str = "reasoning";
     pub const TOOL_TEXT: &str = "tool_text";
+    pub const TEXT_HAS_LITERAL_FALLBACK: &str = "text_has_literal_fallback";
+    pub const REASONING_HAS_LITERAL_FALLBACK: &str = "reasoning_has_literal_fallback";
+    pub const TOOL_HAS_LITERAL_FALLBACK: &str = "tool_has_literal_fallback";
     pub const PAYLOAD: &str = "payload";
 }
 
@@ -648,6 +652,9 @@ struct ProviderIndexFields {
     text: Field,
     reasoning: Field,
     tool_text: Field,
+    text_has_literal_fallback: Field,
+    reasoning_has_literal_fallback: Field,
+    tool_has_literal_fallback: Field,
     payload: Field,
 }
 
@@ -680,6 +687,9 @@ impl ProviderIndexFields {
             text: field(fields::TEXT)?,
             reasoning: field(fields::REASONING)?,
             tool_text: field(fields::TOOL_TEXT)?,
+            text_has_literal_fallback: field(fields::TEXT_HAS_LITERAL_FALLBACK)?,
+            reasoning_has_literal_fallback: field(fields::REASONING_HAS_LITERAL_FALLBACK)?,
+            tool_has_literal_fallback: field(fields::TOOL_HAS_LITERAL_FALLBACK)?,
             payload: field(fields::PAYLOAD)?,
         })
     }
@@ -706,8 +716,20 @@ fn build_schema() -> Schema {
     builder.add_text_field(fields::TEXT, TEXT);
     builder.add_text_field(fields::REASONING, TEXT);
     builder.add_text_field(fields::TOOL_TEXT, TEXT);
+    builder.add_u64_field(fields::TEXT_HAS_LITERAL_FALLBACK, INDEXED | FAST);
+    builder.add_u64_field(fields::REASONING_HAS_LITERAL_FALLBACK, INDEXED | FAST);
+    builder.add_u64_field(fields::TOOL_HAS_LITERAL_FALLBACK, INDEXED | FAST);
     builder.add_text_field(fields::PAYLOAD, STORED);
     builder.build()
+}
+
+/// Whether an entry needs the completeness fallback for plain-literal token
+/// acceleration. Tantivy drops tokens at 40 UTF-8 bytes, and Unicode-aware
+/// case-insensitive regex can match non-ASCII case-fold equivalents that an
+/// ASCII lowercase token query cannot enumerate.
+fn has_literal_fallback_token(text: &str) -> bool {
+    text.split(|character: char| !character.is_alphanumeric())
+        .any(|token| token.len() >= 40 || !token.is_ascii())
 }
 
 pub(super) fn rebuild_lock_path(path: &Path) -> Result<PathBuf> {
@@ -889,6 +911,13 @@ pub(crate) struct IndexedEntryCandidateFilter {
     pub spawned: Option<bool>,
     pub timestamp_from_millis: Option<i64>,
     pub timestamp_until_millis: Option<i64>,
+    /// Lowercase ASCII-alphanumeric literal proven necessary by the exact
+    /// regex. Tantivy narrows matching tokens; entries with tokenizer-dropped
+    /// or Unicode-case-sensitive tokens remain explicit fallback candidates.
+    pub literal_token_contains: Option<String>,
+    /// Exact semantic scope controlling which token fields may satisfy the
+    /// optional literal accelerator.
+    pub literal_scope: Option<SearchScope>,
 }
 
 /// One bounded writer transaction for a provider-index generation.
@@ -1276,20 +1305,37 @@ impl ProviderSearchIndex {
         if let Some(branch) = &entry.git_branch {
             document.add_text(self.fields.git_branch, branch);
         }
+        let mut text_has_literal_fallback = false;
+        let mut reasoning_has_literal_fallback = false;
+        let mut tool_has_literal_fallback = false;
         for segment in &entry.projection.segments {
             match segment.kind {
-                kind if kind.is_text() => document.add_text(self.fields.text, &segment.text),
+                kind if kind.is_text() => {
+                    document.add_text(self.fields.text, &segment.text);
+                    text_has_literal_fallback |= has_literal_fallback_token(&segment.text);
+                }
                 SearchSegmentKind::Reasoning => {
                     document.add_text(self.fields.reasoning, &segment.text);
+                    reasoning_has_literal_fallback |= has_literal_fallback_token(&segment.text);
                 }
                 kind if kind.is_tool() => {
                     document.add_text(self.fields.tool_text, &segment.text);
+                    tool_has_literal_fallback |= has_literal_fallback_token(&segment.text);
                 }
                 _ => {}
             }
             if let Some(name) = &segment.tool_name {
                 document.add_text(self.fields.tool_name, name);
             }
+        }
+        if text_has_literal_fallback {
+            document.add_u64(self.fields.text_has_literal_fallback, 1);
+        }
+        if reasoning_has_literal_fallback {
+            document.add_u64(self.fields.reasoning_has_literal_fallback, 1);
+        }
+        if tool_has_literal_fallback {
+            document.add_u64(self.fields.tool_has_literal_fallback, 1);
         }
         let payload = serde_json::to_string(entry)?;
         document.add_text(self.fields.payload, payload);
@@ -1471,8 +1517,12 @@ impl ProviderSearchIndex {
         T: for<'de> Deserialize<'de>,
     {
         let searcher = self.reader.searcher();
+        let kind_query = TermQuery::new(
+            Term::from_field_text(self.fields.doc_kind, kind),
+            IndexRecordOption::Basic,
+        );
         let addresses = searcher
-            .search(&AllQuery, &DocSetCollector)
+            .search(&kind_query, &DocSetCollector)
             .map_err(|error| SnatchError::IndexError(format!("index scan failed: {error}")))?;
         let mut values = Vec::new();
         for address in addresses {
@@ -1519,9 +1569,12 @@ impl ProviderSearchIndex {
         Some(Box::new(BooleanQuery::union(terms)))
     }
 
-    /// Visit stored entry projections after narrowing only on exact typed
-    /// fields. This deliberately never parses user text as Tantivy query
-    /// syntax and never uses tokenized full-text terms as a necessary filter.
+    /// Visit stored entry projections after safe candidate narrowing.
+    ///
+    /// User text is never parsed as Tantivy query syntax. Exact typed fields
+    /// always narrow candidates; a proven plain literal may additionally use
+    /// token terms plus the explicit long-token/Unicode fallback required for
+    /// completeness. The query layer remains the final semantic authority.
     ///
     /// Candidates are decoded one at a time rather than accumulated into a
     /// corpus-sized vector. Manual iteration mirrors Tantivy's collector path
@@ -1559,6 +1612,68 @@ impl ProviderSearchIndex {
                 Term::from_field_u64(self.fields.spawned, u64::from(spawned)),
                 IndexRecordOption::Basic,
             )));
+        }
+        match (&filter.literal_token_contains, filter.literal_scope) {
+            (Some(literal), Some(scope)) => {
+                if literal.len() < 3
+                    || !literal
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+                {
+                    return Err(SnatchError::IndexError(
+                        "literal accelerator received a non-canonical token".to_string(),
+                    ));
+                }
+                let field_pairs: &[(Field, Field)] = match scope {
+                    SearchScope::Default | SearchScope::Assistant | SearchScope::User => {
+                        &[(self.fields.text, self.fields.text_has_literal_fallback)]
+                    }
+                    SearchScope::Thinking => &[
+                        (self.fields.text, self.fields.text_has_literal_fallback),
+                        (
+                            self.fields.reasoning,
+                            self.fields.reasoning_has_literal_fallback,
+                        ),
+                    ],
+                    SearchScope::ThinkingOnly => &[(
+                        self.fields.reasoning,
+                        self.fields.reasoning_has_literal_fallback,
+                    )],
+                    SearchScope::Tools => {
+                        &[(self.fields.tool_text, self.fields.tool_has_literal_fallback)]
+                    }
+                    SearchScope::All => &[
+                        (self.fields.text, self.fields.text_has_literal_fallback),
+                        (
+                            self.fields.reasoning,
+                            self.fields.reasoning_has_literal_fallback,
+                        ),
+                        (self.fields.tool_text, self.fields.tool_has_literal_fallback),
+                    ],
+                };
+                let pattern = format!(".*{literal}.*");
+                let mut alternatives: Vec<Box<dyn Query>> = Vec::new();
+                for &(text_field, long_token_field) in field_pairs {
+                    alternatives.push(Box::new(
+                        RegexQuery::from_pattern(&pattern, text_field).map_err(|error| {
+                            SnatchError::IndexError(format!(
+                                "failed to compile literal candidate query: {error}"
+                            ))
+                        })?,
+                    ));
+                    alternatives.push(Box::new(TermQuery::new(
+                        Term::from_field_u64(long_token_field, 1),
+                        IndexRecordOption::Basic,
+                    )));
+                }
+                required.push(Box::new(BooleanQuery::union(alternatives)));
+            }
+            (None, None) => {}
+            _ => {
+                return Err(SnatchError::IndexError(
+                    "literal accelerator token/scope must be set together".to_string(),
+                ));
+            }
         }
         if filter.timestamp_from_millis.is_some() || filter.timestamp_until_millis.is_some() {
             let lower = filter

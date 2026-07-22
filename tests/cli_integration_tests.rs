@@ -354,7 +354,7 @@ fn provider_index_cli_build_search_status_and_clear_are_snapshot_backed() {
         .stdout
         .clone();
     let status: serde_json::Value = serde_json::from_slice(&status).unwrap();
-    assert_eq!(status["schema_version"], 3);
+    assert_eq!(status["schema_version"], 4);
     assert_eq!(status["session_count"], 1);
     assert_eq!(status["entry_count"], 6);
     assert_eq!(status["build"]["complete_providers"][0], "claude-code");
@@ -380,8 +380,12 @@ fn provider_index_cli_build_search_status_and_clear_are_snapshot_backed() {
     assert!(indexed["total_matches"].as_u64().unwrap() > 0);
     assert_eq!(indexed["sessions_matched"], 1);
     assert_eq!(
-        indexed["by_session"][0]["session_key"],
+        indexed["matches"][0]["session_key"],
         format!("claude-code:{SESSION_ID}")
+    );
+    assert!(
+        indexed.get("by_session").is_none(),
+        "normal search pages must not duplicate every per-session aggregate"
     );
     assert_eq!(indexed["coverage"]["incomplete"], false);
 
