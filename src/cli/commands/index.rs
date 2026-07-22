@@ -18,7 +18,7 @@ use crate::index::query::{
     IndexedProviderSelection, IndexedSearchFilters, IndexedSearchOrder, IndexedSearchRequest,
 };
 use crate::provider::registry::ProviderSelection;
-use crate::provider::{LogicalSessionKey, ProviderId};
+use crate::provider::ProviderId;
 
 /// Run the index command.
 pub fn run(cli: &Cli, args: &IndexArgs) -> Result<()> {
@@ -73,80 +73,7 @@ pub(super) fn resolve_indexed_session(
     selection: &ProviderSelection,
     reference: &str,
 ) -> Result<String> {
-    let selected = selected_provider_names(selection);
-    let manifests = index.session_manifests()?;
-    let qualified = reference.contains(':');
-    let requested_key = if qualified {
-        Some(
-            reference
-                .parse::<LogicalSessionKey>()
-                .map_err(|reason: String| SnatchError::InvalidArgument {
-                    name: "session".to_string(),
-                    reason,
-                })?,
-        )
-    } else {
-        None
-    };
-    if let (Some(selected), Some(key)) = (&selected, &requested_key) {
-        if !selected.contains(&key.provider.to_string()) {
-            return Err(SnatchError::InvalidArgument {
-                name: "session".to_string(),
-                reason: format!(
-                    "qualified session {reference} belongs to unselected provider {}",
-                    key.provider
-                ),
-            });
-        }
-    }
-
-    let mut candidates: Vec<LogicalSessionKey> = manifests
-        .into_iter()
-        .filter_map(|manifest| manifest.session_key.parse().ok())
-        .filter(|key: &LogicalSessionKey| match &selected {
-            Some(providers) => providers.contains(&key.provider.to_string()),
-            None => true,
-        })
-        .filter(|key| {
-            requested_key.as_ref().map_or_else(
-                || key.native_id.starts_with(reference),
-                |requested| {
-                    key.provider == requested.provider
-                        && key.namespace == requested.namespace
-                        && key.native_id.starts_with(&requested.native_id)
-                },
-            )
-        })
-        .collect();
-    let exact_native = requested_key
-        .as_ref()
-        .map_or(reference, |key| &key.native_id);
-    let exact: Vec<_> = candidates
-        .iter()
-        .filter(|key| key.native_id == exact_native)
-        .cloned()
-        .collect();
-    if !exact.is_empty() {
-        candidates = exact;
-    }
-    candidates.sort();
-    candidates.dedup();
-    match candidates.as_slice() {
-        [] => Err(SnatchError::SessionNotFound {
-            session_id: reference.to_string(),
-        }),
-        [key] => Ok(key.to_string()),
-        many => Err(SnatchError::InvalidArgument {
-            name: "session".to_string(),
-            reason: format!(
-                "ambiguous indexed session reference '{reference}'; candidates: {}",
-                many.iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        }),
-    }
+    index.resolve_session(&indexed_selection(selection), reference)
 }
 
 fn run_build(cli: &Cli, args: &crate::cli::IndexBuildArgs) -> Result<()> {

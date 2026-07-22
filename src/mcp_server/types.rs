@@ -642,6 +642,11 @@ pub struct SearchSessionsRequest {
     /// Search pattern (regex supported).
     pub pattern: String,
 
+    /// Search a committed provider-index snapshot. Omit to preserve the
+    /// classic direct Claude route; use `["all"]` for every represented
+    /// provider. A qualified `session_id` also selects its provider.
+    pub provider: Option<Vec<String>>,
+
     /// Filter by project path (substring match).
     pub project: Option<String>,
 
@@ -658,6 +663,27 @@ pub struct SearchSessionsRequest {
     /// Maximum results to return. Default: 20.
     pub limit: Option<usize>,
 
+    /// Zero-based result offset. Provider-index route only. Default: 0.
+    pub offset: Option<usize>,
+
+    /// Lines of same-segment context before and after each indexed match.
+    /// Provider-index route only. Default: 2.
+    pub context_lines: Option<usize>,
+
+    /// Use ordered fuzzy matching instead of regex. Provider-index route only.
+    pub fuzzy: Option<bool>,
+
+    /// Minimum fuzzy score from 0 through 100. Default: 60.
+    pub fuzzy_threshold: Option<u8>,
+
+    /// Exclude entries matching this regex in the selected scope.
+    /// Provider-index route only.
+    pub exclude: Option<String>,
+
+    /// Stable result order: "source" (default) or "relevance".
+    /// Provider-index route only.
+    pub sort: Option<String>,
+
     /// When `session_id` is set and that session is part of a resume chain,
     /// search the whole chain. Default: true; set false to restrict to the
     /// single file.
@@ -669,12 +695,33 @@ pub struct SearchSessionsRequest {
 pub struct SearchMatch {
     pub session_id: String,
     pub project_path: String,
+    /// Source provider for committed-index results.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Complete qualified source-session identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qualified_id: Option<String>,
     /// Root chain ID if this session is part of a chain.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chain_id: Option<String>,
+    /// Complete qualified continuation root for indexed results.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logical_root: Option<String>,
+    /// Deterministic normalized entry identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_id: Option<String>,
+    /// Normalized source order within the session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_order: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
     pub message_type: String,
+    /// Stable projected-content location.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    /// Provider-neutral matcher relevance score (0–100).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<u8>,
     pub matched_text: String,
     pub context: String,
 }
@@ -684,11 +731,28 @@ pub struct SearchMatch {
 pub struct SearchSessionsResponse {
     pub pattern: String,
     pub total_matches: usize,
+    /// Exact occurrence count before pagination (indexed route).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_occurrences: Option<usize>,
+    /// Distinct matching source sessions (indexed route).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sessions_matched: Option<usize>,
     pub returned: usize,
+    /// Applied result offset (indexed route).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+    /// Applied page limit (indexed route).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
     pub results: Vec<SearchMatch>,
-    /// Set when scope="thinking" scanned only empty thinking blocks (recent
-    /// Claude Code versions persist only the encrypted signature), so a
-    /// zero-match result is explained rather than silent.
+    /// Committed snapshot generation and completeness (indexed route).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<crate::index::query::IndexedQueryCoverage>,
+    /// Search acquisition basis; present on provider-index responses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query_basis: Option<String>,
+    /// Explains a zero-match reasoning search when native text is empty or
+    /// unavailable; encrypted reasoning payloads are never treated as text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }

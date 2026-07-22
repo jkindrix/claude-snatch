@@ -2629,7 +2629,36 @@ ignored until their provider-neutral contracts exist. Tests build real
 temporary Claude and cross-provider indexes, exercise qualified-prefix and
 `all` queries, verify flagless search remains classic, prove legacy schemas
 require explicit rebuild, and hold a writable handle while opening a
-read-only query handle. Unit 5 (MCP `search_sessions` routing) is next.
+read-only query handle.
+
+Unit 5 is implemented at the MCP boundary. Flagless, unqualified
+`search_sessions` retains the classic direct-Claude response shape and
+behavior. A non-empty `provider` selection or registered qualified
+`session_id` uses the same read-only committed snapshot as CLI search; the MCP
+server receives the index directory from the already-loaded CLI configuration,
+including an explicit `--config` path. Provider responses add source provider,
+qualified session/root and deterministic entry identity, normalized location
+and score, exact occurrence/session cardinalities, offset/limit, and the full
+snapshot coverage statement. Regex/fuzzy, same-scope exclusion, scope,
+case, project, deterministic source/relevance order, context lines, and typed
+continuation-root expansion are classified explicitly. Result pages are capped
+at 200 rows and 20 context lines; callers use `offset` for further pages.
+Index-only options on the classic route are rejected instead of ignored, with
+a complete request destructure making future unclassified fields a compile
+error.
+
+The session-prefix resolver now belongs to the snapshot API and is shared by
+CLI and MCP. It starts qualified-id parsing only when the leading segment names
+a selected or indexed provider, preserving ordinary unqualified native ids
+containing colons while requiring the escaped qualified form for the inherently
+ambiguous provider-prefixed case. Malformed encodings for known providers are
+strictly rejected. Tests pin classic wire-shape parity, explicit cross-provider
+pagination and qualified provenance, qualified-id routing without `provider`, typed
+chain-aware versus single-session search, and invalid-option refusal. The
+cross-provider test removes both source roots after building and still queries
+successfully, proving that request execution performs no live source
+rediscovery or parsing. Unit 6 (real-corpus performance/parity exit audit) is
+next.
 
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".

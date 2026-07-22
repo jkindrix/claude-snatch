@@ -2991,9 +2991,10 @@ pub fn run() -> Result<()> {
                 message: format!("Failed to create tokio runtime: {e}"),
                 source: None,
             })?;
-            rt.block_on(crate::mcp_server::run_server(
+            rt.block_on(crate::mcp_server::run_server_with_index(
                 cli.claude_dir.clone(),
                 cli.max_file_size,
+                config.index.directory.clone(),
             ))
         }
     }

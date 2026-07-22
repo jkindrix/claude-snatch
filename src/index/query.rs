@@ -434,6 +434,121 @@ fn make_result(
 }
 
 impl ProviderSearchIndex {
+    /// Resolve a full or prefix session reference using only committed index
+    /// manifests. A colon starts qualified-id parsing only when its leading
+    /// segment names a selected or indexed provider, so ordinary native ids
+    /// containing colons remain valid unqualified references. A native id that
+    /// itself begins with a provider-qualified prefix must use the escaped
+    /// qualified form to disambiguate intent.
+    pub fn resolve_session(
+        &self,
+        selection: &IndexedProviderSelection,
+        reference: &str,
+    ) -> Result<String> {
+        let build = self.build_manifest()?.ok_or_else(|| {
+            SnatchError::IndexError(
+                "provider search index has no committed build; run an index build first"
+                    .to_string(),
+            )
+        })?;
+        let manifests = self.session_manifests()?;
+        let manifest_providers: BTreeSet<_> = manifests
+            .iter()
+            .map(|manifest| manifest.provider.clone())
+            .collect();
+        let selected = match selection {
+            IndexedProviderSelection::Explicit(values) => Some(
+                normalize_values(values, "provider")?
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+            ),
+            IndexedProviderSelection::All => None,
+        };
+        let known_providers: BTreeSet<_> = manifest_providers
+            .into_iter()
+            .chain(build.selected_providers)
+            .chain(
+                selected
+                    .iter()
+                    .flat_map(|providers| providers.iter().cloned()),
+            )
+            .collect();
+        let qualified = reference
+            .split_once(':')
+            .is_some_and(|(provider, _)| known_providers.contains(provider));
+        let requested_key = if qualified {
+            Some(
+                reference
+                    .parse::<LogicalSessionKey>()
+                    .map_err(|reason: String| SnatchError::InvalidArgument {
+                        name: "session".to_string(),
+                        reason,
+                    })?,
+            )
+        } else {
+            None
+        };
+        if let (Some(selected), Some(key)) = (&selected, &requested_key) {
+            if !selected.contains(&key.provider.to_string()) {
+                return Err(SnatchError::InvalidArgument {
+                    name: "session".to_string(),
+                    reason: format!(
+                        "qualified session {reference} belongs to unselected provider {}",
+                        key.provider
+                    ),
+                });
+            }
+        }
+
+        let mut candidates: Vec<LogicalSessionKey> = manifests
+            .into_iter()
+            .filter_map(|manifest| manifest.session_key.parse().ok())
+            .filter(|key: &LogicalSessionKey| match &selected {
+                Some(providers) => providers.contains(&key.provider.to_string()),
+                None => true,
+            })
+            .filter(|key| {
+                requested_key.as_ref().map_or_else(
+                    || key.native_id.starts_with(reference),
+                    |requested| {
+                        key.provider == requested.provider
+                            && key.namespace == requested.namespace
+                            && key.native_id.starts_with(&requested.native_id)
+                    },
+                )
+            })
+            .collect();
+        let exact_native = requested_key
+            .as_ref()
+            .map_or(reference, |key| &key.native_id);
+        let exact: Vec<_> = candidates
+            .iter()
+            .filter(|key| key.native_id == exact_native)
+            .cloned()
+            .collect();
+        if !exact.is_empty() {
+            candidates = exact;
+        }
+        candidates.sort();
+        candidates.dedup();
+        match candidates.as_slice() {
+            [] => Err(SnatchError::SessionNotFound {
+                session_id: reference.to_string(),
+            }),
+            [key] => Ok(key.to_string()),
+            many => Err(SnatchError::InvalidArgument {
+                name: "session".to_string(),
+                reason: format!(
+                    "ambiguous indexed session reference '{reference}'; candidates: {}",
+                    many.iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }),
+        }
+    }
+
     /// Execute an exact query against only the committed index snapshot.
     /// This method has no provider registry and cannot perform source
     /// discovery or parsing as a side effect.
@@ -563,8 +678,6 @@ impl ProviderSearchIndex {
                 )));
             }
         }
-        let selected_session =
-            !session_keys.is_empty() && !request.filters.session_keys_are_scope_filter;
         let logical_roots = normalize_values(&request.filters.logical_roots, "logical_root")?;
         for logical_root in &logical_roots {
             let provider = provider_of(logical_root)?;
@@ -577,6 +690,9 @@ impl ProviderSearchIndex {
                 });
             }
         }
+        let selected_session = (!session_keys.is_empty()
+            && !request.filters.session_keys_are_scope_filter)
+            || !logical_roots.is_empty();
         let project_keys = normalize_values(&request.filters.project_keys, "project_key")?;
         let message_types = normalize_values(&request.filters.message_types, "message_type")?;
         let activities = if selected_session || request.filters.include_inherited {
@@ -1210,6 +1326,41 @@ mod tests {
         assert_eq!(result.coverage.searched_providers, vec!["alpha"]);
         assert_eq!(result.coverage.skipped.len(), 1);
         assert!(result.coverage.incomplete);
+    }
+
+    #[test]
+    fn snapshot_session_resolution_distinguishes_native_colons_from_qualification() {
+        let dir = tempdir().unwrap();
+        let index = ProviderSearchIndex::open(dir.path().join("index")).unwrap();
+        let session = key("alpha", "native:part");
+        index
+            .apply_generation(
+                &[batch(
+                    &session,
+                    "g1",
+                    vec![entry(&session, 0, SearchSegmentKind::UserText, "needle")],
+                )],
+                &[],
+                &build("g1", &["alpha"], &["alpha"], Vec::new()),
+            )
+            .unwrap();
+        let selection = IndexedProviderSelection::Explicit(vec!["alpha".to_string()]);
+
+        assert_eq!(
+            index.resolve_session(&selection, "native:part").unwrap(),
+            session.to_string()
+        );
+        assert_eq!(
+            index
+                .resolve_session(&selection, "alpha:native%3Apart")
+                .unwrap(),
+            session.to_string()
+        );
+        assert!(index
+            .resolve_session(&selection, "alpha:%ZZ")
+            .unwrap_err()
+            .to_string()
+            .contains("invalid escape sequence"));
     }
 
     #[test]

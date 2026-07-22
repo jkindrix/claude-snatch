@@ -88,6 +88,9 @@ pub struct SnatchServer {
     codex_dir: Option<PathBuf>,
     /// Maximum file size for parsing.
     max_file_size: Option<u64>,
+    /// Optional committed provider-index path. Runtime startup supplies the
+    /// loaded config value; embedded callers may override it for isolation.
+    index_dir: Option<PathBuf>,
 }
 
 impl SnatchServer {
@@ -97,6 +100,7 @@ impl SnatchServer {
             claude_dir,
             codex_dir: None,
             max_file_size,
+            index_dir: None,
         }
     }
 
@@ -105,6 +109,19 @@ impl SnatchServer {
     pub fn with_codex_dir(mut self, codex_dir: impl Into<PathBuf>) -> Self {
         self.codex_dir = Some(codex_dir.into());
         self
+    }
+
+    /// Override the committed provider-index path for an embedded server.
+    #[must_use]
+    pub fn with_index_dir(mut self, index_dir: impl Into<PathBuf>) -> Self {
+        self.index_dir = Some(index_dir.into());
+        self
+    }
+
+    fn provider_index_path(&self) -> PathBuf {
+        self.index_dir
+            .clone()
+            .unwrap_or_else(crate::index::provider::ProviderSearchIndex::default_index_dir)
     }
 
     /// Get the Claude directory.
@@ -565,6 +582,224 @@ impl SnatchServer {
                 max_file_size: self.max_file_size,
             },
         )
+    }
+
+    /// Search the committed provider-index snapshot. This path never performs
+    /// provider discovery or session parsing; snapshot generation and partial
+    /// coverage are returned with every response.
+    fn provider_search_sessions(&self, request: &SearchSessionsRequest) -> ToolOutput {
+        use crate::analysis::search::{ExactSearchMatcher, SearchScope};
+        use crate::index::provider::ProviderSearchIndex;
+        use crate::index::query::{
+            IndexedProviderSelection, IndexedSearchFilters, IndexedSearchOrder,
+            IndexedSearchRequest,
+        };
+        use crate::provider::registry::ProviderSelection;
+        use crate::provider::LogicalSessionKey;
+
+        const MAX_RESULTS: usize = 200;
+        const MAX_CONTEXT_LINES: usize = 20;
+
+        let flags = request.provider.as_deref().unwrap_or(&[]);
+        let selection = if flags.is_empty() {
+            let Some(reference) = request.session_id.as_deref() else {
+                return ToolOutput::error(
+                    "provider-index search requires provider or a qualified session_id",
+                );
+            };
+            let key = match reference.parse::<LogicalSessionKey>() {
+                Ok(key) => key,
+                Err(error) => return ToolOutput::error(format!("Invalid session_id: {error}")),
+            };
+            ProviderSelection::Explicit(vec![key.provider])
+        } else {
+            match ProviderSelection::from_flags(flags) {
+                Ok(selection) => selection,
+                Err(error) => {
+                    return ToolOutput::error(format!("Invalid provider selection: {error}"))
+                }
+            }
+        };
+        let indexed_selection = match &selection {
+            ProviderSelection::All => IndexedProviderSelection::All,
+            ProviderSelection::Explicit(ids) => {
+                IndexedProviderSelection::Explicit(ids.iter().map(ToString::to_string).collect())
+            }
+        };
+
+        let limit = request.limit.unwrap_or(20);
+        if limit > MAX_RESULTS {
+            return ToolOutput::error(format!(
+                "limit must not exceed {MAX_RESULTS}; use offset for additional pages"
+            ));
+        }
+        let context_lines = request.context_lines.unwrap_or(2);
+        if context_lines > MAX_CONTEXT_LINES {
+            return ToolOutput::error(format!("context_lines must not exceed {MAX_CONTEXT_LINES}"));
+        }
+        if request.fuzzy_threshold.is_some() && !request.fuzzy.unwrap_or(false) {
+            return ToolOutput::error("fuzzy_threshold requires fuzzy=true");
+        }
+        let scope = match request.scope.as_deref().unwrap_or("text") {
+            "text" => SearchScope::Default,
+            "tools" => SearchScope::Tools,
+            "thinking" => SearchScope::ThinkingOnly,
+            "all" => SearchScope::All,
+            other => {
+                return ToolOutput::error(format!(
+                    "Invalid scope '{other}'; expected text, tools, thinking, or all"
+                ))
+            }
+        };
+        let order = match request.sort.as_deref().unwrap_or("source") {
+            "source" => IndexedSearchOrder::Source,
+            "relevance" => IndexedSearchOrder::Relevance,
+            other => {
+                return ToolOutput::error(format!(
+                    "Invalid sort '{other}'; expected source or relevance"
+                ))
+            }
+        };
+        let ignore_case = request.ignore_case.unwrap_or(true);
+        let matcher = if request.fuzzy.unwrap_or(false) {
+            ExactSearchMatcher::fuzzy(
+                &request.pattern,
+                ignore_case,
+                request.fuzzy_threshold.unwrap_or(60),
+            )
+        } else {
+            match ExactSearchMatcher::regex(&request.pattern, ignore_case) {
+                Ok(matcher) => matcher,
+                Err(error) => return ToolOutput::error(format!("Invalid regex pattern: {error}")),
+            }
+        };
+        let exclude = match request
+            .exclude
+            .as_deref()
+            .map(|pattern| ExactSearchMatcher::regex(pattern, ignore_case))
+            .transpose()
+        {
+            Ok(exclude) => exclude,
+            Err(error) => return ToolOutput::error(format!("Invalid exclude pattern: {error}")),
+        };
+
+        let index = match ProviderSearchIndex::open_read_only(self.provider_index_path()) {
+            Ok(index) => index,
+            Err(error) => return ToolOutput::error(error.to_string()),
+        };
+        let mut filters = IndexedSearchFilters {
+            project_contains: request.project.clone(),
+            include_spawned: false,
+            ..Default::default()
+        };
+        if let Some(reference) = request.session_id.as_deref() {
+            let resolved = match index.resolve_session(&indexed_selection, reference) {
+                Ok(resolved) => resolved,
+                Err(error) => return ToolOutput::error(error.to_string()),
+            };
+            if request.chain_aware.unwrap_or(true) {
+                let manifest = match index.session_manifests().and_then(|manifests| {
+                    manifests
+                        .into_iter()
+                        .find(|manifest| manifest.session_key == resolved)
+                        .ok_or_else(|| {
+                            crate::error::SnatchError::IndexError(format!(
+                                "requested session is absent from the committed index: {resolved}"
+                            ))
+                        })
+                }) {
+                    Ok(manifest) => manifest,
+                    Err(error) => return ToolOutput::error(error.to_string()),
+                };
+                filters.logical_roots = vec![manifest.logical_root];
+            } else {
+                filters.session_keys = vec![resolved];
+                filters.restrict_session_keys = true;
+            }
+        }
+
+        let response = match index.query(&IndexedSearchRequest {
+            selection: indexed_selection,
+            matcher,
+            exclude,
+            scope,
+            filters,
+            context_lines,
+            order,
+            offset: request.offset.unwrap_or(0),
+            limit,
+        }) {
+            Ok(response) => response,
+            Err(error) => return ToolOutput::error(error.to_string()),
+        };
+        let mut results = Vec::with_capacity(response.matches.len());
+        for hit in &response.matches {
+            let session = match hit.session_key.parse::<LogicalSessionKey>() {
+                Ok(session) => session,
+                Err(error) => {
+                    return ToolOutput::error(format!(
+                        "Invalid committed session identity {}: {error}",
+                        hit.session_key
+                    ))
+                }
+            };
+            let root = match hit.logical_root.parse::<LogicalSessionKey>() {
+                Ok(root) => root,
+                Err(error) => {
+                    return ToolOutput::error(format!(
+                        "Invalid committed logical root {}: {error}",
+                        hit.logical_root
+                    ))
+                }
+            };
+            let context = [
+                hit.context_before.as_str(),
+                hit.line.as_str(),
+                hit.context_after.as_str(),
+            ]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+            let chain_id = (root != session).then(|| root.native_id.clone());
+            results.push(SearchMatch {
+                session_id: session.native_id,
+                project_path: hit.project_path.clone(),
+                provider: Some(hit.provider.clone()),
+                qualified_id: Some(hit.session_key.clone()),
+                chain_id,
+                logical_root: Some(hit.logical_root.clone()),
+                entry_id: Some(hit.entry_id.clone()),
+                entry_order: Some(hit.entry_order),
+                timestamp: hit.timestamp.map(|timestamp| timestamp.to_rfc3339()),
+                message_type: hit.message_type.clone(),
+                location: Some(hit.location.clone()),
+                score: Some(hit.score),
+                matched_text: truncate_text(&hit.matched_text, 200),
+                context: truncate_text(&context, 300),
+            });
+        }
+        let note = (matches!(scope, SearchScope::ThinkingOnly)
+            && response.total_matches == 0)
+            .then(|| {
+                "No indexed reasoning-summary text matched. Availability varies by provider and version; encrypted reasoning payloads are not searchable."
+                    .to_string()
+            });
+        let output = SearchSessionsResponse {
+            pattern: request.pattern.clone(),
+            total_matches: response.total_matches,
+            total_occurrences: Some(response.total_occurrences),
+            sessions_matched: Some(response.sessions_matched),
+            returned: response.returned,
+            offset: Some(response.offset),
+            limit: Some(response.limit),
+            results,
+            coverage: Some(response.coverage),
+            query_basis: Some("committed-provider-index".to_string()),
+            note,
+        };
+        ToolOutput::json(&output)
+            .unwrap_or_else(|error| ToolOutput::error(format!("JSON serialization error: {error}")))
     }
 
     fn provider_file_history(&self, request: GetFileHistoryRequest) -> ToolOutput {
@@ -1124,6 +1359,35 @@ fn claude_registry_scope(provider: Option<&str>) -> Result<bool, String> {
              cross-provider goals/notes/decisions are not available"
         )),
     }
+}
+
+/// Whether a classic `search_sessions` request uses an option whose contract
+/// exists only on the committed-index route. The complete destructure is a
+/// compile-time guard: adding a request field requires an explicit routing
+/// decision instead of being silently ignored on one path.
+fn classic_search_uses_index_only_options(request: &SearchSessionsRequest) -> bool {
+    let SearchSessionsRequest {
+        pattern: _,
+        provider: _,
+        project: _,
+        session_id: _,
+        scope: _,
+        ignore_case: _,
+        limit: _,
+        offset,
+        context_lines,
+        fuzzy,
+        fuzzy_threshold,
+        exclude,
+        sort,
+        chain_aware: _,
+    } = request;
+    offset.is_some()
+        || context_lines.is_some()
+        || fuzzy.is_some()
+        || fuzzy_threshold.is_some()
+        || exclude.is_some()
+        || sort.is_some()
 }
 
 #[mcp_server(name = "claude-snatch", version = "0.1.0")]
@@ -2402,11 +2666,24 @@ impl SnatchServer {
     // New Tool: search_sessions
     // ========================================================================
 
-    /// Search across sessions for text patterns using regex.
+    /// Search across sessions for text patterns.
     #[tool(
-        description = "Search across sessions for text patterns (regex). Filter by project, session, scope (text/tools/thinking/all). scope='thinking' searches reasoning blocks, but matches only sessions from old Claude Code (~2.1.4x and earlier) — recent versions persist thinking as empty text, and the response notes when only empty blocks were scanned. Returns matching text with context."
+        description = "Search session text with progressive narrowing. Omit provider for the classic direct Claude route; set provider=['claude-code'|'codex'|'all'] or use a qualified session_id to query the committed provider index with deterministic offset/limit pagination, qualified entry provenance, and snapshot coverage. Supports regex or fuzzy matching and scopes text/tools/thinking/all. Indexed reasoning availability varies by provider/version; encrypted payloads are never searched."
     )]
     async fn search_sessions(&self, request: SearchSessionsRequest) -> ToolOutput {
+        let provider_flags = request.provider.as_deref().unwrap_or(&[]);
+        let qualified_session = request
+            .session_id
+            .as_deref()
+            .is_some_and(|reference| self.provider_registry().looks_qualified(reference));
+        if !provider_flags.is_empty() || qualified_session {
+            return self.provider_search_sessions(&request);
+        }
+        if classic_search_uses_index_only_options(&request) {
+            return ToolOutput::error(
+                "offset, context_lines, fuzzy, fuzzy_threshold, exclude, and sort require provider selection or a qualified session_id",
+            );
+        }
         let claude_dir = match get_claude_dir(self) {
             Ok(dir) => dir,
             Err(e) => return e,
@@ -2535,9 +2812,16 @@ impl SnatchServer {
                     results.push(SearchMatch {
                         session_id: sid.clone(),
                         project_path: session.project_path().to_string(),
+                        provider: None,
+                        qualified_id: None,
                         chain_id: chain_id.clone(),
+                        logical_root: None,
+                        entry_id: None,
+                        entry_order: None,
                         timestamp: entry.timestamp().map(|t| t.to_rfc3339()),
                         message_type: entry.message_type().to_string(),
+                        location: None,
+                        score: None,
                         matched_text: truncate_text(&matched, 200),
                         context: truncate_text(&context, 300),
                     });
@@ -2557,8 +2841,14 @@ impl SnatchServer {
         let response = SearchSessionsResponse {
             pattern: request.pattern,
             total_matches: total,
+            total_occurrences: None,
+            sessions_matched: None,
             returned,
+            offset: None,
+            limit: None,
             results,
+            coverage: None,
+            query_basis: None,
             note,
         };
 
@@ -4679,7 +4969,26 @@ pub async fn run_server(
     claude_dir: Option<PathBuf>,
     max_file_size: Option<u64>,
 ) -> crate::error::Result<()> {
-    let server = SnatchServer::new(claude_dir, max_file_size);
+    let index_dir = crate::config::Config::load()
+        .ok()
+        .and_then(|config| config.index.directory);
+    run_server_with_index(claude_dir, max_file_size, index_dir).await
+}
+
+/// Run the MCP server with an explicitly loaded provider-index path.
+///
+/// The CLI uses this entry point so `--config` affects MCP and CLI search in
+/// exactly the same way. [`run_server`] remains available for embedded callers
+/// and loads the ordinary default configuration.
+pub async fn run_server_with_index(
+    claude_dir: Option<PathBuf>,
+    max_file_size: Option<u64>,
+    index_dir: Option<PathBuf>,
+) -> crate::error::Result<()> {
+    let mut server = SnatchServer::new(claude_dir, max_file_size);
+    if let Some(index_dir) = index_dir {
+        server = server.with_index_dir(index_dir);
+    }
     let transport = StdioTransport::new();
 
     mcpkit::server::ServerRuntime::with_config(
@@ -5001,6 +5310,36 @@ mod tests {
 
     fn make_server(tmp: &TempDir) -> SnatchServer {
         SnatchServer::new(Some(tmp.path().to_path_buf()), None)
+    }
+
+    fn build_provider_search_index(
+        server: &SnatchServer,
+        path: &std::path::Path,
+        selection: &crate::provider::registry::ProviderSelection,
+    ) {
+        let index = crate::index::provider::ProviderSearchIndex::open(path).unwrap();
+        let options = crate::index::build::ProviderIndexBuildOptions::new(selection, None);
+        crate::index::build::update_provider_index(&index, &server.provider_registry(), &options)
+            .unwrap();
+    }
+
+    fn search_request(pattern: &str) -> SearchSessionsRequest {
+        SearchSessionsRequest {
+            pattern: pattern.to_string(),
+            provider: None,
+            project: None,
+            session_id: None,
+            scope: None,
+            ignore_case: None,
+            limit: None,
+            offset: None,
+            context_lines: None,
+            fuzzy: None,
+            fuzzy_threshold: None,
+            exclude: None,
+            sort: None,
+            chain_aware: None,
+        }
     }
 
     #[cfg(feature = "codex")]
@@ -6154,16 +6493,27 @@ mod tests {
             server
                 .search_sessions(SearchSessionsRequest {
                     pattern: "Hello, Claude!".to_string(),
+                    provider: None,
                     project: None,
                     session_id: None,
                     scope: None,
                     ignore_case: None,
                     limit: None,
+                    offset: None,
+                    context_lines: None,
+                    fuzzy: None,
+                    fuzzy_threshold: None,
+                    exclude: None,
+                    sort: None,
                     chain_aware: None,
                 })
                 .await,
         );
         assert!(text.contains(sid));
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(value.get("coverage").is_none());
+        assert!(value.get("offset").is_none());
+        assert!(value["results"][0].get("provider").is_none());
     }
 
     /// Build a temp Claude dir with a two-file resume chain. The continuation's
@@ -6217,11 +6567,18 @@ mod tests {
             server
                 .search_sessions(SearchSessionsRequest {
                     pattern: "alpha_root_marker".to_string(),
+                    provider: None,
                     project: None,
                     session_id: Some(cont.to_string()),
                     scope: None,
                     ignore_case: None,
                     limit: None,
+                    offset: None,
+                    context_lines: None,
+                    fuzzy: None,
+                    fuzzy_threshold: None,
+                    exclude: None,
+                    sort: None,
                     chain_aware: None,
                 })
                 .await,
@@ -6237,11 +6594,18 @@ mod tests {
             server
                 .search_sessions(SearchSessionsRequest {
                     pattern: "alpha_root_marker".to_string(),
+                    provider: None,
                     project: None,
                     session_id: Some(cont.to_string()),
                     scope: None,
                     ignore_case: None,
                     limit: None,
+                    offset: None,
+                    context_lines: None,
+                    fuzzy: None,
+                    fuzzy_threshold: None,
+                    exclude: None,
+                    sort: None,
                     chain_aware: Some(false),
                 })
                 .await,
@@ -6261,16 +6625,278 @@ mod tests {
             server
                 .search_sessions(SearchSessionsRequest {
                     pattern: "xyzzy_nonexistent".to_string(),
+                    provider: None,
                     project: None,
                     session_id: None,
                     scope: None,
                     ignore_case: None,
                     limit: None,
+                    offset: None,
+                    context_lines: None,
+                    fuzzy: None,
+                    fuzzy_threshold: None,
+                    exclude: None,
+                    sort: None,
                     chain_aware: None,
                 })
                 .await,
         );
         assert!(!text.contains(sid));
+    }
+
+    #[tokio::test]
+    async fn classic_search_refuses_index_only_options_instead_of_ignoring_them() {
+        let sid = "23232323-aaaa-bbbb-cccc-dddddddddddd";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let server = make_server(&tmp);
+        assert_error(
+            server
+                .search_sessions(SearchSessionsRequest {
+                    pattern: "Hello".to_string(),
+                    provider: None,
+                    project: None,
+                    session_id: None,
+                    scope: None,
+                    ignore_case: None,
+                    limit: None,
+                    offset: Some(0),
+                    context_lines: None,
+                    fuzzy: None,
+                    fuzzy_threshold: None,
+                    exclude: None,
+                    sort: None,
+                    chain_aware: None,
+                })
+                .await,
+        );
+    }
+
+    #[cfg(feature = "codex")]
+    #[tokio::test]
+    async fn provider_search_uses_snapshot_pagination_and_qualified_provenance() {
+        let claude_id = "24242424-aaaa-bbbb-cccc-dddddddddddd";
+        let claude_jsonl = minimal_session_jsonl(claude_id).replace("Hello, Claude!", "start task");
+        let claude = setup_claude_dir(claude_id, PROJECT_PATH, &claude_jsonl);
+        let (codex, codex_id) = setup_codex_dir_with_cwd(PROJECT_PATH);
+        let index_home = TempDir::new().unwrap();
+        let index_path = index_home.path().join("provider-index");
+        let server = make_server(&claude)
+            .with_codex_dir(codex.path())
+            .with_index_dir(&index_path);
+        build_provider_search_index(
+            &server,
+            &index_path,
+            &crate::provider::registry::ProviderSelection::All,
+        );
+        // The query contract is snapshot-only: source discovery/parsing must
+        // not be needed after a successful build.
+        drop(claude);
+        drop(codex);
+
+        let text = unwrap_output(
+            server
+                .search_sessions(SearchSessionsRequest {
+                    pattern: "start task".to_string(),
+                    provider: Some(vec!["all".to_string()]),
+                    project: None,
+                    session_id: None,
+                    scope: None,
+                    ignore_case: None,
+                    limit: Some(1),
+                    offset: Some(1),
+                    context_lines: Some(0),
+                    fuzzy: None,
+                    fuzzy_threshold: None,
+                    exclude: None,
+                    sort: Some("source".to_string()),
+                    chain_aware: None,
+                })
+                .await,
+        );
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["total_matches"], 2);
+        assert_eq!(value["total_occurrences"], 2);
+        assert_eq!(value["sessions_matched"], 2);
+        assert_eq!(value["returned"], 1);
+        assert_eq!(value["offset"], 1);
+        assert_eq!(value["limit"], 1);
+        assert_eq!(value["query_basis"], "committed-provider-index");
+        assert_eq!(
+            value["coverage"]["requested_providers"],
+            serde_json::json!(["claude-code", "codex"])
+        );
+        assert_eq!(value["coverage"]["incomplete"], false);
+        let result = &value["results"][0];
+        assert_eq!(result["provider"], "codex");
+        assert_eq!(result["session_id"], codex_id);
+        assert_eq!(result["qualified_id"], format!("codex:{codex_id}"));
+        assert!(result["entry_id"].as_str().unwrap().starts_with("codex:"));
+        assert_eq!(result["location"], "user message");
+        assert!(result["context"].as_str().unwrap().contains("start task"));
+
+        let mut fuzzy_request = search_request("strttsk");
+        fuzzy_request.provider = Some(vec!["all".to_string()]);
+        fuzzy_request.fuzzy = Some(true);
+        fuzzy_request.fuzzy_threshold = Some(0);
+        fuzzy_request.exclude = Some("never present".to_string());
+        fuzzy_request.sort = Some("relevance".to_string());
+        let fuzzy = unwrap_output(server.search_sessions(fuzzy_request).await);
+        let fuzzy: serde_json::Value = serde_json::from_str(&fuzzy).unwrap();
+        assert_eq!(fuzzy["total_matches"], 2);
+
+        let mut excluded_request = search_request("start task");
+        excluded_request.provider = Some(vec!["all".to_string()]);
+        excluded_request.exclude = Some("start task".to_string());
+        let excluded = unwrap_output(server.search_sessions(excluded_request).await);
+        let excluded: serde_json::Value = serde_json::from_str(&excluded).unwrap();
+        assert_eq!(excluded["total_matches"], 0);
+
+        let mut scope_request = search_request("start task");
+        scope_request.provider = Some(vec!["all".to_string()]);
+        scope_request.scope = Some("tools".to_string());
+        let scoped = unwrap_output(server.search_sessions(scope_request).await);
+        let scoped: serde_json::Value = serde_json::from_str(&scoped).unwrap();
+        assert_eq!(scoped["total_matches"], 0);
+
+        let mut project_request = search_request("start task");
+        project_request.provider = Some(vec!["all".to_string()]);
+        project_request.project = Some("not-this-project".to_string());
+        let projected = unwrap_output(server.search_sessions(project_request).await);
+        let projected: serde_json::Value = serde_json::from_str(&projected).unwrap();
+        assert_eq!(projected["total_matches"], 0);
+
+        let qualified = unwrap_output(
+            server
+                .search_sessions(SearchSessionsRequest {
+                    pattern: "working".to_string(),
+                    provider: None,
+                    project: None,
+                    session_id: Some(format!("codex:{codex_id}")),
+                    scope: None,
+                    ignore_case: None,
+                    limit: None,
+                    offset: None,
+                    context_lines: None,
+                    fuzzy: None,
+                    fuzzy_threshold: None,
+                    exclude: None,
+                    sort: None,
+                    chain_aware: None,
+                })
+                .await,
+        );
+        let qualified: serde_json::Value = serde_json::from_str(&qualified).unwrap();
+        assert_eq!(qualified["total_matches"], 1);
+        assert_eq!(
+            qualified["coverage"]["requested_providers"],
+            serde_json::json!(["codex"])
+        );
+        assert_eq!(
+            qualified["results"][0]["qualified_id"],
+            format!("codex:{codex_id}")
+        );
+    }
+
+    #[cfg(feature = "codex")]
+    #[tokio::test]
+    async fn provider_search_all_surfaces_an_unavailable_partition() {
+        let claude_id = "27272727-aaaa-bbbb-cccc-dddddddddddd";
+        let claude = setup_claude_dir(claude_id, PROJECT_PATH, &minimal_session_jsonl(claude_id));
+        let scratch = TempDir::new().unwrap();
+        let index_path = scratch.path().join("provider-index");
+        let server = make_server(&claude)
+            .with_codex_dir(scratch.path().join("missing-codex-root"))
+            .with_index_dir(&index_path);
+        build_provider_search_index(
+            &server,
+            &index_path,
+            &crate::provider::registry::ProviderSelection::All,
+        );
+
+        let text = unwrap_output(
+            server
+                .search_sessions(SearchSessionsRequest {
+                    pattern: "Hello".to_string(),
+                    provider: Some(vec!["all".to_string()]),
+                    project: None,
+                    session_id: None,
+                    scope: None,
+                    ignore_case: None,
+                    limit: None,
+                    offset: None,
+                    context_lines: None,
+                    fuzzy: None,
+                    fuzzy_threshold: None,
+                    exclude: None,
+                    sort: None,
+                    chain_aware: None,
+                })
+                .await,
+        );
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["total_matches"], 2);
+        assert_eq!(
+            value["coverage"]["requested_providers"],
+            serde_json::json!(["claude-code", "codex"])
+        );
+        assert_eq!(
+            value["coverage"]["searched_providers"],
+            serde_json::json!(["claude-code"])
+        );
+        assert_eq!(value["coverage"]["skipped"].as_array().unwrap().len(), 1);
+        assert_eq!(value["coverage"]["incomplete"], true);
+    }
+
+    #[tokio::test]
+    async fn indexed_chain_aware_search_uses_the_committed_logical_root() {
+        let root = "25252525-1111-1111-1111-111111111111";
+        let continuation = "26262626-2222-2222-2222-222222222222";
+        let claude = setup_chain_claude_dir(
+            root,
+            continuation,
+            PROJECT_PATH,
+            "indexed_root_marker only here",
+            "indexed_continuation_marker only here",
+        );
+        let index_home = TempDir::new().unwrap();
+        let index_path = index_home.path().join("provider-index");
+        let server = make_server(&claude).with_index_dir(&index_path);
+        build_provider_search_index(
+            &server,
+            &index_path,
+            &crate::provider::registry::ProviderSelection::Explicit(vec![
+                crate::provider::ProviderId::claude_code(),
+            ]),
+        );
+        let request = |chain_aware| SearchSessionsRequest {
+            pattern: "indexed_root_marker".to_string(),
+            provider: Some(vec!["claude-code".to_string()]),
+            project: None,
+            session_id: Some(format!("claude-code:{continuation}")),
+            scope: None,
+            ignore_case: None,
+            limit: None,
+            offset: None,
+            context_lines: None,
+            fuzzy: None,
+            fuzzy_threshold: None,
+            exclude: None,
+            sort: None,
+            chain_aware: Some(chain_aware),
+        };
+
+        let chain = unwrap_output(server.search_sessions(request(true)).await);
+        let chain: serde_json::Value = serde_json::from_str(&chain).unwrap();
+        assert_eq!(chain["total_matches"], 1);
+        assert_eq!(chain["results"][0]["session_id"], root);
+        assert_eq!(
+            chain["results"][0]["logical_root"],
+            format!("claude-code:{root}")
+        );
+
+        let single = unwrap_output(server.search_sessions(request(false)).await);
+        let single: serde_json::Value = serde_json::from_str(&single).unwrap();
+        assert_eq!(single["total_matches"], 0);
     }
 
     #[tokio::test]
