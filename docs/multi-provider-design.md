@@ -2699,6 +2699,31 @@ source-deletion test and the bounded result heap, these measurements close the
 P1.5 no-rediscovery, performance, parity, cross-provider, and output-economy
 exit requirements.
 
+#### Typed lineage CLI (P1.6 slice 1, 2026-07-22)
+
+`snatch chain` keeps its flagless Claude continuation-chain output unchanged.
+An explicit `--provider` uses the registry's existing typed lineage and unified
+project contracts instead of reconstructing Claude-style parent UUID chains.
+The provider view renders continuation, fork, and spawn edges; spawn metadata
+remains attached to its edge, and missing/deleted endpoints remain visible as
+dangling rather than being dropped. Project filtering retains an edge when
+either known endpoint belongs to a matching unified project, which preserves a
+dangling parent edge into the selected project.
+
+Explicit provider selections are atomic; `all` is partial-but-reported and
+requires at least one successful inventory/lineage scan. JSON is one typed
+response with qualified endpoints, per-endpoint project context,
+kind counts, skips, and project-context warnings. TSV sanitizes provider-owned
+metadata so embedded tabs/newlines cannot inject rows. The registry already
+validates that every provider-owned edge remains inside that provider's
+identity, sorts/deduplicates edges, and removes a provider's project inventory
+under `all` if its lineage scan fails; no new capability or parallel failure
+policy was introduced for the command.
+
+This does not imply graph-bundle, live-tail, deletion, or file-recovery
+capabilities. Those operations remain independently gated by source evidence
+and mutation authority. Generic provider validation is the next P1.6 slice.
+
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".
 - [x] Drift-coverage claims must state checked vs unchecked counts

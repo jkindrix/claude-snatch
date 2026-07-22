@@ -232,7 +232,7 @@ pub enum Commands {
     #[command(alias = "browse", display_order = 4)]
     Pick(PickArgs),
 
-    /// List session chains (multi-file logical sessions).
+    /// List classic chains or typed provider lineage.
     #[command(display_order = 5)]
     Chain(commands::chain::ChainArgs),
 

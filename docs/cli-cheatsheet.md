@@ -77,6 +77,12 @@ snatch recent                         # last 5 sessions
 snatch recent -n 10                   # last 10 sessions
 snatch recent -p myproject            # recent for a project
 
+Session lineage
+
+snatch chain                          # classic Claude continuation chains
+snatch chain --provider all           # typed continuation/fork/spawn edges
+snatch chain --provider codex -p repo # provider lineage scoped to a project
+
 Session details (aliases: i, show)
 
 snatch info <SESSION>                 # detailed session info

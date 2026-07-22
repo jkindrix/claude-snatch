@@ -2355,6 +2355,21 @@ mod codex_provider_cli {
         setup_codex_home_with_cwd("/tmp/p")
     }
 
+    fn add_codex_fork(codex_home: &std::path::Path) -> String {
+        let fork = "0198aaaa-bbbb-7ccc-8ddd-eeeeffff0002";
+        let day = codex_home.join("sessions/2026/07/17");
+        std::fs::create_dir_all(&day).unwrap();
+        let content = format!(
+            "{{\"timestamp\":\"2026-07-17T10:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{fork}\",\"cwd\":\"/tmp/p\",\"forked_from_id\":\"{CODEX_THREAD}\"}}}}\n"
+        );
+        std::fs::write(
+            day.join(format!("rollout-2026-07-17T10-00-00-{fork}.jsonl")),
+            content,
+        )
+        .unwrap();
+        fork.to_string()
+    }
+
     #[test]
     fn list_provider_codex_shows_qualified_ids() {
         let claude = setup_fixture_dir();
@@ -2366,6 +2381,100 @@ mod codex_provider_cli {
             .assert()
             .success()
             .stdout(predicate::str::contains(format!("codex:{CODEX_THREAD}")));
+    }
+
+    #[test]
+    fn chain_provider_surfaces_typed_fork_lineage_and_project_filtering() {
+        let claude = setup_fixture_dir();
+        let (codex, _) = setup_codex_home();
+        let fork = add_codex_fork(codex.path());
+
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "chain", "--provider", "codex"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let output: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(output["total_edges"], 1);
+        assert_eq!(output["counts_by_kind"]["fork"], 1);
+        assert_eq!(output["edges"][0]["provider"], "codex");
+        assert_eq!(output["edges"][0]["kind"], "fork");
+        assert_eq!(output["edges"][0]["from"], format!("codex:{CODEX_THREAD}"));
+        assert_eq!(output["edges"][0]["to"], format!("codex:{fork}"));
+        assert_eq!(output["edges"][0]["dangling_from"], false);
+        assert_eq!(output["edges"][0]["dangling_to"], false);
+        assert_eq!(output["edges"][0]["from_project"], "/tmp/p");
+        assert_eq!(output["edges"][0]["to_project"], "/tmp/p");
+        assert_eq!(output["skipped_providers"], serde_json::json!([]));
+
+        let all_output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "chain", "--provider", "all"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let all_output: serde_json::Value = serde_json::from_slice(&all_output).unwrap();
+        assert_eq!(all_output["total_edges"], 1);
+        assert_eq!(all_output["edges"][0]["kind"], "fork");
+        assert_eq!(all_output["skipped_providers"], serde_json::json!([]));
+
+        let filtered = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "-o",
+                "json",
+                "chain",
+                "--provider",
+                "codex",
+                "--project",
+                "does-not-match",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let filtered: serde_json::Value = serde_json::from_slice(&filtered).unwrap();
+        assert_eq!(filtered["total_edges"], 0);
+        assert_eq!(filtered["edges"], serde_json::json!([]));
+
+        let missing_home_parent = TempDir::new().unwrap();
+        let missing_home = missing_home_parent.path().join("missing-codex-home");
+        let partial = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", &missing_home)
+            .args(["-o", "json", "chain", "--provider", "all"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let partial: serde_json::Value = serde_json::from_slice(&partial).unwrap();
+        assert_eq!(partial["total_edges"], 0);
+        assert_eq!(partial["skipped_providers"][0]["provider"], "codex");
+
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", &missing_home)
+            .args(["chain", "--provider", "codex"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("provider 'codex' is unavailable"));
+
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .args(["chain"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("No session chains found."));
     }
 
     #[test]
