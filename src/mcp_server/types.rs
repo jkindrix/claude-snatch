@@ -1303,6 +1303,10 @@ pub struct GetProjectHealthRequest {
 
     /// Exclude subagent sessions. Default: true.
     pub no_subagents: Option<bool>,
+
+    /// Session-log providers to analyze. Omit for the classic Claude-only
+    /// route; use `["all"]` for an explicit cross-provider union.
+    pub provider: Option<Vec<String>>,
 }
 
 /// A hotspot file entry.
@@ -1354,6 +1358,43 @@ pub struct GetProjectHealthResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decision_churn: Option<DecisionChurnEntry>,
     pub session_stats: Vec<SessionHealthEntry>,
+    /// Providers scanned successfully (provider route only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub providers: Option<Vec<String>>,
+    /// Successfully parsed source-session descriptors (provider route only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_descriptors_analyzed: Option<usize>,
+    /// Authoritatively classified failures (provider route only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed_tool_failures: Option<usize>,
+    /// Text-inferred failure signals (provider route only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inferred_failure_signals: Option<usize>,
+    /// Descriptors whose period inclusion used conservative source time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date_filter_fallback_descriptors: Option<usize>,
+    /// Claude-project registry coverage (provider route only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry_coverage: Option<ProjectRegistryCoverage>,
+    /// Providers skipped under an explicit `all` selection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_providers: Vec<String>,
+    /// Bounded analysis warnings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// Honest evidence boundary for provider-routed churn metrics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage_note: Option<String>,
+}
+
+/// Coverage of goals/decisions stored in Claude project metadata.
+#[derive(Debug, Serialize)]
+pub struct ProjectRegistryCoverage {
+    pub scope: String,
+    pub goals_available: bool,
+    pub decisions_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
 }
 
 // ============================================================================
@@ -1442,6 +1483,10 @@ pub struct SuggestPrioritiesRequest {
 
     /// Exclude subagent sessions. Default: true.
     pub no_subagents: Option<bool>,
+
+    /// Session-log providers to analyze. Omit for the classic Claude-only
+    /// route; use `["all"]` for an explicit cross-provider union.
+    pub provider: Option<Vec<String>>,
 }
 
 /// A source of evidence for a priority item.
@@ -1469,9 +1514,27 @@ pub struct SuggestPrioritiesResponse {
     pub period: String,
     pub sessions_analyzed: usize,
     pub total_tool_failures: usize,
-    pub open_goals: usize,
-    pub proposed_decisions: usize,
+    pub open_goals: Option<usize>,
+    pub proposed_decisions: Option<usize>,
     pub priorities: Vec<PriorityItemEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub providers: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_descriptors_analyzed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed_tool_failures: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inferred_failure_signals: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date_filter_fallback_descriptors: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry_coverage: Option<ProjectRegistryCoverage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_providers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage_note: Option<String>,
 }
 
 // ============================================================================

@@ -5,13 +5,20 @@
 //!
 //! Used by both CLI and MCP `get_project_health` tools.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::analysis::extraction::extract_tool_names;
-use crate::analysis::lessons::{extract_error_fix_pairs, LessonOptions};
+use crate::analysis::lessons::{
+    extract_error_fix_pairs, extract_lessons_from_conversation, FailureKind, LessonOptions,
+};
 use crate::decisions::{DecisionStatus, DecisionStore};
 use crate::discovery::Session;
-use crate::file_index::FileIndex;
+use crate::file_index::{FileIndex, ProviderFileIndexBuilder};
+use crate::provider::{
+    ActivityKind, FileChangeOutcome, FileChangeProjection, LogicalSessionKey, ParsedSession,
+};
+use crate::reconstruction::Conversation;
 
 /// Parameters for project health analysis.
 pub struct ProjectHealthParams {
@@ -75,6 +82,297 @@ pub struct ProjectHealthResult {
     pub session_stats: Vec<SessionHealthStats>,
     pub total_errors: usize,
     pub total_tool_calls: usize,
+}
+
+/// Provider-routed health result plus failure evidence.
+///
+/// Transport adapters render `health`; the evidence remains
+/// internal so the two project analyses cannot disagree about failure counts.
+#[derive(Debug)]
+pub struct ProviderProjectHealthResult {
+    /// Provider-neutral health metrics.
+    pub health: ProjectHealthResult,
+    /// Successfully parsed source-session descriptors.
+    pub session_descriptors_analyzed: usize,
+    /// Authoritatively classified failures.
+    pub confirmed_failures: usize,
+    /// Failures inferred from unstructured output text.
+    pub inferred_failures: usize,
+    /// Failure/fix evidence paired with its logical continuation root.
+    pub failures: Vec<(crate::analysis::lessons::ErrorFixPair, LogicalSessionKey)>,
+}
+
+#[derive(Default)]
+struct ProviderSessionAggregate {
+    timestamp: Option<String>,
+    error_count: usize,
+    tool_count: usize,
+}
+
+/// Streaming provider-project health accumulator.
+///
+/// Each source-session descriptor is analyzed once, while continuation members are
+/// accumulated under their typed logical root. Forks retain distinct roots,
+/// spawned transcripts are filtered by the registry visitor, and inherited
+/// fork history is excluded here by entry/file-change activity annotations.
+#[derive(Default)]
+pub struct ProviderProjectHealthAccumulator {
+    sessions: BTreeMap<LogicalSessionKey, ProviderSessionAggregate>,
+    files: ProviderFileIndexBuilder,
+    project_roots: BTreeSet<String>,
+    failures: Vec<(crate::analysis::lessons::ErrorFixPair, LogicalSessionKey)>,
+    session_descriptors_analyzed: usize,
+    confirmed_failures: usize,
+    inferred_failures: usize,
+}
+
+impl ProviderProjectHealthAccumulator {
+    /// Add one successfully parsed source-session descriptor.
+    pub fn add_session(
+        &mut self,
+        project_roots: &[String],
+        logical_root: &LogicalSessionKey,
+        parsed: Arc<ParsedSession>,
+        semantic_annotations: bool,
+    ) -> crate::error::Result<()> {
+        self.project_roots.extend(project_roots.iter().cloned());
+        let conversation = Conversation::from_parsed_session(Arc::clone(&parsed))?;
+        let lesson_opts = LessonOptions {
+            limit: usize::MAX,
+            ..Default::default()
+        };
+        let lessons =
+            extract_lessons_from_conversation(&conversation, &lesson_opts, semantic_annotations);
+        let error_count = lessons.error_fix_pairs.len();
+        let confirmed = lessons
+            .error_fix_pairs
+            .iter()
+            .filter(|pair| pair.failure_kind == FailureKind::Confirmed)
+            .count();
+        self.confirmed_failures = self.confirmed_failures.saturating_add(confirmed);
+        self.inferred_failures = self
+            .inferred_failures
+            .saturating_add(error_count.saturating_sub(confirmed));
+        self.failures.extend(
+            lessons
+                .error_fix_pairs
+                .into_iter()
+                .map(|pair| (pair, logical_root.clone())),
+        );
+
+        let active_entries: Vec<_> = parsed
+            .entries
+            .iter()
+            .filter(|entry| {
+                parsed
+                    .semantics
+                    .get(&entry.id)
+                    .map_or(true, |semantics| semantics.activity == ActivityKind::New)
+            })
+            .collect();
+        let tool_count = active_entries
+            .iter()
+            .map(|entry| match &entry.entry {
+                crate::model::LogEntry::Assistant(message) => message.message.tool_uses().len(),
+                _ => 0,
+            })
+            .sum::<usize>();
+        let timestamp = active_entries
+            .iter()
+            .filter_map(|entry| entry.entry.timestamp())
+            .min()
+            .map(|value| value.to_rfc3339());
+
+        let aggregate = self.sessions.entry(logical_root.clone()).or_default();
+        aggregate.error_count = aggregate.error_count.saturating_add(error_count);
+        aggregate.tool_count = aggregate.tool_count.saturating_add(tool_count);
+        if let Some(timestamp) = timestamp {
+            if aggregate
+                .timestamp
+                .as_ref()
+                .map_or(true, |current| timestamp < *current)
+            {
+                aggregate.timestamp = Some(timestamp);
+            }
+        }
+
+        let projection = FileChangeProjection {
+            changes: parsed.file_changes.clone(),
+            inherited_owners: parsed
+                .semantics
+                .iter()
+                .filter(|(_, semantics)| semantics.activity == ActivityKind::InheritedHistory)
+                .map(|(entry, _)| entry.clone())
+                .collect(),
+            owner_timestamps: parsed
+                .entries
+                .iter()
+                .filter_map(|entry| {
+                    entry
+                        .entry
+                        .timestamp()
+                        .map(|timestamp| (entry.id.clone(), timestamp))
+                })
+                .collect(),
+        };
+        self.files.add_projection_for_logical_session(
+            project_roots.first().map_or("", String::as_str),
+            &parsed.descriptor.key,
+            logical_root,
+            &projection,
+        );
+        self.session_descriptors_analyzed = self.session_descriptors_analyzed.saturating_add(1);
+        Ok(())
+    }
+
+    /// Finish deterministic rankings and attach optional Claude-registry
+    /// decision coverage.
+    #[must_use]
+    pub fn finish(
+        self,
+        decision_store: Option<&DecisionStore>,
+        params: &ProjectHealthParams,
+    ) -> ProviderProjectHealthResult {
+        let file_index = self.files.build();
+        let mut file_aggregates: BTreeMap<String, (usize, BTreeSet<LogicalSessionKey>)> =
+            BTreeMap::new();
+        for (path, changes) in file_index.entries {
+            if !is_provider_project_file(&path, &self.project_roots) {
+                continue;
+            }
+            let aggregate = file_aggregates.entry(path).or_default();
+            for change in changes {
+                if change.outcome == FileChangeOutcome::Applied {
+                    aggregate.0 = aggregate.0.saturating_add(1);
+                    aggregate.1.insert(change.session);
+                }
+            }
+        }
+        file_aggregates.retain(|_, (edits, _)| *edits > 0);
+        let mut hotspot_files: Vec<_> = file_aggregates
+            .iter()
+            .map(|(path, (edits, sessions))| HotspotFile {
+                path: path.clone(),
+                edit_count: *edits,
+                session_count: sessions.len(),
+            })
+            .collect();
+        hotspot_files.sort_by(|a, b| {
+            b.edit_count
+                .cmp(&a.edit_count)
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        hotspot_files.truncate(params.max_hotspots);
+
+        let mut rework_files: Vec<_> = file_aggregates
+            .into_iter()
+            .filter(|(_, (_, sessions))| sessions.len() > 1)
+            .map(|(path, (edits, sessions))| ReworkFile {
+                path,
+                version_count: edits,
+                session_count: sessions.len(),
+            })
+            .collect();
+        rework_files.sort_by(|a, b| {
+            b.session_count
+                .cmp(&a.session_count)
+                .then_with(|| b.version_count.cmp(&a.version_count))
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        rework_files.truncate(params.max_hotspots);
+
+        let mut session_stats: Vec<_> = self
+            .sessions
+            .iter()
+            .map(|(key, aggregate)| SessionHealthStats {
+                session_id: key.to_string(),
+                timestamp: aggregate.timestamp.clone(),
+                error_count: aggregate.error_count,
+                tool_count: aggregate.tool_count,
+            })
+            .collect();
+        session_stats.sort_by(|a, b| {
+            a.timestamp
+                .cmp(&b.timestamp)
+                .then_with(|| a.session_id.cmp(&b.session_id))
+        });
+
+        let total_errors = self
+            .confirmed_failures
+            .saturating_add(self.inferred_failures);
+        let total_tool_calls = session_stats.iter().fold(0_usize, |sum, session| {
+            sum.saturating_add(session.tool_count)
+        });
+        ProviderProjectHealthResult {
+            health: ProjectHealthResult {
+                sessions_analyzed: self.sessions.len(),
+                hotspot_files,
+                rework_files,
+                decision_churn: decision_store.map(decision_churn),
+                session_stats,
+                total_errors,
+                total_tool_calls,
+            },
+            session_descriptors_analyzed: self.session_descriptors_analyzed,
+            confirmed_failures: self.confirmed_failures,
+            inferred_failures: self.inferred_failures,
+            failures: self.failures,
+        }
+    }
+}
+
+fn decision_churn(store: &DecisionStore) -> DecisionChurn {
+    let decisions = &store.decisions;
+    DecisionChurn {
+        total_decisions: decisions.len(),
+        confirmed_count: decisions
+            .iter()
+            .filter(|decision| decision.status == DecisionStatus::Confirmed)
+            .count(),
+        superseded_count: decisions
+            .iter()
+            .filter(|decision| decision.status == DecisionStatus::Superseded)
+            .count(),
+        abandoned_count: decisions
+            .iter()
+            .filter(|decision| decision.status == DecisionStatus::Abandoned)
+            .count(),
+        proposed_count: decisions
+            .iter()
+            .filter(|decision| decision.status == DecisionStatus::Proposed)
+            .count(),
+    }
+}
+
+fn is_provider_project_file(path: &str, project_roots: &BTreeSet<String>) -> bool {
+    let windows_drive = path.as_bytes().get(1) == Some(&b':');
+    let windows_absolute =
+        windows_drive && matches!(path.as_bytes().get(2), Some(b'/') | Some(b'\\'));
+    if windows_drive && !windows_absolute {
+        return false;
+    }
+    if !path.starts_with('/') && !windows_absolute {
+        let Some(relative) = crate::provider::project::normalize_cwd(path) else {
+            return false;
+        };
+        return relative != ".."
+            && !relative.starts_with("../")
+            && !relative.split('/').any(|segment| segment == ".tmp");
+    }
+    let Some(path) = crate::provider::project::normalize_cwd(path) else {
+        return false;
+    };
+    if path.split('/').any(|segment| segment == ".tmp") {
+        return false;
+    }
+    project_roots.iter().any(|root| {
+        crate::provider::project::normalize_cwd(root).is_some_and(|root| {
+            path == root
+                || path
+                    .strip_prefix(&root)
+                    .is_some_and(|tail| tail.starts_with('/'))
+        })
+    })
 }
 
 /// Whether `path` is one of the project's own files, for scoping churn metrics.
@@ -221,5 +519,98 @@ pub fn analyze_project_health(
         session_stats,
         total_errors,
         total_tool_calls,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::fake::{multi_artifact_key, FakeProvider};
+    use crate::provider::{
+        FileChangeDetail, FileChangeEvidence, FileChangeKind, FileChangeObservation, SourceProvider,
+    };
+
+    #[test]
+    fn provider_health_scopes_snapshot_dedup_to_continuation_members() {
+        let provider = FakeProvider;
+        let mut parsed = provider.parse(&multi_artifact_key()).unwrap();
+        let active_owner = parsed.entries[2].id.clone();
+        let inherited_owner = parsed.entries.last().unwrap().id.clone();
+        let record = parsed.entry_origins[&active_owner][0].clone();
+        let change = |owner, path: &str, outcome| FileChangeObservation {
+            owner,
+            operation_id: format!("snapshot-{path}"),
+            change_index: 0,
+            record: record.clone(),
+            outcome_record: None,
+            path: path.to_string(),
+            move_path: None,
+            kind: FileChangeKind::Update,
+            detail: FileChangeDetail::FullContent("new".to_string()),
+            evidence: FileChangeEvidence::FileHistorySnapshot,
+            outcome,
+            observed_at: None,
+            native_version: Some(1),
+        };
+        parsed.file_changes = vec![
+            change(
+                active_owner.clone(),
+                "/work/src/lib.rs",
+                FileChangeOutcome::Applied,
+            ),
+            change(
+                active_owner.clone(),
+                "/work/src/lib.rs",
+                FileChangeOutcome::Applied,
+            ),
+            change(
+                active_owner.clone(),
+                "/work/src/fail.rs",
+                FileChangeOutcome::Failed,
+            ),
+            change(
+                inherited_owner,
+                "/work/src/inherited.rs",
+                FileChangeOutcome::Applied,
+            ),
+            change(
+                active_owner,
+                "/workbench/src/outside.rs",
+                FileChangeOutcome::Applied,
+            ),
+            change(
+                parsed.entries[2].id.clone(),
+                "../outside.rs",
+                FileChangeOutcome::Applied,
+            ),
+            change(
+                parsed.entries[2].id.clone(),
+                "src/../.tmp/scratch.rs",
+                FileChangeOutcome::Applied,
+            ),
+            change(
+                parsed.entries[2].id.clone(),
+                "C:drive-relative.rs",
+                FileChangeOutcome::Applied,
+            ),
+        ];
+        let first = Arc::new(parsed);
+        let mut second = (*first).clone();
+        second.descriptor.key.native_id = "continuation-member".to_string();
+        let second = Arc::new(second);
+        let mut aggregate = ProviderProjectHealthAccumulator::default();
+        for parsed in [first, second] {
+            aggregate
+                .add_session(&["/work".to_string()], &multi_artifact_key(), parsed, true)
+                .unwrap();
+        }
+        let result = aggregate.finish(None, &ProjectHealthParams::default());
+        assert_eq!(result.session_descriptors_analyzed, 2);
+        assert_eq!(result.health.sessions_analyzed, 1);
+        assert_eq!(result.health.hotspot_files.len(), 1);
+        assert_eq!(result.health.hotspot_files[0].path, "/work/src/lib.rs");
+        assert_eq!(result.health.hotspot_files[0].edit_count, 2);
+        assert_eq!(result.health.hotspot_files[0].session_count, 1);
+        assert!(result.health.rework_files.is_empty());
     }
 }

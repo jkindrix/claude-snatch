@@ -8,8 +8,12 @@
 
 use std::collections::HashMap;
 
-use crate::analysis::project_health::{analyze_project_health, ProjectHealthParams};
-use crate::analysis::project_lessons::{aggregate_project_lessons, ProjectLessonsParams};
+use crate::analysis::project_health::{
+    analyze_project_health, ProjectHealthParams, ProviderProjectHealthResult,
+};
+use crate::analysis::project_lessons::{
+    aggregate_failure_pairs, aggregate_project_lessons, ProjectLessonsParams,
+};
 use crate::decisions::{DecisionStatus, DecisionStore};
 use crate::discovery::Session;
 use crate::goals::{GoalStatus, GoalStore};
@@ -167,6 +171,160 @@ pub struct PriorityResult {
     pub priorities: Vec<PriorityItem>,
 }
 
+/// Provider-routed priority result.
+///
+/// Registry-backed counts are optional because goals and decisions remain scoped to Claude project
+/// storage; absence must not serialize as a provider-neutral zero.
+#[derive(Debug)]
+#[allow(missing_docs)]
+pub struct ProviderPriorityResult {
+    pub sessions_analyzed: usize,
+    pub session_descriptors_analyzed: usize,
+    pub total_errors: usize,
+    pub confirmed_failures: usize,
+    pub inferred_failures: usize,
+    pub open_goals: Option<usize>,
+    pub proposed_decisions: Option<usize>,
+    pub priorities: Vec<PriorityItem>,
+}
+
+/// Rank provider-routed failure/churn evidence together with optional
+/// Claude-project registry state.
+#[must_use]
+pub fn suggest_provider_priorities(
+    analysis: ProviderProjectHealthResult,
+    decision_store: Option<&DecisionStore>,
+    goal_store: Option<&GoalStore>,
+    params: &PriorityParams,
+) -> ProviderPriorityResult {
+    let mut items = Vec::new();
+    let lessons_params = ProjectLessonsParams {
+        category: "errors".to_string(),
+        limit: params.max_errors,
+        min_occurrences: 2,
+    };
+    let failures = analysis
+        .failures
+        .iter()
+        .cloned()
+        .map(|(pair, session)| (pair, session.to_string()))
+        .collect();
+    for error in aggregate_failure_pairs(failures, &lessons_params) {
+        let session_count = error.sessions.len();
+        let score = (error.count as f64).ln() * (1.0 + session_count as f64 * 0.5);
+        items.push(PriorityItem {
+            rank: 0,
+            category: "reliability".to_string(),
+            summary: format!(
+                "[{}] tool failure occurring {}x across {} sessions",
+                error.tool_name, error.count, session_count,
+            ),
+            score,
+            sources: vec![PrioritySource::RecurringError {
+                tool: error.tool_name,
+                count: error.count,
+                sessions: session_count,
+                pattern: error.error_pattern,
+                last_fix: error.example_resolution,
+            }],
+        });
+    }
+
+    for file in &analysis.health.rework_files {
+        if file.session_count >= 3 {
+            let score = (file.session_count as f64) * 1.5 + (file.version_count as f64).ln();
+            items.push(PriorityItem {
+                rank: 0,
+                category: "stability".to_string(),
+                summary: format!(
+                    "{} reworked across {} sessions ({} versions)",
+                    file.path, file.session_count, file.version_count,
+                ),
+                score,
+                sources: vec![PrioritySource::FileChurn {
+                    path: file.path.clone(),
+                    edits: file.version_count,
+                    sessions: file.session_count,
+                }],
+            });
+        }
+    }
+
+    let open_goals = goal_store.map(|store| {
+        store
+            .goals
+            .iter()
+            .filter(|goal| goal.status.is_active())
+            .map(|goal| {
+                let is_in_progress = matches!(goal.status, GoalStatus::InProgress);
+                items.push(PriorityItem {
+                    rank: 0,
+                    category: "goal".to_string(),
+                    summary: goal.text.clone(),
+                    score: if is_in_progress { 8.0 } else { 5.0 },
+                    sources: vec![PrioritySource::OpenGoal {
+                        id: goal.id as usize,
+                        text: goal.text.clone(),
+                        status: if is_in_progress {
+                            "in_progress".to_string()
+                        } else {
+                            "open".to_string()
+                        },
+                    }],
+                });
+            })
+            .count()
+    });
+    let proposed_decisions = decision_store.map(|store| {
+        store
+            .decisions
+            .iter()
+            .filter(|decision| decision.status == DecisionStatus::Proposed)
+            .map(|decision| {
+                items.push(PriorityItem {
+                    rank: 0,
+                    category: "decision".to_string(),
+                    summary: format!("Resolve: {}", decision.title),
+                    score: 4.0 + (1.0 - decision.confidence) * 3.0,
+                    sources: vec![PrioritySource::ProposedDecision {
+                        id: decision.id as usize,
+                        title: decision.title.clone(),
+                        confidence: decision.confidence,
+                    }],
+                });
+            })
+            .count()
+    });
+
+    let mut priorities = deduplicate_by_file(&mut items);
+    sort_priorities(&mut priorities);
+    priorities.truncate(params.max_priorities);
+    for (index, item) in priorities.iter_mut().enumerate() {
+        item.rank = index + 1;
+    }
+
+    ProviderPriorityResult {
+        sessions_analyzed: analysis.health.sessions_analyzed,
+        session_descriptors_analyzed: analysis.session_descriptors_analyzed,
+        total_errors: analysis.health.total_errors,
+        confirmed_failures: analysis.confirmed_failures,
+        inferred_failures: analysis.inferred_failures,
+        open_goals,
+        proposed_decisions,
+        priorities,
+    }
+}
+
+fn sort_priorities(items: &mut [PriorityItem]) {
+    items.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.category.cmp(&b.category))
+            .then_with(|| a.summary.cmp(&b.summary))
+    });
+}
+
 /// Suggest priorities based on project data.
 pub fn suggest_priorities(
     sessions: &[Session],
@@ -287,6 +445,8 @@ pub fn suggest_priorities(
     let mut merged = deduplicate_by_file(&mut items);
 
     // Sort by score descending
+    // Preserve the classic route's historical score-only ordering. The
+    // provider route above has an explicit deterministic tie contract.
     merged.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)

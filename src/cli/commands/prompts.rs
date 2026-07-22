@@ -833,41 +833,7 @@ fn extract_single_session(cli: &Cli, args: &PromptsArgs, session_id: &str) -> Re
     Ok(())
 }
 
-fn context_overlaps_date_range(
-    context: &crate::provider::project::SessionProjectContext,
-    since: Option<std::time::SystemTime>,
-    until: Option<std::time::SystemTime>,
-) -> (bool, bool) {
-    if since.is_none() && until.is_none() {
-        return (true, false);
-    }
-
-    let start = context.started_at.map(std::time::SystemTime::from);
-    let native_end = if context.native_tail_unresolved {
-        None
-    } else {
-        context.ended_at
-    };
-    let end = if native_end.is_some() {
-        native_end
-    } else {
-        [context.ended_at, context.started_at, context.modified_at]
-            .into_iter()
-            .flatten()
-            .max()
-    }
-    .map(std::time::SystemTime::from);
-
-    let used_fallback = (since.is_some() && native_end.is_none())
-        || (until.is_some() && context.started_at.is_none());
-    if since.is_some_and(|cutoff| end.is_some_and(|timestamp| timestamp < cutoff)) {
-        return (false, used_fallback);
-    }
-    if until.is_some_and(|cutoff| start.is_some_and(|timestamp| timestamp > cutoff)) {
-        return (false, used_fallback);
-    }
-    (true, used_fallback)
-}
+use crate::provider::project::context_overlaps_time_range as context_overlaps_date_range;
 
 fn sort_prompts_chronologically(prompts: &mut [Prompt]) {
     prompts.sort_by(|a, b| {

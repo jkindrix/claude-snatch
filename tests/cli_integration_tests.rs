@@ -45,6 +45,37 @@ fn setup_fixture_dir() -> TempDir {
     tmp
 }
 
+#[test]
+fn flagless_health_and_priorities_keep_classic_json_shapes() {
+    let claude = setup_fixture_dir();
+    let health = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", claude.path())
+        .args(["-o", "json", "health", PROJECT_PATH])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let health: serde_json::Value = serde_json::from_slice(&health).unwrap();
+    assert_eq!(health["sessions_analyzed"], 1);
+    assert!(health.get("providers").is_none());
+    assert_eq!(health["session_stats"][0]["session_id"], SESSION_ID);
+
+    let priorities = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", claude.path())
+        .args(["-o", "json", "priorities", PROJECT_PATH])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let priorities: serde_json::Value = serde_json::from_slice(&priorities).unwrap();
+    assert_eq!(priorities["sessions_analyzed"], 1);
+    assert!(priorities["open_goals"].is_number());
+    assert!(priorities["proposed_decisions"].is_number());
+    assert!(priorities.get("providers").is_none());
+}
+
 fn setup_code_fixture_dir() -> TempDir {
     let tmp = TempDir::new().expect("failed to create temp dir");
     let project_dir = tmp
@@ -4015,6 +4046,142 @@ mod codex_normalization_cli {
             .find(|file| file["total_attempts"] == 1)
             .unwrap();
         assert_eq!(failed["attempts"][0]["outcome"], "failed");
+    }
+
+    #[test]
+    fn provider_health_uses_typed_changes_and_honest_registry_coverage() {
+        let claude = setup_fixture_dir();
+        let codex = file_changes_home();
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "health", "/tmp/p", "--provider", "codex"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["providers"], serde_json::json!(["codex"]));
+        assert_eq!(value["sessions_analyzed"], 1);
+        assert_eq!(value["session_descriptors_analyzed"], 1);
+        assert_eq!(value["total_tool_calls"], 2);
+        assert_eq!(value["confirmed_tool_failures"], 0);
+        assert_eq!(value["inferred_failure_signals"], 1);
+        assert_eq!(value["hotspot_files"].as_array().unwrap().len(), 1);
+        assert_eq!(value["hotspot_files"][0]["path"], "src/old.rs");
+        assert_eq!(value["hotspot_files"][0]["edit_count"], 1);
+        assert!(value["rework_files"].as_array().unwrap().is_empty());
+        assert_eq!(value["registry_coverage"]["available"], false);
+        assert!(value["decision_churn"].is_null());
+        assert!(value["coverage_note"]
+            .as_str()
+            .unwrap()
+            .contains("shell writes"));
+
+        let lessons = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "-o",
+                "json",
+                "lessons",
+                "--project",
+                "/tmp/p",
+                "--provider",
+                "codex",
+                "--category",
+                "errors",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let lessons: serde_json::Value = serde_json::from_slice(&lessons).unwrap();
+        assert_eq!(
+            value["total_tool_failures"],
+            lessons["summary"]["total_errors"]
+        );
+        assert_eq!(
+            value["confirmed_tool_failures"],
+            lessons["summary"]["confirmed_tool_failures"]
+        );
+        assert_eq!(
+            value["inferred_failure_signals"],
+            lessons["summary"]["inferred_failure_signals"]
+        );
+    }
+
+    #[test]
+    fn provider_priorities_cluster_failures_without_fabricating_registry_zeroes() {
+        let claude = setup_fixture_dir();
+        let codex = file_changes_home();
+        let original = std::fs::read_dir(codex.path().join("sessions/2026/07/16"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let content = std::fs::read_to_string(&original).unwrap();
+        let sibling = "019f7000-0000-7000-8000-000000000123";
+        std::fs::write(
+            original
+                .parent()
+                .unwrap()
+                .join(format!("rollout-2026-07-16T11-00-00-{sibling}.jsonl")),
+            content.replace(THREAD, sibling),
+        )
+        .unwrap();
+
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "priorities", "/tmp/p", "--provider", "codex"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["sessions_analyzed"], 2);
+        assert_eq!(value["session_descriptors_analyzed"], 2);
+        assert_eq!(value["total_tool_failures"], 2);
+        assert!(value["open_goals"].is_null());
+        assert!(value["proposed_decisions"].is_null());
+        assert_eq!(value["registry_coverage"]["goals_available"], false);
+        assert_eq!(value["registry_coverage"]["decisions_available"], false);
+        assert_eq!(value["priorities"][0]["category"], "reliability");
+        assert!(value["priorities"][0]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("2x across 2 sessions"));
+    }
+
+    #[test]
+    fn provider_health_all_is_partial_but_explicit_failure_is_atomic() {
+        let claude = setup_fixture_dir();
+        let missing_codex = claude.path().join("missing-codex-home");
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", &missing_codex)
+            .args(["-o", "json", "health", PROJECT_PATH, "--provider", "all"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["providers"], serde_json::json!(["claude-code"]));
+        assert_eq!(value["sessions_analyzed"], 1);
+        assert_eq!(value["skipped_providers"][0]["provider"], "codex");
+
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", &missing_codex)
+            .args(["health", PROJECT_PATH, "--provider", "codex"])
+            .assert()
+            .failure();
     }
 
     #[test]

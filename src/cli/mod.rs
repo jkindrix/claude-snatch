@@ -2069,7 +2069,7 @@ pub struct LessonsArgs {
     pub session_id: Option<String>,
 
     /// Source provider (`claude-code` or `codex`). A qualified session id
-    /// also selects its provider. Cross-session union extraction is Phase D.
+    /// also selects its provider; repeat or use `all` for cross-session unions.
     #[arg(long = "provider", value_name = "PROVIDER", action = clap::ArgAction::Append)]
     pub provider: Vec<String>,
 
@@ -2346,6 +2346,11 @@ pub struct HealthArgs {
     /// Filter to sessions until this date.
     #[arg(long)]
     pub until: Option<String>,
+
+    /// Source providers to search (repeatable; "all" = every installed
+    /// provider). Omit for the classic Claude-only route.
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
 }
 
 /// Arguments for the file-evolution command.
@@ -2409,6 +2414,11 @@ pub struct PrioritiesArgs {
     /// Filter to sessions until this date.
     #[arg(long)]
     pub until: Option<String>,
+
+    /// Source providers to search (repeatable; "all" = every installed
+    /// provider). Omit for the classic Claude-only route.
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
 }
 
 /// Arguments for the context command.

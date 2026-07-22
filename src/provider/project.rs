@@ -93,6 +93,49 @@ impl SessionProjectContext {
     }
 }
 
+/// Whether a whole session artifact overlaps a requested time range.
+///
+/// Complete native bounds are authoritative. A missing start or unresolved
+/// tail falls back conservatively to available native/source timestamps and
+/// reports that weaker evidence to the caller. Unknown bounds include the
+/// artifact rather than silently dropping potentially relevant work.
+#[must_use]
+pub fn context_overlaps_time_range(
+    context: &SessionProjectContext,
+    since: Option<std::time::SystemTime>,
+    until: Option<std::time::SystemTime>,
+) -> (bool, bool) {
+    if since.is_none() && until.is_none() {
+        return (true, false);
+    }
+
+    let start = context.started_at.map(std::time::SystemTime::from);
+    let native_end = if context.native_tail_unresolved {
+        None
+    } else {
+        context.ended_at
+    };
+    let end = if native_end.is_some() {
+        native_end
+    } else {
+        [context.ended_at, context.started_at, context.modified_at]
+            .into_iter()
+            .flatten()
+            .max()
+    }
+    .map(std::time::SystemTime::from);
+
+    let used_fallback = (since.is_some() && native_end.is_none())
+        || (until.is_some() && context.started_at.is_none());
+    if since.is_some_and(|cutoff| end.is_some_and(|timestamp| timestamp < cutoff)) {
+        return (false, used_fallback);
+    }
+    if until.is_some_and(|cutoff| start.is_some_and(|timestamp| timestamp > cutoff)) {
+        return (false, used_fallback);
+    }
+    (true, used_fallback)
+}
+
 /// Evidence basis selected for a stable project identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ProjectIdentityBasis {

@@ -65,13 +65,13 @@ use types::{
     ListSessionsRequest, ManageDecisionsRequest, ManageDecisionsResponse, ManageGoalsRequest,
     ManageGoalsResponse, ManageNotesRequest, ManageNotesResponse, MessageEntry, NoteEntry,
     PriorityItemEntry, PrioritySourceEntry, ProjectAggregate, ProjectHistoryResponse,
-    ProjectSessionEntry, ReworkFileEntry, SearchMatch, SearchSessionsRequest,
-    SearchSessionsResponse, SessionDigestResponse, SessionHealthEntry, SessionInfoResponse,
-    SessionLessonsResponse, SessionMessagesResponse, SessionSummary, SessionTimelineResponse,
-    StatsResponse, SubagentSummary, SuggestPrioritiesRequest, SuggestPrioritiesResponse,
-    ThreadExchangeEntry, ThreadTopicRequest, ThreadTopicResponse, TimelineTurn, ToolCallEntry,
-    ToolCallsResponse, ToolCallsSummary, ToolDetail, ToolLifecycleEntry, UnmatchedSubagent,
-    UserCorrection,
+    ProjectRegistryCoverage, ProjectSessionEntry, ReworkFileEntry, SearchMatch,
+    SearchSessionsRequest, SearchSessionsResponse, SessionDigestResponse, SessionHealthEntry,
+    SessionInfoResponse, SessionLessonsResponse, SessionMessagesResponse, SessionSummary,
+    SessionTimelineResponse, StatsResponse, SubagentSummary, SuggestPrioritiesRequest,
+    SuggestPrioritiesResponse, ThreadExchangeEntry, ThreadTopicRequest, ThreadTopicResponse,
+    TimelineTurn, ToolCallEntry, ToolCallsResponse, ToolCallsSummary, ToolDetail,
+    ToolLifecycleEntry, UnmatchedSubagent, UserCorrection,
 };
 
 // ============================================================================
@@ -3886,10 +3886,17 @@ impl SnatchServer {
 
     /// Project health dashboard: hotspot files, rework, error trends, decision stability.
     #[tool(
-        description = "Project health dashboard. Shows hotspot files (most edits), rework files (edited across multiple sessions), decision stability metrics, and per-session error/tool counts. Answers 'which parts of the codebase cause the most trouble?' and 'are we improving?'"
+        description = "Project health dashboard. Shows hotspot files, rework, decision stability, and per-session tool/failure counts. Set provider to route through normalized session logs; provider churn is limited to source-backed applied patch/snapshot evidence and reports unavailable Claude-registry data explicitly. Omit provider for the classic Claude-only response."
     )]
     async fn get_project_health(&self, request: GetProjectHealthRequest) -> ToolOutput {
         use crate::analysis::project_health::{analyze_project_health, ProjectHealthParams};
+
+        if let Some(flags) = request.provider.as_ref() {
+            if flags.is_empty() {
+                return ToolOutput::error("provider must name at least one provider or 'all'");
+            }
+            return provider_project_health(self, request);
+        }
 
         let claude_dir = match self.get_claude_dir() {
             Ok(dir) => dir,
@@ -3981,6 +3988,15 @@ impl SnatchServer {
                     tool_count: s.tool_count,
                 })
                 .collect(),
+            providers: None,
+            session_descriptors_analyzed: None,
+            confirmed_tool_failures: None,
+            inferred_failure_signals: None,
+            date_filter_fallback_descriptors: None,
+            registry_coverage: None,
+            skipped_providers: Vec::new(),
+            warnings: Vec::new(),
+            coverage_note: None,
         };
 
         match ToolOutput::json(&response) {
@@ -3995,12 +4011,19 @@ impl SnatchServer {
 
     /// Suggest what to work on next based on project data.
     #[tool(
-        description = "Suggest priorities based on project data: recurring errors (reliability issues), high-churn files (stability concerns), open goals (committed work), and proposed decisions (unresolved uncertainty). Returns ranked items with evidence. Use at session start or when deciding what to tackle next."
+        description = "Suggest priorities from recurring classified tool failures, source-backed file churn, open goals, and proposed decisions. Set provider to route through normalized session logs; goals/decisions remain explicitly Claude-project-registry scoped and are null when unavailable. Omit provider for the classic Claude-only response."
     )]
     async fn suggest_priorities(&self, request: SuggestPrioritiesRequest) -> ToolOutput {
         use crate::analysis::priorities::{
             suggest_priorities as analyze_priorities, PriorityParams,
         };
+
+        if let Some(flags) = request.provider.as_ref() {
+            if flags.is_empty() {
+                return ToolOutput::error("provider must name at least one provider or 'all'");
+            }
+            return provider_priorities(self, request);
+        }
 
         let claude_dir = match self.get_claude_dir() {
             Ok(dir) => dir,
@@ -4059,8 +4082,8 @@ impl SnatchServer {
             period: period.to_string(),
             sessions_analyzed: result.sessions_analyzed,
             total_tool_failures: result.total_errors,
-            open_goals: result.open_goals,
-            proposed_decisions: result.proposed_decisions,
+            open_goals: Some(result.open_goals),
+            proposed_decisions: Some(result.proposed_decisions),
             priorities: result
                 .priorities
                 .into_iter()
@@ -4095,6 +4118,15 @@ impl SnatchServer {
                         .collect(),
                 })
                 .collect(),
+            providers: None,
+            session_descriptors_analyzed: None,
+            confirmed_tool_failures: None,
+            inferred_failure_signals: None,
+            date_filter_fallback_descriptors: None,
+            registry_coverage: None,
+            skipped_providers: Vec::new(),
+            warnings: Vec::new(),
+            coverage_note: None,
         };
 
         match ToolOutput::json(&response) {
@@ -4302,6 +4334,328 @@ impl SnatchServer {
             Err(e) => ToolOutput::error(format!("JSON error: {e}")),
         }
     }
+}
+
+struct McpProviderHealthCollection {
+    accumulator: crate::analysis::project_health::ProviderProjectHealthAccumulator,
+    providers: Vec<String>,
+    date_filter_fallback_descriptors: usize,
+    skipped_providers: Vec<String>,
+    warnings: Vec<String>,
+}
+
+fn collect_mcp_provider_health(
+    server: &SnatchServer,
+    flags: &[String],
+    project_filter: &str,
+    cutoff: Option<chrono::DateTime<chrono::Utc>>,
+    include_subagents: bool,
+) -> Result<McpProviderHealthCollection, String> {
+    use std::collections::BTreeSet;
+
+    use crate::provider::project::context_overlaps_time_range;
+    use crate::provider::registry::ProviderSelection;
+
+    let selection = ProviderSelection::from_flags(flags)
+        .map_err(|reason| format!("Invalid provider selection: {reason}"))?;
+    let atomic = matches!(selection, ProviderSelection::Explicit(_));
+    let registry = server.provider_registry();
+    let mut providers: BTreeSet<_> = registry
+        .select(&selection)
+        .map_err(|error| error.to_string())?
+        .providers
+        .into_iter()
+        .map(|provider| provider.id().to_string())
+        .collect();
+    let mut accumulator =
+        crate::analysis::project_health::ProviderProjectHealthAccumulator::default();
+    let mut date_fallbacks = BTreeSet::new();
+    let mut analysis_errors = Vec::new();
+    let since = cutoff.map(std::time::SystemTime::from);
+    let report = registry
+        .visit_filtered_parsed_project_sessions(
+            &selection,
+            crate::cache::global_cache(),
+            Some(project_filter),
+            include_subagents,
+            |_, session| {
+                let (include, fallback) =
+                    context_overlaps_time_range(&session.context, since, None);
+                if include && fallback {
+                    date_fallbacks.insert(session.descriptor.key.clone());
+                }
+                include
+            },
+            |project, session, logical_root, parsed| {
+                let semantic_annotations = registry
+                    .get(&session.descriptor.key.provider)
+                    .expect("visited session came from a registered provider")
+                    .capabilities()
+                    .semantic_annotations;
+                let mut roots = project.cwd_variants.clone();
+                if let Some(path) = &project.display_path {
+                    roots.push(path.clone());
+                }
+                if let Err(error) =
+                    accumulator.add_session(&roots, logical_root, parsed, semantic_annotations)
+                {
+                    analysis_errors.push((session.descriptor.key.clone(), error.to_string()));
+                }
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    if atomic {
+        if let Some((key, reason)) = analysis_errors.first() {
+            return Err(format!(
+                "selected session {key} could not be analyzed: {reason}"
+            ));
+        }
+    }
+    for (provider, _) in &report.skipped {
+        providers.remove(&provider.to_string());
+    }
+    let mut warnings = report.warnings;
+    warnings.extend(
+        analysis_errors
+            .into_iter()
+            .map(|(key, _)| format!("{key}: session could not be analyzed")),
+    );
+    if !date_fallbacks.is_empty() {
+        warnings.push(format!(
+            "{} session descriptors used conservative source-time evidence for period filtering",
+            date_fallbacks.len()
+        ));
+    }
+    warnings.sort();
+    warnings.dedup();
+    Ok(McpProviderHealthCollection {
+        accumulator,
+        providers: providers.into_iter().collect(),
+        date_filter_fallback_descriptors: date_fallbacks.len(),
+        skipped_providers: report
+            .skipped
+            .into_iter()
+            .map(|(provider, _)| format!("{provider}: unavailable"))
+            .collect(),
+        warnings,
+    })
+}
+
+fn mcp_project_registry(
+    server: &SnatchServer,
+    project_filter: &str,
+) -> (
+    Option<crate::decisions::DecisionStore>,
+    Option<crate::goals::GoalStore>,
+    Option<String>,
+) {
+    let project = server.get_claude_dir().ok().and_then(|directory| {
+        directory.projects().ok().and_then(|projects| {
+            let mut matches = crate::cli::helpers::filter_projects(projects, project_filter);
+            (matches.len() == 1).then(|| matches.remove(0))
+        })
+    });
+    let decisions = project
+        .as_ref()
+        .and_then(|project| crate::decisions::load_decisions(project.path()).ok());
+    let goals = project
+        .as_ref()
+        .and_then(|project| crate::goals::load_goals(project.path()).ok());
+    let path = project.map(|project| project.path().display().to_string());
+    (decisions, goals, path)
+}
+
+fn provider_project_health(server: &SnatchServer, request: GetProjectHealthRequest) -> ToolOutput {
+    let flags = request
+        .provider
+        .as_deref()
+        .expect("provider route requires flags");
+    let period = request.period.as_deref().unwrap_or("7d");
+    let cutoff = match period_cutoff(period) {
+        Ok(cutoff) => cutoff,
+        Err(error) => return ToolOutput::error(format!("Invalid period: {error}")),
+    };
+    let collection = match collect_mcp_provider_health(
+        server,
+        flags,
+        &request.project,
+        cutoff,
+        !request.no_subagents.unwrap_or(true),
+    ) {
+        Ok(collection) => collection,
+        Err(error) => return ToolOutput::error(error),
+    };
+    let (decision_store, _, registry_path) = mcp_project_registry(server, &request.project);
+    let params = crate::analysis::project_health::ProjectHealthParams {
+        max_hotspots: request.max_hotspots.unwrap_or(20),
+    };
+    let analysis = collection
+        .accumulator
+        .finish(decision_store.as_ref(), &params);
+    let health = analysis.health;
+    let response = GetProjectHealthResponse {
+        project_path: request.project,
+        period: period.to_string(),
+        sessions_analyzed: health.sessions_analyzed,
+        total_tool_failures: health.total_errors,
+        total_tool_calls: health.total_tool_calls,
+        hotspot_files: health
+            .hotspot_files
+            .into_iter()
+            .map(|file| HotspotFileEntry {
+                path: file.path,
+                edit_count: file.edit_count,
+                session_count: file.session_count,
+            })
+            .collect(),
+        rework_files: health
+            .rework_files
+            .into_iter()
+            .map(|file| ReworkFileEntry {
+                path: file.path,
+                version_count: file.version_count,
+                session_count: file.session_count,
+            })
+            .collect(),
+        decision_churn: health.decision_churn.map(|churn| DecisionChurnEntry {
+            total_decisions: churn.total_decisions,
+            confirmed_count: churn.confirmed_count,
+            superseded_count: churn.superseded_count,
+            abandoned_count: churn.abandoned_count,
+            proposed_count: churn.proposed_count,
+        }),
+        session_stats: health
+            .session_stats
+            .into_iter()
+            .map(|session| SessionHealthEntry {
+                session_id: session.session_id,
+                timestamp: session.timestamp,
+                tool_failure_count: session.error_count,
+                tool_count: session.tool_count,
+            })
+            .collect(),
+        providers: Some(collection.providers),
+        session_descriptors_analyzed: Some(analysis.session_descriptors_analyzed),
+        confirmed_tool_failures: Some(analysis.confirmed_failures),
+        inferred_failure_signals: Some(analysis.inferred_failures),
+        date_filter_fallback_descriptors: Some(
+            collection.date_filter_fallback_descriptors,
+        ),
+        registry_coverage: Some(ProjectRegistryCoverage {
+            scope: "claude_project_registry".to_string(),
+            goals_available: false,
+            decisions_available: decision_store.is_some(),
+            project_path: registry_path,
+        }),
+        skipped_providers: collection.skipped_providers,
+        warnings: collection.warnings,
+        coverage_note: Some(
+            "File churn uses source-backed applied patch/snapshot evidence; arbitrary shell writes are not inferred."
+                .to_string(),
+        ),
+    };
+    ToolOutput::json(&response)
+        .unwrap_or_else(|error| ToolOutput::error(format!("JSON error: {error}")))
+}
+
+fn provider_priorities(server: &SnatchServer, request: SuggestPrioritiesRequest) -> ToolOutput {
+    let flags = request
+        .provider
+        .as_deref()
+        .expect("provider route requires flags");
+    let period = request.period.as_deref().unwrap_or("7d");
+    let cutoff = match period_cutoff(period) {
+        Ok(cutoff) => cutoff,
+        Err(error) => return ToolOutput::error(format!("Invalid period: {error}")),
+    };
+    let collection = match collect_mcp_provider_health(
+        server,
+        flags,
+        &request.project,
+        cutoff,
+        !request.no_subagents.unwrap_or(true),
+    ) {
+        Ok(collection) => collection,
+        Err(error) => return ToolOutput::error(error),
+    };
+    let (decision_store, goal_store, registry_path) =
+        mcp_project_registry(server, &request.project);
+    let params = crate::analysis::priorities::PriorityParams {
+        max_priorities: request.max_priorities.unwrap_or(10),
+        ..Default::default()
+    };
+    let health_params = crate::analysis::project_health::ProjectHealthParams {
+        max_hotspots: params.max_files,
+    };
+    let analysis = collection
+        .accumulator
+        .finish(decision_store.as_ref(), &health_params);
+    let result = crate::analysis::priorities::suggest_provider_priorities(
+        analysis,
+        decision_store.as_ref(),
+        goal_store.as_ref(),
+        &params,
+    );
+    let priorities = result
+        .priorities
+        .into_iter()
+        .map(|priority| PriorityItemEntry {
+            rank: priority.rank,
+            category: priority.category,
+            summary: priority.summary,
+            score: priority.score,
+            sources: priority
+                .sources
+                .into_iter()
+                .map(|source| {
+                    let source_type = match &source {
+                        crate::analysis::priorities::PrioritySource::RecurringError { .. } => {
+                            "error"
+                        }
+                        crate::analysis::priorities::PrioritySource::FileChurn { .. } => "churn",
+                        crate::analysis::priorities::PrioritySource::OpenGoal { .. } => "goal",
+                        crate::analysis::priorities::PrioritySource::ProposedDecision {
+                            ..
+                        } => "decision",
+                    };
+                    PrioritySourceEntry {
+                        source_type: source_type.to_string(),
+                        detail: source.to_string(),
+                    }
+                })
+                .collect(),
+        })
+        .collect();
+    let response = SuggestPrioritiesResponse {
+        project_path: request.project,
+        period: period.to_string(),
+        sessions_analyzed: result.sessions_analyzed,
+        total_tool_failures: result.total_errors,
+        open_goals: result.open_goals,
+        proposed_decisions: result.proposed_decisions,
+        priorities,
+        providers: Some(collection.providers),
+        session_descriptors_analyzed: Some(result.session_descriptors_analyzed),
+        confirmed_tool_failures: Some(result.confirmed_failures),
+        inferred_failure_signals: Some(result.inferred_failures),
+        date_filter_fallback_descriptors: Some(
+            collection.date_filter_fallback_descriptors,
+        ),
+        registry_coverage: Some(ProjectRegistryCoverage {
+            scope: "claude_project_registry".to_string(),
+            goals_available: goal_store.is_some(),
+            decisions_available: decision_store.is_some(),
+            project_path: registry_path,
+        }),
+        skipped_providers: collection.skipped_providers,
+        warnings: collection.warnings,
+        coverage_note: Some(
+            "Reliability uses classified tool outcomes; churn uses source-backed applied patch/snapshot evidence. Registry priorities remain Claude-project scoped."
+                .to_string(),
+        ),
+    };
+    ToolOutput::json(&response)
+        .unwrap_or_else(|error| ToolOutput::error(format!("JSON error: {error}")))
 }
 
 /// Runtime configuration for the MCP server.
@@ -5106,6 +5460,103 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("shell writes"));
+    }
+
+    #[cfg(feature = "codex")]
+    #[tokio::test]
+    async fn provider_health_and_priorities_share_typed_evidence_and_registry_scope() {
+        let claude = setup_claude_dir(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            PROJECT_PATH,
+            &minimal_session_jsonl("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        );
+        let (codex, _thread) = setup_codex_file_change_dir();
+        let server = make_server(&claude).with_codex_dir(codex.path());
+
+        let health = unwrap_output(
+            server
+                .get_project_health(GetProjectHealthRequest {
+                    project: "/tmp/mcp-files".into(),
+                    period: Some("all".into()),
+                    max_hotspots: Some(20),
+                    no_subagents: Some(true),
+                    provider: Some(vec!["codex".into()]),
+                })
+                .await,
+        );
+        let health: serde_json::Value = serde_json::from_str(&health).unwrap();
+        assert_eq!(health["providers"], serde_json::json!(["codex"]));
+        assert_eq!(health["sessions_analyzed"], 1);
+        assert_eq!(health["session_descriptors_analyzed"], 1);
+        assert_eq!(health["total_tool_calls"], 2);
+        assert_eq!(health["confirmed_tool_failures"], 0);
+        assert_eq!(health["inferred_failure_signals"], 1);
+        assert_eq!(health["hotspot_files"][0]["path"], "src/a.rs");
+        assert_eq!(health["registry_coverage"]["decisions_available"], false);
+        assert!(health["decision_churn"].is_null());
+
+        let priorities = unwrap_output(
+            server
+                .suggest_priorities(SuggestPrioritiesRequest {
+                    project: "/tmp/mcp-files".into(),
+                    period: Some("all".into()),
+                    max_priorities: Some(10),
+                    no_subagents: Some(true),
+                    provider: Some(vec!["codex".into()]),
+                })
+                .await,
+        );
+        let priorities: serde_json::Value = serde_json::from_str(&priorities).unwrap();
+        assert_eq!(priorities["sessions_analyzed"], 1);
+        assert_eq!(priorities["total_tool_failures"], 1);
+        assert!(priorities["open_goals"].is_null());
+        assert!(priorities["proposed_decisions"].is_null());
+        assert_eq!(priorities["registry_coverage"]["goals_available"], false);
+        assert_eq!(
+            priorities["registry_coverage"]["decisions_available"],
+            false
+        );
+    }
+
+    #[tokio::test]
+    async fn flagless_health_and_priorities_keep_the_classic_wire_shape() {
+        let session_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        let claude = setup_claude_dir(session_id, PROJECT_PATH, &minimal_session_jsonl(session_id));
+        let server = make_server(&claude);
+        let health = unwrap_output(
+            server
+                .get_project_health(GetProjectHealthRequest {
+                    project: PROJECT_PATH.into(),
+                    period: Some("all".into()),
+                    max_hotspots: Some(20),
+                    no_subagents: Some(true),
+                    provider: None,
+                })
+                .await,
+        );
+        let health: serde_json::Value = serde_json::from_str(&health).unwrap();
+        assert_eq!(health["sessions_analyzed"], 1);
+        assert!(health.get("providers").is_none());
+        assert!(health.get("registry_coverage").is_none());
+        assert!(health.get("confirmed_tool_failures").is_none());
+
+        let priorities = unwrap_output(
+            server
+                .suggest_priorities(SuggestPrioritiesRequest {
+                    project: PROJECT_PATH.into(),
+                    period: Some("all".into()),
+                    max_priorities: Some(10),
+                    no_subagents: Some(true),
+                    provider: None,
+                })
+                .await,
+        );
+        let priorities: serde_json::Value = serde_json::from_str(&priorities).unwrap();
+        assert_eq!(priorities["sessions_analyzed"], 1);
+        assert!(priorities["open_goals"].is_number());
+        assert!(priorities["proposed_decisions"].is_number());
+        assert!(priorities.get("providers").is_none());
+        assert!(priorities.get("registry_coverage").is_none());
     }
 
     #[cfg(feature = "codex")]

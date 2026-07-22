@@ -3,7 +3,7 @@
 //! Builds a reverse index from file paths to the sessions and messages
 //! that modified them, using `file-history-snapshot` entries.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 
@@ -141,7 +141,25 @@ impl ProviderFileIndexBuilder {
         session: &LogicalSessionKey,
         projection: &FileChangeProjection,
     ) {
-        self.index.add_projection(project_path, session, projection);
+        self.index
+            .add_projection(project_path, session, session, projection);
+    }
+
+    /// Add a projection whose physical source session differs from the
+    /// logical continuation root used in cross-session reporting.
+    ///
+    /// Snapshot versions are scoped to the physical source session, while
+    /// rework/session counts collapse continuation members under
+    /// `logical_session`.
+    pub fn add_projection_for_logical_session(
+        &mut self,
+        project_path: &str,
+        source_session: &LogicalSessionKey,
+        logical_session: &LogicalSessionKey,
+        projection: &FileChangeProjection,
+    ) {
+        self.index
+            .add_projection(project_path, source_session, logical_session, projection);
     }
 
     /// Sort and deduplicate snapshot states, returning the completed index.
@@ -191,6 +209,7 @@ impl ProviderFileIndex {
         self.add_projection(
             project_path,
             &parsed.descriptor.key,
+            &parsed.descriptor.key,
             &FileChangeProjection {
                 changes: parsed.file_changes.clone(),
                 inherited_owners,
@@ -202,7 +221,8 @@ impl ProviderFileIndex {
     fn add_projection(
         &mut self,
         project_path: &str,
-        session: &LogicalSessionKey,
+        source_session: &LogicalSessionKey,
+        logical_session: &LogicalSessionKey,
         projection: &FileChangeProjection,
     ) {
         for change in &projection.changes {
@@ -213,7 +233,7 @@ impl ProviderFileIndex {
                 .observed_at
                 .or_else(|| projection.owner_timestamps.get(&change.owner).copied());
             let modification = ProviderFileModification {
-                session: session.clone(),
+                session: logical_session.clone(),
                 project_path: project_path.to_string(),
                 entry_id: change.owner.clone(),
                 operation_id: change.operation_id.clone(),
@@ -230,7 +250,7 @@ impl ProviderFileIndex {
             };
             if modification.evidence == FileChangeEvidence::FileHistorySnapshot {
                 if let Some(version) = modification.version {
-                    let key = (session.clone(), modification.path.clone(), version);
+                    let key = (source_session.clone(), modification.path.clone(), version);
                     match self.snapshot_states.entry(key) {
                         std::collections::btree_map::Entry::Vacant(entry) => {
                             entry.insert(modification);
@@ -260,16 +280,6 @@ impl ProviderFileIndex {
         }
         for modifications in self.entries.values_mut() {
             modifications.sort_by(modification_order);
-            let mut snapshot_states = BTreeSet::new();
-            modifications.retain(|change| {
-                if change.evidence != FileChangeEvidence::FileHistorySnapshot {
-                    return true;
-                }
-                let Some(version) = change.version else {
-                    return true;
-                };
-                snapshot_states.insert((change.session.clone(), change.path.clone(), version))
-            });
         }
     }
 

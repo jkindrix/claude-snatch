@@ -59,7 +59,7 @@ pub struct ProjectLessonsResult {
 /// Strips variable parts (paths, line numbers, identifiers) to group
 /// similar errors together.
 fn normalize_error(tool_name: &str, error: &str) -> String {
-    let mut s = error.to_string();
+    let mut s = without_transport_headers(error);
 
     // Strip ANSI color codes
     if let Ok(re) = regex::Regex::new(r"\x1b\[[0-9;]*m") {
@@ -76,8 +76,8 @@ fn normalize_error(tool_name: &str, error: &str) -> String {
         s = re.replace_all(&s, ":<N>").to_string();
     }
 
-    // Truncate to first meaningful line for clustering
-    if let Some(first_line) = s.lines().next() {
+    // Truncate to first meaningful line for clustering.
+    if let Some(first_line) = s.lines().find(|line| !line.trim().is_empty()) {
         let trimmed = first_line.trim();
         if trimmed.len() > 10 {
             return format!(
@@ -89,6 +89,39 @@ fn normalize_error(tool_name: &str, error: &str) -> String {
     }
 
     format!("{}:{}", tool_name, s.chars().take(120).collect::<String>())
+}
+
+/// Remove only leading provider transport metadata, retaining the complete
+/// native failure body for representative evidence.
+fn without_transport_headers(error: &str) -> String {
+    let mut found_body = false;
+    let lines: Vec<_> = error
+        .lines()
+        .filter(|line| {
+            if found_body {
+                return true;
+            }
+            let line = line.trim();
+            let header = line.is_empty()
+                || [
+                    "Chunk ID:",
+                    "Wall time:",
+                    "Process exited with code ",
+                    "Original token count:",
+                    "Final output:",
+                    "Output:",
+                ]
+                .iter()
+                .any(|prefix| line.starts_with(prefix));
+            found_body = !header;
+            found_body
+        })
+        .collect();
+    if lines.is_empty() {
+        error.to_string()
+    } else {
+        lines.join("\n")
+    }
 }
 
 /// Aggregate lessons across all sessions for a project.
@@ -120,6 +153,28 @@ pub fn aggregate_project_lessons(
         }
     }
 
+    ProjectLessonsResult {
+        recurring_errors: aggregate_failure_pairs_with_order(all_errors, params, false),
+    }
+}
+
+/// Cluster already-classified failure evidence across logical sessions.
+///
+/// Provider-routed project analyses use this entry point so their failure
+/// taxonomy is derived once from complete parsed bundles and reused by both
+/// health and priority ranking.
+pub fn aggregate_failure_pairs(
+    all_errors: Vec<(ErrorFixPair, String)>,
+    params: &ProjectLessonsParams,
+) -> Vec<RecurringError> {
+    aggregate_failure_pairs_with_order(all_errors, params, true)
+}
+
+fn aggregate_failure_pairs_with_order(
+    all_errors: Vec<(ErrorFixPair, String)>,
+    params: &ProjectLessonsParams,
+    deterministic_ties: bool,
+) -> Vec<RecurringError> {
     // Cluster errors by normalized pattern
     let mut error_clusters: HashMap<String, Vec<(ErrorFixPair, String)>> = HashMap::new();
     for (pair, sid) in all_errors {
@@ -147,7 +202,13 @@ pub fn aggregate_project_lessons(
             // Use first entry's error_preview as the display pattern
             let error_pattern = entries
                 .first()
-                .map(|(p, _)| p.error_preview.clone())
+                .map(|(pair, _)| {
+                    if deterministic_ties {
+                        without_transport_headers(&pair.error_preview)
+                    } else {
+                        pair.error_preview.clone()
+                    }
+                })
                 .unwrap_or(pattern);
 
             RecurringError {
@@ -164,10 +225,18 @@ pub fn aggregate_project_lessons(
     // mis-flags as errors) at the source, so priorities sees a cleaned
     // recurring-error set.
     recurring_errors.retain(|e| !is_extraction_noise(&e.tool_name, &e.error_pattern));
-    recurring_errors.sort_by_key(|b| std::cmp::Reverse(b.count));
+    if deterministic_ties {
+        recurring_errors.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| a.tool_name.cmp(&b.tool_name))
+                .then_with(|| a.error_pattern.cmp(&b.error_pattern))
+        });
+    } else {
+        recurring_errors.sort_by_key(|error| std::cmp::Reverse(error.count));
+    }
     recurring_errors.truncate(params.limit);
-
-    ProjectLessonsResult { recurring_errors }
+    recurring_errors
 }
 
 /// Whether a recurring "error" is actually mis-flagged successful tool output.
@@ -208,6 +277,20 @@ fn looks_like_build_or_test_success(p: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analysis::lessons::{FailureBasis, FailureKind};
+
+    fn failure(preview: &str) -> ErrorFixPair {
+        ErrorFixPair {
+            timestamp: None,
+            tool_name: "exec_command".to_string(),
+            input_summary: HashMap::new(),
+            error_preview: preview.to_string(),
+            failure_kind: FailureKind::Confirmed,
+            failure_basis: FailureBasis::ProcessExit,
+            resolution_summary: None,
+            resolution_tools: Vec::new(),
+        }
+    }
 
     #[test]
     fn extraction_noise_drops_success_keeps_failures() {
@@ -233,5 +316,38 @@ mod tests {
         ));
         // Other tools are never treated as extraction noise.
         assert!(!is_extraction_noise("Edit", "String to replace not found"));
+    }
+
+    #[test]
+    fn provider_transport_headers_do_not_fragment_recurring_failures() {
+        let failures = vec![
+            (
+                failure(
+                    "Chunk ID: abc123\nWall time: 0.1 seconds\nProcess exited with code 2\nFinal output:\nerror: unexpected argument '--bad'",
+                ),
+                "codex:first".to_string(),
+            ),
+            (
+                failure(
+                    "Chunk ID: def456\nWall time: 8.9 seconds\nProcess exited with code 2\nFinal output:\nerror: unexpected argument '--bad'",
+                ),
+                "codex:second".to_string(),
+            ),
+        ];
+        let result = aggregate_failure_pairs(
+            failures,
+            &ProjectLessonsParams {
+                category: "errors".to_string(),
+                limit: 10,
+                min_occurrences: 2,
+            },
+        );
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].count, 2);
+        assert_eq!(result[0].sessions.len(), 2);
+        assert_eq!(
+            result[0].error_pattern,
+            "error: unexpected argument '--bad'"
+        );
     }
 }

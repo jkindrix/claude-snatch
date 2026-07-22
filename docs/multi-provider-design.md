@@ -2353,6 +2353,57 @@ provider success. Prompt length statistics and minimum-length filtering count
 Unicode scalar values rather than bytes, and human-readable truncation cannot
 split a multibyte character.
 
+#### Project health and priority routing (2026-07-22)
+
+CLI `health`/`priorities` and MCP `get_project_health`/`suggest_priorities`
+accept explicit provider selections while preserving their flagless classic
+routes. The shared provider analysis consumes complete parsed bundles. Session
+counts use typed continuation roots, forks remain distinct, spawned sessions
+follow the caller's subagent policy, and inherited fork activity is excluded.
+Explicit selections are atomic; `all` retains successful providers with
+bounded skip/warning metadata. Period filters select whole artifacts using the
+same native-bound/conservative-source-time contract as prompt aggregation and
+report the fallback-descriptor count.
+
+Tool totals come from normalized tool-call emissions. Failure totals use the
+shared classified outcome machinery and expose confirmed versus inferred
+counts, preventing source text inside successful read/search/orchestration
+results from becoming phantom failures. Health and priorities consume the same
+failure evidence so their totals cannot drift apart. Per-session identity is
+provider-qualified, source-session descriptors are counted separately from logical
+continuation roots, and parse failures are never counted as analyzed sessions.
+Recurring-error clustering removes only leading provider transport metadata
+(`Chunk ID`, wall time, process status, and output headings) before deriving a
+pattern; representative evidence begins at the native failure body rather than
+at a volatile wrapper id.
+
+Hotspot and rework rankings use only provider-normalized, source-backed,
+successfully applied patch or file-snapshot observations. Failed, declined,
+unknown-outcome, inherited, scratch, and out-of-project changes are excluded;
+arbitrary shell writes are not inferred. Repeated cumulative file snapshots
+are deduplicated through the shared provider file index before counting. The
+deduplication key retains the physical source-session identity (so equal native
+version numbers in separate continuation files remain distinct), while rework
+and session counts use the typed logical continuation root.
+Rankings use lexical tie-breakers so equal counts/scores remain deterministic.
+
+Goals and decisions deliberately remain in Claude project storage. Provider
+responses therefore carry `registry_coverage` with the storage scope and
+resolved project path. Missing or ambiguous storage yields unavailable/null,
+never zero, and registry-derived priority categories are omitted. This keeps a
+valid provider-only project analysis from failing merely because no matching
+Claude metadata directory exists while preventing absent state from being
+presented as an empty provider-neutral registry.
+
+Live source-built probes over this machine's corpus completed the provider-only
+health/priorities routes in about 0.9 seconds at roughly 288 MiB peak RSS (7
+logical sessions). A one-day explicit cross-provider project query completed
+in about 2.2 seconds at roughly 334 MiB (6 logical sessions), reporting five
+conservative source-time fallbacks. Provider-only health classified 65
+failures, exactly matching the independently routed cross-session lessons
+result; after transport-header normalization, seven recurring patterns became
+eligible for ranking instead of fragmenting by chunk id.
+
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".
 - [x] Drift-coverage claims must state checked vs unchecked counts
