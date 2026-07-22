@@ -2,20 +2,88 @@
 //!
 //! Manage session tags, names, and bookmarks for easier session discovery.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use crate::analytics::SessionAnalytics;
 use crate::cli::{Cli, OutputFormat, TagAction, TagArgs};
 use crate::discovery::Session;
 use crate::error::Result;
+use crate::provider::registry::{ProviderRegistry, ProviderSelection};
+use crate::provider::{LogicalSessionKey, ProviderId, SessionNamespace};
 use crate::reconstruction::Conversation;
-use crate::tags::TagStore;
+use crate::tags::{OutcomeStats, TagStore};
 
 use super::get_claude_dir;
+
+#[derive(Debug, Clone)]
+enum TagProviderFilter {
+    All,
+    Only(BTreeSet<ProviderId>),
+}
+
+impl TagProviderFilter {
+    fn contains(&self, provider: &ProviderId) -> bool {
+        match self {
+            Self::All => true,
+            Self::Only(ids) => ids.contains(provider),
+        }
+    }
+}
+
+fn refuse_provider_bulk(flags: &[String], operation: &str) -> Result<()> {
+    if flags.is_empty() {
+        return Ok(());
+    }
+    Err(crate::error::SnatchError::InvalidArgument {
+        name: operation.to_string(),
+        reason: "provider bulk mutation needs an explicit native activity-time contract; select individual qualified sessions instead"
+            .to_string(),
+    })
+}
+
+fn selected_sessions_with_tag<'a>(
+    store: &'a TagStore,
+    tag: &str,
+    filter: &TagProviderFilter,
+) -> Vec<&'a LogicalSessionKey> {
+    store
+        .sessions_with_tag(tag)
+        .into_iter()
+        .filter(|key| filter.contains(&key.provider))
+        .collect()
+}
+
+fn selected_tags(store: &TagStore, filter: &TagProviderFilter) -> Vec<String> {
+    let mut tags: BTreeSet<String> = BTreeSet::new();
+    for (key, metadata) in &store.sessions {
+        if filter.contains(&key.provider) {
+            tags.extend(metadata.tags.iter().cloned());
+        }
+    }
+    tags.into_iter().collect()
+}
+
+fn selected_outcome_stats(store: &TagStore, filter: &TagProviderFilter) -> OutcomeStats {
+    let mut stats = OutcomeStats::default();
+    for (key, metadata) in &store.sessions {
+        if !filter.contains(&key.provider) {
+            continue;
+        }
+        match metadata.outcome {
+            Some(crate::tags::SessionOutcome::Success) => stats.success += 1,
+            Some(crate::tags::SessionOutcome::Partial) => stats.partial += 1,
+            Some(crate::tags::SessionOutcome::Failed) => stats.failed += 1,
+            Some(crate::tags::SessionOutcome::Abandoned) => stats.abandoned += 1,
+            None => stats.unclassified += 1,
+        }
+    }
+    stats
+}
 
 /// Run the tag command.
 pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
     let mut store = TagStore::load()?;
+    let provider_flags = &args.provider;
 
     match &args.action {
         TagAction::Add {
@@ -28,24 +96,25 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
         } => {
             // If session is specified, use single-session mode
             if let Some(session_prefix) = session {
-                let session_id = resolve_session_id(cli, session_prefix)?;
+                let session_key = resolve_tag_key(cli, provider_flags, &store, session_prefix)?;
                 if *preview {
                     println!(
                         "Would add tag '{}' to session {}",
                         tag,
-                        short_id(&session_id)
+                        short_key(&session_key)
                     );
-                } else if store.add_tag(&session_id, tag) {
+                } else if store.add_tag_key(&session_key, tag) {
                     store.save()?;
-                    println!("Added tag '{}' to session {}", tag, short_id(&session_id));
+                    println!("Added tag '{}' to session {}", tag, short_key(&session_key));
                 } else {
                     println!(
                         "Session {} already has tag '{}'",
-                        short_id(&session_id),
+                        short_key(&session_key),
                         tag
                     );
                 }
             } else if since.is_some() || until.is_some() || project.is_some() {
+                refuse_provider_bulk(provider_flags, "tag add")?;
                 // Bulk mode with filters
                 let sessions = get_filtered_sessions(
                     cli,
@@ -97,28 +166,29 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
         } => {
             // If session is specified, use single-session mode
             if let Some(session_prefix) = session {
-                let session_id = resolve_session_id(cli, session_prefix)?;
+                let session_key = resolve_tag_key(cli, provider_flags, &store, session_prefix)?;
                 if *preview {
                     println!(
                         "Would remove tag '{}' from session {}",
                         tag,
-                        short_id(&session_id)
+                        short_key(&session_key)
                     );
-                } else if store.remove_tag(&session_id, tag) {
+                } else if store.remove_tag_key(&session_key, tag) {
                     store.save()?;
                     println!(
                         "Removed tag '{}' from session {}",
                         tag,
-                        short_id(&session_id)
+                        short_key(&session_key)
                     );
                 } else {
                     println!(
                         "Session {} does not have tag '{}'",
-                        short_id(&session_id),
+                        short_key(&session_key),
                         tag
                     );
                 }
             } else if since.is_some() || until.is_some() || project.is_some() {
+                refuse_provider_bulk(provider_flags, "tag remove")?;
                 // Bulk mode with filters
                 let sessions = get_filtered_sessions(
                     cli,
@@ -164,23 +234,27 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
         }
 
         TagAction::Name { session, name } => {
-            let session_id = resolve_session_id(cli, session)?;
+            let session_key = resolve_tag_key(cli, provider_flags, &store, session)?;
             if let Some(name) = name {
-                store.set_name(&session_id, Some(name.clone()));
+                store.set_name_key(&session_key, Some(name.clone()));
                 store.save()?;
-                println!("Set name '{}' for session {}", name, short_id(&session_id));
+                println!(
+                    "Set name '{}' for session {}",
+                    name,
+                    short_key(&session_key)
+                );
             } else {
-                store.set_name(&session_id, None);
+                store.set_name_key(&session_key, None);
                 store.save()?;
-                println!("Cleared name for session {}", short_id(&session_id));
+                println!("Cleared name for session {}", short_key(&session_key));
             }
         }
 
         TagAction::List { session } => {
             if let Some(session_prefix) = session {
                 // Show tags for a specific session
-                let session_id = resolve_session_id(cli, session_prefix)?;
-                if let Some(meta) = store.get(&session_id) {
+                let session_key = resolve_tag_key(cli, provider_flags, &store, session_prefix)?;
+                if let Some(meta) = store.get_key(&session_key) {
                     match cli.effective_output() {
                         OutputFormat::Json => {
                             println!("{}", serde_json::to_string_pretty(meta)?);
@@ -189,7 +263,7 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                             println!("session_id\tname\ttags\tbookmarked");
                             println!(
                                 "{}\t{}\t{}\t{}",
-                                session_id,
+                                stored_id(&session_key),
                                 meta.name.as_deref().unwrap_or(""),
                                 meta.tags.join(","),
                                 meta.bookmarked
@@ -201,7 +275,7 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                             }
                         }
                         OutputFormat::Text => {
-                            println!("Session: {}", short_id(&session_id));
+                            println!("Session: {}", short_key(&session_key));
                             if let Some(name) = &meta.name {
                                 println!("  Name: {}", name);
                             }
@@ -214,11 +288,15 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                         }
                     }
                 } else {
-                    println!("No tags or metadata for session {}", short_id(&session_id));
+                    println!(
+                        "No tags or metadata for session {}",
+                        short_key(&session_key)
+                    );
                 }
             } else {
                 // List all unique tags
-                let tags = store.all_tags();
+                let filter = tag_provider_filter(cli, provider_flags, &store)?;
+                let tags = selected_tags(&store, &filter);
                 if tags.is_empty() {
                     println!("No tags defined.");
                     return Ok(());
@@ -231,7 +309,7 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                     OutputFormat::Tsv => {
                         println!("tag\tcount");
                         for tag in &tags {
-                            let count = store.sessions_with_tag(tag).len();
+                            let count = selected_sessions_with_tag(&store, tag, &filter).len();
                             println!("{}\t{}", tag, count);
                         }
                     }
@@ -243,7 +321,7 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                     OutputFormat::Text => {
                         println!("Tags ({} unique):", tags.len());
                         for tag in &tags {
-                            let count = store.sessions_with_tag(tag).len();
+                            let count = selected_sessions_with_tag(&store, tag, &filter).len();
                             println!(
                                 "  {} ({} session{})",
                                 tag,
@@ -257,21 +335,26 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
         }
 
         TagAction::Bookmark { session } => {
-            let session_id = resolve_session_id(cli, session)?;
-            store.set_bookmark(&session_id, true);
+            let session_key = resolve_tag_key(cli, provider_flags, &store, session)?;
+            store.set_bookmark_key(&session_key, true);
             store.save()?;
-            println!("Bookmarked session {}", short_id(&session_id));
+            println!("Bookmarked session {}", short_key(&session_key));
         }
 
         TagAction::Unbookmark { session } => {
-            let session_id = resolve_session_id(cli, session)?;
-            store.set_bookmark(&session_id, false);
+            let session_key = resolve_tag_key(cli, provider_flags, &store, session)?;
+            store.set_bookmark_key(&session_key, false);
             store.save()?;
-            println!("Removed bookmark from session {}", short_id(&session_id));
+            println!("Removed bookmark from session {}", short_key(&session_key));
         }
 
         TagAction::Bookmarks => {
-            let bookmarked = store.bookmarked_sessions();
+            let filter = tag_provider_filter(cli, provider_flags, &store)?;
+            let bookmarked: Vec<_> = store
+                .bookmarked_sessions()
+                .into_iter()
+                .filter(|key| filter.contains(&key.provider))
+                .collect();
             if bookmarked.is_empty() {
                 println!("No bookmarked sessions.");
                 return Ok(());
@@ -314,7 +397,8 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
         }
 
         TagAction::Find { tag } => {
-            let sessions = store.sessions_with_tag(tag);
+            let filter = tag_provider_filter(cli, provider_flags, &store)?;
+            let sessions = selected_sessions_with_tag(&store, tag, &filter);
             if sessions.is_empty() {
                 println!("No sessions with tag '{}'.", tag);
                 return Ok(());
@@ -354,26 +438,31 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
         }
 
         TagAction::Outcome { session, outcome } => {
-            let session_id = resolve_session_id(cli, session)?;
+            let session_key = resolve_tag_key(cli, provider_flags, &store, session)?;
             if let Some(outcome) = outcome {
-                store.set_outcome(&session_id, Some(*outcome));
+                store.set_outcome_key(&session_key, Some(*outcome));
                 store.save()?;
                 println!(
                     "Set outcome '{}' for session {}",
                     outcome,
-                    short_id(&session_id)
+                    short_key(&session_key)
                 );
             } else {
-                store.set_outcome(&session_id, None);
+                store.set_outcome_key(&session_key, None);
                 store.save()?;
-                println!("Cleared outcome for session {}", short_id(&session_id));
+                println!("Cleared outcome for session {}", short_key(&session_key));
             }
         }
 
         TagAction::Outcomes { outcome } => {
+            let filter = tag_provider_filter(cli, provider_flags, &store)?;
             if let Some(outcome) = outcome {
                 // List sessions with specific outcome
-                let sessions = store.sessions_with_outcome(*outcome);
+                let sessions: Vec<_> = store
+                    .sessions_with_outcome(*outcome)
+                    .into_iter()
+                    .filter(|key| filter.contains(&key.provider))
+                    .collect();
                 if sessions.is_empty() {
                     println!("No sessions with outcome '{}'.", outcome);
                     return Ok(());
@@ -412,7 +501,7 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                 }
             } else {
                 // Show outcome statistics
-                let stats = store.outcome_stats();
+                let stats = selected_outcome_stats(&store, &filter);
 
                 match cli.effective_output() {
                     OutputFormat::Json => {
@@ -457,8 +546,8 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
             text,
             label,
         } => {
-            let session_id = resolve_session_id(cli, session)?;
-            store.add_note(&session_id, text, label.as_deref());
+            let session_key = resolve_tag_key(cli, provider_flags, &store, session)?;
+            store.add_note_key(&session_key, text, label.as_deref());
             store.save()?;
             let label_str = label
                 .as_ref()
@@ -467,15 +556,15 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
             println!(
                 "Added note{} to session {}",
                 label_str,
-                short_id(&session_id)
+                short_key(&session_key)
             );
         }
 
         TagAction::Notes { session } => {
-            let session_id = resolve_session_id(cli, session)?;
-            if let Some(notes) = store.get_notes(&session_id) {
+            let session_key = resolve_tag_key(cli, provider_flags, &store, session)?;
+            if let Some(notes) = store.get_notes_key(&session_key) {
                 if notes.is_empty() {
-                    println!("No notes for session {}.", short_id(&session_id));
+                    println!("No notes for session {}.", short_key(&session_key));
                     return Ok(());
                 }
 
@@ -503,7 +592,7 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                     OutputFormat::Text => {
                         println!(
                             "Notes for session {} ({} total):",
-                            short_id(&session_id),
+                            short_key(&session_key),
                             notes.len()
                         );
                         println!();
@@ -527,59 +616,59 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                     }
                 }
             } else {
-                println!("No notes for session {}.", short_id(&session_id));
+                println!("No notes for session {}.", short_key(&session_key));
             }
         }
 
         TagAction::Unnote { session, index } => {
-            let session_id = resolve_session_id(cli, session)?;
-            if store.remove_note(&session_id, *index) {
+            let session_key = resolve_tag_key(cli, provider_flags, &store, session)?;
+            if store.remove_note_key(&session_key, *index) {
                 store.save()?;
                 println!(
                     "Removed note {} from session {}",
                     index,
-                    short_id(&session_id)
+                    short_key(&session_key)
                 );
             } else {
                 println!(
                     "No note at index {} for session {}",
                     index,
-                    short_id(&session_id)
+                    short_key(&session_key)
                 );
             }
         }
 
         TagAction::ClearNotes { session } => {
-            let session_id = resolve_session_id(cli, session)?;
-            store.clear_notes(&session_id);
+            let session_key = resolve_tag_key(cli, provider_flags, &store, session)?;
+            store.clear_notes_key(&session_key);
             store.save()?;
-            println!("Cleared all notes from session {}", short_id(&session_id));
+            println!("Cleared all notes from session {}", short_key(&session_key));
         }
 
         TagAction::Link {
             session_a,
             session_b,
         } => {
-            let id_a = resolve_session_id(cli, session_a)?;
-            let id_b = resolve_session_id(cli, session_b)?;
+            let id_a = resolve_tag_key(cli, provider_flags, &store, session_a)?;
+            let id_b = resolve_tag_key(cli, provider_flags, &store, session_b)?;
 
             if id_a == id_b {
                 println!("Cannot link a session to itself.");
                 return Ok(());
             }
 
-            if store.link_sessions(&id_a, &id_b) {
+            if store.link_session_keys(&id_a, &id_b) {
                 store.save()?;
                 println!(
                     "Linked sessions {} <-> {}",
-                    short_id(&id_a),
-                    short_id(&id_b)
+                    short_key(&id_a),
+                    short_key(&id_b)
                 );
             } else {
                 println!(
                     "Sessions {} and {} are already linked",
-                    short_id(&id_a),
-                    short_id(&id_b)
+                    short_key(&id_a),
+                    short_key(&id_b)
                 );
             }
         }
@@ -588,21 +677,21 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
             session_a,
             session_b,
         } => {
-            let id_a = resolve_session_id(cli, session_a)?;
-            let id_b = resolve_session_id(cli, session_b)?;
+            let id_a = resolve_tag_key(cli, provider_flags, &store, session_a)?;
+            let id_b = resolve_tag_key(cli, provider_flags, &store, session_b)?;
 
-            if store.unlink_sessions(&id_a, &id_b) {
+            if store.unlink_session_keys(&id_a, &id_b) {
                 store.save()?;
                 println!(
                     "Unlinked sessions {} <-> {}",
-                    short_id(&id_a),
-                    short_id(&id_b)
+                    short_key(&id_a),
+                    short_key(&id_b)
                 );
             } else {
                 println!(
                     "Sessions {} and {} were not linked",
-                    short_id(&id_a),
-                    short_id(&id_b)
+                    short_key(&id_a),
+                    short_key(&id_b)
                 );
             }
         }
@@ -610,11 +699,14 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
         TagAction::Links { session } => {
             if let Some(session_prefix) = session {
                 // Show links for specific session
-                let session_id = resolve_session_id(cli, session_prefix)?;
-                let linked = store.get_linked_sessions(&session_id);
+                let session_key = resolve_tag_key(cli, provider_flags, &store, session_prefix)?;
+                let linked = store.get_linked_session_keys(&session_key);
 
                 if linked.is_empty() {
-                    println!("Session {} has no linked sessions.", short_id(&session_id));
+                    println!(
+                        "Session {} has no linked sessions.",
+                        short_key(&session_key)
+                    );
                     return Ok(());
                 }
 
@@ -640,7 +732,7 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                     OutputFormat::Text => {
                         println!(
                             "Sessions linked to {} ({}):",
-                            short_id(&session_id),
+                            short_key(&session_key),
                             linked.len()
                         );
                         for id in &linked {
@@ -655,7 +747,12 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                 }
             } else {
                 // Show all sessions with links
-                let sessions = store.sessions_with_links();
+                let filter = tag_provider_filter(cli, provider_flags, &store)?;
+                let sessions: Vec<_> = store
+                    .sessions_with_links()
+                    .into_iter()
+                    .filter(|key| filter.contains(&key.provider))
+                    .collect();
                 if sessions.is_empty() {
                     println!("No sessions have links.");
                     return Ok(());
@@ -725,6 +822,14 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
             tag_weight,
             token_weight,
         } => {
+            let registry = super::helpers::provider_registry(cli);
+            if provider_route_for_reference(&registry, &store, provider_flags, session) {
+                return Err(crate::error::SnatchError::InvalidArgument {
+                    name: "tag similar".to_string(),
+                    reason: "provider sessions require a typed similarity contract for project, tool, time, and usage evidence; use provider-aware search or project health instead"
+                        .to_string(),
+                });
+            }
             let session_id = resolve_session_id(cli, session)?;
             let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
             let all_sessions = claude_dir.all_sessions()?;
@@ -1065,7 +1170,193 @@ fn calculate_similarity(
     }
 }
 
-/// Resolve a session ID prefix to a full session ID.
+fn tag_provider_filter(cli: &Cli, flags: &[String], store: &TagStore) -> Result<TagProviderFilter> {
+    if flags.is_empty() {
+        return Ok(TagProviderFilter::Only(BTreeSet::from([
+            ProviderId::claude_code(),
+        ])));
+    }
+    let selection = ProviderSelection::from_flags(flags).map_err(|reason| {
+        crate::error::SnatchError::InvalidArgument {
+            name: "--provider".to_string(),
+            reason,
+        }
+    })?;
+    match selection {
+        ProviderSelection::All => Ok(TagProviderFilter::All),
+        ProviderSelection::Explicit(ids) => {
+            let registry = super::helpers::provider_registry(cli);
+            let registered: BTreeSet<_> = registry.registered_ids().into_iter().collect();
+            let stored: BTreeSet<_> = store
+                .sessions
+                .keys()
+                .map(|key| key.provider.clone())
+                .collect();
+            for id in &ids {
+                if !registered.contains(id) && !stored.contains(id) {
+                    return Err(crate::error::SnatchError::InvalidArgument {
+                        name: "--provider".to_string(),
+                        reason: format!(
+                            "unknown provider '{id}' (registered/stored: {})",
+                            registered
+                                .union(&stored)
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    });
+                }
+            }
+            Ok(TagProviderFilter::Only(ids.into_iter().collect()))
+        }
+    }
+}
+
+fn stored_reference_is_qualified(store: &TagStore, reference: &str) -> bool {
+    reference
+        .parse::<LogicalSessionKey>()
+        .ok()
+        .is_some_and(|parsed| {
+            store
+                .sessions
+                .keys()
+                .any(|key| key.provider == parsed.provider)
+        })
+}
+
+fn provider_route_for_reference(
+    registry: &ProviderRegistry,
+    store: &TagStore,
+    flags: &[String],
+    reference: &str,
+) -> bool {
+    !flags.is_empty()
+        || registry.looks_qualified(reference)
+        || stored_reference_is_qualified(store, reference)
+}
+
+fn resolve_provider_session_key(
+    cli: &Cli,
+    flags: &[String],
+    store: &TagStore,
+    reference: &str,
+) -> Result<LogicalSessionKey> {
+    let registry = super::helpers::provider_registry(cli);
+    let parsed_qualified =
+        if registry.looks_qualified(reference) || stored_reference_is_qualified(store, reference) {
+            Some(reference.parse::<LogicalSessionKey>().map_err(|reason| {
+                crate::error::SnatchError::InvalidArgument {
+                    name: "session".to_string(),
+                    reason,
+                }
+            })?)
+        } else {
+            None
+        };
+    // A qualified reference is itself an explicit provider selection. Keep
+    // flagless aggregate operations Claude-only, but do not make callers
+    // repeat the provider already named by a single-session reference.
+    let filter = if flags.is_empty() {
+        parsed_qualified.as_ref().map_or_else(
+            || tag_provider_filter(cli, flags, store),
+            |key| {
+                Ok(TagProviderFilter::Only(BTreeSet::from([key
+                    .provider
+                    .clone()])))
+            },
+        )?
+    } else {
+        tag_provider_filter(cli, flags, store)?
+    };
+
+    if let Some(key) = &parsed_qualified {
+        if !filter.contains(&key.provider) {
+            return Err(crate::error::SnatchError::InvalidArgument {
+                name: "session".to_string(),
+                reason: format!(
+                    "qualified id '{reference}' names provider '{}', outside the selected metadata providers",
+                    key.provider
+                ),
+            });
+        }
+        if store.get_key(key).is_some() {
+            return Ok(key.clone());
+        }
+    }
+
+    let stored_matches: Vec<LogicalSessionKey> = match &parsed_qualified {
+        Some(key) => store
+            .matching_keys(&key.provider, &key.namespace, &key.native_id)
+            .into_iter()
+            .filter(|candidate| filter.contains(&candidate.provider))
+            .cloned()
+            .collect(),
+        None => store
+            .sessions
+            .keys()
+            .filter(|candidate| {
+                filter.contains(&candidate.provider) && candidate.native_id.starts_with(reference)
+            })
+            .cloned()
+            .collect(),
+    };
+
+    match registry.resolve_with_default_policy(flags, reference) {
+        Ok(resolution) => {
+            let mut candidates: BTreeSet<_> = stored_matches.into_iter().collect();
+            candidates.insert(resolution.key.clone());
+            if candidates.len() == 1 {
+                Ok(resolution.key)
+            } else {
+                Err(crate::error::SnatchError::InvalidArgument {
+                    name: "session".to_string(),
+                    reason: format!(
+                        "session reference '{reference}' is ambiguous: {}",
+                        candidates
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                })
+            }
+        }
+        Err(source_error) => match stored_matches.as_slice() {
+            [key] => Ok(key.clone()),
+            [] => Err(source_error.into()),
+            keys => Err(crate::error::SnatchError::InvalidArgument {
+                name: "session".to_string(),
+                reason: format!(
+                    "session reference '{reference}' is ambiguous in persistent metadata: {}",
+                    keys.iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }),
+        },
+    }
+}
+
+fn resolve_tag_key(
+    cli: &Cli,
+    flags: &[String],
+    store: &TagStore,
+    reference: &str,
+) -> Result<LogicalSessionKey> {
+    let registry = super::helpers::provider_registry(cli);
+    if provider_route_for_reference(&registry, store, flags, reference) {
+        resolve_provider_session_key(cli, flags, store, reference)
+    } else {
+        resolve_session_id(cli, reference).map(|native_id| LogicalSessionKey {
+            provider: ProviderId::claude_code(),
+            namespace: SessionNamespace::global(),
+            native_id,
+        })
+    }
+}
+
+/// Resolve a classic session ID prefix to a full native session ID.
 fn resolve_session_id(cli: &Cli, prefix: &str) -> Result<String> {
     // First try to find in existing tag store
     let store = TagStore::load()?;

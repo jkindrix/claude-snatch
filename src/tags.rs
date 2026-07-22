@@ -564,6 +564,23 @@ impl TagStore {
         self.sessions.get(key)
     }
 
+    /// Stored identities matching a provider/namespace/native-id prefix.
+    pub fn matching_keys(
+        &self,
+        provider: &ProviderId,
+        namespace: &SessionNamespace,
+        native_prefix: &str,
+    ) -> Vec<&LogicalSessionKey> {
+        self.sessions
+            .keys()
+            .filter(|key| {
+                key.provider == *provider
+                    && key.namespace == *namespace
+                    && key.native_id.starts_with(native_prefix)
+            })
+            .collect()
+    }
+
     /// Get mutable metadata by exact logical identity, creating if needed.
     pub fn get_or_create_key(&mut self, key: &LogicalSessionKey) -> &mut SessionMeta {
         self.sessions.entry(key.clone()).or_default()

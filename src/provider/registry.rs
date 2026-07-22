@@ -60,6 +60,13 @@ impl ProviderRegistry {
         Self::with_config(&RegistryConfig::default())
     }
 
+    /// Identities of every compiled-in provider, including providers whose
+    /// source root is currently unavailable. Persistent metadata selection
+    /// uses this inventory without requiring a source scan.
+    pub fn registered_ids(&self) -> Vec<ProviderId> {
+        self.entries.iter().map(|entry| entry.id.clone()).collect()
+    }
+
     /// Compatibility wrapper over [`ProviderRegistry::with_config`] carrying
     /// only an explicit Claude root.
     pub fn with_claude_root(claude_root: Option<&std::path::Path>) -> Self {

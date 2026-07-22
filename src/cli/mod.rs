@@ -1642,6 +1642,11 @@ pub struct CleanupArgs {
 /// Arguments for the tag command.
 #[derive(Debug, Parser)]
 pub struct TagArgs {
+    /// Restrict metadata operations to one or more session-log providers.
+    /// Repeat for an explicit union, or pass `all`.
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
+
     /// Tag subcommand to run.
     #[command(subcommand)]
     pub action: TagAction,

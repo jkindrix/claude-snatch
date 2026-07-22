@@ -3211,6 +3211,323 @@ mod codex_provider_cli {
         assert!(redacted.contains("\"id\":\"codex\""));
         assert!(!redacted.contains("user@example.com"));
     }
+
+    #[test]
+    fn provider_tag_metadata_round_trips_with_qualified_identity() {
+        let claude = setup_fixture_dir();
+        let (codex, _) = setup_codex_home();
+        let config = TempDir::new().unwrap();
+        let qualified = format!("codex:{CODEX_THREAD}");
+
+        let run = |args: &[&str]| {
+            snatch_cmd()
+                .env("SNATCH_CLAUDE_DIR", claude.path())
+                .env("CODEX_HOME", codex.path())
+                .env("SNATCH_CONFIG_DIR", config.path())
+                .args(args)
+                .assert()
+                .success();
+        };
+        run(&[
+            "tag",
+            "--provider",
+            "codex",
+            "add",
+            "triage",
+            "-s",
+            &qualified,
+        ]);
+        run(&["tag", "name", &qualified, "provider session"]);
+        run(&["tag", "bookmark", &qualified]);
+        run(&["tag", "outcome", &qualified, "success"]);
+        run(&[
+            "tag",
+            "note",
+            &qualified,
+            "preserved note",
+            "--label",
+            "audit",
+        ]);
+
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .env("SNATCH_CONFIG_DIR", config.path())
+            .args(["-o", "json", "tag", "list", &qualified])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let metadata: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(metadata["name"], "provider session");
+        assert_eq!(metadata["tags"], serde_json::json!(["triage"]));
+        assert_eq!(metadata["bookmarked"], true);
+        assert_eq!(metadata["outcome"], "success");
+        assert_eq!(metadata["notes"][0]["text"], "preserved note");
+
+        let stored: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(config.path().join("claude-snatch/tags.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stored["version"], 2);
+        assert!(stored["sessions"].is_array());
+        assert_eq!(stored["sessions"][0]["key"]["provider"], "codex");
+        assert_eq!(stored["sessions"][0]["key"]["namespace"], "global");
+        assert_eq!(stored["sessions"][0]["key"]["native_id"], CODEX_THREAD);
+    }
+
+    #[test]
+    fn provider_tag_listing_is_scoped_and_stale_exact_keys_remain_editable() {
+        let claude = setup_fixture_dir();
+        let (codex, _) = setup_codex_home();
+        let config = TempDir::new().unwrap();
+        let qualified = format!("codex:{CODEX_THREAD}");
+
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .env("SNATCH_CONFIG_DIR", config.path())
+            .args(["tag", "add", "provider-only", "-s", &qualified])
+            .assert()
+            .success();
+
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .env("SNATCH_CONFIG_DIR", config.path())
+            .args(["tag", "find", "provider-only"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("No sessions"));
+
+        let selected = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .env("SNATCH_CONFIG_DIR", config.path())
+            .args([
+                "-o",
+                "json",
+                "tag",
+                "--provider",
+                "codex",
+                "find",
+                "provider-only",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&selected).unwrap(),
+            serde_json::json!([qualified])
+        );
+
+        let missing = config.path().join("missing-provider-home");
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", missing)
+            .env("SNATCH_CONFIG_DIR", config.path())
+            .args(["tag", "name", &qualified, "stale but retained"])
+            .assert()
+            .success();
+
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .env("SNATCH_CONFIG_DIR", config.path())
+            .args(["-o", "json", "tag", "list", &qualified])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let metadata: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(metadata["name"], "stale but retained");
+    }
+
+    #[test]
+    fn provider_tag_selection_and_unsupported_aggregates_fail_before_mutation() {
+        let claude = setup_fixture_dir();
+        let (codex, _) = setup_codex_home();
+        let config = TempDir::new().unwrap();
+        let qualified = format!("codex:{CODEX_THREAD}");
+        let tags_path = config.path().join("claude-snatch/tags.json");
+
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .env("SNATCH_CONFIG_DIR", config.path())
+            .args([
+                "tag",
+                "--provider",
+                "codex",
+                "add",
+                "bulk",
+                "--since",
+                "1day",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("native activity-time contract"));
+        assert!(
+            !tags_path.exists(),
+            "refusal must precede persistent mutation"
+        );
+
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .env("SNATCH_CONFIG_DIR", config.path())
+            .args(["tag", "similar", &qualified])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("typed similarity contract"));
+        assert!(
+            !tags_path.exists(),
+            "analysis refusal must not create the store"
+        );
+
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .env("SNATCH_CONFIG_DIR", config.path())
+            .args([
+                "tag",
+                "--provider",
+                "claude-code",
+                "add",
+                "wrong-provider",
+                "-s",
+                &qualified,
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "outside the selected metadata providers",
+            ));
+        assert!(!tags_path.exists());
+
+        for flags in [
+            vec!["--provider", "all", "--provider", "codex"],
+            vec!["--provider", "does-not-exist"],
+        ] {
+            let mut args = vec!["tag"];
+            args.extend(flags);
+            args.push("list");
+            snatch_cmd()
+                .env("SNATCH_CLAUDE_DIR", claude.path())
+                .env("CODEX_HOME", codex.path())
+                .env("SNATCH_CONFIG_DIR", config.path())
+                .args(args)
+                .assert()
+                .failure();
+        }
+        assert!(!tags_path.exists());
+    }
+
+    #[test]
+    fn provider_tag_resolution_does_not_alias_equal_native_ids_or_ambiguous_prefixes() {
+        let claude = setup_fixture_dir();
+        let (codex, _) = setup_codex_home();
+        let config = TempDir::new().unwrap();
+        let native = "shared-native-id";
+        write_tags_config(
+            config.path(),
+            &serde_json::json!({
+                "version": 2,
+                "sessions": [
+                    {
+                        "key": {
+                            "provider": "claude-code",
+                            "namespace": "global",
+                            "native_id": native
+                        },
+                        "metadata": {"tags": ["claude-only"]}
+                    },
+                    {
+                        "key": {
+                            "provider": "codex",
+                            "namespace": "global",
+                            "native_id": native
+                        },
+                        "metadata": {"tags": ["provider-only"]}
+                    },
+                    {
+                        "key": {
+                            "provider": "codex",
+                            "namespace": "global",
+                            "native_id": "ambiguous-one"
+                        },
+                        "metadata": {"tags": []}
+                    },
+                    {
+                        "key": {
+                            "provider": "codex",
+                            "namespace": "global",
+                            "native_id": "ambiguous-two"
+                        },
+                        "metadata": {"tags": []}
+                    }
+                ],
+                "unresolved": []
+            })
+            .to_string(),
+        );
+
+        let find = |provider: &str, tag: &str| {
+            let output = snatch_cmd()
+                .env("SNATCH_CLAUDE_DIR", claude.path())
+                .env("CODEX_HOME", codex.path())
+                .env("SNATCH_CONFIG_DIR", config.path())
+                .args(["-o", "json", "tag", "--provider", provider, "find", tag])
+                .assert()
+                .success()
+                .get_output()
+                .stdout
+                .clone();
+            serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+        };
+        assert_eq!(
+            find("claude-code", "claude-only"),
+            serde_json::json!([native])
+        );
+        assert_eq!(
+            find("codex", "provider-only"),
+            serde_json::json!([format!("codex:{native}")])
+        );
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .env("SNATCH_CONFIG_DIR", config.path())
+            .args(["tag", "--provider", "codex", "find", "claude-only"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("No sessions"));
+
+        let before = std::fs::read(config.path().join("claude-snatch/tags.json")).unwrap();
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .env("SNATCH_CONFIG_DIR", config.path())
+            .args([
+                "tag",
+                "--provider",
+                "codex",
+                "name",
+                "ambiguous-",
+                "must not land",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("ambiguous in persistent metadata"));
+        assert_eq!(
+            std::fs::read(config.path().join("claude-snatch/tags.json")).unwrap(),
+            before,
+            "an ambiguous reference must not rewrite metadata"
+        );
+    }
 }
 
 #[cfg(feature = "codex")]

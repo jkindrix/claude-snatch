@@ -2812,10 +2812,24 @@ malformed JSON, malformed versions, and unsupported future store versions are
 refused without rewriting the source. Prefix lookup no longer chooses an
 arbitrary hash-map match when more than one stored identity matches.
 
-This slice changes only storage and typed access. Provider-aware `tag` routing
-and qualified metadata in `info`/`list`/`recent` land next, after each consumer
-stops swallowing store-load failures and is tested against namespace-colliding
-native ids.
+The `tag` command now routes single-session mutations through typed logical
+keys. A qualified id is an explicit provider choice without requiring a
+redundant flag; an explicit `--provider` selection still constrains the
+reference and refuses mismatches. Aggregate reads default to Claude metadata,
+while repeated provider flags or `all` select a deliberate metadata union.
+Resolution combines stored and currently discoverable identities, refuses
+ambiguous prefixes, and permits exact stored keys to remain editable while the
+session source is offline. This is intentional: user metadata is durable state,
+not a cache whose availability follows the source corpus.
+
+Provider bulk date/project tag mutations remain refused until providers expose
+a common native activity-time contract. Provider-routed similarity remains
+refused until its project, tool, time, usage, and tag evidence has a typed
+cross-provider definition. Tests pin both refusals before persistence, equal
+native ids across providers, stale-source edits, qualified-selection mismatch,
+and the unchanged flagless Claude behavior. Qualified metadata in
+`info`/`list`/`recent` lands in the next slice, after each consumer stops
+swallowing store-load failures.
 
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".
