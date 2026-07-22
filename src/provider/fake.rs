@@ -177,6 +177,8 @@ impl SourceProvider for FakeProvider {
                 }],
                 field_derivations: Vec::new(),
                 semantics: BTreeMap::new(),
+                file_changes: Vec::new(),
+                file_change_diagnostics: FileChangeDiagnostics::default(),
                 diagnostics: IngestionDiagnostics {
                     mapped: 1,
                     ..Default::default()
@@ -367,6 +369,8 @@ impl SourceProvider for FakeProvider {
             record_dispositions,
             field_derivations: Vec::new(),
             semantics,
+            file_changes: Vec::new(),
+            file_change_diagnostics: FileChangeDiagnostics::default(),
             diagnostics: IngestionDiagnostics {
                 mapped: 4,
                 suppressed: 1,

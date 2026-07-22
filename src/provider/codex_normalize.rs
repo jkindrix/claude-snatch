@@ -52,10 +52,12 @@ use crate::model::{
 
 use super::{
     ActivityKind, CompactionKind, CompactionSemantics, CompactionWindow, EntryId, EntrySemantics,
-    IdentifiedEntry, IngestionDiagnostics, LogicalSessionKey, PromptAuthorship, PromptDelivery,
-    PromptSemantics, RecordDisposition, RecordOutcome, RecordRef, StateCheckpointKind,
-    SuppressionReason, ToolExecutionStatus, ToolKind, ToolLifecycleKind, ToolLifecycleObservation,
-    ToolSemantics, UsageAggregation, UsageObservation, UsageObservationKind, UsageScope,
+    FileChangeDetail, FileChangeDiagnostics, FileChangeEvidence, FileChangeKind,
+    FileChangeObservation, FileChangeOutcome, IdentifiedEntry, IngestionDiagnostics,
+    LogicalSessionKey, PromptAuthorship, PromptDelivery, PromptSemantics, RecordDisposition,
+    RecordOutcome, RecordRef, StateCheckpointKind, SuppressionReason, ToolExecutionStatus,
+    ToolKind, ToolLifecycleKind, ToolLifecycleObservation, ToolSemantics, UsageAggregation,
+    UsageObservation, UsageObservationKind, UsageScope,
 };
 
 /// Output of normalizing the parsed record stream.
@@ -64,6 +66,8 @@ pub(super) struct NormalizeOutput {
     pub entry_origins: BTreeMap<EntryId, Vec<RecordRef>>,
     pub record_dispositions: Vec<RecordDisposition>,
     pub semantics: BTreeMap<EntryId, EntrySemantics>,
+    pub file_changes: Vec<FileChangeObservation>,
+    pub file_change_diagnostics: FileChangeDiagnostics,
     pub diagnostics: IngestionDiagnostics,
 }
 
@@ -261,6 +265,467 @@ fn plan_lifecycle_window(window: &[(RecordRef, Value)], plan: &mut LifecyclePlan
         // No response-item candidate: this is an event-only nested operation,
         // not an ambiguity. It will become its own canonical tool call.
     }
+}
+
+#[derive(Debug)]
+struct ParsedFileChange {
+    path: String,
+    move_path: Option<String>,
+    kind: FileChangeKind,
+    detail: FileChangeDetail,
+}
+
+#[derive(Default)]
+struct ParsedFileChanges {
+    changes: Vec<ParsedFileChange>,
+    unparsed_items: usize,
+}
+
+fn structured_file_changes(payload: &Value) -> ParsedFileChanges {
+    let Some(changes) = payload.get("changes").and_then(Value::as_object) else {
+        return ParsedFileChanges {
+            unparsed_items: 1,
+            ..Default::default()
+        };
+    };
+    let mut paths: Vec<_> = changes.keys().collect();
+    paths.sort();
+    let mut parsed = ParsedFileChanges::default();
+    for path in paths {
+        if path.is_empty() {
+            parsed.unparsed_items += 1;
+            continue;
+        }
+        let value = &changes[path];
+        let Some(kind) = value.get("type").and_then(Value::as_str) else {
+            parsed.unparsed_items += 1;
+            continue;
+        };
+        let change = match kind {
+            "add" => value
+                .get("content")
+                .and_then(Value::as_str)
+                .map(|content| ParsedFileChange {
+                    path: path.clone(),
+                    move_path: None,
+                    kind: FileChangeKind::Add,
+                    detail: FileChangeDetail::FullContent(content.to_string()),
+                }),
+            "delete" => {
+                value
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(|content| ParsedFileChange {
+                        path: path.clone(),
+                        move_path: None,
+                        kind: FileChangeKind::Delete,
+                        detail: FileChangeDetail::FullContent(content.to_string()),
+                    })
+            }
+            "update" => value
+                .get("unified_diff")
+                .and_then(Value::as_str)
+                .map(|patch| ParsedFileChange {
+                    path: path.clone(),
+                    move_path: value
+                        .get("move_path")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    kind: FileChangeKind::Update,
+                    detail: FileChangeDetail::Patch(patch.to_string()),
+                }),
+            _ => None,
+        };
+        match change {
+            Some(change) => parsed.changes.push(change),
+            None => parsed.unparsed_items += 1,
+        }
+    }
+    parsed
+}
+
+/// Conservatively project the provider's documented patch grammar. This is
+/// not an apply engine: exact operation headers and their native bodies are
+/// retained as declaration evidence, while a separate result record decides
+/// whether they actually applied.
+fn declared_file_changes(input: &str) -> ParsedFileChanges {
+    let mut lines: Vec<&str> = input
+        .lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .collect();
+    while lines.last() == Some(&"") {
+        lines.pop();
+    }
+    if lines.first() != Some(&"*** Begin Patch") || lines.last() != Some(&"*** End Patch") {
+        return ParsedFileChanges {
+            unparsed_items: 1,
+            ..Default::default()
+        };
+    }
+
+    #[derive(Clone, Copy)]
+    enum DeclaredKind {
+        Add,
+        Delete,
+        Update,
+    }
+    struct Pending<'a> {
+        path: &'a str,
+        kind: DeclaredKind,
+        body: Vec<&'a str>,
+    }
+
+    fn finish(pending: Pending<'_>, parsed: &mut ParsedFileChanges) {
+        let path = pending.path.trim();
+        if path.is_empty() {
+            parsed.unparsed_items += 1;
+            return;
+        }
+        match pending.kind {
+            DeclaredKind::Add => {
+                let valid = pending.body.iter().all(|line| line.starts_with('+'));
+                let detail = if valid {
+                    let mut content = pending
+                        .body
+                        .iter()
+                        .map(|line| &line[1..])
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !pending.body.is_empty() {
+                        content.push('\n');
+                    }
+                    FileChangeDetail::FullContent(content)
+                } else {
+                    parsed.unparsed_items += 1;
+                    FileChangeDetail::PathOnly
+                };
+                parsed.changes.push(ParsedFileChange {
+                    path: path.to_string(),
+                    move_path: None,
+                    kind: FileChangeKind::Add,
+                    detail,
+                });
+            }
+            DeclaredKind::Delete => {
+                if !pending.body.is_empty() {
+                    parsed.unparsed_items += 1;
+                }
+                parsed.changes.push(ParsedFileChange {
+                    path: path.to_string(),
+                    move_path: None,
+                    kind: FileChangeKind::Delete,
+                    detail: FileChangeDetail::PathOnly,
+                });
+            }
+            DeclaredKind::Update => {
+                let (move_path, body_start) = pending.body.first().map_or((None, 0), |line| {
+                    line.strip_prefix("*** Move to: ")
+                        .map_or((None, 0), |path| (Some(path.trim().to_string()), 1))
+                });
+                if move_path.as_deref() == Some("") {
+                    parsed.unparsed_items += 1;
+                }
+                let patch_lines = &pending.body[body_start..];
+                let detail = if patch_lines.is_empty() {
+                    parsed.unparsed_items += 1;
+                    FileChangeDetail::PathOnly
+                } else {
+                    let mut patch = patch_lines.join("\n");
+                    patch.push('\n');
+                    FileChangeDetail::Patch(patch)
+                };
+                parsed.changes.push(ParsedFileChange {
+                    path: path.to_string(),
+                    move_path: move_path.filter(|path| !path.is_empty()),
+                    kind: FileChangeKind::Update,
+                    detail,
+                });
+            }
+        }
+    }
+
+    let mut parsed = ParsedFileChanges::default();
+    let mut pending: Option<Pending<'_>> = None;
+    for line in &lines[1..lines.len() - 1] {
+        let header = [
+            ("*** Add File: ", DeclaredKind::Add),
+            ("*** Delete File: ", DeclaredKind::Delete),
+            ("*** Update File: ", DeclaredKind::Update),
+        ]
+        .into_iter()
+        .find_map(|(prefix, kind)| line.strip_prefix(prefix).map(|path| (path, kind)));
+        if let Some((path, kind)) = header {
+            if let Some(previous) = pending.take() {
+                finish(previous, &mut parsed);
+            }
+            pending = Some(Pending {
+                path,
+                kind,
+                body: Vec::new(),
+            });
+        } else if let Some(current) = &mut pending {
+            current.body.push(line);
+        } else {
+            parsed.unparsed_items += 1;
+        }
+    }
+    if let Some(last) = pending {
+        finish(last, &mut parsed);
+    }
+    if parsed.changes.is_empty() && parsed.unparsed_items == 0 {
+        parsed.unparsed_items = 1;
+    }
+    parsed
+}
+
+fn lifecycle_file_outcome(payload: &Value) -> FileChangeOutcome {
+    if payload.get("status").and_then(Value::as_str) == Some("declined") {
+        FileChangeOutcome::Declined
+    } else if payload.get("success").and_then(Value::as_bool) == Some(false)
+        || payload.get("status").and_then(Value::as_str) == Some("failed")
+    {
+        FileChangeOutcome::Failed
+    } else if payload.get("success").and_then(Value::as_bool) == Some(true)
+        && payload.get("status").and_then(Value::as_str) == Some("completed")
+    {
+        FileChangeOutcome::Applied
+    } else {
+        FileChangeOutcome::Unknown
+    }
+}
+
+fn declared_file_outcome(payload: &Value) -> FileChangeOutcome {
+    let Some(output) = payload.get("output").and_then(Value::as_str) else {
+        return FileChangeOutcome::Unknown;
+    };
+    if let Ok(parsed) = serde_json::from_str::<Value>(output) {
+        if let Some(exit_code) = parsed
+            .get("metadata")
+            .and_then(|metadata| metadata.get("exit_code"))
+            .and_then(Value::as_i64)
+        {
+            return if exit_code == 0 {
+                FileChangeOutcome::Applied
+            } else {
+                FileChangeOutcome::Failed
+            };
+        }
+    }
+    if let Some(exit_code) = output.lines().find_map(|line| {
+        line.strip_prefix("Exit code: ")
+            .and_then(|code| code.trim().parse::<i32>().ok())
+    }) {
+        return if exit_code == 0 {
+            FileChangeOutcome::Applied
+        } else {
+            FileChangeOutcome::Failed
+        };
+    }
+    if output.starts_with("apply_patch verification failed:")
+        || output.starts_with("execution error:")
+    {
+        FileChangeOutcome::Failed
+    } else {
+        FileChangeOutcome::Unknown
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_file_changes(
+    observations: &mut Vec<FileChangeObservation>,
+    diagnostics: &mut FileChangeDiagnostics,
+    owner: EntryId,
+    call_id: String,
+    record: RecordRef,
+    outcome_record: Option<RecordRef>,
+    evidence: FileChangeEvidence,
+    outcome: FileChangeOutcome,
+    parsed: ParsedFileChanges,
+) {
+    diagnostics.patch_calls += 1;
+    diagnostics.unparsed_change_items += parsed.unparsed_items;
+    if parsed.changes.is_empty() {
+        diagnostics.unparsed_calls += 1;
+        return;
+    }
+    diagnostics.calls_with_changes += 1;
+    if outcome == FileChangeOutcome::Unknown {
+        diagnostics.unknown_outcome_calls += 1;
+    }
+    for (change_index, change) in parsed.changes.into_iter().enumerate() {
+        match evidence {
+            FileChangeEvidence::StructuredLifecycle => diagnostics.structured_changes += 1,
+            FileChangeEvidence::PatchDeclaration => diagnostics.declaration_changes += 1,
+        }
+        observations.push(FileChangeObservation {
+            owner: owner.clone(),
+            call_id: call_id.clone(),
+            change_index: u32::try_from(change_index).unwrap_or(u32::MAX),
+            record: record.clone(),
+            outcome_record: outcome_record.clone(),
+            path: change.path,
+            move_path: change.move_path,
+            kind: change.kind,
+            detail: change.detail,
+            evidence,
+            outcome,
+        });
+    }
+}
+
+fn project_file_changes(
+    records: &[(RecordRef, Value)],
+    plan: &LifecyclePlan,
+    key: &LogicalSessionKey,
+    first_new_after_fork: Option<u64>,
+) -> (Vec<FileChangeObservation>, FileChangeDiagnostics) {
+    #[derive(Clone)]
+    struct Native<'a> {
+        record: &'a RecordRef,
+        payload: &'a Value,
+    }
+
+    type WindowCall = (u64, String);
+    let mut window = 0_u64;
+    let mut calls: Vec<(u64, Native<'_>)> = Vec::new();
+    let mut outputs: BTreeMap<WindowCall, Vec<Native<'_>>> = BTreeMap::new();
+    let mut patch_events: BTreeMap<u64, Native<'_>> = BTreeMap::new();
+    for (record, value) in records {
+        let starts_new_window = {
+            let (envelope, _, payload_type) = envelope_parts(value);
+            is_window_boundary(envelope, payload_type)
+                || first_new_after_fork == Some(record.ordinal)
+        };
+        if starts_new_window {
+            window = window.saturating_add(1);
+        }
+        let (envelope, payload, payload_type) = envelope_parts(value);
+        if envelope == "response_item"
+            && payload_type == "custom_tool_call"
+            && payload.get("name").and_then(Value::as_str) == Some("apply_patch")
+        {
+            calls.push((window, Native { record, payload }));
+        } else if envelope == "response_item" && payload_type == "custom_tool_call_output" {
+            if let Some(call_id) = payload.get("call_id").and_then(Value::as_str) {
+                outputs
+                    .entry((window, call_id.to_string()))
+                    .or_default()
+                    .push(Native { record, payload });
+            }
+        } else if envelope == "event_msg" && payload_type == "patch_apply_end" {
+            patch_events.insert(record.ordinal, Native { record, payload });
+        }
+    }
+
+    let mut observations = Vec::new();
+    let mut diagnostics = FileChangeDiagnostics::default();
+    let paired_patch_events: BTreeMap<u64, &LifecyclePair> = plan
+        .paired
+        .iter()
+        .filter_map(|(event, pair)| patch_events.contains_key(event).then_some((*event, pair)))
+        .collect();
+
+    for (call_window, call) in calls {
+        let call_id = call
+            .payload
+            .get("call_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let owner = EntryId::deterministic(key, call.record.ordinal, 0);
+        let paired = paired_patch_events.iter().find_map(|(ordinal, pair)| {
+            (pair.target_ordinal == call.record.ordinal)
+                .then(|| patch_events.get(ordinal))
+                .flatten()
+        });
+        if let Some(event) = paired {
+            let structured = structured_file_changes(event.payload);
+            if !structured.changes.is_empty() {
+                emit_file_changes(
+                    &mut observations,
+                    &mut diagnostics,
+                    owner,
+                    call_id,
+                    event.record.clone(),
+                    Some(event.record.clone()),
+                    FileChangeEvidence::StructuredLifecycle,
+                    lifecycle_file_outcome(event.payload),
+                    structured,
+                );
+                continue;
+            }
+            // The structured source existed but carried no usable item. The
+            // declaration fallback may still recover paths; retain the
+            // structured parse gap in coverage accounting.
+            diagnostics.unparsed_change_items += structured.unparsed_items;
+        }
+
+        let declared = call
+            .payload
+            .get("input")
+            .and_then(Value::as_str)
+            .map(declared_file_changes)
+            .unwrap_or_else(|| ParsedFileChanges {
+                unparsed_items: 1,
+                ..Default::default()
+            });
+        let result_candidates = outputs
+            .get(&(call_window, call_id.clone()))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let (outcome, outcome_record) = match result_candidates {
+            [result] => (
+                declared_file_outcome(result.payload),
+                Some(result.record.clone()),
+            ),
+            _ => (FileChangeOutcome::Unknown, None),
+        };
+        emit_file_changes(
+            &mut observations,
+            &mut diagnostics,
+            owner,
+            call_id,
+            call.record.clone(),
+            outcome_record,
+            FileChangeEvidence::PatchDeclaration,
+            outcome,
+            declared,
+        );
+    }
+
+    for (ordinal, event) in patch_events {
+        if paired_patch_events.contains_key(&ordinal) {
+            continue;
+        }
+        if plan.ambiguous.contains(&ordinal) {
+            diagnostics.ambiguous_records += 1;
+            continue;
+        }
+        let call_id = event
+            .payload
+            .get("call_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        emit_file_changes(
+            &mut observations,
+            &mut diagnostics,
+            EntryId::deterministic(key, ordinal, 0),
+            call_id,
+            event.record.clone(),
+            Some(event.record.clone()),
+            FileChangeEvidence::StructuredLifecycle,
+            lifecycle_file_outcome(event.payload),
+            structured_file_changes(event.payload),
+        );
+    }
+
+    observations.sort_by(|left, right| {
+        left.owner
+            .cmp(&right.owner)
+            .then_with(|| left.change_index.cmp(&right.change_index))
+    });
+    (observations, diagnostics)
 }
 
 fn claim(pool: &mut [Candidate], text: &str) -> Option<u64> {
@@ -513,6 +978,8 @@ pub(super) fn normalize(
         entry_origins: BTreeMap::new(),
         record_dispositions: Vec::new(),
         semantics: BTreeMap::new(),
+        file_changes: Vec::new(),
+        file_change_diagnostics: FileChangeDiagnostics::default(),
         diagnostics: IngestionDiagnostics::default(),
     };
     let first_new_after_fork = inherited_range.map(|(_, last)| last.saturating_add(1));
@@ -725,6 +1192,10 @@ pub(super) fn normalize(
         push_unknown(pending.value, key, &pending.record, &mut out);
     }
     attach_paired_lifecycle(records, &lifecycle_plan, key, &mut out);
+    let (file_changes, file_change_diagnostics) =
+        project_file_changes(records, &lifecycle_plan, key, first_new_after_fork);
+    out.file_changes = file_changes;
+    out.file_change_diagnostics = file_change_diagnostics;
     // Canonical entry order = record order (late-attached leftovers above
     // would otherwise trail out of place).
     out.entries.sort_by_key(|e| (e.id.ordinal, e.id.subindex));
@@ -1848,5 +2319,84 @@ mod tests {
         assert_eq!(classify_tool("wait"), ToolKind::Orchestration);
         assert_eq!(classify_tool("update_plan"), ToolKind::Orchestration);
         assert_eq!(classify_tool("exec_command"), ToolKind::Shell);
+    }
+
+    #[test]
+    fn patch_declaration_parser_preserves_operation_order_and_coverage() {
+        let parsed = declared_file_changes(
+            "*** Begin Patch\n\
+             *** Add File: a.txt\n\
+             +one\n\
+             +two\n\
+             *** Update File: old.txt\n\
+             *** Move to: new.txt\n\
+             @@\n\
+             -old\n\
+             +new\n\
+             *** Delete File: gone.txt\n\
+             *** End Patch\n",
+        );
+        assert_eq!(parsed.unparsed_items, 0);
+        assert_eq!(parsed.changes.len(), 3);
+        assert_eq!(parsed.changes[0].path, "a.txt");
+        assert_eq!(
+            parsed.changes[0].detail,
+            FileChangeDetail::FullContent("one\ntwo\n".into())
+        );
+        assert_eq!(parsed.changes[1].kind, FileChangeKind::Update);
+        assert_eq!(parsed.changes[1].move_path.as_deref(), Some("new.txt"));
+        assert!(matches!(
+            &parsed.changes[1].detail,
+            FileChangeDetail::Patch(patch) if patch == "@@\n-old\n+new\n"
+        ));
+        assert_eq!(parsed.changes[2].kind, FileChangeKind::Delete);
+        assert_eq!(parsed.changes[2].detail, FileChangeDetail::PathOnly);
+    }
+
+    #[test]
+    fn patch_declaration_parser_does_not_scan_unframed_or_embedded_headers() {
+        let unframed = declared_file_changes("*** Update File: not-evidence.txt\n@@\n-old\n+new");
+        assert!(unframed.changes.is_empty());
+        assert_eq!(unframed.unparsed_items, 1);
+
+        let parsed = declared_file_changes(
+            "*** Begin Patch\n\
+             *** Add File: literal.txt\n\
+             +*** Delete File: not-a-header.txt\n\
+             *** End Patch\n",
+        );
+        assert_eq!(parsed.changes.len(), 1);
+        assert_eq!(parsed.changes[0].path, "literal.txt");
+        assert_eq!(
+            parsed.changes[0].detail,
+            FileChangeDetail::FullContent("*** Delete File: not-a-header.txt\n".into())
+        );
+    }
+
+    #[test]
+    fn file_change_outcomes_require_native_result_evidence() {
+        assert_eq!(
+            declared_file_outcome(&serde_json::json!({
+                "output": "{\"output\":\"done\",\"metadata\":{\"exit_code\":0}}"
+            })),
+            FileChangeOutcome::Applied
+        );
+        assert_eq!(
+            declared_file_outcome(&serde_json::json!({
+                "output": "apply_patch verification failed: invalid hunk"
+            })),
+            FileChangeOutcome::Failed
+        );
+        assert_eq!(
+            declared_file_outcome(&serde_json::json!({"output": "looks fine"})),
+            FileChangeOutcome::Unknown
+        );
+        assert_eq!(
+            lifecycle_file_outcome(&serde_json::json!({
+                "status": "declined", "success": false
+            })),
+            FileChangeOutcome::Declined,
+            "the provider's explicit declined status remains distinct from failure"
+        );
     }
 }

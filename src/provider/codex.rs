@@ -1385,6 +1385,8 @@ impl SourceProvider for CodexProvider {
                 },
             ],
             semantics: normalized.semantics,
+            file_changes: normalized.file_changes,
+            file_change_diagnostics: normalized.file_change_diagnostics,
             diagnostics,
         })
     }
@@ -1966,6 +1968,7 @@ mod tests {
             (0usize, 0usize, 0usize, 0usize, 0usize);
         let (mut lifecycle_paired, mut lifecycle_event_only, mut lifecycle_ambiguous) =
             (0usize, 0usize, 0usize);
+        let mut file_change_totals = crate::provider::FileChangeDiagnostics::default();
         let mut preserved_unknown_families: std::collections::BTreeMap<String, u64> =
             std::collections::BTreeMap::new();
         let mut expected_lineage: std::collections::BTreeSet<LineageEdge> =
@@ -2311,6 +2314,28 @@ mod tests {
                             AuditLifecycleOwner::Ambiguous => lifecycle_ambiguous += 1,
                         }
                     }
+                    let file_change_audit =
+                        audit_file_changes(&d.key, &raw_records, &session, first_new_after_fork);
+                    assert!(
+                        file_change_audit.is_empty(),
+                        "file-change audit failed: {} violation(s)",
+                        file_change_audit.len()
+                    );
+                    file_change_totals.patch_calls += session.file_change_diagnostics.patch_calls;
+                    file_change_totals.calls_with_changes +=
+                        session.file_change_diagnostics.calls_with_changes;
+                    file_change_totals.unparsed_calls +=
+                        session.file_change_diagnostics.unparsed_calls;
+                    file_change_totals.unparsed_change_items +=
+                        session.file_change_diagnostics.unparsed_change_items;
+                    file_change_totals.ambiguous_records +=
+                        session.file_change_diagnostics.ambiguous_records;
+                    file_change_totals.unknown_outcome_calls +=
+                        session.file_change_diagnostics.unknown_outcome_calls;
+                    file_change_totals.structured_changes +=
+                        session.file_change_diagnostics.structured_changes;
+                    file_change_totals.declaration_changes +=
+                        session.file_change_diagnostics.declaration_changes;
 
                     // physical record — compare against an independent count
                     // of the preferred artifact's records. Active sessions
@@ -2417,7 +2442,8 @@ mod tests {
              {replacement_items} replacement items + {world_full} world full + \
              {world_patch} world patch + {ghosts} ghost checkpoints, lifecycle: \
              {lifecycle_paired} paired + {lifecycle_event_only} event-only + \
-             {lifecycle_ambiguous} ambiguous, records: {totals:?}",
+             {lifecycle_ambiguous} ambiguous, file changes: {file_change_totals:?}, \
+             records: {totals:?}",
             n = sessions.len()
         );
         eprintln!("preserved unknown families: {preserved_unknown_families:?}");
@@ -4278,6 +4304,537 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct AuditFileChange {
+        owner_ordinal: u64,
+        call_id: String,
+        change_index: u32,
+        record_ordinal: u64,
+        outcome_record_ordinal: Option<u64>,
+        path: String,
+        move_path: Option<String>,
+        kind: crate::provider::FileChangeKind,
+        detail: crate::provider::FileChangeDetail,
+        evidence: crate::provider::FileChangeEvidence,
+        outcome: crate::provider::FileChangeOutcome,
+    }
+
+    #[derive(Default)]
+    struct AuditParsedChanges {
+        changes: Vec<(
+            String,
+            Option<String>,
+            crate::provider::FileChangeKind,
+            crate::provider::FileChangeDetail,
+        )>,
+        unparsed_items: usize,
+    }
+
+    fn audit_structured_changes(payload: &serde_json::Value) -> AuditParsedChanges {
+        let Some(map) = payload["changes"].as_object() else {
+            return AuditParsedChanges {
+                unparsed_items: 1,
+                ..Default::default()
+            };
+        };
+        let mut keys: Vec<&String> = map.keys().collect();
+        keys.sort();
+        let mut result = AuditParsedChanges::default();
+        for path in keys {
+            if path.is_empty() {
+                result.unparsed_items += 1;
+                continue;
+            }
+            let change = &map[path];
+            let projected = match change["type"].as_str() {
+                Some("add") => change["content"].as_str().map(|content| {
+                    (
+                        path.clone(),
+                        None,
+                        crate::provider::FileChangeKind::Add,
+                        crate::provider::FileChangeDetail::FullContent(content.to_string()),
+                    )
+                }),
+                Some("delete") => change["content"].as_str().map(|content| {
+                    (
+                        path.clone(),
+                        None,
+                        crate::provider::FileChangeKind::Delete,
+                        crate::provider::FileChangeDetail::FullContent(content.to_string()),
+                    )
+                }),
+                Some("update") => change["unified_diff"].as_str().map(|patch| {
+                    (
+                        path.clone(),
+                        change["move_path"].as_str().map(str::to_string),
+                        crate::provider::FileChangeKind::Update,
+                        crate::provider::FileChangeDetail::Patch(patch.to_string()),
+                    )
+                }),
+                _ => None,
+            };
+            if let Some(projected) = projected {
+                result.changes.push(projected);
+            } else {
+                result.unparsed_items += 1;
+            }
+        }
+        result
+    }
+
+    /// Independent patch-declaration reader for the conformance oracle. It
+    /// intentionally does not call the production parser: operation sections
+    /// are split and finalized in a separate implementation so mutations to
+    /// emitted paths/details cannot self-confirm.
+    fn audit_declared_changes(input: &str) -> AuditParsedChanges {
+        #[derive(Clone, Copy)]
+        enum Kind {
+            Add,
+            Delete,
+            Update,
+        }
+        struct Section {
+            path: String,
+            kind: Kind,
+            body: Vec<String>,
+        }
+        fn finish(section: Section, out: &mut AuditParsedChanges) {
+            if section.path.trim().is_empty() {
+                out.unparsed_items += 1;
+                return;
+            }
+            let path = section.path.trim().to_string();
+            match section.kind {
+                Kind::Add => {
+                    let valid = section.body.iter().all(|line| line.starts_with('+'));
+                    let detail = if valid {
+                        let mut content = section
+                            .body
+                            .iter()
+                            .map(|line| line[1..].to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if !section.body.is_empty() {
+                            content.push('\n');
+                        }
+                        crate::provider::FileChangeDetail::FullContent(content)
+                    } else {
+                        out.unparsed_items += 1;
+                        crate::provider::FileChangeDetail::PathOnly
+                    };
+                    out.changes
+                        .push((path, None, crate::provider::FileChangeKind::Add, detail));
+                }
+                Kind::Delete => {
+                    if !section.body.is_empty() {
+                        out.unparsed_items += 1;
+                    }
+                    out.changes.push((
+                        path,
+                        None,
+                        crate::provider::FileChangeKind::Delete,
+                        crate::provider::FileChangeDetail::PathOnly,
+                    ));
+                }
+                Kind::Update => {
+                    let mut body = section.body;
+                    let move_path = body.first().and_then(|line| {
+                        line.strip_prefix("*** Move to: ")
+                            .map(|path| path.trim().to_string())
+                    });
+                    if move_path.is_some() {
+                        body.remove(0);
+                    }
+                    if move_path.as_deref() == Some("") {
+                        out.unparsed_items += 1;
+                    }
+                    let detail = if body.is_empty() {
+                        out.unparsed_items += 1;
+                        crate::provider::FileChangeDetail::PathOnly
+                    } else {
+                        let mut patch = body.join("\n");
+                        patch.push('\n');
+                        crate::provider::FileChangeDetail::Patch(patch)
+                    };
+                    out.changes.push((
+                        path,
+                        move_path.filter(|path| !path.is_empty()),
+                        crate::provider::FileChangeKind::Update,
+                        detail,
+                    ));
+                }
+            }
+        }
+
+        let mut lines: Vec<String> = input
+            .lines()
+            .map(|line| line.trim_end_matches('\r').to_string())
+            .collect();
+        while lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        if lines.first().map(String::as_str) != Some("*** Begin Patch")
+            || lines.last().map(String::as_str) != Some("*** End Patch")
+        {
+            return AuditParsedChanges {
+                unparsed_items: 1,
+                ..Default::default()
+            };
+        }
+        let mut result = AuditParsedChanges::default();
+        let mut current: Option<Section> = None;
+        for line in lines
+            .into_iter()
+            .skip(1)
+            .rev()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            let header = [
+                ("*** Add File: ", Kind::Add),
+                ("*** Delete File: ", Kind::Delete),
+                ("*** Update File: ", Kind::Update),
+            ]
+            .into_iter()
+            .find_map(|(prefix, kind)| line.strip_prefix(prefix).map(|path| (path, kind)));
+            if let Some((path, kind)) = header {
+                if let Some(section) = current.take() {
+                    finish(section, &mut result);
+                }
+                current = Some(Section {
+                    path: path.to_string(),
+                    kind,
+                    body: Vec::new(),
+                });
+            } else if let Some(section) = &mut current {
+                section.body.push(line);
+            } else {
+                result.unparsed_items += 1;
+            }
+        }
+        if let Some(section) = current {
+            finish(section, &mut result);
+        }
+        if result.changes.is_empty() && result.unparsed_items == 0 {
+            result.unparsed_items = 1;
+        }
+        result
+    }
+
+    fn audit_patch_lifecycle_outcome(
+        payload: &serde_json::Value,
+    ) -> crate::provider::FileChangeOutcome {
+        match payload["status"].as_str() {
+            Some("declined") => crate::provider::FileChangeOutcome::Declined,
+            Some("failed") => crate::provider::FileChangeOutcome::Failed,
+            Some("completed") if payload["success"].as_bool() == Some(true) => {
+                crate::provider::FileChangeOutcome::Applied
+            }
+            _ if payload["success"].as_bool() == Some(false) => {
+                crate::provider::FileChangeOutcome::Failed
+            }
+            _ => crate::provider::FileChangeOutcome::Unknown,
+        }
+    }
+
+    fn audit_patch_result_outcome(
+        payload: &serde_json::Value,
+    ) -> crate::provider::FileChangeOutcome {
+        let Some(output) = payload["output"].as_str() else {
+            return crate::provider::FileChangeOutcome::Unknown;
+        };
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(output) {
+            if let Some(code) = value["metadata"]["exit_code"].as_i64() {
+                return if code == 0 {
+                    crate::provider::FileChangeOutcome::Applied
+                } else {
+                    crate::provider::FileChangeOutcome::Failed
+                };
+            }
+        }
+        if let Some(code) = output.lines().find_map(|line| {
+            line.strip_prefix("Exit code: ")
+                .and_then(|value| value.trim().parse::<i64>().ok())
+        }) {
+            return if code == 0 {
+                crate::provider::FileChangeOutcome::Applied
+            } else {
+                crate::provider::FileChangeOutcome::Failed
+            };
+        }
+        if output.starts_with("apply_patch verification failed:")
+            || output.starts_with("execution error:")
+        {
+            crate::provider::FileChangeOutcome::Failed
+        } else {
+            crate::provider::FileChangeOutcome::Unknown
+        }
+    }
+
+    fn independent_file_change_expectations(
+        raw: &[(u64, serde_json::Value)],
+        first_new_after_fork: Option<u64>,
+    ) -> (Vec<AuditFileChange>, crate::provider::FileChangeDiagnostics) {
+        type Native<'a> = (u64, &'a serde_json::Value);
+        let lifecycle = independent_lifecycle_expectations(raw, first_new_after_fork);
+        let paired_patch: std::collections::BTreeMap<u64, &AuditLifecycleExpectation<'_>> =
+            lifecycle
+                .iter()
+                .filter_map(|event| match (event.family, &event.owner) {
+                    (AuditLifecycleFamily::Patch, AuditLifecycleOwner::Paired(owner)) => {
+                        Some((*owner, event))
+                    }
+                    _ => None,
+                })
+                .collect();
+        let mut window = 0_u64;
+        let mut calls: Vec<(u64, Native<'_>)> = Vec::new();
+        let mut outputs: std::collections::BTreeMap<(u64, String), Vec<Native<'_>>> =
+            std::collections::BTreeMap::new();
+        for (ordinal, value) in raw {
+            if is_audit_boundary(*ordinal, value, first_new_after_fork) {
+                window = window.saturating_add(1);
+            }
+            if value["type"] != "response_item" {
+                continue;
+            }
+            let payload = &value["payload"];
+            match payload["type"].as_str() {
+                Some("custom_tool_call") if payload["name"] == "apply_patch" => {
+                    calls.push((window, (*ordinal, payload)));
+                }
+                Some("custom_tool_call_output") => {
+                    if let Some(call_id) = payload["call_id"].as_str() {
+                        outputs
+                            .entry((window, call_id.to_string()))
+                            .or_default()
+                            .push((*ordinal, payload));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut expected = Vec::new();
+        let mut diagnostics = crate::provider::FileChangeDiagnostics::default();
+        let emit = |owner_ordinal: u64,
+                    call_id: String,
+                    record_ordinal: u64,
+                    outcome_record_ordinal: Option<u64>,
+                    evidence: crate::provider::FileChangeEvidence,
+                    outcome: crate::provider::FileChangeOutcome,
+                    parsed: AuditParsedChanges,
+                    expected: &mut Vec<AuditFileChange>,
+                    diagnostics: &mut crate::provider::FileChangeDiagnostics| {
+            diagnostics.patch_calls += 1;
+            diagnostics.unparsed_change_items += parsed.unparsed_items;
+            if parsed.changes.is_empty() {
+                diagnostics.unparsed_calls += 1;
+                return;
+            }
+            diagnostics.calls_with_changes += 1;
+            if outcome == crate::provider::FileChangeOutcome::Unknown {
+                diagnostics.unknown_outcome_calls += 1;
+            }
+            for (index, (path, move_path, kind, detail)) in parsed.changes.into_iter().enumerate() {
+                match evidence {
+                    crate::provider::FileChangeEvidence::StructuredLifecycle => {
+                        diagnostics.structured_changes += 1;
+                    }
+                    crate::provider::FileChangeEvidence::PatchDeclaration => {
+                        diagnostics.declaration_changes += 1;
+                    }
+                }
+                expected.push(AuditFileChange {
+                    owner_ordinal,
+                    call_id: call_id.clone(),
+                    change_index: u32::try_from(index).unwrap_or(u32::MAX),
+                    record_ordinal,
+                    outcome_record_ordinal,
+                    path,
+                    move_path,
+                    kind,
+                    detail,
+                    evidence,
+                    outcome,
+                });
+            }
+        };
+
+        for (call_window, (ordinal, payload)) in calls {
+            let call_id = payload["call_id"].as_str().unwrap_or("").to_string();
+            if let Some(event) = paired_patch.get(&ordinal) {
+                let structured = audit_structured_changes(event.payload);
+                if !structured.changes.is_empty() {
+                    emit(
+                        ordinal,
+                        call_id,
+                        event.ordinal,
+                        Some(event.ordinal),
+                        crate::provider::FileChangeEvidence::StructuredLifecycle,
+                        audit_patch_lifecycle_outcome(event.payload),
+                        structured,
+                        &mut expected,
+                        &mut diagnostics,
+                    );
+                    continue;
+                }
+                diagnostics.unparsed_change_items += structured.unparsed_items;
+            }
+            let declared = payload["input"]
+                .as_str()
+                .map(audit_declared_changes)
+                .unwrap_or_else(|| AuditParsedChanges {
+                    unparsed_items: 1,
+                    ..Default::default()
+                });
+            let results = outputs
+                .get(&(call_window, call_id.clone()))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let (outcome, outcome_record) = match results {
+                [(result_ordinal, result)] => {
+                    (audit_patch_result_outcome(result), Some(*result_ordinal))
+                }
+                _ => (crate::provider::FileChangeOutcome::Unknown, None),
+            };
+            emit(
+                ordinal,
+                call_id,
+                ordinal,
+                outcome_record,
+                crate::provider::FileChangeEvidence::PatchDeclaration,
+                outcome,
+                declared,
+                &mut expected,
+                &mut diagnostics,
+            );
+        }
+
+        for event in lifecycle {
+            if event.family != AuditLifecycleFamily::Patch {
+                continue;
+            }
+            match event.owner {
+                AuditLifecycleOwner::Paired(_) => {}
+                AuditLifecycleOwner::Ambiguous => diagnostics.ambiguous_records += 1,
+                AuditLifecycleOwner::EventOnly => emit(
+                    event.ordinal,
+                    event.call_id.unwrap_or("").to_string(),
+                    event.ordinal,
+                    Some(event.ordinal),
+                    crate::provider::FileChangeEvidence::StructuredLifecycle,
+                    audit_patch_lifecycle_outcome(event.payload),
+                    audit_structured_changes(event.payload),
+                    &mut expected,
+                    &mut diagnostics,
+                ),
+            }
+        }
+        expected.sort_by(|left, right| {
+            left.owner_ordinal
+                .cmp(&right.owner_ordinal)
+                .then_with(|| left.change_index.cmp(&right.change_index))
+        });
+        (expected, diagnostics)
+    }
+
+    fn audit_file_changes(
+        key: &crate::provider::LogicalSessionKey,
+        raw: &[(u64, serde_json::Value)],
+        parsed: &crate::provider::ParsedSession,
+        first_new_after_fork: Option<u64>,
+    ) -> Vec<String> {
+        let (expected, diagnostics) =
+            independent_file_change_expectations(raw, first_new_after_fork);
+        let mut violations = Vec::new();
+        if parsed.file_change_diagnostics != diagnostics {
+            violations.push(format!(
+                "file-change diagnostics differ: expected {diagnostics:?}, got {:?}",
+                parsed.file_change_diagnostics
+            ));
+        }
+        let actual: std::collections::BTreeMap<_, _> = parsed
+            .file_changes
+            .iter()
+            .map(|change| {
+                (
+                    (
+                        change.owner.clone(),
+                        change.call_id.clone(),
+                        change.change_index,
+                    ),
+                    change,
+                )
+            })
+            .collect();
+        let mut expected_keys = std::collections::BTreeSet::new();
+        for change in expected {
+            let owner = EntryId::deterministic(key, change.owner_ordinal, 0);
+            let identity = (owner.clone(), change.call_id.clone(), change.change_index);
+            expected_keys.insert(identity.clone());
+            let Some(observed) = actual.get(&identity) else {
+                violations.push(format!(
+                    "file-change owner {owner} call {} index {} is missing",
+                    change.call_id, change.change_index
+                ));
+                continue;
+            };
+            let expected_record =
+                parsed
+                    .descriptor
+                    .preferred_artifact()
+                    .map(|artifact| RecordRef {
+                        artifact: artifact.snapshot.id.clone(),
+                        ordinal: change.record_ordinal,
+                    });
+            let expected_outcome_record = change.outcome_record_ordinal.and_then(|ordinal| {
+                parsed
+                    .descriptor
+                    .preferred_artifact()
+                    .map(|artifact| RecordRef {
+                        artifact: artifact.snapshot.id.clone(),
+                        ordinal,
+                    })
+            });
+            if Some(&observed.record) != expected_record.as_ref() {
+                violations.push(format!(
+                    "file-change call {} index {} names the wrong evidence record",
+                    change.call_id, change.change_index
+                ));
+            }
+            if observed.outcome_record != expected_outcome_record {
+                violations.push(format!(
+                    "file-change call {} index {} names the wrong outcome record",
+                    change.call_id, change.change_index
+                ));
+            }
+            if observed.path != change.path
+                || observed.move_path != change.move_path
+                || observed.kind != change.kind
+                || observed.detail != change.detail
+                || observed.evidence != change.evidence
+                || observed.outcome != change.outcome
+            {
+                violations.push(format!(
+                    "file-change call {} index {} fields differ from native evidence",
+                    change.call_id, change.change_index
+                ));
+            }
+        }
+        for identity in actual.keys() {
+            if !expected_keys.contains(identity) {
+                violations.push(format!(
+                    "unexpected file-change observation for owner {} call {} index {}",
+                    identity.0, identity.1, identity.2
+                ));
+            }
+        }
+        violations
+    }
+
     fn lifecycle_fixture() -> (
         tempfile::TempDir,
         crate::provider::ParsedSession,
@@ -4672,6 +5229,155 @@ mod tests {
             violations
                 .iter()
                 .any(|v| v.contains("correctly classified tool result")),
+            "{violations:?}"
+        );
+    }
+
+    fn declaration_file_change_fixture() -> (
+        tempfile::TempDir,
+        crate::provider::ParsedSession,
+        Vec<(u64, serde_json::Value)>,
+    ) {
+        let applied = serde_json::to_string(&serde_json::json!({
+            "output": "Success. Updated files.",
+            "metadata": {"exit_code": 0, "duration_seconds": 0.1}
+        }))
+        .unwrap();
+        parse_and_raw(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line(
+                "turn_context",
+                serde_json::json!({"turn_id": "turn-files", "model": "gpt-test"}),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({
+                    "type": "custom_tool_call", "name": "apply_patch",
+                    "call_id": "declared-ok",
+                    "input": "*** Begin Patch\n*** Add File: add.txt\n+hello\n*** Update File: old.txt\n*** Move to: new.txt\n@@\n-old\n+new\n*** Delete File: gone.txt\n*** End Patch\n"
+                }),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({
+                    "type": "custom_tool_call_output", "call_id": "declared-ok",
+                    "output": applied
+                }),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({
+                    "type": "custom_tool_call", "name": "apply_patch",
+                    "call_id": "declared-failed",
+                    "input": "*** Begin Patch\n*** Update File: retry.txt\n@@\n-old\n+new\n*** End Patch\n"
+                }),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({
+                    "type": "custom_tool_call_output", "call_id": "declared-failed",
+                    "output": "apply_patch verification failed: missing context"
+                }),
+            ),
+        ])
+    }
+
+    #[test]
+    fn file_change_projection_prefers_structured_and_covers_declarations() {
+        let (_tmp, parsed, raw) = lifecycle_fixture();
+        let violations = audit_file_changes(&key(THREAD_A), &raw, &parsed, None);
+        assert!(violations.is_empty(), "{violations:?}");
+        assert_eq!(parsed.file_change_diagnostics.patch_calls, 2);
+        assert_eq!(parsed.file_change_diagnostics.structured_changes, 2);
+        assert_eq!(parsed.file_change_diagnostics.declaration_changes, 0);
+        assert!(parsed.file_changes.iter().all(|change| {
+            change.evidence == crate::provider::FileChangeEvidence::StructuredLifecycle
+                && change.outcome == crate::provider::FileChangeOutcome::Applied
+        }));
+
+        let (_tmp, parsed, raw) = declaration_file_change_fixture();
+        let violations = audit_file_changes(&key(THREAD_A), &raw, &parsed, None);
+        assert!(violations.is_empty(), "{violations:?}");
+        assert_eq!(parsed.file_change_diagnostics.patch_calls, 2);
+        assert_eq!(parsed.file_change_diagnostics.calls_with_changes, 2);
+        assert_eq!(parsed.file_change_diagnostics.declaration_changes, 4);
+        assert_eq!(parsed.file_changes[0].path, "add.txt");
+        assert_eq!(parsed.file_changes[1].move_path.as_deref(), Some("new.txt"));
+        assert_eq!(
+            parsed.file_changes[2].detail,
+            crate::provider::FileChangeDetail::PathOnly,
+            "declaration-only deletes honestly retain path-only coverage"
+        );
+        assert_eq!(
+            parsed.file_changes[3].outcome,
+            crate::provider::FileChangeOutcome::Failed
+        );
+    }
+
+    #[test]
+    fn nc_file_change_audit_rejects_missing_observation_with_consistent_diagnostics() {
+        let (_tmp, mut parsed, raw) = declaration_file_change_fixture();
+        parsed.file_changes.remove(0);
+        parsed.file_change_diagnostics.declaration_changes -= 1;
+        assert!(
+            parsed.validate_provenance().is_empty(),
+            "mutation must remain internally coherent so the native audit earns its keep"
+        );
+        let violations = audit_file_changes(&key(THREAD_A), &raw, &parsed, None);
+        assert!(
+            violations
+                .iter()
+                .any(|message| message.contains("is missing")),
+            "{violations:?}"
+        );
+    }
+
+    #[test]
+    fn nc_file_change_audit_rejects_mutated_path_detail_and_outcome() {
+        let (_tmp, mut parsed, raw) = declaration_file_change_fixture();
+        parsed.file_changes[0].path = "wrong.txt".into();
+        assert!(parsed.validate_provenance().is_empty());
+        let violations = audit_file_changes(&key(THREAD_A), &raw, &parsed, None);
+        assert!(
+            violations
+                .iter()
+                .any(|message| message.contains("fields differ")),
+            "{violations:?}"
+        );
+
+        let (_tmp, mut parsed, raw) = declaration_file_change_fixture();
+        parsed.file_changes[1].detail = crate::provider::FileChangeDetail::PathOnly;
+        assert!(parsed.validate_provenance().is_empty());
+        let violations = audit_file_changes(&key(THREAD_A), &raw, &parsed, None);
+        assert!(
+            violations
+                .iter()
+                .any(|message| message.contains("fields differ")),
+            "{violations:?}"
+        );
+
+        let (_tmp, mut parsed, raw) = declaration_file_change_fixture();
+        parsed.file_changes[0].outcome = crate::provider::FileChangeOutcome::Failed;
+        assert!(parsed.validate_provenance().is_empty());
+        let violations = audit_file_changes(&key(THREAD_A), &raw, &parsed, None);
+        assert!(
+            violations
+                .iter()
+                .any(|message| message.contains("fields differ")),
+            "{violations:?}"
+        );
+    }
+
+    #[test]
+    fn file_change_validator_rejects_declaration_as_its_own_outcome_source() {
+        let (_tmp, mut parsed, _raw) = declaration_file_change_fixture();
+        let declaration = parsed.file_changes[0].record.clone();
+        parsed.file_changes[0].outcome_record = Some(declaration);
+        let violations = parsed.validate_provenance();
+        assert!(
+            violations
+                .iter()
+                .any(|message| message.contains("cannot use its declaration")),
             "{violations:?}"
         );
     }

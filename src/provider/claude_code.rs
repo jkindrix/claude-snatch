@@ -26,11 +26,11 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::time::UNIX_EPOCH;
 
 use super::{
-    ArtifactForm, ArtifactId, ArtifactRevision, ArtifactSnapshot, EntryId, IdentifiedEntry,
-    IngestionDiagnostics, LineageEdge, LineageEdgeKind, LogicalSessionKey, ParseDiagnostic,
-    ParsedSession, ProviderCapabilities, ProviderError, ProviderId, RecordDisposition,
-    RecordOutcome, RecordRef, SessionArtifact, SessionDescriptor, SessionNamespace, SourceProvider,
-    SuppressionReason,
+    ArtifactForm, ArtifactId, ArtifactRevision, ArtifactSnapshot, EntryId, FileChangeDiagnostics,
+    IdentifiedEntry, IngestionDiagnostics, LineageEdge, LineageEdgeKind, LogicalSessionKey,
+    ParseDiagnostic, ParsedSession, ProviderCapabilities, ProviderError, ProviderId,
+    RecordDisposition, RecordOutcome, RecordRef, SessionArtifact, SessionDescriptor,
+    SessionNamespace, SourceProvider, SuppressionReason,
 };
 use crate::discovery::chain::extract_session_link;
 use crate::discovery::{ClaudeDirectory, Session};
@@ -476,6 +476,8 @@ impl SourceProvider for ClaudeCodeProvider {
             record_dispositions,
             field_derivations: Vec::new(),
             semantics: BTreeMap::new(),
+            file_changes: Vec::new(),
+            file_change_diagnostics: FileChangeDiagnostics::default(),
             diagnostics,
         })
     }

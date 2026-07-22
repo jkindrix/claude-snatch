@@ -623,6 +623,159 @@ pub struct ToolSemantics {
     pub lifecycle: Vec<ToolLifecycleObservation>,
 }
 
+/// Provider-neutral operation represented by one file-change observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FileChangeKind {
+    /// A new file was added.
+    Add,
+    /// An existing file was deleted.
+    Delete,
+    /// An existing file was updated, optionally moving to a new path.
+    Update,
+}
+
+impl FileChangeKind {
+    /// Stable provider-neutral label for display and wire adapters.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Delete => "delete",
+            Self::Update => "update",
+        }
+    }
+}
+
+/// Strength/source of the evidence behind a file-change observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FileChangeEvidence {
+    /// Provider-persisted structured change data from an execution lifecycle
+    /// record. This is the strongest form and supersedes a model-authored
+    /// declaration for the same call.
+    StructuredLifecycle,
+    /// A provider-recognized patch declaration persisted as a tool call. Its
+    /// outcome comes from a separate native tool-result record when present.
+    PatchDeclaration,
+}
+
+impl FileChangeEvidence {
+    /// Stable provider-neutral label for display and wire adapters.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StructuredLifecycle => "structured_lifecycle",
+            Self::PatchDeclaration => "patch_declaration",
+        }
+    }
+}
+
+/// Whether the native evidence proves that a declared file change took effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FileChangeOutcome {
+    /// The provider reported successful application.
+    Applied,
+    /// The provider reported execution/application failure.
+    Failed,
+    /// The change was declined before application.
+    Declined,
+    /// No source-backed outcome could be established.
+    Unknown,
+}
+
+impl FileChangeOutcome {
+    /// Stable provider-neutral label for display and wire adapters.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Failed => "failed",
+            Self::Declined => "declined",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Content coverage carried by one file-change observation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FileChangeDetail {
+    /// Complete file content (new content for add, prior content for delete).
+    FullContent(String),
+    /// A provider-native patch/diff describing an update.
+    Patch(String),
+    /// The source proves only the affected path and operation.
+    PathOnly,
+}
+
+impl FileChangeDetail {
+    /// Stable coverage label for display and wire adapters.
+    #[must_use]
+    pub const fn coverage(&self) -> &'static str {
+        match self {
+            Self::FullContent(_) => "full_content",
+            Self::Patch(_) => "patch",
+            Self::PathOnly => "path_only",
+        }
+    }
+}
+
+/// One evidence-bounded file change owned by a normalized tool call.
+///
+/// `record` carries the declaration/structured change itself. A distinct
+/// `outcome_record` carries the execution result used to classify the outcome;
+/// structured lifecycle records normally serve both roles. Exact native data
+/// stays at the provider source and remains reachable through these references.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileChangeObservation {
+    /// Normalized ToolUse entry that owns this operation.
+    pub owner: EntryId,
+    /// Native tool-call identifier.
+    pub call_id: String,
+    /// Zero-based operation position within the native patch evidence. This
+    /// keeps repeated operations on the same path distinct without relying on
+    /// path equality as identity.
+    pub change_index: u32,
+    /// Record carrying the path/change detail.
+    pub record: RecordRef,
+    /// Record proving the application outcome, when one exists.
+    pub outcome_record: Option<RecordRef>,
+    /// Provider-native source path, preserved verbatim.
+    pub path: String,
+    /// Provider-native destination path for a move/update, when present.
+    pub move_path: Option<String>,
+    /// Add/delete/update operation.
+    pub kind: FileChangeKind,
+    /// Content coverage available from the native evidence.
+    pub detail: FileChangeDetail,
+    /// Evidence source/strength.
+    pub evidence: FileChangeEvidence,
+    /// Source-backed application outcome.
+    pub outcome: FileChangeOutcome,
+}
+
+/// Coverage/accounting for a session's file-change projection.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileChangeDiagnostics {
+    /// Canonical patch calls/operations inspected (paired lifecycle records
+    /// count with their authoritative call, never a second time).
+    pub patch_calls: usize,
+    /// Calls that produced one or more typed file changes.
+    pub calls_with_changes: usize,
+    /// Calls whose native declaration/change map could not produce a path.
+    pub unparsed_calls: usize,
+    /// Individual structured/declaration items that were only partially
+    /// understood. Typed path evidence may still exist for the same call.
+    pub unparsed_change_items: usize,
+    /// Lifecycle records excluded because ownership/cardinality was
+    /// ambiguous. They remain exact preserved-Unknown records.
+    pub ambiguous_records: usize,
+    /// Calls with typed changes but no source-backed application outcome.
+    pub unknown_outcome_calls: usize,
+    /// Typed changes sourced from structured lifecycle records.
+    pub structured_changes: usize,
+    /// Typed changes sourced from patch declarations.
+    pub declaration_changes: usize,
+}
+
 /// Provider-neutral family of a native tool lifecycle observation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolLifecycleKind {
@@ -954,6 +1107,10 @@ pub struct ParsedSession {
     pub field_derivations: Vec<FieldDerivation>,
     /// Adapter-asserted semantics, keyed by entry id.
     pub semantics: BTreeMap<EntryId, EntrySemantics>,
+    /// Evidence-bounded file changes owned by normalized tool calls.
+    pub file_changes: Vec<FileChangeObservation>,
+    /// Coverage/accounting for [`ParsedSession::file_changes`].
+    pub file_change_diagnostics: FileChangeDiagnostics,
     /// Ingestion counters (cross-checked against dispositions).
     pub diagnostics: IngestionDiagnostics,
 }
@@ -1182,6 +1339,160 @@ impl ParsedSession {
                     }
                 }
             }
+        }
+
+        // File-change evidence is session-level because its declaration and
+        // outcome may live on two different normalized entries. The owning
+        // entry must contain the named ToolUse; the change record must be its
+        // origin; and a distinct outcome record must map to a matching
+        // ToolResult. This keeps the projection source-addressable without
+        // pretending that a result record produced the call entry itself.
+        let entry_by_id: BTreeMap<&EntryId, &LogEntry> = self
+            .entries
+            .iter()
+            .map(|entry| (&entry.id, &entry.entry))
+            .collect();
+        let mut seen_changes = BTreeSet::new();
+        let mut covered_calls = BTreeSet::new();
+        let mut unknown_outcome_calls = BTreeSet::new();
+        let mut structured_changes = 0_usize;
+        let mut declaration_changes = 0_usize;
+        for change in &self.file_changes {
+            let dedup_key = (
+                &change.owner,
+                change.call_id.as_str(),
+                change.change_index,
+                &change.record,
+                change.path.as_str(),
+                change.move_path.as_deref(),
+                change.kind,
+            );
+            if !seen_changes.insert(dedup_key) {
+                violations.push(format!(
+                    "file change for call {} on entry {} repeats {:?} {}",
+                    change.call_id, change.owner, change.kind, change.path
+                ));
+            }
+            covered_calls.insert((&change.owner, change.call_id.as_str()));
+            if change.outcome == FileChangeOutcome::Unknown {
+                unknown_outcome_calls.insert((&change.owner, change.call_id.as_str()));
+            }
+            match change.evidence {
+                FileChangeEvidence::StructuredLifecycle => structured_changes += 1,
+                FileChangeEvidence::PatchDeclaration => declaration_changes += 1,
+            }
+
+            check_artifact(&change.record, "file-change evidence", &mut violations);
+            if !entry_ids.contains(&change.owner) {
+                violations.push(format!(
+                    "file change for call {} names missing owner {}",
+                    change.call_id, change.owner
+                ));
+                continue;
+            }
+            match self.entry_origins.get(&change.owner) {
+                Some(origins) if origins.contains(&change.record) => {}
+                _ => violations.push(format!(
+                    "file change for call {} on entry {} names record #{} which is not one of the entry's origins",
+                    change.call_id, change.owner, change.record.ordinal
+                )),
+            }
+            let owns_call = entry_by_id.get(&change.owner).is_some_and(|entry| {
+                matches!(entry, LogEntry::Assistant(message)
+                    if message.message.tool_uses().iter().any(|tool| tool.id == change.call_id))
+            });
+            if !owns_call {
+                violations.push(format!(
+                    "file change owner {} does not contain ToolUse {}",
+                    change.owner, change.call_id
+                ));
+            }
+
+            if let Some(outcome) = &change.outcome_record {
+                check_artifact(outcome, "file-change outcome", &mut violations);
+                if change.evidence == FileChangeEvidence::StructuredLifecycle
+                    && outcome != &change.record
+                {
+                    violations.push(format!(
+                        "structured file change for call {} must use its lifecycle record as the outcome source",
+                        change.call_id
+                    ));
+                }
+                if change.evidence == FileChangeEvidence::PatchDeclaration
+                    && outcome == &change.record
+                {
+                    violations.push(format!(
+                        "declared file change for call {} cannot use its declaration as execution outcome evidence",
+                        change.call_id
+                    ));
+                }
+                if outcome == &change.record {
+                    if !self
+                        .entry_origins
+                        .get(&change.owner)
+                        .is_some_and(|origins| origins.contains(outcome))
+                    {
+                        violations.push(format!(
+                            "file change lifecycle outcome #{} is not an origin of owner {}",
+                            outcome.ordinal, change.owner
+                        ));
+                    }
+                } else {
+                    let matching_result = producing.get(outcome).is_some_and(|entries| {
+                        entries.iter().any(|entry_id| {
+                            entry_by_id.get(entry_id).is_some_and(|entry| {
+                                matches!(entry, LogEntry::User(message)
+                                if message.message.tool_results().iter().any(|result| {
+                                    result.tool_use_id == change.call_id
+                                }))
+                            })
+                        })
+                    });
+                    if !matching_result {
+                        violations.push(format!(
+                            "file change outcome record #{} does not produce ToolResult {}",
+                            outcome.ordinal, change.call_id
+                        ));
+                    }
+                }
+            } else if change.evidence == FileChangeEvidence::StructuredLifecycle {
+                violations.push(format!(
+                    "structured file change for call {} is missing its lifecycle outcome source",
+                    change.call_id
+                ));
+            } else if change.outcome != FileChangeOutcome::Unknown {
+                violations.push(format!(
+                    "file change for call {} claims outcome {} without an outcome record",
+                    change.call_id,
+                    change.outcome.as_str()
+                ));
+            }
+        }
+
+        let expected_change_count = self
+            .file_change_diagnostics
+            .structured_changes
+            .saturating_add(self.file_change_diagnostics.declaration_changes);
+        if expected_change_count != self.file_changes.len()
+            || structured_changes != self.file_change_diagnostics.structured_changes
+            || declaration_changes != self.file_change_diagnostics.declaration_changes
+            || covered_calls.len() != self.file_change_diagnostics.calls_with_changes
+            || unknown_outcome_calls.len() != self.file_change_diagnostics.unknown_outcome_calls
+            || self
+                .file_change_diagnostics
+                .calls_with_changes
+                .saturating_add(self.file_change_diagnostics.unparsed_calls)
+                != self.file_change_diagnostics.patch_calls
+        {
+            violations.push(format!(
+                "file-change diagnostics {:?} do not match {} observations across {} covered calls ({} structured, {} declarations, {} unknown-outcome calls)",
+                self.file_change_diagnostics,
+                self.file_changes.len(),
+                covered_calls.len(),
+                structured_changes,
+                declaration_changes,
+                unknown_outcome_calls.len()
+            ));
         }
 
         // Every entry must have provenance; every origin must be real.

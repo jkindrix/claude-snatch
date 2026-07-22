@@ -2011,6 +2011,49 @@ calls but does not yet claim one provider-neutral file-change projection over
 both paired and event-only forms. That evidence-bounded layer, including
 coverage strength and inherited-history exclusion, is the next roadmap item.
 
+#### File-change evidence audit and contract (2026-07-22)
+
+The second parity slice began by testing that boundary against the native
+corpus and upstream source. A lifecycle-only extractor would have been badly
+incomplete: the artifact census contained thousands of persisted
+`custom_tool_call/apply_patch` declarations but only hundreds of structured
+`patch_apply_end` records because extended-history persistence is
+mode-dependent. Codex `rust-v0.144.6` defines structured changes as
+`FileChange::{Add { content }, Delete { content }, Update { unified_diff,
+move_path }}` in
+[`protocol.rs`](https://github.com/openai/codex/blob/rust-v0.144.6/codex-rs/protocol/src/protocol.rs),
+and its
+[`apply_patch` conversion](https://github.com/openai/codex/blob/rust-v0.144.6/codex-rs/core/src/apply_patch.rs)
+confirms that those fields come from the verified patch action. The persisted
+patch declaration uses a separate documented grammar; its result record, not
+the model-authored declaration, determines whether application succeeded.
+
+`ParsedSession` now carries a session-level `FileChangeObservation` projection
+rather than copying change fields onto whichever entry happens to be nearby.
+Each observation names the owning ToolUse, call id and stable operation index;
+the full record carrying the change; the distinct result record when needed;
+native source and move paths; add/delete/update kind; full-content, patch, or
+path-only coverage; evidence grade (`StructuredLifecycle` or
+`PatchDeclaration`); and a source-backed applied/failed/declined/unknown
+outcome. Structured lifecycle evidence wins when both forms exist. A
+declaration is used only as the fallback and is never allowed to serve as its
+own execution proof. Delete declarations are honestly path-only because that
+grammar does not carry the removed bytes. Consumers can exclude copied fork
+history through the owning entry's existing `ActivityKind` instead of
+duplicating activity state on every changed path.
+
+The generic validator checks owner ToolUse identity, evidence-origin
+correspondence, result-to-ToolResult correspondence, artifact membership,
+dedup identity, and coverage counters. A separate native oracle independently
+derives the patch/result allocation and exact per-file fields; mutation tests
+prove that missing observations and changed paths, patch detail, outcomes, or
+outcome sources fail. On the live preferred-artifact corpus it reconciled all
+243 sessions: 6,705 canonical patch calls yielded 6,939 typed file changes
+(778 from structured lifecycle evidence, 6,161 from patch declarations), zero
+unparsed calls, zero unknown outcomes, and one explicitly counted partial item
+(a native empty update declaration). This establishes the evidence layer; the
+file-history/evolution consumers are routed only in the next bounded commit.
+
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".
 - [x] Drift-coverage claims must state checked vs unchecked counts
