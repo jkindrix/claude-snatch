@@ -56,7 +56,7 @@ tantivy = "0.26"
 similar = "3.1"
 
 # JSON Schema
-jsonschema = { version = "0.47", default-features = false }
+jsonschema = { version = "0.48", default-features = false }
 
 # Codex provider: streaming zstd decode of cold rollout files (compiled only
 # with the `codex` feature; default features off per review round 11).
