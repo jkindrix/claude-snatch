@@ -19,36 +19,10 @@ pub use crate::analysis::extraction::{
     extract_files_from_tools, extract_image_placeholders, extract_result_preview,
     extract_thinking_text, extract_tool_input_summary, extract_tool_names,
     extract_user_prompt_text, failed_tool_use_ids, find_compaction_events, get_model, has_thinking,
-    has_tool_errors, is_human_prompt, is_prompt_boundary, queued_human_prompt,
-    render_attachment_content, thinking_redaction_note, truncate_text,
+    has_tool_errors, is_human_prompt, is_prompt_boundary, main_thread_message_total,
+    queued_human_prompt, render_attachment_content, thinking_redaction_note, truncate_text,
 };
 pub use crate::analysis::filters::{parse_period, period_cutoff};
-
-/// Canonical session message total: human user prompts plus distinct assistant
-/// turns (deduped by `message.id`), counted over the main thread.
-///
-/// This is detail-independent and is the single definition shared by
-/// `get_session_messages` (its `total_messages`) and `get_session_info` (its
-/// `messages`), so the two always report the same number.
-#[must_use]
-pub fn main_thread_message_total(conversation: &Conversation) -> usize {
-    use std::collections::HashSet;
-
-    let mut assistant_turns: HashSet<&str> = HashSet::new();
-    let mut user_prompts = 0usize;
-    for entry in conversation.main_thread_entries() {
-        match entry {
-            LogEntry::Assistant(assistant) => {
-                assistant_turns.insert(assistant.message.id.as_str());
-            }
-            LogEntry::User(_) if is_human_prompt(entry) => {
-                user_prompts += 1;
-            }
-            _ => {}
-        }
-    }
-    user_prompts + assistant_turns.len()
-}
 
 /// Resolved session with parsed conversation and analytics.
 pub struct ResolvedSession {

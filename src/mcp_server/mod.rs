@@ -1514,9 +1514,19 @@ impl SnatchServer {
             indexed.reverse();
         }
 
+        // Size of the population offset/limit actually range over at this
+        // detail level (post message_type/detail filtering). Distinct from
+        // total_messages (the canonical, detail-independent count): page_total
+        // is what a caller must compare against to know if more pages exist,
+        // so total vs returned never has to be (mis)read as a pagination signal.
+        let page_total = indexed.len();
+
         // Apply pagination
         let paginated: Vec<(usize, &LogEntry)> =
             indexed.into_iter().skip(offset).take(limit).collect();
+        // Computed from entries consumed by this page, not rendered messages
+        // (some entries can render empty at a given detail level).
+        let has_more = offset.saturating_add(paginated.len()) < page_total;
 
         // Map tool_use_id -> (had_error, result_preview) so the "full" detail
         // builder can surface each tool's output, joined to the assistant's
@@ -1801,6 +1811,8 @@ impl SnatchServer {
             total_messages,
             returned,
             offset,
+            page_total,
+            has_more,
             messages,
             unmatched_subagents,
             duplicate_notice,
@@ -2646,7 +2658,7 @@ impl SnatchServer {
     /// Extract operational lessons from a session: error→fix pairs and user corrections.
     /// Targets the most expensive compaction failure mode (negative result amnesia).
     #[tool(
-        description = "Extract lessons from an agent session: error->fix pairs (what failed and how it was resolved) and high-precision human corrections, each labeled with its dialogue evidence. Claude Code is the default; select another provider with provider or a qualified id. category filters the returned lists; summary totals always describe the full session. Provider tool and prompt semantics suppress content-shaped false positives."
+        description = "Extract lessons from an agent session: error->fix pairs (what failed and how it was resolved) and high-precision human corrections, each labeled with its dialogue evidence. Claude Code is the default; select another provider with provider or a qualified id. category filters the returned lists; summary totals always describe the full session. Provider tool and prompt semantics suppress content-shaped false positives. Best for recovery and continuity; to independently judge what happened (adversarial review), read the raw transcript with get_session_messages rather than this pre-extracted summary."
     )]
     async fn get_session_lessons(&self, request: GetSessionLessonsRequest) -> ToolOutput {
         use crate::analysis::lessons::{
@@ -4291,6 +4303,143 @@ mod tests {
             matches!(output, ToolOutput::RecoverableError { .. }),
             "Expected error but got success"
         );
+    }
+
+    /// A 9-entry linear session engineered so the canonical message total
+    /// (`main_thread_message_total`) diverges from the detail-filtered
+    /// pagination population in BOTH directions:
+    ///   - 2 human prompts (U1, U2) + 4 distinct assistant turn ids
+    ///     (msg_001, msg_002, msg_003, msg_004) => canonical total = 6.
+    ///   - `standard` detail keeps all 9 entries => page_total 9 > total 6.
+    ///   - `conversation` detail keeps only the 5 text/prompt entries
+    ///     (msg_002 is tool-only via A2 but has a text sibling A3; msg_004 is
+    ///     tool-only with no text sibling, so it is dropped) => page_total 5
+    ///     < total 6 — the reviewer's "total > returned looks like more pages"
+    ///     trap direction.
+    fn pagination_fixture_jsonl(session_id: &str) -> String {
+        const LINES: &str = concat!(
+            r#"{"type":"user","uuid":"bbbbbbbb-0000-0000-0000-000000000001","parentUuid":null,"timestamp":"2025-02-01T10:00:00.000Z","sessionId":"__SID__","version":"2.0.74","message":{"role":"user","content":"First question"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"bbbbbbbb-0000-0000-0000-000000000002","parentUuid":"bbbbbbbb-0000-0000-0000-000000000001","timestamp":"2025-02-01T10:00:01.000Z","sessionId":"__SID__","version":"2.0.74","message":{"id":"msg_001","type":"message","role":"assistant","content":[{"type":"text","text":"Answer one"}],"model":"claude-sonnet-4-20250514","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"bbbbbbbb-0000-0000-0000-000000000003","parentUuid":"bbbbbbbb-0000-0000-0000-000000000002","timestamp":"2025-02-01T10:00:02.000Z","sessionId":"__SID__","version":"2.0.74","message":{"id":"msg_002","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_a","name":"Bash","input":{"command":"ls"}}],"model":"claude-sonnet-4-20250514","stop_reason":"tool_use","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
+            "\n",
+            r#"{"type":"user","uuid":"bbbbbbbb-0000-0000-0000-000000000004","parentUuid":"bbbbbbbb-0000-0000-0000-000000000003","timestamp":"2025-02-01T10:00:03.000Z","sessionId":"__SID__","version":"2.0.74","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"ok"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"bbbbbbbb-0000-0000-0000-000000000005","parentUuid":"bbbbbbbb-0000-0000-0000-000000000004","timestamp":"2025-02-01T10:00:04.000Z","sessionId":"__SID__","version":"2.0.74","message":{"id":"msg_002","type":"message","role":"assistant","content":[{"type":"text","text":"Interpreted result"}],"model":"claude-sonnet-4-20250514","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"bbbbbbbb-0000-0000-0000-000000000006","parentUuid":"bbbbbbbb-0000-0000-0000-000000000005","timestamp":"2025-02-01T10:00:05.000Z","sessionId":"__SID__","version":"2.0.74","message":{"id":"msg_004","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_b","name":"Read","input":{"file_path":"/x"}}],"model":"claude-sonnet-4-20250514","stop_reason":"tool_use","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
+            "\n",
+            r#"{"type":"user","uuid":"bbbbbbbb-0000-0000-0000-000000000007","parentUuid":"bbbbbbbb-0000-0000-0000-000000000006","timestamp":"2025-02-01T10:00:06.000Z","sessionId":"__SID__","version":"2.0.74","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_b","content":"data"}]}}"#,
+            "\n",
+            r#"{"type":"user","uuid":"bbbbbbbb-0000-0000-0000-000000000008","parentUuid":"bbbbbbbb-0000-0000-0000-000000000007","timestamp":"2025-02-01T10:00:07.000Z","sessionId":"__SID__","version":"2.0.74","message":{"role":"user","content":"Second question"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"bbbbbbbb-0000-0000-0000-000000000009","parentUuid":"bbbbbbbb-0000-0000-0000-000000000008","timestamp":"2025-02-01T10:00:08.000Z","sessionId":"__SID__","version":"2.0.74","message":{"id":"msg_003","type":"message","role":"assistant","content":[{"type":"text","text":"Second answer"}],"model":"claude-sonnet-4-20250514","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
+            "\n",
+        );
+        LINES.replace("__SID__", session_id)
+    }
+
+    async fn page_value(
+        server: &SnatchServer,
+        id: &str,
+        detail: &str,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> serde_json::Value {
+        let out = unwrap_output(
+            server
+                .get_session_messages(GetSessionMessagesRequest {
+                    session_id: id.to_string(),
+                    provider: None,
+                    detail: Some(detail.to_string()),
+                    message_type: None,
+                    limit,
+                    offset,
+                    reverse: None,
+                    include_thinking: None,
+                    chain_aware: None,
+                    after_timestamp: None,
+                    before_timestamp: None,
+                    include_subagent_transcripts: None,
+                    chunk: None,
+                    errors_only: None,
+                    max_text_len: None,
+                })
+                .await,
+        );
+        serde_json::from_str(&out).unwrap()
+    }
+
+    /// Regression guard for the pagination-signal fix: `total_messages` is the
+    /// canonical, detail-independent count (equal to get_session_info.messages)
+    /// and is NOT the pagination bound; `page_total`/`has_more` are. Neither the
+    /// "total > returned looks like more pages" trap (conversation detail) nor
+    /// its inverse (standard detail, where the paginable set exceeds total) may
+    /// mislead a caller.
+    #[tokio::test]
+    async fn total_messages_is_canonical_and_page_total_drives_pagination() {
+        let id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        let tmp = setup_claude_dir(id, PROJECT_PATH, &pagination_fixture_jsonl(id));
+        let server = make_server(&tmp);
+
+        // Canonical total is detail-independent and equals info.messages.
+        let info: serde_json::Value = serde_json::from_str(&unwrap_output(
+            server
+                .get_session_info(GetSessionInfoRequest {
+                    session_id: id.to_string(),
+                    provider: None,
+                })
+                .await,
+        ))
+        .unwrap();
+        assert_eq!(info["messages"], 6, "canonical count");
+        for detail in ["overview", "conversation", "standard", "full"] {
+            let page = page_value(&server, id, detail, Some(0), Some(0)).await;
+            assert_eq!(
+                page["total_messages"], 6,
+                "total_messages must be detail-independent ({detail})"
+            );
+            assert_eq!(
+                page["total_messages"], info["messages"],
+                "total_messages must equal get_session_info.messages ({detail})"
+            );
+            // A full (unlimited) page from offset 0 reaches the end: no more.
+            assert_eq!(
+                page["has_more"], false,
+                "unlimited page has_more ({detail})"
+            );
+        }
+
+        // conversation: page_total (5) < total_messages (6) — the trap
+        // direction. has_more must say "stop", not defer to total > returned.
+        let conv = page_value(&server, id, "conversation", Some(0), Some(0)).await;
+        assert_eq!(conv["page_total"], 5);
+        assert_eq!(conv["returned"], 5);
+        assert_eq!(conv["has_more"], false);
+
+        // standard: page_total (9) > total_messages (6) — the inverse. returned
+        // may exceed total_messages without meaning "past the end".
+        let std = page_value(&server, id, "standard", Some(0), Some(0)).await;
+        assert_eq!(std["page_total"], 9);
+        assert_eq!(std["returned"], 9);
+        assert_eq!(std["has_more"], false);
+
+        // A partial page reports more remain; the last page does not.
+        let partial = page_value(&server, id, "standard", Some(3), Some(0)).await;
+        assert_eq!(partial["returned"], 3);
+        assert_eq!(partial["has_more"], true);
+        let last = page_value(&server, id, "standard", Some(3), Some(6)).await;
+        assert_eq!(last["returned"], 3);
+        assert_eq!(last["has_more"], false);
+
+        // offset at/after page_total yields an empty, terminal page.
+        let at_end = page_value(&server, id, "conversation", Some(0), Some(5)).await;
+        assert_eq!(at_end["returned"], 0);
+        assert_eq!(at_end["has_more"], false);
+        let beyond = page_value(&server, id, "standard", Some(10), Some(99)).await;
+        assert_eq!(beyond["returned"], 0);
+        assert_eq!(beyond["has_more"], false);
     }
 
     #[tokio::test]
