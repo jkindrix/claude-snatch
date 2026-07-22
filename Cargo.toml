@@ -68,7 +68,6 @@ mcpkit = { version = "0.6", optional = true }
 # Terminal utilities
 console = "0.16"
 indicatif = { version = "0.18", features = ["tokio"] }
-syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
 
 # Data structures
 indexmap = { version = "2.13", features = ["serde"] }
