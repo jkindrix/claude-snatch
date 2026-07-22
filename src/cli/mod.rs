@@ -2411,6 +2411,11 @@ pub struct ContextArgs {
     /// Session ID (full UUID or short prefix).
     pub session_id: String,
 
+    /// Route through a session-log provider (repeatable; "all" searches all
+    /// available providers under the normal uniqueness contract).
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
+
     /// Message UUID to zoom around.
     #[arg(short = 'm', long)]
     pub message_id: Option<String>,
@@ -2419,7 +2424,8 @@ pub struct ContextArgs {
     #[arg(short = 't', long)]
     pub timestamp: Option<String>,
 
-    /// Number of turns before/after the target.
+    /// Number of semantic turns before/after the target on annotated
+    /// providers; the classic compatibility route uses adjacent entries.
     #[arg(short = 'w', long, default_value = "2")]
     pub context_window: usize,
 }

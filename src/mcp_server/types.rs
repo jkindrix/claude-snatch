@@ -1366,13 +1366,19 @@ pub struct GetEventContextRequest {
     /// Session ID (full or prefix).
     pub session_id: String,
 
+    /// Source providers to search. Omit for the classic Claude-only route;
+    /// qualified ids route automatically.
+    pub provider: Option<Vec<String>>,
+
     /// Message UUID to find.
     pub message_id: Option<String>,
 
     /// Timestamp to find (ISO 8601 or relative). Finds closest match.
     pub timestamp: Option<String>,
 
-    /// Number of turns before/after the target. Default: 2.
+    /// Number of semantic turns before/after the target on annotated
+    /// providers; the classic route retains adjacent-entry behavior.
+    /// Default: 2.
     pub context_window: Option<usize>,
 
     /// If the session is part of a resume chain, resolve context across all
@@ -1400,12 +1406,22 @@ pub struct ContextTurnEntry {
 #[derive(Debug, Serialize)]
 pub struct GetEventContextResponse {
     pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qualified_id: Option<String>,
     pub target_index: usize,
     pub target: ContextTurnEntry,
     pub before: Vec<ContextTurnEntry>,
     pub after: Vec<ContextTurnEntry>,
     pub related_files: Vec<String>,
     pub error_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed_failure_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inferred_failure_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_window: Option<crate::analysis::event_context::SemanticEventWindow>,
 }
 
 // ============================================================================

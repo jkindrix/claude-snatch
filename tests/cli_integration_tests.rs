@@ -3004,6 +3004,148 @@ mod codex_normalization_cli {
         tmp
     }
 
+    fn event_context_home() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        let day = tmp.path().join("sessions/2026/07/16");
+        std::fs::create_dir_all(&day).unwrap();
+        let line = |timestamp: &str, kind: &str, payload: serde_json::Value| serde_json::json!({"timestamp": timestamp, "type": kind, "payload": payload});
+        let lines = [
+            line(
+                "2026-07-16T12:00:00Z",
+                "session_meta",
+                serde_json::json!({"id": THREAD, "cwd": "/tmp/context", "cli_version": "0.9"}),
+            ),
+            line(
+                "2026-07-16T12:00:01Z",
+                "turn_context",
+                serde_json::json!({"turn_id": "turn-before", "model": "gpt-test"}),
+            ),
+            line(
+                "2026-07-16T12:00:02Z",
+                "response_item",
+                serde_json::json!({"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "before prompt"}]}),
+            ),
+            line(
+                "2026-07-16T12:00:02.100Z",
+                "event_msg",
+                serde_json::json!({"type": "user_message", "message": "before prompt"}),
+            ),
+            line(
+                "2026-07-16T12:00:03Z",
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "before response"}]}),
+            ),
+            line(
+                "2026-07-16T12:01:00Z",
+                "turn_context",
+                serde_json::json!({"turn_id": "turn-focus", "model": "gpt-test"}),
+            ),
+            line(
+                "2026-07-16T12:01:01Z",
+                "response_item",
+                serde_json::json!({"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "harness-only context"}]}),
+            ),
+            line(
+                "2026-07-16T12:01:02Z",
+                "response_item",
+                serde_json::json!({"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "focus prompt"}]}),
+            ),
+            line(
+                "2026-07-16T12:01:02.100Z",
+                "event_msg",
+                serde_json::json!({"type": "user_message", "message": "focus prompt"}),
+            ),
+            line(
+                "2026-07-16T12:01:03Z",
+                "response_item",
+                serde_json::json!({"type": "function_call", "name": "exec_command",
+                    "call_id": "context-exec", "arguments": "{\"cmd\":\"false\"}"}),
+            ),
+            line(
+                "2026-07-16T12:01:04Z",
+                "event_msg",
+                serde_json::json!({"type": "exec_command_end", "call_id": "context-exec",
+                    "turn_id": "turn-focus", "command": ["false"], "cwd": "/tmp/context",
+                    "exit_code": 7, "status": "failed", "stderr": "boom", "stdout": ""}),
+            ),
+            line(
+                "2026-07-16T12:01:05Z",
+                "response_item",
+                serde_json::json!({"type": "function_call_output", "call_id": "context-exec",
+                    "output": "boom"}),
+            ),
+            line(
+                "2026-07-16T12:01:06Z",
+                "response_item",
+                serde_json::json!({"type": "custom_tool_call", "name": "apply_patch",
+                    "call_id": "context-patch", "input": "*** Begin Patch"}),
+            ),
+            line(
+                "2026-07-16T12:01:07Z",
+                "event_msg",
+                serde_json::json!({"type": "patch_apply_end", "call_id": "context-patch",
+                    "turn_id": "turn-focus", "status": "completed", "success": true,
+                    "changes": {"src/changed.rs": {"type": "update",
+                        "unified_diff": "@@\n-old\n+new", "move_path": "src/moved.rs"}}}),
+            ),
+            line(
+                "2026-07-16T12:01:08Z",
+                "response_item",
+                serde_json::json!({"type": "custom_tool_call_output", "call_id": "context-patch",
+                    "output": "Exit code: 0\nOutput:\ndone"}),
+            ),
+            line(
+                "2026-07-16T12:01:09Z",
+                "event_msg",
+                serde_json::json!({"type": "user_message", "message": "focus steering"}),
+            ),
+            line(
+                "2026-07-16T12:01:10Z",
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "focus response"}]}),
+            ),
+            line(
+                "2026-07-16T12:02:00Z",
+                "turn_context",
+                serde_json::json!({"turn_id": "turn-after", "model": "gpt-test"}),
+            ),
+            line(
+                "2026-07-16T12:02:01Z",
+                "response_item",
+                serde_json::json!({"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "after prompt"}]}),
+            ),
+            line(
+                "2026-07-16T12:02:01.100Z",
+                "event_msg",
+                serde_json::json!({"type": "user_message", "message": "after prompt"}),
+            ),
+            line(
+                "2026-07-16T12:02:02Z",
+                "response_item",
+                serde_json::json!({"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "after response"}]}),
+            ),
+        ];
+        let content = lines
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(
+            day.join(format!("rollout-2026-07-16T12-00-00-{THREAD}.jsonl")),
+            content,
+        )
+        .unwrap();
+        tmp
+    }
+
     #[test]
     fn messages_renders_normalized_codex_conversation() {
         let claude = setup_fixture_dir();
@@ -3339,6 +3481,141 @@ mod codex_normalization_cli {
                 .failure()
                 .stderr(predicate::str::contains(*flag));
         }
+    }
+
+    #[test]
+    fn event_context_uses_compact_semantic_turns_and_typed_evidence() {
+        let claude = setup_fixture_dir();
+        let codex = event_context_home();
+        let qualified = format!("codex:{THREAD}");
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "-o",
+                "json",
+                "context",
+                THREAD,
+                "--provider",
+                "codex",
+                "--timestamp",
+                "2026-07-16T12:01:03Z",
+                "--context-window",
+                "1",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["provider"], "codex");
+        assert_eq!(value["qualified_id"], qualified);
+        assert_eq!(value["session_id"], THREAD);
+        assert_eq!(value["before"], serde_json::json!([]));
+        assert_eq!(value["after"], serde_json::json!([]));
+        assert_eq!(
+            value["semantic_window"]["before"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            value["semantic_window"]["after"].as_array().unwrap().len(),
+            1
+        );
+        let focus = &value["semantic_window"]["focus"];
+        assert_eq!(focus["turn_id"], "turn-focus");
+        assert_eq!(focus["user_prompt"], "focus prompt");
+        assert_eq!(focus["steering_prompts"][0], "focus steering");
+        assert_eq!(focus["assistant_response"], "focus response");
+        assert!(focus["event_count"].as_u64().unwrap() > 4);
+        assert!(!focus.to_string().contains("harness-only context"));
+        assert!(focus.get("related_files").is_none());
+        assert_eq!(value["confirmed_failure_count"], 1);
+        assert_eq!(value["inferred_failure_count"], 0);
+        assert_eq!(value["error_count"], 1);
+        assert!(value["related_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path == "src/changed.rs"));
+        assert!(value["related_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path == "src/moved.rs"));
+
+        // A directly targeted harness entry is still findable even though it
+        // is deliberately absent from the canonical conversational turns.
+        // It gets a one-event derived focus between the neighboring turns.
+        let harness = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "-o",
+                "json",
+                "context",
+                &qualified,
+                "--timestamp",
+                "2026-07-16T12:01:01Z",
+                "--context-window",
+                "1",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let harness: serde_json::Value = serde_json::from_slice(&harness).unwrap();
+        assert_eq!(harness["target"]["text"], "harness-only context");
+        assert_eq!(harness["semantic_window"]["focus"]["event_count"], 1);
+        assert!(harness["semantic_window"]["focus"]["user_prompt"].is_null());
+        assert_eq!(
+            harness["semantic_window"]["before"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            harness["semantic_window"]["after"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn provider_routed_claude_event_context_preserves_classic_output() {
+        let claude = setup_fixture_dir();
+        let missing_codex = claude.path().join("no-codex-home");
+        let run = |provider: bool| {
+            let mut command = snatch_cmd();
+            command
+                .env("SNATCH_CLAUDE_DIR", claude.path())
+                .env("CODEX_HOME", &missing_codex)
+                .args([
+                    "-o",
+                    "json",
+                    "context",
+                    SESSION_ID,
+                    "--message-id",
+                    "22222222",
+                ]);
+            if provider {
+                command.args(["--provider", "claude-code"]);
+            }
+            let output = command.assert().success().get_output().stdout.clone();
+            serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+        };
+        let classic = run(false);
+        let mut routed = run(true);
+        assert_eq!(routed["provider"], "claude-code");
+        assert_eq!(routed["qualified_id"], format!("claude-code:{SESSION_ID}"));
+        assert!(routed.get("semantic_window").is_none());
+        routed.as_object_mut().unwrap().remove("provider");
+        routed.as_object_mut().unwrap().remove("qualified_id");
+        assert_eq!(routed, classic);
     }
 
     #[test]

@@ -183,6 +183,80 @@ pub struct SemanticTurn<'a> {
     pub tool_results: Vec<&'a crate::model::content::ToolResult>,
 }
 
+/// One canonical provider-semantic turn range over `main_thread_entries`.
+/// Internal consumers share this planner so timeline and contextual zoom
+/// cannot silently disagree about native turn boundaries.
+#[derive(Debug, Clone)]
+pub(crate) struct SemanticTurnRange {
+    pub(crate) turn_id: Option<String>,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+}
+
+pub(crate) fn semantic_turn_ranges(conversation: &Conversation) -> Vec<SemanticTurnRange> {
+    struct PendingRange {
+        range: SemanticTurnRange,
+        meaningful: bool,
+    }
+
+    fn flush(current: Option<PendingRange>, ranges: &mut Vec<SemanticTurnRange>) {
+        if let Some(current) = current {
+            if current.meaningful {
+                ranges.push(current.range);
+            }
+        }
+    }
+
+    let entries = conversation.main_thread_entries();
+    let mut ranges = Vec::new();
+    let mut current: Option<PendingRange> = None;
+    let mut current_turn_id: Option<String> = None;
+    for (index, entry) in entries.iter().enumerate() {
+        let semantics = entry
+            .uuid()
+            .and_then(|uuid| conversation.semantics_for_uuid(uuid));
+        let entry_turn = semantics.and_then(|semantics| semantics.turn_id.clone());
+        let prompt = semantics.and_then(|semantics| semantics.prompt);
+        let human = matches!(entry, LogEntry::User(_))
+            && prompt.is_some_and(|prompt| prompt.authorship == PromptAuthorship::Human);
+        let boundary =
+            human && prompt.is_some_and(|prompt| prompt.delivery == PromptDelivery::TurnBoundary);
+        let turn_changed = match (&entry_turn, &current_turn_id) {
+            (Some(new), Some(old)) => new != old,
+            (Some(_), None) => current.is_some(),
+            _ => false,
+        };
+        if boundary || turn_changed {
+            flush(current.take(), &mut ranges);
+        }
+        if entry_turn.is_some() {
+            current_turn_id = entry_turn;
+        }
+
+        let current = current.get_or_insert_with(|| PendingRange {
+            range: SemanticTurnRange {
+                turn_id: current_turn_id.clone(),
+                start: index,
+                end: index + 1,
+            },
+            meaningful: false,
+        });
+        current.range.end = index + 1;
+        if current.range.turn_id.is_none() {
+            current.range.turn_id = current_turn_id.clone();
+        }
+        current.meaningful |= human
+            || matches!(entry, LogEntry::Assistant(assistant)
+            if !assistant.message.tool_uses().is_empty()
+                || assistant.message.content.iter().any(|block| {
+                    matches!(block, crate::model::ContentBlock::Text(text)
+                        if !text.text.trim().is_empty())
+                }));
+    }
+    flush(current, &mut ranges);
+    ranges
+}
+
 /// Group a provider conversation into turns using its semantic sidecar.
 ///
 /// A new turn starts when the entry's `turn_id` changes or at a human
@@ -191,77 +265,53 @@ pub struct SemanticTurn<'a> {
 /// first human prompt forms no turn unless it produced assistant activity.
 #[must_use]
 pub fn semantic_turns<'a>(conversation: &'a Conversation) -> Vec<SemanticTurn<'a>> {
-    fn flush<'a>(turn: Option<SemanticTurn<'a>>, turns: &mut Vec<SemanticTurn<'a>>) {
-        if let Some(t) = turn {
-            if t.user_message.is_some()
-                || !t.steering_messages.is_empty()
-                || t.assistant_message.is_some()
-                || !t.tool_uses.is_empty()
-            {
-                turns.push(t);
-            }
-        }
-    }
-
-    let mut turns: Vec<SemanticTurn<'a>> = Vec::new();
-    let mut current: Option<SemanticTurn<'a>> = None;
-    let mut current_turn_id: Option<String> = None;
-
-    for entry in conversation.main_thread_entries() {
-        let sem = entry
-            .uuid()
-            .and_then(|uuid| conversation.semantics_for_uuid(uuid));
-        let entry_turn = sem.and_then(|s| s.turn_id.clone());
-        let prompt = sem.and_then(|s| s.prompt);
-        let is_human = matches!(entry, LogEntry::User(_))
-            && prompt.is_some_and(|p| p.authorship == PromptAuthorship::Human);
-        let is_human_boundary =
-            is_human && prompt.is_some_and(|p| p.delivery == PromptDelivery::TurnBoundary);
-
-        let turn_changed = match (&entry_turn, &current_turn_id) {
-            (Some(new), Some(old)) => new != old,
-            (Some(_), None) => current.is_some(),
-            _ => false,
-        };
-        if is_human_boundary || turn_changed {
-            flush(current.take(), &mut turns);
-        }
-        if entry_turn.is_some() {
-            current_turn_id = entry_turn;
-        }
-
-        let turn = current.get_or_insert_with(|| SemanticTurn {
-            user_message: None,
-            steering_messages: Vec::new(),
-            assistant_message: None,
-            tool_uses: Vec::new(),
-            tool_results: Vec::new(),
-        });
-        match entry {
-            LogEntry::User(user) => {
-                if is_human {
-                    if prompt.is_some_and(|p| p.delivery == PromptDelivery::MidTurn) {
-                        turn.steering_messages.push(entry);
-                    } else if turn.user_message.is_none() {
-                        turn.user_message = Some(entry);
+    let entries = conversation.main_thread_entries();
+    semantic_turn_ranges(conversation)
+        .into_iter()
+        .map(|range| {
+            let mut turn = SemanticTurn {
+                user_message: None,
+                steering_messages: Vec::new(),
+                assistant_message: None,
+                tool_uses: Vec::new(),
+                tool_results: Vec::new(),
+            };
+            for entry in &entries[range.start..range.end] {
+                let semantics = entry
+                    .uuid()
+                    .and_then(|uuid| conversation.semantics_for_uuid(uuid));
+                let prompt = semantics.and_then(|semantics| semantics.prompt);
+                let human = matches!(entry, LogEntry::User(_))
+                    && prompt.is_some_and(|prompt| prompt.authorship == PromptAuthorship::Human);
+                match entry {
+                    LogEntry::User(user) => {
+                        if human {
+                            if prompt
+                                .is_some_and(|prompt| prompt.delivery == PromptDelivery::MidTurn)
+                            {
+                                turn.steering_messages.push(entry);
+                            } else if turn.user_message.is_none() {
+                                turn.user_message = Some(entry);
+                            }
+                        }
+                        turn.tool_results.extend(user.message.tool_results());
                     }
+                    LogEntry::Assistant(assistant) => {
+                        turn.tool_uses.extend(assistant.message.tool_uses());
+                        let has_text = assistant.message.content.iter().any(|block| {
+                            matches!(block, crate::model::ContentBlock::Text(text)
+                                if !text.text.trim().is_empty())
+                        });
+                        if has_text {
+                            turn.assistant_message = Some(entry);
+                        }
+                    }
+                    _ => {}
                 }
-                turn.tool_results.extend(user.message.tool_results());
             }
-            LogEntry::Assistant(assistant) => {
-                turn.tool_uses.extend(assistant.message.tool_uses());
-                let has_text = assistant.message.content.iter().any(|b| {
-                    matches!(b, crate::model::ContentBlock::Text(t) if !t.text.trim().is_empty())
-                });
-                if has_text {
-                    turn.assistant_message = Some(entry);
-                }
-            }
-            _ => {}
-        }
-    }
-    flush(current, &mut turns);
-    turns
+            turn
+        })
+        .collect()
 }
 
 trait TimelineTurnView<'a> {

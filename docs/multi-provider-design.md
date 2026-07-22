@@ -17,19 +17,19 @@ commands/tools are routed today. This section is the DURABLE roadmap: the
 tier framework, the deliberate deferrals with their rationale, and the
 architectural gaps — content worth keeping in git so the plan survives even
 if the registry is lost (see "Registry Blast Radius" in CLAUDE.md). The
-per-tool lists below are a **dated snapshot (audited through the single-session
-prompt/code routing slice on 2026-07-22), not a live ledger** — consult goal #19 for
-current status rather than trusting these lists to stay in lock-step.
+per-tool lists below are a **dated snapshot (audited through the semantic
+event-context routing slice on 2026-07-22), not a live ledger** — consult goal
+#19 for current status rather than trusting these lists to stay in lock-step.
 
 Goal #18 (Codex ingest + normalization + core surfaces + Phase C/D) shipped
 through commit `9031610`. Two honest framings of "how close to Claude↔Codex
 parity":
 - **By architectural effort** (ingest, normalize, core surfaces, the whole
   verification harness): ~70–75% — the hard, expensive part is done.
-- **By user-facing surface count:** 16 of 42 CLI commands route session data
-  through providers, 21 session-data commands remain unrouted, three
+- **By user-facing surface count:** 17 of 42 CLI commands route session data
+  through providers, 20 session-data commands remain unrouted, three
   registries are deliberately Claude-storage-scoped, and five commands are
-  provider-independent. MCP has 12 routed tools, 4 unrouted tools, and 3
+  provider-independent. MCP has 13 routed tools, 3 unrouted tools, and 3
   deliberately Claude-storage-scoped registry tools. Raw command counts do
   not measure depth, but they prevent broad parity claims from hiding omitted
   surfaces.
@@ -44,16 +44,17 @@ usage oracle + 20 negative controls + real-corpus conformance).
 
 **Tier 2 — analysis / search / insight layer: PARTIAL parity (largest gap).**
 Provider-qualified and explicitly selected routes now cover CLI `digest`,
-`thread`, session-mode `stats`, and single-session `prompts`/`code`, plus MCP `get_tool_calls`,
-`get_session_digest`, `thread_topic`, and session-mode `get_stats`.
+`thread`, session-mode `stats`, single-session `prompts`/`code`, and `context`,
+plus MCP `get_tool_calls`, `get_session_digest`, `thread_topic`, session-mode
+`get_stats`, and `get_event_context`.
 The complete CLI audit is:
 
-- **Already routed (16):** `list`, `info`, `providers`, `doctor`, `lessons`,
+- **Already routed (17):** `list`, `info`, `providers`, `doctor`, `lessons`,
   `digest`, `thread`, `timeline`, `messages`, `chunks`, `file-history`,
-  `file-evolution`, `stats`, `prompts`, `code`, and `export`.
-- **Provider-neutral analysis/discovery candidates (8):** `recent`, `pick`,
-  `summary`, `standup`, `diff`, `context`,
-  `health`, and `priorities`. These share canonical entries or descriptors,
+  `file-evolution`, `stats`, `prompts`, `code`, `context`, and `export`.
+- **Provider-neutral analysis/discovery candidates (7):** `recent`, `pick`,
+  `summary`, `standup`, `diff`, `health`, and `priorities`. These share
+  canonical entries or descriptors,
   but project/union modes still need provider-qualified identity, lineage,
   partial-success, and missing-capability semantics; they are not all thin
   flag wiring.
@@ -73,13 +74,12 @@ The complete CLI audit is:
   `config`, `completions`, `quickstart`, and `serve-mcp` do not select session
   providers (the cache manager itself already includes provider bundles).
 
-The MCP server exposes 19 tools, not 20. Twelve are provider-routed, four still
-directly use `ClaudeDirectory`/classic resolution (`search_sessions`,
-`get_project_health`, `suggest_priorities`, and `get_event_context`), and
-three registry tools are explicitly Claude-storage-scoped. In particular,
-`get_event_context` does not gain provider support merely because its
-`session_id` is a string: it has no provider input and calls the classic
-Claude-only chain resolver.
+The MCP server exposes 19 tools, not 20. Thirteen are provider-routed, three
+still directly use `ClaudeDirectory`/classic resolution (`search_sessions`,
+`get_project_health`, and `suggest_priorities`), and three registry tools are
+explicitly Claude-storage-scoped. In particular,
+`get_event_context` now has an explicit provider input and uses the common
+registry/cache bridge; its classic chain-aware route remains separate.
 
 The route order follows dependency, not command count. Normalize valuable
 tool-lifecycle records first; build one evidence-bounded file-change layer for
@@ -88,9 +88,8 @@ the shared search index. Source-mutating and live-tail capabilities require
 their own contracts and must not be implied by read-only ingestion support.
 
 The session-local stage is deliberately split after its opening audit:
-single-session `stats`, `prompts`, and `code` now route through providers;
-`context`/`get_event_context` need semantic windows rather than the current
-adjacent-entry approximation; and `diff` needs a two-target/native-artifact
+single-session `stats`, `prompts`, `code`, and semantic event context now route
+through providers; `diff` needs a two-target/native-artifact
 contract. Multi-session prompt aggregation belongs with project unions, not
 the single-session slice.
 
@@ -2167,6 +2166,33 @@ boundaries cannot escape the output directory or panic. Fixture tests cover
 harness, human, assistant, and mid-turn content; live probes found all fenced
 human prompts intact on a large session and returned mixed user/assistant code
 with qualified identity.
+
+#### Semantic event-context routing (2026-07-22)
+
+CLI `context` and MCP `get_event_context` now resolve qualified ids and explicit
+provider selections through the common registry/cache bridge. Annotated
+providers use the same canonical turn-range planner as the timeline renderer:
+the exact requested event remains the target, while `context_window` selects a
+compact number of native turns rather than an adjacent number of entries. Each
+turn summary carries its native id and entry bounds, human boundary prompt,
+mid-turn steering, latest assistant response, unique tools, and split
+confirmed/inferred failure counts. This prevents both missing same-turn
+evidence and unbounded per-event output on tool-heavy turns.
+
+Related files are the deduplicated union of typed file-change evidence owned by
+the selected turns plus the legacy tool-input fallback. They serialize once at
+the response root rather than being duplicated inside every turn. Provider
+chain controls are refused rather than ignored; flagless and provider-routed
+Claude retain the classic adjacent-entry result with only additive identity on
+the explicit route. CLI and MCP integration fixtures pin the separate wire
+paths, including harness exclusion, steering retention, typed move paths,
+failure reconciliation, huge-window overflow safety, and routed-Claude parity.
+
+The turn planner is shared rather than copied across consumers. The opt-in
+native conformance remained green on 243/243 sessions after that refactor. A
+live 40 MB session probe selected one 1,264-event native turn into a roughly
+2.6 KB response in 0.39 seconds while retaining the exact target and 19 typed
+file paths; corpus growth can change those measurements.
 
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".

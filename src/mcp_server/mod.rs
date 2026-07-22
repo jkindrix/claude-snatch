@@ -4213,25 +4213,39 @@ impl SnatchServer {
 
     /// Get contextual zoom around a specific event in a session.
     #[tool(
-        description = "Get conversation context around a specific message or timestamp in a session. Returns the target event plus surrounding turns (user prompts, assistant responses, tools, errors). Use to understand 'what was happening around this event?' after finding events via other tools. Provide either message_id or timestamp."
+        description = "Get conversation context around a specific message or timestamp in an agent session (Claude Code by default; other providers via provider or a qualified id). Annotated providers return the exact target plus compact native-turn summaries, typed related files, and confirmed/inferred failure counts; the classic route retains adjacent-entry compatibility. Provide either message_id or timestamp."
     )]
     async fn get_event_context(&self, request: GetEventContextRequest) -> ToolOutput {
-        use crate::analysis::event_context::{find_event_context, EventContextParams};
+        use crate::analysis::event_context::{
+            find_event_context, find_semantic_event_context, EventContextParams,
+        };
 
-        if request.message_id.is_none() && request.timestamp.is_none() {
+        let GetEventContextRequest {
+            session_id,
+            provider,
+            message_id,
+            timestamp: timestamp_input,
+            context_window,
+            chain_aware,
+        } = request;
+        if message_id.is_none() && timestamp_input.is_none() {
             return ToolOutput::error("Either message_id or timestamp is required");
         }
-
-        let chain_aware = request.chain_aware.unwrap_or(true);
-        let resolved = match resolve_session_with_chain(self, &request.session_id, chain_aware) {
+        let provider_flags = provider.as_deref().unwrap_or(&[]);
+        let registry = self.provider_registry();
+        let provider_route = !provider_flags.is_empty() || registry.looks_qualified(&session_id);
+        if provider_route && chain_aware.is_some() {
+            return ToolOutput::error("provider-routed event context does not support chain_aware");
+        }
+        let resolved = match if provider_route {
+            self.resolve_provider_session(provider_flags, &session_id)
+        } else {
+            resolve_session_with_chain(self, &session_id, chain_aware.unwrap_or(true))
+        } {
             Ok(r) => r,
             Err(e) => return e,
         };
-
-        let entries = resolved.conversation.main_thread_entries();
-        let entry_refs: Vec<&LogEntry> = entries.clone();
-
-        let timestamp = if let Some(ref ts) = request.timestamp {
+        let timestamp = if let Some(ref ts) = timestamp_input {
             match parse_timestamp_param(ts) {
                 Ok(dt) => Some(dt),
                 Err(e) => return ToolOutput::error(format!("Invalid timestamp: {e}")),
@@ -4241,13 +4255,17 @@ impl SnatchServer {
         };
 
         let params = EventContextParams {
-            message_id: request.message_id,
+            message_id,
             timestamp,
-            context_window: request.context_window.unwrap_or(2),
+            context_window: context_window.unwrap_or(2),
             max_text_len: 500,
         };
-
-        let result = match find_event_context(&entry_refs, &params) {
+        let entries = resolved.conversation.main_thread_entries();
+        let result = match if resolved.semantic_annotations {
+            find_semantic_event_context(&resolved.conversation, &params)
+        } else {
+            find_event_context(&entries, &params)
+        } {
             Some(r) => r,
             None => return ToolOutput::error("Event not found in session"),
         };
@@ -4266,12 +4284,17 @@ impl SnatchServer {
 
         let response = GetEventContextResponse {
             session_id: resolved.session_id,
+            provider: provider_route.then_some(resolved.provider),
+            qualified_id: provider_route.then_some(resolved.qualified_id),
             target_index: result.target_index,
             target: to_entry(result.target),
             before: result.before.into_iter().map(to_entry).collect(),
             after: result.after.into_iter().map(to_entry).collect(),
             related_files: result.related_files,
             error_count: result.error_count,
+            confirmed_failure_count: result.confirmed_failure_count,
+            inferred_failure_count: result.inferred_failure_count,
+            semantic_window: result.semantic_window,
         };
 
         match ToolOutput::json(&response) {
@@ -5083,6 +5106,101 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("shell writes"));
+    }
+
+    #[cfg(feature = "codex")]
+    #[tokio::test]
+    async fn event_context_routes_semantic_windows_without_changing_classic_shape() {
+        let claude_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        let claude = setup_claude_dir(claude_id, PROJECT_PATH, &minimal_session_jsonl(claude_id));
+        let (codex, thread) = setup_codex_file_change_dir();
+        let server = make_server(&claude).with_codex_dir(codex.path());
+
+        let provider = unwrap_output(
+            server
+                .get_event_context(GetEventContextRequest {
+                    session_id: format!("codex:{thread}"),
+                    provider: None,
+                    message_id: None,
+                    timestamp: Some("2026-07-17T00:00:03Z".into()),
+                    context_window: Some(usize::MAX),
+                    chain_aware: None,
+                })
+                .await,
+        );
+        let provider: serde_json::Value = serde_json::from_str(&provider).unwrap();
+        assert_eq!(provider["provider"], "codex");
+        assert_eq!(provider["qualified_id"], format!("codex:{thread}"));
+        assert_eq!(
+            provider["semantic_window"]["focus"]["turn_id"],
+            "turn-files"
+        );
+        assert!(provider["related_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path == "src/a.rs"));
+        assert_eq!(
+            provider["error_count"],
+            provider["confirmed_failure_count"].as_u64().unwrap()
+                + provider["inferred_failure_count"].as_u64().unwrap()
+        );
+
+        let classic = unwrap_output(
+            server
+                .get_event_context(GetEventContextRequest {
+                    session_id: claude_id.into(),
+                    provider: None,
+                    message_id: Some("22222222".into()),
+                    timestamp: None,
+                    context_window: Some(usize::MAX),
+                    chain_aware: Some(false),
+                })
+                .await,
+        );
+        let classic: serde_json::Value = serde_json::from_str(&classic).unwrap();
+        assert!(classic.get("provider").is_none());
+        assert!(classic.get("qualified_id").is_none());
+        assert!(classic.get("semantic_window").is_none());
+        assert!(classic.get("confirmed_failure_count").is_none());
+
+        let routed_claude = unwrap_output(
+            server
+                .get_event_context(GetEventContextRequest {
+                    session_id: claude_id.into(),
+                    provider: Some(vec!["claude-code".into()]),
+                    message_id: Some("22222222".into()),
+                    timestamp: None,
+                    context_window: Some(usize::MAX),
+                    chain_aware: None,
+                })
+                .await,
+        );
+        let mut routed_claude: serde_json::Value = serde_json::from_str(&routed_claude).unwrap();
+        assert_eq!(routed_claude["provider"], "claude-code");
+        assert!(routed_claude.get("semantic_window").is_none());
+        routed_claude.as_object_mut().unwrap().remove("provider");
+        routed_claude
+            .as_object_mut()
+            .unwrap()
+            .remove("qualified_id");
+        assert_eq!(routed_claude, classic);
+
+        let refused = server
+            .get_event_context(GetEventContextRequest {
+                session_id: format!("codex:{thread}"),
+                provider: None,
+                message_id: None,
+                timestamp: Some("2026-07-17T00:00:03Z".into()),
+                context_window: Some(1),
+                chain_aware: Some(false),
+            })
+            .await;
+        assert!(matches!(
+            refused,
+            ToolOutput::RecoverableError { message, .. }
+                if message.contains("does not support chain_aware")
+        ));
     }
 
     #[tokio::test]
