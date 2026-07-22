@@ -6,6 +6,7 @@
 //! - Ephemeral cache tokens (5m and 1h)
 //! - Server tool usage (web_search, web_fetch)
 
+use chrono::{DateTime, NaiveDate, Utc};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -214,6 +215,20 @@ impl Usage {
                 *slot = (*slot).max(count);
             }
         }
+
+        // These fields affect pricing qualifications. Preserve their first
+        // observed values while deliberately avoiding wholesale cloning of
+        // open-ended `extra` data such as large per-iteration payloads.
+        if self.service_tier.is_none() {
+            self.service_tier.clone_from(&other.service_tier);
+        }
+        for field in ["speed", "inference_geo"] {
+            if !self.extra.contains_key(field) {
+                if let Some(value) = other.extra.get(field) {
+                    self.extra.insert(field.to_string(), value.clone());
+                }
+            }
+        }
     }
 }
 
@@ -276,12 +291,47 @@ pub struct CostEstimate {
     pub output_cost: f64,
     /// Cost for cache writes.
     pub cache_write_cost: f64,
+    /// Cost for cache writes with a five-minute TTL.
+    pub cache_write_5m_cost: f64,
+    /// Cost for cache writes with a one-hour TTL.
+    pub cache_write_1h_cost: f64,
+    /// Cost for cache writes whose TTL was not recorded. These are priced at
+    /// the five-minute rate and surfaced as a qualification by the aggregate.
+    pub cache_write_unclassified_cost: f64,
+    /// Cache-write tokens whose TTL was not recorded.
+    pub unclassified_cache_write_tokens: u64,
+    /// Whether the TTL detail exceeded the aggregate cache-write count. When
+    /// true, the aggregate is conservatively priced at the five-minute rate.
+    pub cache_write_breakdown_mismatch: bool,
     /// Cost for cache reads (typically cheaper).
     pub cache_read_cost: f64,
+    /// Additional usage-based charges for server-side tools.
+    pub server_tool_cost: f64,
     /// Total cost.
     pub total_cost: f64,
     /// Currency (typically "USD").
     pub currency: String,
+}
+
+impl CostEstimate {
+    fn merge(&mut self, other: &Self) {
+        self.input_cost += other.input_cost;
+        self.output_cost += other.output_cost;
+        self.cache_write_cost += other.cache_write_cost;
+        self.cache_write_5m_cost += other.cache_write_5m_cost;
+        self.cache_write_1h_cost += other.cache_write_1h_cost;
+        self.cache_write_unclassified_cost += other.cache_write_unclassified_cost;
+        self.unclassified_cache_write_tokens = self
+            .unclassified_cache_write_tokens
+            .saturating_add(other.unclassified_cache_write_tokens);
+        self.cache_write_breakdown_mismatch |= other.cache_write_breakdown_mismatch;
+        self.cache_read_cost += other.cache_read_cost;
+        self.server_tool_cost += other.server_tool_cost;
+        self.total_cost += other.total_cost;
+        if self.currency.is_empty() {
+            self.currency.clone_from(&other.currency);
+        }
+    }
 }
 
 /// Pricing configuration per model.
@@ -293,11 +343,39 @@ pub struct ModelPricing {
     pub input_per_million: f64,
     /// Cost per million output tokens.
     pub output_per_million: f64,
-    /// Cost per million cache write tokens.
+    /// Cost per million five-minute cache write tokens.
+    ///
+    /// Kept under its original public field name for API compatibility.
     pub cache_write_per_million: f64,
+    /// Cost per million one-hour cache write tokens.
+    pub cache_write_1h_per_million: f64,
     /// Cost per million cache read tokens.
     pub cache_read_per_million: f64,
+    /// Stable identifier for the matched rate card.
+    pub rate_card: &'static str,
+    /// Human-readable effective period for the rate card.
+    pub effective_period: &'static str,
+    /// Primary source for the rates.
+    pub source_url: &'static str,
+    /// Date on which the source was last verified for this release.
+    pub source_checked: &'static str,
 }
+
+/// One pricing bucket used to preserve effective-date and modifier context
+/// while token totals continue to aggregate by model for compatibility.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CostBucketKey {
+    /// Native model identifier.
+    pub model: String,
+    /// Matched rate-card identifier, or `None` when no rate is known.
+    pub rate_card: Option<String>,
+    /// Native modifiers which may change the public base rate and are not
+    /// modeled by the estimator.
+    pub unmodeled_modifiers: Vec<String>,
+}
+
+const ANTHROPIC_PRICING_URL: &str = "https://platform.claude.com/docs/en/about-claude/pricing";
+const PRICING_SOURCE_CHECKED: &str = "2026-07-22";
 
 /// Strip an optional trailing `-YYYYMMDD` snapshot suffix from a model ID so a
 /// dated snapshot (e.g. `claude-opus-4-5-20251101`) maps to the same rate as
@@ -318,10 +396,15 @@ impl ModelPricing {
     pub fn claude_opus_4_5() -> Self {
         Self {
             model: "claude-opus-4-5-20251101".to_string(),
-            input_per_million: 15.0,        // $15/M input
-            output_per_million: 75.0,       // $75/M output
-            cache_write_per_million: 18.75, // 1.25x input
-            cache_read_per_million: 1.5,    // 0.1x input
+            input_per_million: 5.0,
+            output_per_million: 25.0,
+            cache_write_per_million: 6.25,
+            cache_write_1h_per_million: 10.0,
+            cache_read_per_million: 0.5,
+            rate_card: "anthropic-api-opus-4.5",
+            effective_period: "standard API list rate",
+            source_url: ANTHROPIC_PRICING_URL,
+            source_checked: PRICING_SOURCE_CHECKED,
         }
     }
 
@@ -333,7 +416,12 @@ impl ModelPricing {
             input_per_million: 3.0,        // $3/M input
             output_per_million: 15.0,      // $15/M output
             cache_write_per_million: 3.75, // 1.25x input
-            cache_read_per_million: 0.3,   // 0.1x input
+            cache_write_1h_per_million: 6.0,
+            cache_read_per_million: 0.3, // 0.1x input
+            rate_card: "anthropic-api-sonnet-4",
+            effective_period: "standard API list rate",
+            source_url: ANTHROPIC_PRICING_URL,
+            source_checked: PRICING_SOURCE_CHECKED,
         }
     }
 
@@ -342,10 +430,15 @@ impl ModelPricing {
     pub fn claude_haiku_3_5() -> Self {
         Self {
             model: "claude-3-5-haiku-20241022".to_string(),
-            input_per_million: 1.0,        // $1/M input
-            output_per_million: 5.0,       // $5/M output
-            cache_write_per_million: 1.25, // 1.25x input
-            cache_read_per_million: 0.1,   // 0.1x input
+            input_per_million: 0.8,
+            output_per_million: 4.0,
+            cache_write_per_million: 1.0,
+            cache_write_1h_per_million: 1.6,
+            cache_read_per_million: 0.08,
+            rate_card: "anthropic-api-haiku-3.5",
+            effective_period: "standard API list rate",
+            source_url: ANTHROPIC_PRICING_URL,
+            source_checked: PRICING_SOURCE_CHECKED,
         }
     }
 
@@ -359,7 +452,12 @@ impl ModelPricing {
             input_per_million: 5.0,        // $5/M input
             output_per_million: 25.0,      // $25/M output
             cache_write_per_million: 6.25, // 1.25x input
-            cache_read_per_million: 0.5,   // 0.1x input
+            cache_write_1h_per_million: 10.0,
+            cache_read_per_million: 0.5, // 0.1x input
+            rate_card: "anthropic-api-opus-4.6-4.8",
+            effective_period: "standard API list rate",
+            source_url: ANTHROPIC_PRICING_URL,
+            source_checked: PRICING_SOURCE_CHECKED,
         }
     }
 
@@ -371,12 +469,16 @@ impl ModelPricing {
             input_per_million: 10.0,       // $10/M input
             output_per_million: 50.0,      // $50/M output
             cache_write_per_million: 12.5, // 1.25x input
-            cache_read_per_million: 1.0,   // 0.1x input
+            cache_write_1h_per_million: 20.0,
+            cache_read_per_million: 1.0, // 0.1x input
+            rate_card: "anthropic-api-fable-mythos-5",
+            effective_period: "standard API list rate",
+            source_url: ANTHROPIC_PRICING_URL,
+            source_checked: PRICING_SOURCE_CHECKED,
         }
     }
 
-    /// Create pricing for Claude Sonnet 5 (sticker price; intro discount
-    /// through 2026-08-31 not modeled).
+    /// Create standard pricing for Claude Sonnet 5, effective 2026-09-01.
     #[must_use]
     pub fn claude_sonnet_5() -> Self {
         Self {
@@ -384,7 +486,29 @@ impl ModelPricing {
             input_per_million: 3.0,        // $3/M input
             output_per_million: 15.0,      // $15/M output
             cache_write_per_million: 3.75, // 1.25x input
-            cache_read_per_million: 0.3,   // 0.1x input
+            cache_write_1h_per_million: 6.0,
+            cache_read_per_million: 0.3, // 0.1x input
+            rate_card: "anthropic-api-sonnet-5-standard",
+            effective_period: "starting 2026-09-01",
+            source_url: ANTHROPIC_PRICING_URL,
+            source_checked: PRICING_SOURCE_CHECKED,
+        }
+    }
+
+    /// Create introductory pricing for Claude Sonnet 5, through 2026-08-31.
+    #[must_use]
+    pub fn claude_sonnet_5_intro() -> Self {
+        Self {
+            model: "claude-sonnet-5".to_string(),
+            input_per_million: 2.0,
+            output_per_million: 10.0,
+            cache_write_per_million: 2.5,
+            cache_write_1h_per_million: 4.0,
+            cache_read_per_million: 0.2,
+            rate_card: "anthropic-api-sonnet-5-intro",
+            effective_period: "through 2026-08-31",
+            source_url: ANTHROPIC_PRICING_URL,
+            source_checked: PRICING_SOURCE_CHECKED,
         }
     }
 
@@ -398,7 +522,12 @@ impl ModelPricing {
             input_per_million: 1.0,        // $1/M input
             output_per_million: 5.0,       // $5/M output
             cache_write_per_million: 1.25, // 1.25x input
-            cache_read_per_million: 0.1,   // 0.1x input
+            cache_write_1h_per_million: 2.0,
+            cache_read_per_million: 0.1, // 0.1x input
+            rate_card: "anthropic-api-haiku-4.5",
+            effective_period: "standard API list rate",
+            source_url: ANTHROPIC_PRICING_URL,
+            source_checked: PRICING_SOURCE_CHECKED,
         }
     }
 
@@ -407,19 +536,68 @@ impl ModelPricing {
     pub fn calculate_cost(&self, usage: &Usage) -> CostEstimate {
         let input_cost = (usage.input_tokens as f64 / 1_000_000.0) * self.input_per_million;
         let output_cost = (usage.output_tokens as f64 / 1_000_000.0) * self.output_per_million;
-        let cache_write_cost = (usage.cache_creation_input_tokens.unwrap_or(0) as f64
-            / 1_000_000.0)
-            * self.cache_write_per_million;
+        let cache_write_5m_tokens = usage
+            .cache_creation
+            .as_ref()
+            .and_then(|detail| detail.ephemeral_5m_input_tokens)
+            .unwrap_or(0);
+        let cache_write_1h_tokens = usage
+            .cache_creation
+            .as_ref()
+            .and_then(|detail| detail.ephemeral_1h_input_tokens)
+            .unwrap_or(0);
+        let classified_cache_write = cache_write_5m_tokens.saturating_add(cache_write_1h_tokens);
+        // Some older/future envelopes may omit the aggregate while retaining
+        // the more specific TTL fields. In that shape the detail is sufficient
+        // evidence; an explicitly contradictory aggregate is handled below.
+        let aggregate_cache_write = usage
+            .cache_creation_input_tokens
+            .unwrap_or(classified_cache_write);
+        let cache_write_breakdown_mismatch = classified_cache_write > aggregate_cache_write;
+
+        // A missing TTL cannot be reconstructed after the fact. Price the
+        // unexplained aggregate at the cheaper five-minute rate and carry an
+        // explicit qualification rather than fabricating precision. If native
+        // detail exceeds the aggregate, distrust the detail and conservatively
+        // treat the entire aggregate as unclassified.
+        let (priced_5m_tokens, priced_1h_tokens, unclassified_cache_write_tokens) =
+            if cache_write_breakdown_mismatch {
+                (0, 0, aggregate_cache_write)
+            } else {
+                (
+                    cache_write_5m_tokens,
+                    cache_write_1h_tokens,
+                    aggregate_cache_write - classified_cache_write,
+                )
+            };
+        let cache_write_5m_cost =
+            (priced_5m_tokens as f64 / 1_000_000.0) * self.cache_write_per_million;
+        let cache_write_1h_cost =
+            (priced_1h_tokens as f64 / 1_000_000.0) * self.cache_write_1h_per_million;
+        let cache_write_unclassified_cost =
+            (unclassified_cache_write_tokens as f64 / 1_000_000.0) * self.cache_write_per_million;
+        let cache_write_cost =
+            cache_write_5m_cost + cache_write_1h_cost + cache_write_unclassified_cost;
         let cache_read_cost = (usage.cache_read_input_tokens.unwrap_or(0) as f64 / 1_000_000.0)
             * self.cache_read_per_million;
+        // Web search is $10 per 1,000 searches; web fetch has no additional
+        // charge beyond the tokens it adds to context.
+        let server_tool_cost = f64::from(usage.web_search_requests()) * 0.01;
 
-        let total_cost = input_cost + output_cost + cache_write_cost + cache_read_cost;
+        let total_cost =
+            input_cost + output_cost + cache_write_cost + cache_read_cost + server_tool_cost;
 
         CostEstimate {
             input_cost,
             output_cost,
             cache_write_cost,
+            cache_write_5m_cost,
+            cache_write_1h_cost,
+            cache_write_unclassified_cost,
+            unclassified_cache_write_tokens,
+            cache_write_breakdown_mismatch,
             cache_read_cost,
+            server_tool_cost,
             total_cost,
             currency: "USD".to_string(),
         }
@@ -433,19 +611,59 @@ impl ModelPricing {
     /// model — callers must treat that as "rate unavailable", never as $0.
     #[must_use]
     pub fn for_model(model: &str) -> Option<Self> {
+        Self::for_model_at(model, Utc::now())
+    }
+
+    /// Get pricing for a model at the time the usage was observed.
+    ///
+    /// This matters for temporary public rates such as Sonnet 5's introductory
+    /// period. Other entries currently have one verified model-lifetime rate.
+    #[must_use]
+    pub fn for_model_at(model: &str, observed_at: DateTime<Utc>) -> Option<Self> {
         match normalize_model_id(model) {
             "claude-fable-5" | "claude-mythos-5" => Some(Self::claude_fable_5()),
             "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6" => {
                 Some(Self::claude_opus_4_8())
             }
             "claude-opus-4-5" => Some(Self::claude_opus_4_5()),
-            "claude-sonnet-5" => Some(Self::claude_sonnet_5()),
+            "claude-sonnet-5" => {
+                let intro_end =
+                    NaiveDate::from_ymd_opt(2026, 8, 31).expect("hard-coded pricing date is valid");
+                if observed_at.date_naive() <= intro_end {
+                    Some(Self::claude_sonnet_5_intro())
+                } else {
+                    Some(Self::claude_sonnet_5())
+                }
+            }
             "claude-sonnet-4-6" | "claude-sonnet-4-5" | "claude-sonnet-4" => {
                 Some(Self::claude_sonnet_4())
             }
             "claude-haiku-4-5" => Some(Self::claude_haiku_4_5()),
             _ => None,
         }
+    }
+
+    /// Resolve a stable rate-card identifier previously selected by
+    /// [`Self::for_model_at`].
+    #[must_use]
+    pub fn for_rate_card(rate_card: &str) -> Option<Self> {
+        match rate_card {
+            "anthropic-api-fable-mythos-5" => Some(Self::claude_fable_5()),
+            "anthropic-api-opus-4.6-4.8" => Some(Self::claude_opus_4_8()),
+            "anthropic-api-opus-4.5" => Some(Self::claude_opus_4_5()),
+            "anthropic-api-sonnet-5-intro" => Some(Self::claude_sonnet_5_intro()),
+            "anthropic-api-sonnet-5-standard" => Some(Self::claude_sonnet_5()),
+            "anthropic-api-sonnet-4" => Some(Self::claude_sonnet_4()),
+            "anthropic-api-haiku-4.5" => Some(Self::claude_haiku_4_5()),
+            "anthropic-api-haiku-3.5" => Some(Self::claude_haiku_3_5()),
+            _ => None,
+        }
+    }
+
+    /// Primary-source citation shared by human-readable cost reports.
+    #[must_use]
+    pub fn source_summary() -> &'static str {
+        "Anthropic API list rates, checked 2026-07-22; https://platform.claude.com/docs/en/about-claude/pricing"
     }
 }
 
@@ -458,6 +676,11 @@ pub struct AggregatedUsage {
     pub usage: Usage,
     /// Usage breakdown by model.
     pub by_model: IndexMap<String, Usage>,
+    /// Billing totals split by effective rate card and unmodeled modifier set.
+    /// This preserves the context that `by_model` intentionally collapses.
+    pub cost_buckets: IndexMap<CostBucketKey, Usage>,
+    /// Calculated cost breakdown by model using `cost_buckets`.
+    pub cost_by_model: IndexMap<String, CostEstimate>,
     /// Total tool invocations.
     pub tool_invocations: usize,
     /// Tool invocations by name.
@@ -470,16 +693,70 @@ pub struct AggregatedUsage {
     /// Models present in `by_model` that have no known rate, so their cost is
     /// excluded from `estimated_cost`. Non-empty means the estimate is partial.
     pub unpriced_models: Vec<String>,
+    /// Stable rate-card identifiers used by the estimate.
+    pub pricing_rate_cards: Vec<String>,
+    /// Assumptions or unsupported modifiers which qualify the estimate.
+    pub pricing_qualifications: Vec<String>,
 }
 
 impl AggregatedUsage {
     /// Add usage from a single message.
     pub fn add_usage(&mut self, model: &str, usage: &Usage) {
+        self.add_usage_at(model, usage, Utc::now());
+    }
+
+    /// Add usage observed at a specific time, preserving the effective rate
+    /// card selected for that API turn.
+    pub fn add_usage_at(&mut self, model: &str, usage: &Usage, observed_at: DateTime<Utc>) {
         self.message_count += 1;
         self.usage.merge(usage);
 
         let model_usage = self.by_model.entry(model.to_string()).or_default();
         model_usage.merge(usage);
+
+        let rate_card = ModelPricing::for_model_at(model, observed_at)
+            .map(|pricing| pricing.rate_card.to_string());
+        let mut unmodeled_modifiers = Vec::new();
+        if let Some(service_tier) = usage.service_tier.as_deref() {
+            if service_tier != "standard" {
+                unmodeled_modifiers.push(format!("service_tier={service_tier}"));
+            }
+        }
+        for field in ["speed", "inference_geo"] {
+            let Some(value) = usage.extra.get(field).and_then(Value::as_str) else {
+                continue;
+            };
+            let is_default = match field {
+                "speed" => value.is_empty() || value == "standard" || value == "not_available",
+                "inference_geo" => {
+                    value.is_empty() || value == "global" || value == "not_available"
+                }
+                _ => false,
+            };
+            if !is_default {
+                unmodeled_modifiers.push(format!("{field}={value}"));
+            }
+        }
+        let standard_long_context = matches!(
+            normalize_model_id(model),
+            "claude-fable-5"
+                | "claude-mythos-5"
+                | "claude-opus-4-8"
+                | "claude-opus-4-7"
+                | "claude-opus-4-6"
+                | "claude-sonnet-5"
+                | "claude-sonnet-4-6"
+        );
+        if usage.total_input_tokens() > 200_000 && !standard_long_context {
+            unmodeled_modifiers.push("context_window=>200k".to_string());
+        }
+        unmodeled_modifiers.sort();
+        let bucket = CostBucketKey {
+            model: model.to_string(),
+            rate_card,
+            unmodeled_modifiers,
+        };
+        self.cost_buckets.entry(bucket).or_default().merge(usage);
     }
 
     /// Record a tool invocation.
@@ -492,19 +769,56 @@ impl AggregatedUsage {
     pub fn calculate_cost(&mut self) {
         let mut total = 0.0;
         let mut priced = false;
-        let mut unpriced = Vec::new();
+        let mut unpriced = std::collections::BTreeSet::new();
+        let mut rate_cards = std::collections::BTreeSet::new();
+        let mut qualifications = std::collections::BTreeSet::new();
+        let mut cost_by_model: IndexMap<String, CostEstimate> = IndexMap::new();
 
-        for (model, usage) in &self.by_model {
-            if let Some(pricing) = ModelPricing::for_model(model) {
-                let cost = pricing.calculate_cost(usage);
-                total += cost.total_cost;
-                priced = true;
-            } else {
-                unpriced.push(model.clone());
+        for (bucket, usage) in &self.cost_buckets {
+            let Some(rate_card) = bucket.rate_card.as_deref() else {
+                unpriced.insert(bucket.model.clone());
+                continue;
+            };
+            let Some(pricing) = ModelPricing::for_rate_card(rate_card) else {
+                unpriced.insert(bucket.model.clone());
+                continue;
+            };
+            let cost = pricing.calculate_cost(usage);
+            total += cost.total_cost;
+            priced = true;
+            rate_cards.insert(format!(
+                "{} ({})",
+                pricing.rate_card, pricing.effective_period
+            ));
+            if cost.unclassified_cache_write_tokens > 0 {
+                qualifications.insert(format!(
+                    "{}: {} cache-creation tokens lacked TTL detail and were assumed 5m",
+                    bucket.model, cost.unclassified_cache_write_tokens
+                ));
             }
+            if cost.cache_write_breakdown_mismatch {
+                qualifications.insert(format!(
+                    "{}: cache-creation TTL detail exceeded the aggregate; the aggregate was assumed 5m",
+                    bucket.model
+                ));
+            }
+            if !bucket.unmodeled_modifiers.is_empty() {
+                qualifications.insert(format!(
+                    "{}: base list rates do not model {}",
+                    bucket.model,
+                    bucket.unmodeled_modifiers.join(", ")
+                ));
+            }
+            cost_by_model
+                .entry(bucket.model.clone())
+                .or_default()
+                .merge(&cost);
         }
 
-        self.unpriced_models = unpriced;
+        self.cost_by_model = cost_by_model;
+        self.unpriced_models = unpriced.into_iter().collect();
+        self.pricing_rate_cards = rate_cards.into_iter().collect();
+        self.pricing_qualifications = qualifications.into_iter().collect();
         // If no model in the breakdown has a known rate, the cost is
         // unavailable rather than a misleading $0. When some are priced, the
         // sum is partial — `unpriced_models` flags what was excluded.
@@ -653,7 +967,11 @@ mod tests {
                 web_fetch_requests: Some(1),
                 extra: IndexMap::new(),
             }),
-            ..Default::default()
+            service_tier: Some("priority".to_string()),
+            extra: IndexMap::from([
+                ("speed".to_string(), Value::String("fast".to_string())),
+                ("inference_geo".to_string(), Value::String("us".to_string())),
+            ]),
         };
 
         let mut folded = Usage::default();
@@ -675,6 +993,9 @@ mod tests {
         let tools = folded.server_tool_use.unwrap();
         assert_eq!(tools.web_search_requests, Some(2));
         assert_eq!(tools.web_fetch_requests, Some(1));
+        assert_eq!(folded.service_tier.as_deref(), Some("priority"));
+        assert_eq!(folded.extra["speed"], "fast");
+        assert_eq!(folded.extra["inference_geo"], "us");
     }
 
     #[test]
@@ -824,20 +1145,29 @@ mod tests {
             10.0
         );
 
-        // Sonnet 5 prices at the Sonnet sticker rate.
-        let sonnet5 = ModelPricing::for_model("claude-sonnet-5").unwrap();
-        assert_eq!(sonnet5.input_per_million, 3.0);
-        assert_eq!(sonnet5.output_per_million, 15.0);
+        // Sonnet 5 selects its temporary rate by observation date.
+        let intro = DateTime::parse_from_rfc3339("2026-07-22T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let standard = DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let sonnet5_intro = ModelPricing::for_model_at("claude-sonnet-5", intro).unwrap();
+        assert_eq!(sonnet5_intro.input_per_million, 2.0);
+        assert_eq!(sonnet5_intro.output_per_million, 10.0);
+        let sonnet5_standard = ModelPricing::for_model_at("claude-sonnet-5", standard).unwrap();
+        assert_eq!(sonnet5_standard.input_per_million, 3.0);
+        assert_eq!(sonnet5_standard.output_per_million, 15.0);
 
         // Current Opus tier prices at its own rate, not the older 4.5 tier.
         let opus48 = ModelPricing::for_model("claude-opus-4-8").unwrap();
         assert_eq!(opus48.input_per_million, 5.0);
         assert_eq!(opus48.output_per_million, 25.0);
 
-        // Opus 4.5 keeps its own (higher) tier; dated snapshots normalize to it.
+        // Opus 4.5 uses the verified $5/$25 tier; dated snapshots normalize.
         let opus45 = ModelPricing::for_model("claude-opus-4-5-20251101").unwrap();
-        assert_eq!(opus45.input_per_million, 15.0);
-        assert_eq!(opus45.output_per_million, 75.0);
+        assert_eq!(opus45.input_per_million, 5.0);
+        assert_eq!(opus45.output_per_million, 25.0);
 
         // Sonnet and Haiku resolve to their own tiers (dated form included).
         assert_eq!(
@@ -852,6 +1182,9 @@ mod tests {
                 .input_per_million,
             1.0
         );
+        let haiku35 = ModelPricing::claude_haiku_3_5();
+        assert_eq!(haiku35.input_per_million, 0.8);
+        assert_eq!(haiku35.output_per_million, 4.0);
 
         // Unknown / fabricated IDs are unavailable, never a wrong-tier guess.
         assert!(ModelPricing::for_model("claude-made-up-9").is_none());
@@ -925,10 +1258,158 @@ mod tests {
             cache_read_cost: 0.1,
             total_cost: 3.6,
             currency: "USD".to_string(),
+            ..Default::default()
         };
 
         assert_eq!(cost.currency, "USD");
         assert_eq!(cost.total_cost, 3.6);
+    }
+
+    #[test]
+    fn cache_write_cost_uses_each_recorded_ttl() {
+        let usage = Usage {
+            cache_creation_input_tokens: Some(3_000_000),
+            cache_creation: Some(CacheCreationDetails {
+                ephemeral_5m_input_tokens: Some(1_000_000),
+                ephemeral_1h_input_tokens: Some(2_000_000),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let cost = ModelPricing::claude_sonnet_4().calculate_cost(&usage);
+
+        assert_eq!(cost.cache_write_5m_cost, 3.75);
+        assert_eq!(cost.cache_write_1h_cost, 12.0);
+        assert_eq!(cost.cache_write_unclassified_cost, 0.0);
+        assert_eq!(cost.cache_write_cost, 15.75);
+        assert_eq!(cost.unclassified_cache_write_tokens, 0);
+        assert!(!cost.cache_write_breakdown_mismatch);
+    }
+
+    #[test]
+    fn missing_cache_ttl_is_priced_conservatively_and_qualified() {
+        let observed_at = DateTime::parse_from_rfc3339("2026-07-22T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut aggregate = AggregatedUsage::default();
+        aggregate.add_usage_at(
+            "claude-fable-5",
+            &Usage {
+                cache_creation_input_tokens: Some(20_756),
+                ..Default::default()
+            },
+            observed_at,
+        );
+        aggregate.calculate_cost();
+
+        let cost = &aggregate.cost_by_model["claude-fable-5"];
+        assert_eq!(cost.unclassified_cache_write_tokens, 20_756);
+        assert!((cost.cache_write_unclassified_cost - 0.25945).abs() < 0.000_001);
+        assert_eq!(aggregate.pricing_qualifications.len(), 1);
+        assert!(aggregate.pricing_qualifications[0].contains("assumed 5m"));
+    }
+
+    #[test]
+    fn contradictory_cache_ttl_detail_cannot_inflate_the_aggregate() {
+        let usage = Usage {
+            cache_creation_input_tokens: Some(1_000_000),
+            cache_creation: Some(CacheCreationDetails {
+                ephemeral_5m_input_tokens: Some(1_000_000),
+                ephemeral_1h_input_tokens: Some(1_000_000),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let cost = ModelPricing::claude_sonnet_4().calculate_cost(&usage);
+
+        assert!(cost.cache_write_breakdown_mismatch);
+        assert_eq!(cost.unclassified_cache_write_tokens, 1_000_000);
+        assert_eq!(cost.cache_write_cost, 3.75);
+    }
+
+    #[test]
+    fn sonnet_five_costs_preserve_both_effective_rate_periods() {
+        let intro = DateTime::parse_from_rfc3339("2026-08-31T23:59:59Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let standard = DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            ..Default::default()
+        };
+        let mut aggregate = AggregatedUsage::default();
+        aggregate.add_usage_at("claude-sonnet-5", &usage, intro);
+        aggregate.add_usage_at("claude-sonnet-5", &usage, standard);
+        aggregate.calculate_cost();
+
+        assert_eq!(aggregate.estimated_cost, Some(5.0));
+        assert_eq!(aggregate.cost_buckets.len(), 2);
+        assert_eq!(aggregate.pricing_rate_cards.len(), 2);
+    }
+
+    #[test]
+    fn unmodeled_pricing_modifiers_are_never_silent() {
+        let observed_at = DateTime::parse_from_rfc3339("2026-07-22T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut extra = IndexMap::new();
+        extra.insert("speed".to_string(), Value::String("fast".to_string()));
+        extra.insert("inference_geo".to_string(), Value::String("us".to_string()));
+        let mut aggregate = AggregatedUsage::default();
+        aggregate.add_usage_at(
+            "claude-fable-5",
+            &Usage {
+                input_tokens: 100,
+                service_tier: Some("priority".to_string()),
+                extra,
+                ..Default::default()
+            },
+            observed_at,
+        );
+        aggregate.calculate_cost();
+
+        assert_eq!(aggregate.pricing_qualifications.len(), 1);
+        let note = &aggregate.pricing_qualifications[0];
+        assert!(note.contains("inference_geo=us"));
+        assert!(note.contains("service_tier=priority"));
+        assert!(note.contains("speed=fast"));
+    }
+
+    #[test]
+    fn web_search_charge_is_included_but_web_fetch_is_token_only() {
+        let usage = Usage {
+            server_tool_use: Some(ServerToolUse {
+                web_search_requests: Some(3),
+                web_fetch_requests: Some(7),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let cost = ModelPricing::claude_fable_5().calculate_cost(&usage);
+
+        assert_eq!(cost.server_tool_cost, 0.03);
+        assert_eq!(cost.total_cost, 0.03);
+    }
+
+    #[test]
+    fn unsupported_long_context_premium_is_qualified_by_turn_shape() {
+        let observed_at = DateTime::parse_from_rfc3339("2026-03-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut aggregate = AggregatedUsage::default();
+        aggregate.add_usage_at(
+            "claude-opus-4-5",
+            &Usage {
+                input_tokens: 250_000,
+                ..Default::default()
+            },
+            observed_at,
+        );
+        aggregate.calculate_cost();
+
+        assert!(aggregate.pricing_qualifications[0].contains("context_window=>200k"));
     }
 
     #[test]

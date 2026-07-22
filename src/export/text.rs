@@ -185,13 +185,23 @@ impl TextExporter {
                 "  Messages (logical): {} ({} user, {} assistant)",
                 summary.total_messages, summary.user_messages, summary.assistant_messages
             )?;
-            writeln!(writer, "  Work Tokens: {}", summary.total_tokens)?;
             writeln!(
                 writer,
-                "  Total Processed Tokens: {}",
+                "  Work Tokens: {} (uncached input + cache creation + output)",
+                summary.total_tokens
+            )?;
+            writeln!(
+                writer,
+                "  Total Processed Tokens: {} (work + cache reads)",
                 summary.total_processed_tokens
             )?;
-            writeln!(writer, "  Input Tokens: {}", summary.input_tokens)?;
+            writeln!(writer, "  Input (uncached): {}", summary.input_tokens)?;
+            writeln!(
+                writer,
+                "  Cache Creation: {}",
+                summary.cache_creation_tokens
+            )?;
+            writeln!(writer, "  Cache Read: {}", summary.cache_read_tokens)?;
             writeln!(writer, "  Output Tokens: {}", summary.output_tokens)?;
             if summary.cache_hit_rate > 0.0 {
                 writeln!(writer, "  Cache Hit Rate: {:.1}%", summary.cache_hit_rate)?;
@@ -203,7 +213,38 @@ impl TextExporter {
             if let Some(model) = &summary.primary_model {
                 writeln!(writer, "  Primary Model: {model}")?;
             }
-            writeln!(writer, "  Estimated Cost: {}", summary.cost_string())?;
+            writeln!(
+                writer,
+                "  Estimated API List Cost: {}",
+                summary.cost_string()
+            )?;
+            if !analytics.usage.pricing_rate_cards.is_empty() {
+                writeln!(
+                    writer,
+                    "  Cost Rate Cards: {}",
+                    analytics.usage.pricing_rate_cards.join(", ")
+                )?;
+                writeln!(
+                    writer,
+                    "  Cost Source: {}",
+                    crate::model::ModelPricing::source_summary()
+                )?;
+            }
+            if !summary.unpriced_models.is_empty() {
+                let coverage = if summary.estimated_cost.is_some() {
+                    "Partial; excluded models"
+                } else {
+                    "Unavailable; no verified rate for models"
+                };
+                writeln!(
+                    writer,
+                    "  Cost Coverage: {coverage}: {}",
+                    summary.unpriced_models.join(", ")
+                )?;
+            }
+            for qualification in &analytics.usage.pricing_qualifications {
+                writeln!(writer, "  Cost Qualification: {qualification}")?;
+            }
         }
 
         writeln!(writer)?;

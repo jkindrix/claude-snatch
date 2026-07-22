@@ -2,7 +2,7 @@
 //!
 //! Displays usage statistics for sessions and projects.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
 use rayon::prelude::*;
@@ -13,6 +13,7 @@ use crate::cli::{Cli, OutputFormat, StatsArgs};
 use crate::config::Config;
 use crate::discovery::{format_count, format_number, Session};
 use crate::error::{Result, SnatchError};
+use crate::model::usage::{AggregatedUsage, Usage};
 use crate::model::{ContentBlock, LogEntry};
 use crate::reconstruction::Conversation;
 use crate::util::{sparkline_u64, sparkline_with_range};
@@ -46,6 +47,15 @@ struct BillingBlock {
     /// Estimated cost for this block.
     #[serde(skip_serializing_if = "Option::is_none")]
     estimated_cost: Option<f64>,
+    /// Models excluded from a partial estimate.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unpriced_models: Vec<String>,
+    /// Effective rate cards used by the estimate.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pricing_rate_cards: Vec<String>,
+    /// Assumptions or unsupported modifiers qualifying the estimate.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pricing_qualifications: Vec<String>,
     /// Message count in this block.
     message_count: usize,
     /// Tool invocations in this block.
@@ -116,8 +126,19 @@ fn block_end_for(timestamp: DateTime<Utc>) -> DateTime<Utc> {
 
 /// Aggregate entries into billing blocks.
 fn aggregate_billing_blocks(sessions: &[Session], max_file_size: Option<u64>) -> Vec<BillingBlock> {
-    // Use BTreeMap to keep blocks sorted by start time
-    let mut blocks: BTreeMap<DateTime<Utc>, BillingBlock> = BTreeMap::new();
+    #[derive(Default)]
+    struct BilledTurn {
+        first_timestamp: Option<DateTime<Utc>>,
+        model: String,
+        usage: Usage,
+        tool_ids: BTreeSet<String>,
+    }
+
+    // Claude writes one API response as several JSONL chunks with the same
+    // message.id and repeated usage. Recover one billed turn before assigning
+    // it to a time block; summing physical chunks would multiply both tokens
+    // and cost.
+    let mut turns: BTreeMap<(String, String, String), BilledTurn> = BTreeMap::new();
 
     for session in sessions {
         let entries = match session.parse_with_options(max_file_size) {
@@ -126,58 +147,65 @@ fn aggregate_billing_blocks(sessions: &[Session], max_file_size: Option<u64>) ->
         };
 
         for entry in entries {
-            let timestamp = match entry.timestamp() {
-                Some(ts) => ts,
-                None => continue,
+            let LogEntry::Assistant(assistant) = entry else {
+                continue;
             };
-
-            let block_start = block_start_for(timestamp);
-            let block_end = block_end_for(timestamp);
-
-            let block = blocks
-                .entry(block_start)
-                .or_insert_with(|| BillingBlock::new(block_start, block_end));
-
-            // Count messages
-            block.message_count += 1;
-
-            // Extract usage and tool invocations based on entry type
-            if let LogEntry::Assistant(assistant) = &entry {
-                // Count output tokens from assistant messages
-                if let Some(usage) = &assistant.message.usage {
-                    block.input_tokens += usage.input_tokens;
-                    block.output_tokens += usage.output_tokens;
-                    block.cache_read_tokens += usage.cache_read_input_tokens.unwrap_or(0);
-                    block.cache_creation_tokens += usage.cache_creation_input_tokens.unwrap_or(0);
-                }
-
-                // Count tool invocations
-                for content in &assistant.message.content {
-                    if matches!(content, ContentBlock::ToolUse(_)) {
-                        block.tool_invocations += 1;
-                    }
+            let key = (
+                assistant.session_id.clone(),
+                assistant.message.model.clone(),
+                assistant.message.id.clone(),
+            );
+            let turn = turns.entry(key).or_default();
+            turn.model.clone_from(&assistant.message.model);
+            turn.first_timestamp = Some(
+                turn.first_timestamp
+                    .map_or(assistant.timestamp, |first| first.min(assistant.timestamp)),
+            );
+            if let Some(usage) = &assistant.message.usage {
+                turn.usage.merge_max(usage);
+            }
+            for content in &assistant.message.content {
+                if let ContentBlock::ToolUse(tool) = content {
+                    turn.tool_ids.insert(tool.id.clone());
                 }
             }
         }
     }
 
-    // Calculate total tokens and estimated cost for each block
-    for block in blocks.values_mut() {
-        block.total_tokens = block.input_tokens + block.output_tokens;
-
-        // Simple cost estimation (Claude 3.5 Sonnet pricing as baseline)
-        // Input: $3/MTok, Output: $15/MTok, Cache Read: $0.30/MTok, Cache Write: $3.75/MTok
-        let input_cost = (block.input_tokens as f64 / 1_000_000.0) * 3.0;
-        let output_cost = (block.output_tokens as f64 / 1_000_000.0) * 15.0;
-        let cache_read_cost = (block.cache_read_tokens as f64 / 1_000_000.0) * 0.30;
-        let cache_write_cost = (block.cache_creation_tokens as f64 / 1_000_000.0) * 3.75;
-        let total_cost = input_cost + output_cost + cache_read_cost + cache_write_cost;
-        if total_cost > 0.0 {
-            block.estimated_cost = Some(total_cost);
-        }
+    let mut blocks: BTreeMap<DateTime<Utc>, (BillingBlock, AggregatedUsage)> = BTreeMap::new();
+    for turn in turns.into_values() {
+        let Some(timestamp) = turn.first_timestamp else {
+            continue;
+        };
+        let block_start = block_start_for(timestamp);
+        let block_end = block_end_for(timestamp);
+        let (block, usage) = blocks.entry(block_start).or_insert_with(|| {
+            (
+                BillingBlock::new(block_start, block_end),
+                AggregatedUsage::default(),
+            )
+        });
+        block.message_count += 1;
+        block.tool_invocations += turn.tool_ids.len();
+        usage.add_usage_at(&turn.model, &turn.usage, timestamp);
     }
 
-    blocks.into_values().collect()
+    blocks
+        .into_values()
+        .map(|(mut block, mut usage)| {
+            usage.calculate_cost();
+            block.input_tokens = usage.usage.input_tokens;
+            block.output_tokens = usage.usage.output_tokens;
+            block.cache_read_tokens = usage.usage.cache_read_input_tokens.unwrap_or(0);
+            block.cache_creation_tokens = usage.usage.cache_creation_input_tokens.unwrap_or(0);
+            block.total_tokens = usage.usage.work_tokens();
+            block.estimated_cost = usage.estimated_cost;
+            block.unpriced_models = usage.unpriced_models;
+            block.pricing_rate_cards = usage.pricing_rate_cards;
+            block.pricing_qualifications = usage.pricing_qualifications;
+            block
+        })
+        .collect()
 }
 
 /// Output blocks for JSON serialization.
@@ -596,6 +624,30 @@ fn output_session_stats(cli: &Cli, args: &StatsArgs, analytics: &SessionAnalytic
 }
 
 /// Output project statistics.
+fn print_pricing_context(usage: &AggregatedUsage) {
+    if !usage.pricing_rate_cards.is_empty() {
+        println!("Cost Rate Cards: {}", usage.pricing_rate_cards.join(", "));
+        println!(
+            "Cost Source: {}",
+            crate::model::ModelPricing::source_summary()
+        );
+    }
+    if !usage.unpriced_models.is_empty() {
+        let coverage = if usage.estimated_cost.is_some() {
+            "partial; excluded models"
+        } else {
+            "unavailable; no verified rate for models"
+        };
+        println!(
+            "Cost Coverage: {coverage}: {}",
+            usage.unpriced_models.join(", ")
+        );
+    }
+    for qualification in &usage.pricing_qualifications {
+        println!("Cost Qualification: {qualification}");
+    }
+}
+
 fn output_project_stats(
     cli: &Cli,
     args: &StatsArgs,
@@ -689,27 +741,26 @@ fn output_project_stats(
             if args.costs || args.all {
                 println!("Cost Breakdown by Model:");
                 let mut total_cost = 0.0;
-                for (model, usage) in &analytics.total_usage.by_model {
-                    if let Some(pricing) = crate::model::ModelPricing::for_model(model) {
-                        let cost = pricing.calculate_cost(usage);
-                        total_cost += cost.total_cost;
-                        if cost.total_cost > 0.0 {
-                            let display_name = format_model_name(model);
-                            println!("  {display_name}:");
-                            println!("    Input:       ${:.4}", cost.input_cost);
-                            println!("    Output:      ${:.4}", cost.output_cost);
-                            println!("    Cache Write: ${:.4}", cost.cache_write_cost);
-                            println!("    Cache Read:  ${:.4}", cost.cache_read_cost);
-                            println!("    Subtotal:    ${:.4}", cost.total_cost);
-                        }
+                for (model, cost) in &analytics.total_usage.cost_by_model {
+                    total_cost += cost.total_cost;
+                    if cost.total_cost > 0.0 {
+                        let display_name = format_model_name(model);
+                        println!("  {display_name}:");
+                        println!("    Input:       ${:.4}", cost.input_cost);
+                        println!("    Output:      ${:.4}", cost.output_cost);
+                        println!("    Cache Write: ${:.4}", cost.cache_write_cost);
+                        println!("    Cache Read:  ${:.4}", cost.cache_read_cost);
+                        println!("    Server Tools: ${:.4}", cost.server_tool_cost);
+                        println!("    Subtotal:    ${:.4}", cost.total_cost);
                     }
                 }
                 println!();
-                println!("Estimated Total Cost: ${total_cost:.2}");
+                println!("Estimated API List Cost: ${total_cost:.2}");
             } else if let Some(cost) = analytics.total_usage.estimated_cost {
                 // Just show total cost without breakdown
-                println!("Estimated Cost: ${cost:.2}");
+                println!("Estimated API List Cost: ${cost:.2}");
             }
+            print_pricing_context(&analytics.total_usage);
         }
     }
 
@@ -839,27 +890,26 @@ fn output_multi_project_stats(
             if args.costs || args.all {
                 println!("Cost Breakdown by Model:");
                 let mut total_cost = 0.0;
-                for (model, usage) in &analytics.total_usage.by_model {
-                    if let Some(pricing) = crate::model::ModelPricing::for_model(model) {
-                        let cost = pricing.calculate_cost(usage);
-                        total_cost += cost.total_cost;
-                        if cost.total_cost > 0.0 {
-                            let display_name = format_model_name(model);
-                            println!("  {display_name}:");
-                            println!("    Input:       ${:.4}", cost.input_cost);
-                            println!("    Output:      ${:.4}", cost.output_cost);
-                            println!("    Cache Write: ${:.4}", cost.cache_write_cost);
-                            println!("    Cache Read:  ${:.4}", cost.cache_read_cost);
-                            println!("    Subtotal:    ${:.4}", cost.total_cost);
-                        }
+                for (model, cost) in &analytics.total_usage.cost_by_model {
+                    total_cost += cost.total_cost;
+                    if cost.total_cost > 0.0 {
+                        let display_name = format_model_name(model);
+                        println!("  {display_name}:");
+                        println!("    Input:       ${:.4}", cost.input_cost);
+                        println!("    Output:      ${:.4}", cost.output_cost);
+                        println!("    Cache Write: ${:.4}", cost.cache_write_cost);
+                        println!("    Cache Read:  ${:.4}", cost.cache_read_cost);
+                        println!("    Server Tools: ${:.4}", cost.server_tool_cost);
+                        println!("    Subtotal:    ${:.4}", cost.total_cost);
                     }
                 }
                 println!();
-                println!("Estimated Total Cost: ${total_cost:.2}");
+                println!("Estimated API List Cost: ${total_cost:.2}");
             } else if let Some(cost) = analytics.total_usage.estimated_cost {
                 // Just show total cost without breakdown
-                println!("Estimated Cost: ${cost:.2}");
+                println!("Estimated API List Cost: ${cost:.2}");
             }
+            print_pricing_context(&analytics.total_usage);
         }
     }
 
@@ -970,27 +1020,26 @@ fn output_global_stats(cli: &Cli, args: &StatsArgs, analytics: &ProjectAnalytics
             if args.costs || args.all {
                 println!("Cost Breakdown by Model:");
                 let mut total_cost = 0.0;
-                for (model, usage) in &analytics.total_usage.by_model {
-                    if let Some(pricing) = crate::model::ModelPricing::for_model(model) {
-                        let cost = pricing.calculate_cost(usage);
-                        total_cost += cost.total_cost;
-                        if cost.total_cost > 0.0 {
-                            let display_name = format_model_name(model);
-                            println!("  {display_name}:");
-                            println!("    Input:       ${:.4}", cost.input_cost);
-                            println!("    Output:      ${:.4}", cost.output_cost);
-                            println!("    Cache Write: ${:.4}", cost.cache_write_cost);
-                            println!("    Cache Read:  ${:.4}", cost.cache_read_cost);
-                            println!("    Subtotal:    ${:.4}", cost.total_cost);
-                        }
+                for (model, cost) in &analytics.total_usage.cost_by_model {
+                    total_cost += cost.total_cost;
+                    if cost.total_cost > 0.0 {
+                        let display_name = format_model_name(model);
+                        println!("  {display_name}:");
+                        println!("    Input:       ${:.4}", cost.input_cost);
+                        println!("    Output:      ${:.4}", cost.output_cost);
+                        println!("    Cache Write: ${:.4}", cost.cache_write_cost);
+                        println!("    Cache Read:  ${:.4}", cost.cache_read_cost);
+                        println!("    Server Tools: ${:.4}", cost.server_tool_cost);
+                        println!("    Subtotal:    ${:.4}", cost.total_cost);
                     }
                 }
                 println!();
-                println!("Estimated Total Cost: ${total_cost:.2}");
+                println!("Estimated API List Cost: ${total_cost:.2}");
             } else if let Some(cost) = analytics.total_usage.estimated_cost {
                 // Just show total cost without breakdown
-                println!("Estimated Total Cost: ${cost:.2}");
+                println!("Estimated API List Cost: ${cost:.2}");
             }
+            print_pricing_context(&analytics.total_usage);
         }
     }
 
@@ -1073,6 +1122,19 @@ fn output_blocks_stats(cli: &Cli, args: &StatsArgs, sessions: &[Session]) -> Res
     let total_messages: usize = blocks.iter().map(|b| b.message_count).sum();
     let total_tool_invocations: usize = blocks.iter().map(|b| b.tool_invocations).sum();
     let total_cost: f64 = blocks.iter().filter_map(|b| b.estimated_cost).sum();
+    let has_estimated_cost = blocks.iter().any(|b| b.estimated_cost.is_some());
+    let unpriced_models: BTreeSet<_> = blocks
+        .iter()
+        .flat_map(|block| block.unpriced_models.iter().cloned())
+        .collect();
+    let pricing_rate_cards: BTreeSet<_> = blocks
+        .iter()
+        .flat_map(|block| block.pricing_rate_cards.iter().cloned())
+        .collect();
+    let pricing_qualifications: BTreeSet<_> = blocks
+        .iter()
+        .flat_map(|block| block.pricing_qualifications.iter().cloned())
+        .collect();
     let highest_block_tokens = blocks.iter().map(|b| b.total_tokens).max().unwrap_or(0);
 
     // Parse token limit for display
@@ -1108,7 +1170,7 @@ fn output_blocks_stats(cli: &Cli, args: &StatsArgs, sessions: &[Session]) -> Res
                     total_output_tokens,
                     total_messages,
                     total_tool_invocations,
-                    estimated_cost: if total_cost > 0.0 {
+                    estimated_cost: if has_estimated_cost {
                         Some(total_cost)
                     } else {
                         None
@@ -1143,11 +1205,15 @@ fn output_blocks_stats(cli: &Cli, args: &StatsArgs, sessions: &[Session]) -> Res
             }
         }
         OutputFormat::Compact => {
+            let cost = if has_estimated_cost {
+                format!("${total_cost:.2}")
+            } else {
+                "N/A".to_string()
+            };
             println!(
-                "blocks:{} tokens:{} cost:${:.2}",
+                "blocks:{} tokens:{} cost:{cost}",
                 blocks.len(),
-                total_tokens,
-                total_cost
+                total_tokens
             );
             if let Some(ref active) = active_block {
                 if let Some(remaining) = active.remaining() {
@@ -1175,10 +1241,15 @@ fn output_blocks_stats(cli: &Cli, args: &StatsArgs, sessions: &[Session]) -> Res
                     println!("  Remaining: {}h {}m", hours, mins);
                 }
                 println!(
-                    "  Tokens:    {} (in: {}, out: {})",
+                    "  Work:      {} (uncached in: {}, cache creation: {}, out: {})",
                     format_number(active.total_tokens),
                     format_number(active.input_tokens),
+                    format_number(active.cache_creation_tokens),
                     format_number(active.output_tokens)
+                );
+                println!(
+                    "  Cache Read: {} (excluded from work tokens)",
+                    format_number(active.cache_read_tokens)
                 );
 
                 // Show progress bar if token limit specified
@@ -1197,7 +1268,7 @@ fn output_blocks_stats(cli: &Cli, args: &StatsArgs, sessions: &[Session]) -> Res
                 }
 
                 if let Some(cost) = active.estimated_cost {
-                    println!("  Cost:      ${cost:.4}");
+                    println!("  Est. API List Cost: ${cost:.4}");
                 }
                 println!();
             }
@@ -1216,8 +1287,37 @@ fn output_blocks_stats(cli: &Cli, args: &StatsArgs, sessions: &[Session]) -> Res
                 "  Tool Invocations:  {}",
                 format_count(total_tool_invocations)
             );
-            if total_cost > 0.0 {
-                println!("  Estimated Cost:    ${total_cost:.4}");
+            if has_estimated_cost {
+                println!("  Est. API List Cost: ${total_cost:.4}");
+            } else if !unpriced_models.is_empty() {
+                println!("  Est. API List Cost: N/A");
+            }
+            if !pricing_rate_cards.is_empty() {
+                println!(
+                    "  Cost Rate Cards:    {}",
+                    pricing_rate_cards
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                println!(
+                    "  Cost Source:        {}",
+                    crate::model::ModelPricing::source_summary()
+                );
+            }
+            if !unpriced_models.is_empty() {
+                let coverage = if has_estimated_cost {
+                    "partial; excluded"
+                } else {
+                    "unavailable; no verified rate for"
+                };
+                println!(
+                    "  Cost Coverage:      {coverage} {}",
+                    unpriced_models.into_iter().collect::<Vec<_>>().join(", ")
+                );
+            }
+            for qualification in pricing_qualifications {
+                println!("  Cost Qualification: {qualification}");
             }
 
             // Sparkline visualizations
@@ -2330,6 +2430,36 @@ fn progress_bar(percent: f64, width: usize) -> String {
 mod tests {
     use super::*;
     use crate::analytics::SessionAnalytics;
+
+    #[test]
+    fn billing_blocks_deduplicate_streaming_chunks_and_use_native_rate_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp
+            .path()
+            .join("11111111-1111-1111-1111-111111111111.jsonl");
+        let chunks = [
+            r#"{"type":"assistant","uuid":"a1","parentUuid":null,"timestamp":"2026-07-22T00:00:43Z","sessionId":"s","version":"2.1.0","message":{"id":"m1","type":"message","role":"assistant","model":"claude-fable-5","content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":{}}],"usage":{"input_tokens":2,"cache_creation_input_tokens":20756,"cache_read_input_tokens":20749,"output_tokens":100,"service_tier":"standard","cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":20756},"inference_geo":"not_available","speed":"standard"}}}"#,
+            r#"{"type":"assistant","uuid":"a2","parentUuid":"a1","timestamp":"2026-07-22T00:00:44Z","sessionId":"s","version":"2.1.0","message":{"id":"m1","type":"message","role":"assistant","model":"claude-fable-5","content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":{}}],"usage":{"input_tokens":2,"cache_creation_input_tokens":20756,"cache_read_input_tokens":20749,"output_tokens":2716,"service_tier":"standard","cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":20756},"inference_geo":"not_available","speed":"standard"}}}"#,
+        ]
+        .join("\n");
+        std::fs::write(&path, chunks).unwrap();
+        let session = Session::from_path(&path, "/test").unwrap();
+
+        let blocks = aggregate_billing_blocks(&[session], None);
+        assert_eq!(blocks.len(), 1);
+        let block = &blocks[0];
+        assert_eq!(block.message_count, 1);
+        assert_eq!(block.tool_invocations, 1);
+        assert_eq!(block.input_tokens, 2);
+        assert_eq!(block.output_tokens, 2716);
+        assert_eq!(block.cache_creation_tokens, 20_756);
+        assert_eq!(block.cache_read_tokens, 20_749);
+        assert_eq!(block.total_tokens, 23_474);
+        assert!((block.estimated_cost.unwrap() - 0.571_689).abs() < 0.000_001);
+        assert!(block.unpriced_models.is_empty());
+        assert!(block.pricing_qualifications.is_empty());
+        assert_eq!(block.pricing_rate_cards.len(), 1);
+    }
 
     #[test]
     fn test_stats_output_from_session() {

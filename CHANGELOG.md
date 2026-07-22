@@ -35,6 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--main-thread` now defaults to false (exports all entries by default)
 - Human-readable exports distinguish physical record bounds and transcript span
   from native reported turn time and the last completed-turn timestamp
+- Human-readable usage reports label uncached input and both cache components,
+  define work versus processed totals, and cite the effective API rate cards
 
 ### Fixed
 - HTML export missing closing `>` on meta generator tag
@@ -47,6 +49,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tool results extraction from user messages to SQLite
 - Trailing housekeeping records no longer masquerade as the conversation end or
   active duration in Markdown and text exports
+- Cost estimates distinguish five-minute and one-hour cache writes, select
+  temporary rates by observation date, include metered server-side web search,
+  and qualify unmodeled pricing modifiers
+- Opus 4.5 and Haiku 3.5 use their verified API list rates
+- Five-hour billing blocks deduplicate streamed response chunks and use the
+  shared model-aware estimator instead of a hard-coded model rate
 
 ## [0.1.0] - 2025-12-30
 

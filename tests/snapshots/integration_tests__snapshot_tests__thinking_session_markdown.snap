@@ -10,14 +10,18 @@ expression: markdown
 
 ## Statistics
 - **Messages (logical):** 2 (1 user, 1 assistant)
-- **Work Tokens:** 100
-- **Total Processed Tokens:** 100
-- **Input Tokens:** 20
+- **Work Tokens:** 100 (uncached input + cache creation + output)
+- **Total Processed Tokens:** 100 (work + cache reads)
+- **Input (uncached):** 20
+- **Cache Creation:** 0
+- **Cache Read:** 0
 - **Output Tokens:** 80
 - **Tool Invocations:** 0
 - **Thinking Blocks:** 1
 - **Primary Model:** claude-sonnet-4-20250514
-- **Estimated Cost:** $0.0013
+- **Estimated API List Cost:** $0.0013
+- **Cost Rate Cards:** anthropic-api-sonnet-4 (standard API list rate)
+- **Cost Source:** Anthropic API list rates, checked 2026-07-22; https://platform.claude.com/docs/en/about-claude/pricing
 
 ---
 

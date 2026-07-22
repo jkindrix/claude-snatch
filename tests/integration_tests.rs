@@ -341,6 +341,96 @@ mod export {
     }
 
     #[test]
+    fn test_exports_explain_token_totals_and_cache_aware_cost() {
+        let entries = [
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"timestamp":"2026-07-22T00:00:00Z","sessionId":"s","version":"2.1.0","message":{"role":"user","content":"a realistically long prompt"}}"#,
+            r#"{"type":"assistant","uuid":"a1","parentUuid":"u1","timestamp":"2026-07-22T00:00:43Z","sessionId":"s","version":"2.1.0","message":{"id":"m1","type":"message","role":"assistant","model":"claude-fable-5","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":2,"cache_creation_input_tokens":20756,"cache_read_input_tokens":20749,"output_tokens":2716,"service_tier":"standard","cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":20756},"inference_geo":"not_available","speed":"standard"}}}"#,
+        ]
+        .iter()
+        .map(|raw| serde_json::from_str(raw).unwrap())
+        .collect();
+        let conversation = Conversation::from_entries(entries).unwrap();
+        let options = ExportOptions::default();
+
+        let mut markdown = Vec::new();
+        MarkdownExporter::new()
+            .export_conversation(&conversation, &mut markdown, &options)
+            .unwrap();
+        let markdown = String::from_utf8(markdown).unwrap();
+        assert!(
+            markdown.contains("**Work Tokens:** 23474 (uncached input + cache creation + output)")
+        );
+        assert!(markdown.contains("**Total Processed Tokens:** 44223 (work + cache reads)"));
+        assert!(markdown.contains("**Input (uncached):** 2"));
+        assert!(markdown.contains("**Cache Creation:** 20756"));
+        assert!(markdown.contains("**Cache Read:** 20749"));
+        assert!(markdown.contains("**Output Tokens:** 2716"));
+        // One-hour writes cost $20/MTok for this $10/MTok model. The old
+        // all-5m calculation produced $0.416; the TTL-aware value is $0.572.
+        assert!(markdown.contains("**Estimated API List Cost:** $0.572"));
+        assert!(markdown.contains("anthropic-api-fable-mythos-5"));
+        assert!(markdown.contains("https://platform.claude.com/docs/en/about-claude/pricing"));
+        assert!(!markdown.contains("Cost Qualification"));
+
+        let mut text = Vec::new();
+        TextExporter::new()
+            .export_conversation(&conversation, &mut text, &options)
+            .unwrap();
+        let text = String::from_utf8(text).unwrap();
+        assert!(text.contains("Work Tokens: 23474 (uncached input + cache creation + output)"));
+        assert!(text.contains("Total Processed Tokens: 44223 (work + cache reads)"));
+        assert!(text.contains("Input (uncached): 2"));
+        assert!(text.contains("Cache Creation: 20756"));
+        assert!(text.contains("Cache Read: 20749"));
+        assert!(text.contains("Estimated API List Cost: $0.572"));
+    }
+
+    #[test]
+    fn test_export_cost_coverage_distinguishes_partial_and_unavailable() {
+        let assistant = |uuid: &str, parent: Option<&str>, model: &str| {
+            serde_json::from_value::<LogEntry>(serde_json::json!({
+                "type": "assistant",
+                "uuid": uuid,
+                "parentUuid": parent,
+                "timestamp": "2026-07-22T00:00:00Z",
+                "sessionId": "s",
+                "version": "2.1.0",
+                "message": {
+                    "id": uuid,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": model,
+                    "content": [{"type": "text", "text": "done"}],
+                    "usage": {"input_tokens": 1000, "output_tokens": 100}
+                }
+            }))
+            .unwrap()
+        };
+        let render = |entries| {
+            let conversation = Conversation::from_entries(entries).unwrap();
+            let mut output = Vec::new();
+            MarkdownExporter::new()
+                .export_conversation(&conversation, &mut output, &ExportOptions::default())
+                .unwrap();
+            String::from_utf8(output).unwrap()
+        };
+
+        let unavailable = render(vec![assistant("unknown", None, "future-model-9")]);
+        assert!(unavailable.contains("**Estimated API List Cost:** N/A"));
+        assert!(unavailable.contains(
+            "**Cost Coverage:** Unavailable; no verified rate for models: future-model-9"
+        ));
+
+        let partial = render(vec![
+            assistant("known", None, "claude-fable-5"),
+            assistant("unknown", Some("known"), "future-model-9"),
+        ]);
+        assert!(!partial.contains("**Estimated API List Cost:** N/A"));
+        assert!(partial.contains("**Cost Coverage:** Partial; excluded models: future-model-9"));
+        assert!(partial.contains("anthropic-api-fable-mythos-5"));
+    }
+
+    #[test]
     fn test_json_round_trip() {
         let entries = parse_fixture("simple_session.jsonl");
         let conversation =

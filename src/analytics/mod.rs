@@ -126,8 +126,9 @@ impl SessionAnalytics {
     /// turn is counted once. `message_count` ends at the number of distinct
     /// turns, consistent with `message_counts.assistant`.
     fn accumulate_usage(&mut self, conversation: &Conversation) {
-        // (model, message.id) -> deduped usage for that turn.
-        let mut deduped: IndexMap<(String, String), crate::model::usage::Usage> = IndexMap::new();
+        // (model, message.id) -> (deduped usage, first timestamp) for that turn.
+        let mut deduped: IndexMap<(String, String), (crate::model::usage::Usage, DateTime<Utc>)> =
+            IndexMap::new();
 
         for node in conversation.nodes().values() {
             if let LogEntry::Assistant(assistant) = &node.entry {
@@ -138,12 +139,16 @@ impl SessionAnalytics {
                     assistant.message.model.clone(),
                     assistant.message.id.clone(),
                 );
-                deduped.entry(key).or_default().merge_max(usage);
+                let (deduped_usage, first_timestamp) = deduped.entry(key).or_insert_with(|| {
+                    (crate::model::usage::Usage::default(), assistant.timestamp)
+                });
+                deduped_usage.merge_max(usage);
+                *first_timestamp = (*first_timestamp).min(assistant.timestamp);
             }
         }
 
-        for ((model, _id), usage) in &deduped {
-            self.usage.add_usage(model, usage);
+        for ((model, _id), (usage, observed_at)) in &deduped {
+            self.usage.add_usage_at(model, usage, *observed_at);
         }
     }
 
@@ -1769,6 +1774,15 @@ impl ProjectAnalytics {
             model_usage.merge(usage);
         }
 
+        // Preserve effective-date and modifier context for accurate pricing.
+        for (bucket, usage) in &session.usage.cost_buckets {
+            self.total_usage
+                .cost_buckets
+                .entry(bucket.clone())
+                .or_default()
+                .merge(usage);
+        }
+
         // Merge tools_by_name
         for (tool, count) in &session.usage.tools_by_name {
             *self
@@ -2228,6 +2242,75 @@ mod tests {
         // message_count tracks distinct turns, consistent with assistant count.
         assert_eq!(analytics.usage.message_count, 2);
         assert_eq!(analytics.message_counts.assistant, 2);
+    }
+
+    #[test]
+    fn test_usage_pricing_uses_assistant_observation_time() {
+        let assistant = |uuid: &str, parent: &str, timestamp: &str, message_id: &str| {
+            serde_json::from_value::<crate::model::LogEntry>(serde_json::json!({
+                "type": "assistant",
+                "uuid": uuid,
+                "parentUuid": parent,
+                "timestamp": timestamp,
+                "sessionId": "s",
+                "version": "2.1.0",
+                "message": {
+                    "id": message_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-5",
+                    "content": [{"type": "text", "text": "x"}],
+                    "usage": {"input_tokens": 1_000_000, "output_tokens": 0}
+                }
+            }))
+            .unwrap()
+        };
+        let conversation = crate::reconstruction::Conversation::from_entries(vec![
+            assistant("intro", "root", "2026-08-31T23:59:59Z", "m1"),
+            assistant("standard", "intro", "2026-09-01T00:00:00Z", "m2"),
+        ])
+        .unwrap();
+        let analytics = SessionAnalytics::from_conversation(&conversation);
+
+        assert_eq!(analytics.usage.estimated_cost, Some(5.0));
+        assert_eq!(analytics.usage.cost_buckets.len(), 2);
+        assert_eq!(analytics.usage.pricing_rate_cards.len(), 2);
+    }
+
+    #[test]
+    fn test_project_pricing_preserves_session_rate_periods() {
+        let session = |timestamp: &str, id: &str| {
+            let entry = serde_json::from_value::<crate::model::LogEntry>(serde_json::json!({
+                "type": "assistant",
+                "uuid": id,
+                "parentUuid": null,
+                "timestamp": timestamp,
+                "sessionId": id,
+                "version": "2.1.0",
+                "message": {
+                    "id": id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-5",
+                    "content": [{"type": "text", "text": "x"}],
+                    "usage": {"input_tokens": 1_000_000, "output_tokens": 0}
+                }
+            }))
+            .unwrap();
+            let conversation =
+                crate::reconstruction::Conversation::from_entries(vec![entry]).unwrap();
+            SessionAnalytics::from_conversation(&conversation)
+        };
+        let intro = session("2026-08-31T23:59:59Z", "intro");
+        let standard = session("2026-09-01T00:00:00Z", "standard");
+        let mut project = ProjectAnalytics::default();
+        project.add_session(&intro);
+        project.add_session(&standard);
+        project.calculate_cost();
+
+        assert_eq!(project.total_usage.estimated_cost, Some(5.0));
+        assert_eq!(project.total_usage.cost_buckets.len(), 2);
+        assert_eq!(project.total_usage.pricing_rate_cards.len(), 2);
     }
 
     #[test]
