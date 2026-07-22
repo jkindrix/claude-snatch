@@ -46,14 +46,15 @@ usage oracle + 20 negative controls + real-corpus conformance).
 Provider-qualified and explicitly selected routes now cover CLI `digest`,
 `thread`, session-mode `stats`, single-session `prompts`/`code`, and `context`,
 plus MCP `get_tool_calls`, `get_session_digest`, `thread_topic`, session-mode
-`get_stats`, and `get_event_context`.
+  `get_stats`, and `get_event_context`; CLI `diff` also resolves both targets
+  independently through the provider seam.
 The complete CLI audit is:
 
-- **Already routed (17):** `list`, `info`, `providers`, `doctor`, `lessons`,
+- **Already routed (18):** `list`, `info`, `providers`, `doctor`, `lessons`,
   `digest`, `thread`, `timeline`, `messages`, `chunks`, `file-history`,
-  `file-evolution`, `stats`, `prompts`, `code`, `context`, and `export`.
-- **Provider-neutral analysis/discovery candidates (7):** `recent`, `pick`,
-  `summary`, `standup`, `diff`, `health`, and `priorities`. These share
+  `file-evolution`, `stats`, `prompts`, `code`, `context`, `diff`, and `export`.
+- **Provider-neutral analysis/discovery candidates (6):** `recent`, `pick`,
+  `summary`, `standup`, `health`, and `priorities`. These share
   canonical entries or descriptors,
   but project/union modes still need provider-qualified identity, lineage,
   partial-success, and missing-capability semantics; they are not all thin
@@ -87,11 +88,10 @@ all file consumers; route canonical session analyses; then project unions and
 the shared search index. Source-mutating and live-tail capabilities require
 their own contracts and must not be implied by read-only ingestion support.
 
-The session-local stage is deliberately split after its opening audit:
-single-session `stats`, `prompts`, `code`, and semantic event context now route
-through providers; `diff` needs a two-target/native-artifact
-contract. Multi-session prompt aggregation belongs with project unions, not
-the single-session slice.
+The session-local stage was deliberately split after its opening audit:
+single-session `stats`, `prompts`, `code`, semantic event context, and the
+two-target `diff` contract now route through providers. Multi-session prompt
+aggregation belongs with project unions, not the single-session slice.
 
 **Tier 3 — persistent registries: not unified.** `goals`/`notes`/
 `decisions` remain Claude-only storage under `~/.claude`. The Phase D plan
@@ -2193,6 +2193,43 @@ native conformance remained green on 243/243 sessions after that refactor. A
 live 40 MB session probe selected one 1,264-event native turn into a roughly
 2.6 KB response in 0.39 seconds while retaining the exact target and 19 typed
 file paths; corpus growth can change those measurements.
+
+#### Two-target diff contract (2026-07-22)
+
+`diff` has two deliberately separate comparison contracts. Semantic mode
+resolves each target independently, so qualified ids can compare sessions
+across providers while unqualified, flagless references retain the classic
+Claude-session-or-local-file behavior. A repeated `--provider` selection
+applies to both targets; mixed-provider comparisons should normally qualify
+both ids. Provider sessions retain their complete parsed bundles through the
+cache bridge.
+
+Semantic equality is identity-neutral and emission-sensitive: it compares an
+ordered sequence of canonical message payloads, excluding transport identity,
+timestamps, session ids, model/usage accounting, tool-call ids, and reasoning
+signatures. Native UUID equality is not semantic equality. An ordered sequence
+diff preserves repeated equal messages as distinct emissions and treats
+reordering as a change; filtering is applied to the comparison projection
+without rebuilding and accidentally reshaping the source conversation tree.
+
+Line mode compares aligned raw-JSONL records, normalizing JSON object
+formatting but not record order or content. Provider targets use the explicit
+`raw_jsonl` capability (including bounded decompression where the provider
+owns a compressed artifact); a provider without that capability fails
+honestly. It does not compare universal archive bundles or claim that a
+multi-artifact archive is one native JSONL file. Local path and classic
+session behavior stays unchanged. Provider-routed output identifies both
+sources by provider-qualified logical key rather than leaking or reconstructing
+artifact paths.
+
+The slice-exit corpus run observed one resumed session written with the newer
+`rust-v0.145.0` `UserMessageEvent` media vocabulary (`audio` and
+`local_audio`, both empty). The producer type also defines `client_id`, image
+detail vectors, and local-image detail vectors, so the nested-field baseline
+was updated as one source-backed vocabulary unit rather than whitelisting only
+the two observed keys. Response-item `input_audio` remains content-complete as
+an unknown content block; no nonempty audio payload was present in the corpus,
+so richer audio presentation is not claimed.
 
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".

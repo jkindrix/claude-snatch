@@ -2613,6 +2613,42 @@ fn provider_export_preflight_never_creates_the_output_file() {
 }
 
 #[test]
+fn provider_routed_claude_diff_preserves_the_classic_semantic_result() {
+    let claude = setup_fixture_dir();
+    let missing_codex = claude.path().join("no-codex-home");
+    let run = |provider: bool| {
+        let mut command = snatch_cmd();
+        command
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", &missing_codex)
+            .args(["-o", "json", "diff", SESSION_ID, SESSION_ID]);
+        if provider {
+            command.args(["--provider", "claude-code"]);
+        }
+        let output = command.assert().success().get_output().stdout.clone();
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+    };
+
+    let classic = run(false);
+    let routed = run(true);
+    assert_eq!(routed["first_source"]["provider"], "claude-code");
+    assert_eq!(
+        routed["first_source"]["qualified_id"],
+        format!("claude-code:{SESSION_ID}")
+    );
+    for field in [
+        "mode",
+        "identical",
+        "comparison_basis",
+        "filter",
+        "summary",
+        "details",
+    ] {
+        assert_eq!(routed[field], classic[field], "field {field}");
+    }
+}
+
+#[test]
 fn export_list_templates_rejects_provider_selection() {
     let tmp = setup_fixture_dir();
     snatch_cmd()
@@ -3144,6 +3180,87 @@ mod codex_normalization_cli {
         )
         .unwrap();
         tmp
+    }
+
+    #[test]
+    fn diff_resolves_each_provider_target_and_preserves_both_identities() {
+        let claude = setup_fixture_dir();
+        let codex = slice_home();
+        let first = format!("claude-code:{SESSION_ID}");
+        let second = format!("codex:{THREAD}");
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "diff", &first, &second])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["mode"], "semantic");
+        assert_eq!(
+            value["comparison_basis"],
+            "ordered_identity_neutral_payloads"
+        );
+        assert_eq!(value["first"], first);
+        assert_eq!(value["second"], second);
+        assert_eq!(value["first_source"]["provider"], "claude-code");
+        assert_eq!(value["first_source"]["qualified_id"], first);
+        assert_eq!(value["second_source"]["provider"], "codex");
+        assert_eq!(value["second_source"]["qualified_id"], second);
+
+        // `--prompts` is an authorship projection, not merely every
+        // user-role record: the tool result and harness traffic stay out.
+        let prompt_output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "diff", &second, &second, "--prompts"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let prompt_output: serde_json::Value = serde_json::from_slice(&prompt_output).unwrap();
+        assert_eq!(prompt_output["summary"]["first_message_count"], 1);
+        assert_eq!(prompt_output["summary"]["second_message_count"], 1);
+    }
+
+    #[test]
+    fn provider_line_diff_uses_the_raw_jsonl_capability() {
+        let claude = setup_fixture_dir();
+        let codex = slice_home();
+        let target = format!("codex:{THREAD}");
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "diff", &target, &target, "--line-based"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["mode"], "line-based");
+        assert_eq!(value["identical"], true);
+        assert_eq!(value["first_source"]["provider"], "codex");
+        assert_eq!(value["second_source"]["qualified_id"], target);
+        assert_eq!(value["summary"]["matching"], 11);
+
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "--max-file-size",
+                "100",
+                "diff",
+                &target,
+                &target,
+                "--line-based",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("size limit"));
     }
 
     #[test]

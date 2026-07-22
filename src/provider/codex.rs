@@ -855,9 +855,17 @@ impl CodexProvider {
             ("event_msg", "token_count") => Some(&["type", "info", "rate_limits"]),
             ("event_msg", "user_message") => Some(&[
                 "type",
+                // rust-v0.145.0 UserMessageEvent. Audio and detail fields
+                // were added after the original v0.144.5 baseline; the live
+                // drift instrument first observed the two empty audio vectors.
+                "client_id",
                 "message",
                 "images",
+                "image_details",
                 "local_images",
+                "local_image_details",
+                "audio",
+                "local_audio",
                 "text_elements",
                 "kind",
             ]),
@@ -3550,6 +3558,37 @@ mod tests {
             .unknown_field_paths
             .keys()
             .any(|k| k.ends_with("/info") || k.ends_with("/rate_limits")));
+    }
+
+    #[test]
+    fn drift_accepts_the_source_backed_user_media_vocabulary() {
+        let content = [
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({
+                    "type": "user_message",
+                    "client_id": "client-message-1",
+                    "message": "media",
+                    "images": ["https://example.invalid/image.png"],
+                    "image_details": ["original"],
+                    "local_images": ["/tmp/image.png"],
+                    "local_image_details": [null],
+                    "audio": ["data:audio/mpeg;base64,AA=="],
+                    "local_audio": ["/tmp/audio.mp3"],
+                    "text_elements": [],
+                }),
+            ),
+        ]
+        .join("\n")
+            + "\n";
+        let (_tmp, provider) = home_with(THREAD_A, content.as_bytes(), false);
+        let report = provider.drift_report().unwrap();
+        assert!(
+            report.unknown_field_paths.is_empty(),
+            "rust-v0.145.0 UserMessageEvent fields are baselined: {:?}",
+            report.unknown_field_paths
+        );
     }
 
     #[test]

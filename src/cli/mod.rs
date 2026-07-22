@@ -1323,6 +1323,11 @@ pub struct DiffArgs {
     /// Second session ID (supports short prefixes like "780893e4").
     pub second: String,
 
+    /// Route both session references through the selected provider set
+    /// (repeatable; qualify each id for a mixed-provider comparison).
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
+
     /// Only show summary, not details.
     #[arg(short = 's', long)]
     pub summary_only: bool,
@@ -1336,7 +1341,8 @@ pub struct DiffArgs {
     pub exit_code: bool,
 
     /// Use line-based diff instead of semantic diff.
-    /// Line-based diff compares raw JSONL lines; semantic diff compares by message structure.
+    /// Line mode compares aligned JSONL records (ignoring JSON formatting);
+    /// semantic mode compares ordered, identity-neutral message payloads.
     #[arg(long)]
     pub line_based: bool,
 
