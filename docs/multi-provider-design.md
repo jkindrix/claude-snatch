@@ -2527,6 +2527,29 @@ P1.5 delivery is split into independently gated units:
 6. real-corpus build/query benchmarks proving no per-query source rediscovery,
    bounded result retention, routed-Claude parity, and cross-provider results.
 
+**Implementation status (2026-07-22).** Unit 1 is shipped: direct and indexed
+search share one typed, ordered entry projection that retains repeated equal
+segments, native tool-call metadata, user-carried tool results, and
+machine-visible omission coverage without storing base64 image payloads. The
+low-level core of unit 2 is implemented alongside (not over) the legacy index:
+an exact version-2 schema; canonical provider/session/root identities; one
+source-session manifest per partition; one build manifest per committed
+generation; complete parsed-bundle projection; pre-writer cross-document and
+build-coverage validation; exact delete-and-replace transactions; and
+owner-only storage. Incompatible legacy schemas are rejected without content
+or permission mutation. Tests prove repeated builds cannot duplicate a
+partition, invalid replacements cannot erase the prior snapshot, partial
+builds remain representable without licensing stale-session deletion, and
+namespace-colliding native ids remain independent.
+
+The unit-2 exit is not yet claimed. Registry-driven inventory, revision and
+metadata comparison, unchanged-session skipping, disappearance calculation,
+partial-build stale preservation, and the explicit staged legacy-directory
+replacement still remain. The directory replacement must be described
+honestly as either a genuinely atomic platform operation or a recoverable
+two-phase swap; a portable pair of renames must not be called an atomic
+exchange merely because each individual rename is atomic.
+
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".
 - [x] Drift-coverage claims must state checked vs unchecked counts

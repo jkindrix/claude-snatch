@@ -10,6 +10,9 @@
 //! - Field-specific search (message type, model, tool)
 //! - Index persistence and management
 
+/// Versioned provider-neutral search index.
+pub mod provider;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
