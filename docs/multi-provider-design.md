@@ -17,8 +17,8 @@ commands/tools are routed today. This section is the DURABLE roadmap: the
 tier framework, the deliberate deferrals with their rationale, and the
 architectural gaps — content worth keeping in git so the plan survives even
 if the registry is lost (see "Registry Blast Radius" in CLAUDE.md). The
-per-tool lists below are a **dated snapshot (as of commit `2e338bf`,
-2026-07-21), not a live ledger** — consult goal #19 for current status
+per-tool lists below are a **dated snapshot (audited against commit `f99da5c`,
+2026-07-22), not a live ledger** — consult goal #19 for current status
 rather than trusting these lists to stay in lock-step.
 
 Goal #18 (Codex ingest + normalization + core surfaces + Phase C/D) shipped
@@ -26,9 +26,13 @@ through commit `9031610`. Two honest framings of "how close to Claude↔Codex
 parity":
 - **By architectural effort** (ingest, normalize, core surfaces, the whole
   verification harness): ~70–75% — the hard, expensive part is done.
-- **By feature breadth** (how many snatch commands/MCP tools work
-  identically on Codex): about half, with the analysis layer being burned
-  down under goal #19 rather than treated as one binary claim.
+- **By user-facing surface count:** 11 of 42 CLI commands route session data
+  through providers, 23 session-data commands remain unrouted, three
+  registries are deliberately Claude-storage-scoped, and five commands are
+  provider-independent. MCP has 9 routed tools, 7 unrouted tools, and 3
+  deliberately Claude-storage-scoped registry tools. Raw command counts do
+  not measure depth, but they prevent broad parity claims from hiding omitted
+  surfaces.
 
 **Tier 1 — at parity (deep).** Discovery, parse, normalization into the
 common model with full provenance, and the core surfaces: `list`, `info`,
@@ -41,20 +45,47 @@ usage oracle + 20 negative controls + real-corpus conformance).
 **Tier 2 — analysis / search / insight layer: PARTIAL parity (largest gap).**
 Provider-qualified and explicitly selected routes now cover CLI `digest` and
 `thread`, plus MCP `get_tool_calls`, `get_session_digest`, and `thread_topic`.
-The remaining Claude-only surfaces are:
-- CLI (~13): `search`, `stats`, `summary`, `context`, `recent`,
-  `standup`, `diff`, `health`, `priorities`, `file-evolution`,
-  `file-history`, `tag`, `extract`.
-- MCP (7 tools): `search_sessions`, `get_stats`, `get_file_history`,
-  `get_project_health`, `get_event_context`, `suggest_priorities`, and
-  `explain_file_evolution`.
-- Most are wiring through the existing seam (`cached_parsed_session` +
-  `resolve_with_default_policy`) instead of `ClaudeDirectory`. Exceptions
-  needing real work: `file-history`/`file-evolution` depend on constructs
-  Codex logs differently (Claude uses
-  `file-history-snapshot` entries; Codex uses `apply_patch` tool calls) —
-  they need a Codex-native file-change extractor. `search` still wants a
-  cross-provider index.
+The complete CLI audit is:
+
+- **Already routed (11):** `list`, `info`, `providers`, `doctor`, `lessons`,
+  `digest`, `thread`, `timeline`, `messages`, `chunks`, and `export`.
+- **Provider-neutral analysis/discovery candidates (11):** `recent`, `pick`,
+  `stats`, `summary`, `standup`, `diff`, `context`, `code`, `prompts`,
+  `health`, and `priorities`. These share canonical entries or descriptors,
+  but project/union modes still need provider-qualified identity, lineage,
+  partial-success, and missing-capability semantics; they are not all thin
+  flag wiring.
+- **New provider capability or infrastructure required (10):** `search` and
+  `index` need a versioned cross-provider index; `file-history`,
+  `file-evolution`, and `recover` need evidence-bounded file-change/recovery
+  semantics; `chain` needs typed lineage rather than Claude continuation-only
+  assumptions; `grab` needs provider-neutral session-graph bundling; `watch`
+  needs an active-artifact stream capability; and `validate`/`cleanup` need
+  provider-owned validation and destructive-artifact contracts.
+- **Metadata migration (1):** `tag` stores unqualified native IDs and must
+  migrate to structured logical keys before provider routing.
+- **Provider-specific by design (1):** `extract` reads Claude configuration
+  and project-memory structures. It remains explicitly Claude-specific unless
+  a real provider-configuration abstraction is designed.
+- **Deliberately scoped (3):** `goals`, `notes`, and `decisions` remain in
+  Claude project-memory storage. **Provider-independent (5):** `cache`,
+  `config`, `completions`, `quickstart`, and `serve-mcp` do not select session
+  providers (the cache manager itself already includes provider bundles).
+
+The MCP server exposes 19 tools, not 20. Nine are provider-routed, seven still
+directly use `ClaudeDirectory`/classic resolution (`get_stats`,
+`search_sessions`, `get_file_history`, `get_project_health`,
+`suggest_priorities`, `explain_file_evolution`, and `get_event_context`), and
+three registry tools are explicitly Claude-storage-scoped. In particular,
+`get_event_context` does not gain provider support merely because its
+`session_id` is a string: it has no provider input and calls the classic
+Claude-only chain resolver.
+
+The route order follows dependency, not command count. Normalize valuable
+tool-lifecycle records first; build one evidence-bounded file-change layer for
+all file consumers; route canonical session analyses; then project unions and
+the shared search index. Source-mutating and live-tail capabilities require
+their own contracts and must not be implied by read-only ingestion support.
 
 **Tier 3 — persistent registries: not unified.** `goals`/`notes`/
 `decisions` remain Claude-only storage under `~/.claude`. The Phase D plan
