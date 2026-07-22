@@ -205,6 +205,14 @@ fn snatch_cmd() -> Command {
     Command::cargo_bin("snatch").expect("snatch binary not found")
 }
 
+fn write_index_config(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+    let index = tmp.path().join("provider-search-index");
+    let config = tmp.path().join("index-config.toml");
+    let encoded_path = serde_json::to_string(&index.to_string_lossy()).unwrap();
+    std::fs::write(&config, format!("[index]\ndirectory = {encoded_path}\n")).unwrap();
+    (config, index)
+}
+
 // =============================================================================
 // list
 // =============================================================================
@@ -280,6 +288,203 @@ fn test_search_no_match_returns_empty() {
         .assert()
         .success()
         .stdout(predicate::str::contains("aaaaaaaa").not());
+}
+
+#[test]
+fn provider_index_cli_build_search_status_and_clear_are_snapshot_backed() {
+    let claude = setup_fixture_dir();
+    let config_home = TempDir::new().unwrap();
+    let (config, index_path) = write_index_config(&config_home);
+    let missing_codex = config_home.path().join("missing-codex");
+
+    let empty_status = snatch_cmd()
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "-o",
+            "json",
+            "index",
+            "status",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let empty_status: serde_json::Value = serde_json::from_slice(&empty_status).unwrap();
+    assert_eq!(empty_status["document_count"], 0);
+    assert!(
+        !index_path.exists(),
+        "read-only status must not create an index"
+    );
+
+    let build = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", claude.path())
+        .env("CODEX_HOME", &missing_codex)
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "-o",
+            "json",
+            "index",
+            "build",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let build: serde_json::Value = serde_json::from_slice(&build).unwrap();
+    assert_eq!(build["sessions_replaced"], 1);
+    assert_eq!(build["entries_replaced"], 6);
+    assert_eq!(build["removal_coverage_complete"], true);
+
+    let status = snatch_cmd()
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "-o",
+            "json",
+            "index",
+            "status",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: serde_json::Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(status["schema_version"], 3);
+    assert_eq!(status["session_count"], 1);
+    assert_eq!(status["entry_count"], 6);
+    assert_eq!(status["build"]["complete_providers"][0], "claude-code");
+
+    let indexed = snatch_cmd()
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "-o",
+            "json",
+            "index",
+            "search",
+            "directory",
+            "--session",
+            "aaaaaaaa",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let indexed: serde_json::Value = serde_json::from_slice(&indexed).unwrap();
+    assert!(indexed["total_matches"].as_u64().unwrap() > 0);
+    assert_eq!(indexed["sessions_matched"], 1);
+    assert_eq!(
+        indexed["by_session"][0]["session_key"],
+        format!("claude-code:{SESSION_ID}")
+    );
+    assert_eq!(indexed["coverage"]["incomplete"], false);
+
+    let count = snatch_cmd()
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "-o",
+            "json",
+            "search",
+            "directory",
+            "--provider",
+            "claude-code",
+            "--count",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let count: serde_json::Value = serde_json::from_slice(&count).unwrap();
+    assert!(count["total"].as_u64().unwrap() > 0);
+    assert_eq!(count["count_basis"], "occurrences");
+    assert_eq!(count["coverage"]["incomplete"], false);
+
+    snatch_cmd()
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "search",
+            "directory",
+            "--session",
+            &format!("claude-code:{SESSION_ID}"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "Session: claude-code:{SESSION_ID}"
+        )));
+
+    snatch_cmd()
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "search",
+            "directory",
+            "--provider",
+            "claude-code",
+            "--errors",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--errors").and(predicate::str::contains("refused")));
+
+    snatch_cmd()
+        .args(["--config", config.to_str().unwrap(), "index", "clear"])
+        .assert()
+        .success();
+    let cleared = snatch_cmd()
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "-o",
+            "json",
+            "index",
+            "status",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cleared: serde_json::Value = serde_json::from_slice(&cleared).unwrap();
+    assert_eq!(cleared["document_count"], 0);
+    assert!(cleared["build"].is_null());
+}
+
+#[test]
+fn provider_index_requires_explicit_rebuild_of_a_legacy_schema() {
+    let claude = setup_fixture_dir();
+    let config_home = TempDir::new().unwrap();
+    let (config, index_path) = write_index_config(&config_home);
+    let legacy = claude_snatch::index::SearchIndex::open(&index_path).unwrap();
+    drop(legacy);
+
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", claude.path())
+        .args(["--config", config.to_str().unwrap(), "index", "build"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("incompatible search index schema")
+                .and(predicate::str::contains("index rebuild")),
+        );
+
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", claude.path())
+        .args(["--config", config.to_str().unwrap(), "index", "rebuild"])
+        .assert()
+        .success();
+    let replacement = claude_snatch::index::provider::ProviderSearchIndex::open(index_path)
+        .expect("provider schema activated");
+    assert_eq!(replacement.stats().unwrap().session_count, 1);
 }
 
 /// `--files-only` is grep-like: one very noisy session consumes one result,
@@ -2157,6 +2362,90 @@ mod codex_provider_cli {
             .assert()
             .success()
             .stdout(predicate::str::contains(format!("codex:{CODEX_THREAD}")));
+    }
+
+    #[test]
+    fn provider_index_all_build_and_search_span_both_providers() {
+        let claude = setup_fixture_dir();
+        let (codex, _) = setup_codex_home();
+        let config_home = TempDir::new().unwrap();
+        let (config, _) = write_index_config(&config_home);
+
+        let build = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "--config",
+                config.to_str().unwrap(),
+                "-o",
+                "json",
+                "index",
+                "build",
+                "--provider",
+                "all",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let build: serde_json::Value = serde_json::from_slice(&build).unwrap();
+        assert_eq!(build["sessions_replaced"], 2);
+        assert_eq!(build["skipped"], 0);
+        assert_eq!(build["removal_coverage_complete"], true);
+
+        let result = snatch_cmd()
+            .args([
+                "--config",
+                config.to_str().unwrap(),
+                "-o",
+                "json",
+                "search",
+                "hello",
+                "--ignore-case",
+                "--provider",
+                "all",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let result: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(result["sessions_matched"], 2);
+        assert_eq!(
+            result["coverage"]["searched_providers"],
+            serde_json::json!(["claude-code", "codex"])
+        );
+        assert_eq!(result["coverage"]["incomplete"], false);
+        let providers: std::collections::BTreeSet<_> = result["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row["provider"].as_str())
+            .collect();
+        assert_eq!(
+            providers,
+            std::collections::BTreeSet::from(["claude-code", "codex"])
+        );
+
+        snatch_cmd()
+            .args([
+                "--config",
+                config.to_str().unwrap(),
+                "index",
+                "search",
+                "hello",
+                "--provider",
+                "codex",
+                "--session",
+                "0198aaaa",
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(format!(
+                "Session: codex:{CODEX_THREAD}"
+            )));
     }
 
     #[test]

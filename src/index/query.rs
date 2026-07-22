@@ -5,7 +5,7 @@
 //! projections by the same matcher used by direct CLI search.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, BinaryHeap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,13 @@ pub enum IndexedProviderSelection {
 pub struct IndexedSearchFilters {
     /// Complete qualified source-session keys.
     pub session_keys: Vec<String>,
+    /// Treat an empty `session_keys` list as an explicit empty selection
+    /// rather than as no session filter.
+    pub restrict_session_keys: bool,
+    /// The session-key restriction came from cross-session scope selection
+    /// (for example date/recent filtering), not a specifically selected
+    /// source session. Cross-session inherited/spawn policy still applies.
+    pub session_keys_are_scope_filter: bool,
     /// Complete qualified continuation-root keys.
     pub logical_roots: Vec<String>,
     /// Exact unified-project identities.
@@ -190,6 +197,23 @@ pub struct IndexedQueryCoverage {
     pub notes: Vec<String>,
 }
 
+/// Exact per-session cardinalities retained independently of the result page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexedSessionMatchSummary {
+    /// Source provider id.
+    pub provider: String,
+    /// Complete qualified source-session key.
+    pub session_key: String,
+    /// Project display path captured at build time.
+    pub project_path: String,
+    /// Source modification time captured by the session manifest.
+    pub source_modified_at: Option<DateTime<Utc>>,
+    /// Number of matching projected lines in this session.
+    pub matching_lines: usize,
+    /// Number of exact regex/fuzzy occurrences in this session.
+    pub occurrences: usize,
+}
+
 /// Exact results and distinct cardinalities. Normal result cardinality is one
 /// per matching line; `total_occurrences` preserves grep-count semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +232,8 @@ pub struct IndexedSearchResponse {
     pub limit: usize,
     /// Deterministically ordered result page.
     pub matches: Vec<IndexedSearchMatch>,
+    /// Exact per-session cardinalities, independent of pagination.
+    pub by_session: Vec<IndexedSessionMatchSummary>,
     /// Snapshot generation and coverage statement.
     pub coverage: IndexedQueryCoverage,
 }
@@ -470,6 +496,10 @@ impl ProviderSearchIndex {
             )
         })?;
         let manifests = self.session_manifests()?;
+        let source_modified: BTreeMap<_, _> = manifests
+            .iter()
+            .map(|manifest| (manifest.session_key.clone(), manifest.source_modified_at))
+            .collect();
         let partition_providers: BTreeSet<_> = manifests
             .iter()
             .map(|manifest| manifest.provider.clone())
@@ -481,7 +511,13 @@ impl ProviderSearchIndex {
             .collect();
         let requested = match &request.selection {
             IndexedProviderSelection::Explicit(values) => normalize_values(values, "provider")?,
-            IndexedProviderSelection::All => represented.iter().cloned().collect(),
+            IndexedProviderSelection::All => represented
+                .iter()
+                .cloned()
+                .chain(build.selected_providers.iter().cloned())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
         };
         if requested.is_empty() {
             return Err(SnatchError::IndexError(
@@ -501,6 +537,11 @@ impl ProviderSearchIndex {
                 )));
             }
         }
+        let searched: Vec<_> = requested
+            .iter()
+            .filter(|provider| represented.contains(*provider))
+            .cloned()
+            .collect();
 
         let session_keys = normalize_values(&request.filters.session_keys, "session")?;
         for session_key in &session_keys {
@@ -522,7 +563,8 @@ impl ProviderSearchIndex {
                 )));
             }
         }
-        let selected_session = !session_keys.is_empty();
+        let selected_session =
+            !session_keys.is_empty() && !request.filters.session_keys_are_scope_filter;
         let logical_roots = normalize_values(&request.filters.logical_roots, "logical_root")?;
         for logical_root in &logical_roots {
             let provider = provider_of(logical_root)?;
@@ -548,8 +590,10 @@ impl ProviderSearchIndex {
             Some(false)
         };
         let candidate_filter = IndexedEntryCandidateFilter {
-            providers: requested.clone(),
+            providers: searched.clone(),
             session_keys,
+            session_keys_match_none: request.filters.restrict_session_keys
+                && request.filters.session_keys.is_empty(),
             logical_roots,
             project_keys,
             message_types,
@@ -567,7 +611,7 @@ impl ProviderSearchIndex {
 
         let mut total_matches = 0_usize;
         let mut total_occurrences = 0_usize;
-        let mut sessions_matched = HashSet::new();
+        let mut by_session: BTreeMap<String, IndexedSessionMatchSummary> = BTreeMap::new();
         let mut retained = BinaryHeap::with_capacity(window.min(MAX_INDEXED_SEARCH_PAGE_SIZE));
         self.visit_candidate_entries(&candidate_filter, |entry| {
             if !entry_matches_filters(&entry, &request.filters)
@@ -577,20 +621,35 @@ impl ProviderSearchIndex {
             {
                 return Ok(());
             }
-            total_occurrences = total_occurrences.saturating_add(count_projection_matches(
-                &entry.projection,
-                &request.matcher,
-                request.scope,
-            ));
+            let entry_occurrences =
+                count_projection_matches(&entry.projection, &request.matcher, request.scope);
+            total_occurrences = total_occurrences.saturating_add(entry_occurrences);
             let provider = provider_of(&entry.session_key)?;
-            for matched in search_projection(
+            let entry_matches = search_projection(
                 &entry.projection,
                 &request.matcher,
                 request.scope,
                 request.context_lines,
-            ) {
+            );
+            if !entry_matches.is_empty() {
+                let summary = by_session
+                    .entry(entry.session_key.clone())
+                    .or_insert_with(|| IndexedSessionMatchSummary {
+                        provider: provider.clone(),
+                        session_key: entry.session_key.clone(),
+                        project_path: entry.project_path.clone(),
+                        source_modified_at: source_modified
+                            .get(&entry.session_key)
+                            .copied()
+                            .flatten(),
+                        matching_lines: 0,
+                        occurrences: 0,
+                    });
+                summary.matching_lines = summary.matching_lines.saturating_add(entry_matches.len());
+                summary.occurrences = summary.occurrences.saturating_add(entry_occurrences);
+            }
+            for matched in entry_matches {
                 total_matches = total_matches.saturating_add(1);
-                sessions_matched.insert(entry.session_key.clone());
                 retain_match(
                     &mut retained,
                     make_result(&entry, &provider, matched),
@@ -667,21 +726,23 @@ impl ProviderSearchIndex {
             || !skipped.is_empty()
             || !build.removal_coverage_complete;
         let matches = retained;
+        let by_session: Vec<_> = by_session.into_values().collect();
         Ok(IndexedSearchResponse {
             total_matches,
             total_occurrences,
-            sessions_matched: sessions_matched.len(),
+            sessions_matched: by_session.len(),
             returned: matches.len(),
             offset: request.offset,
             limit: request.limit,
             matches,
+            by_session,
             coverage: IndexedQueryCoverage {
                 schema_version: PROVIDER_INDEX_SCHEMA_VERSION,
                 generation: build.generation,
                 built_at: build.built_at,
                 requested_providers: requested.clone(),
                 represented_providers: represented.into_iter().collect(),
-                searched_providers: requested,
+                searched_providers: searched,
                 complete_providers: complete,
                 removal_coverage_complete: build.removal_coverage_complete,
                 incomplete,
@@ -865,6 +926,9 @@ mod tests {
         assert_eq!(first_page.total_matches, 2);
         assert_eq!(first_page.total_occurrences, 4);
         assert_eq!(first_page.returned, 1);
+        assert_eq!(first_page.by_session.len(), 1);
+        assert_eq!(first_page.by_session[0].matching_lines, 2);
+        assert_eq!(first_page.by_session[0].occurrences, 4);
         assert_eq!(first_page.matches[0].segment_index, 0);
         assert_eq!(first_page.matches[0].context_before, "😀 before");
         assert_eq!(first_page.matches[0].context_after, "世界 after");
@@ -882,6 +946,8 @@ mod tests {
         query.matcher = ExactSearchMatcher::fuzzy("ndle", false, 0);
         query.scope = SearchScope::Default;
         assert_eq!(index.query(&query).unwrap().total_matches, 2);
+        query.filters.restrict_session_keys = true;
+        assert_eq!(index.query(&query).unwrap().total_matches, 0);
     }
 
     #[test]
@@ -968,6 +1034,8 @@ mod tests {
         query.scope = SearchScope::Tools;
         query.filters = IndexedSearchFilters {
             session_keys: vec![session.to_string()],
+            restrict_session_keys: false,
+            session_keys_are_scope_filter: false,
             logical_roots: vec![session.to_string()],
             project_keys: vec!["project:alpha".to_string()],
             project_contains: Some("/WORK/ALPHA".to_string()),
@@ -1103,6 +1171,45 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("absent from the committed index"));
+    }
+
+    #[test]
+    fn all_reports_a_selected_provider_even_without_a_retained_partition() {
+        let dir = tempdir().unwrap();
+        let index = ProviderSearchIndex::open(dir.path().join("index")).unwrap();
+        let alpha = key("alpha", "one");
+        let skipped = IndexedSkip {
+            provider: Some("beta".to_string()),
+            session_key: None,
+            reason: "details withheld".to_string(),
+        };
+        index
+            .apply_generation(
+                &[batch(
+                    &alpha,
+                    "g1",
+                    vec![entry(
+                        &alpha,
+                        0,
+                        SearchSegmentKind::AssistantText,
+                        "needle alpha",
+                    )],
+                )],
+                &[],
+                &build("g1", &["alpha", "beta"], &["alpha"], vec![skipped]),
+            )
+            .unwrap();
+
+        let mut query = request("alpha", "needle");
+        query.selection = IndexedProviderSelection::All;
+        let result = index.query(&query).unwrap();
+
+        assert_eq!(result.total_matches, 1);
+        assert_eq!(result.coverage.requested_providers, vec!["alpha", "beta"]);
+        assert_eq!(result.coverage.represented_providers, vec!["alpha"]);
+        assert_eq!(result.coverage.searched_providers, vec!["alpha"]);
+        assert_eq!(result.coverage.skipped.len(), 1);
+        assert!(result.coverage.incomplete);
     }
 
     #[test]

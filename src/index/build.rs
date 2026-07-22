@@ -57,6 +57,8 @@ pub struct ProviderIndexBuildReport {
     pub sessions_unchanged: usize,
     /// Sessions parsed and replaced.
     pub sessions_replaced: usize,
+    /// Normalized entry documents written for replaced sessions.
+    pub entries_replaced: usize,
     /// Stale source-session partitions removed after complete inventory.
     pub sessions_removed: usize,
     /// Provider/session failures retained in the build manifest.
@@ -386,6 +388,7 @@ pub fn update_provider_index(
     let mut sessions_scanned = 0_usize;
     let mut sessions_unchanged = 0_usize;
     let mut sessions_replaced = 0_usize;
+    let mut entries_replaced = 0_usize;
 
     for project in &collected.projects {
         if options
@@ -503,6 +506,7 @@ pub fn update_provider_index(
             };
             // Writer failures are generation-fatal even under `all`: unlike
             // provider parse errors, Tantivy has no per-session savepoint.
+            entries_replaced = entries_replaced.saturating_add(batch.entries.len());
             transaction.replace(batch)?;
             sessions_replaced = sessions_replaced.saturating_add(1);
         }
@@ -555,6 +559,7 @@ pub fn update_provider_index(
         sessions_scanned,
         sessions_unchanged,
         sessions_replaced,
+        entries_replaced,
         sessions_removed,
         skipped: skipped_count,
         warnings: warning_count,

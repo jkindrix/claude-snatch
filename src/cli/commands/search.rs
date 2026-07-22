@@ -19,6 +19,10 @@ use crate::analysis::search::{
 use crate::cli::{Cli, OutputFormat, SearchArgs};
 use crate::discovery::Session;
 use crate::error::{Result, SnatchError};
+use crate::index::provider::{IndexedSessionManifest, ProviderSearchIndex};
+use crate::index::query::{
+    IndexedSearchFilters, IndexedSearchOrder, IndexedSearchRequest, IndexedSearchResponse,
+};
 use crate::model::{ContentBlock, LogEntry};
 
 /// (project_path, match_count, last_modified) for a session's search matches.
@@ -664,8 +668,411 @@ fn output_batch_breakdown(
 
 // ─── Main entry point ───────────────────────────────────────────────────────
 
+fn validate_indexed_args(args: &SearchArgs) -> Result<()> {
+    let SearchArgs {
+        pattern: _,
+        provider: _,
+        project: _,
+        session: _,
+        ignore_case: _,
+        thinking: _,
+        thinking_only: _,
+        tools: _,
+        all: _,
+        context: _,
+        limit: _,
+        no_limit,
+        files_only: _,
+        count: _,
+        message_type: _,
+        model: _,
+        tool_name: _,
+        errors,
+        fuzzy: _,
+        fuzzy_threshold: _,
+        min_tokens: _,
+        max_tokens: _,
+        git_branch: _,
+        sort: _,
+        patterns_tsv,
+        since: _,
+        until: _,
+        recent: _,
+        match_only: _,
+        exclude: _,
+        with_date,
+        no_subagents: _,
+        aggregate_by_session,
+        breakdown,
+        phase,
+        show_uuid,
+    } = args;
+    super::helpers::refuse_unsupported_flags(
+        "provider-index search",
+        &[
+            ("multiple patterns", args.pattern.len() > 1),
+            ("--patterns-tsv", patterns_tsv.is_some()),
+            ("--no-limit", *no_limit),
+            ("--errors", *errors),
+            ("--breakdown", *breakdown),
+            ("--phase", phase.is_some()),
+            ("--show-uuid", *show_uuid),
+            (
+                "--with-date",
+                *with_date && !args.count && !*aggregate_by_session,
+            ),
+        ],
+    )
+}
+
+fn indexed_manifest_overlaps(
+    manifest: &IndexedSessionManifest,
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+) -> bool {
+    let start = manifest
+        .source_started_at
+        .or(manifest.source_ended_at)
+        .or(manifest.source_modified_at);
+    let end = manifest
+        .source_ended_at
+        .or(manifest.source_started_at)
+        .or(manifest.source_modified_at);
+    let (Some(start), Some(end)) = (start, end) else {
+        return since.is_none() && until.is_none();
+    };
+    let after_start = match since {
+        Some(bound) => end >= bound,
+        None => true,
+    };
+    let before_end = match until {
+        Some(bound) => start <= bound,
+        None => true,
+    };
+    after_start && before_end
+}
+
+fn indexed_session_filter(
+    index: &ProviderSearchIndex,
+    selection: &crate::provider::registry::ProviderSelection,
+    args: &SearchArgs,
+) -> Result<(Vec<String>, bool, bool)> {
+    let resolved_session = args
+        .session
+        .as_deref()
+        .map(|reference| super::index::resolve_indexed_session(index, selection, reference))
+        .transpose()?;
+    let restrict = resolved_session.is_some()
+        || args.since.is_some()
+        || args.until.is_some()
+        || args.recent.is_some();
+    if !restrict {
+        return Ok((Vec::new(), false, false));
+    }
+    let since = args
+        .since
+        .as_deref()
+        .map(super::parse_date_filter)
+        .transpose()?
+        .map(DateTime::<Utc>::from);
+    let until = args
+        .until
+        .as_deref()
+        .map(super::parse_date_filter)
+        .transpose()?
+        .map(DateTime::<Utc>::from);
+    let selected = super::index::selected_provider_names(selection);
+    let project = args.project.as_ref().map(|value| value.to_lowercase());
+    let mut manifests: Vec<_> = index
+        .session_manifests()?
+        .into_iter()
+        .filter(|manifest| match &selected {
+            Some(providers) => providers.contains(&manifest.provider),
+            None => true,
+        })
+        .filter(|manifest| match &resolved_session {
+            Some(session) => manifest.session_key == *session,
+            None => true,
+        })
+        .filter(|manifest| {
+            resolved_session.is_some()
+                || match &project {
+                    Some(needle) => {
+                        manifest.project_path.to_lowercase().contains(needle)
+                            || manifest.project_key.to_lowercase().contains(needle)
+                    }
+                    None => true,
+                }
+        })
+        .filter(|manifest| indexed_manifest_overlaps(manifest, since, until))
+        .collect();
+    if let Some(limit) = args.recent {
+        manifests.sort_by(|left, right| {
+            right
+                .source_modified_at
+                .cmp(&left.source_modified_at)
+                .then_with(|| left.session_key.cmp(&right.session_key))
+        });
+        manifests.truncate(limit);
+    }
+    let mut keys: Vec<_> = manifests
+        .into_iter()
+        .map(|manifest| manifest.session_key)
+        .collect();
+    keys.sort();
+    keys.dedup();
+    let scope_filter = resolved_session.is_none() || keys.is_empty();
+    Ok((keys, true, scope_filter))
+}
+
+fn indexed_matcher(args: &SearchArgs) -> Result<ExactSearchMatcher> {
+    if args.pattern.len() != 1 || args.pattern[0].trim().is_empty() {
+        return Err(SnatchError::InvalidArgument {
+            name: "pattern".to_string(),
+            reason: "provider-index search requires exactly one non-empty pattern".to_string(),
+        });
+    }
+    if args.fuzzy {
+        return Ok(ExactSearchMatcher::fuzzy(
+            &args.pattern[0],
+            args.ignore_case,
+            args.fuzzy_threshold,
+        ));
+    }
+    ExactSearchMatcher::regex(&args.pattern[0], args.ignore_case).map_err(|error| {
+        SnatchError::InvalidArgument {
+            name: "pattern".to_string(),
+            reason: error.to_string(),
+        }
+    })
+}
+
+fn output_indexed_coverage_warning(cli: &Cli, response: &IndexedSearchResponse) {
+    if response.coverage.incomplete && !cli.quiet {
+        eprintln!(
+            "Warning: indexed coverage is incomplete for generation {}",
+            response.coverage.generation
+        );
+    }
+}
+
+fn output_indexed_summary(
+    cli: &Cli,
+    args: &SearchArgs,
+    response: &IndexedSearchResponse,
+) -> Result<()> {
+    let use_occurrences = args.count;
+    let total = if use_occurrences {
+        response.total_occurrences
+    } else {
+        response.total_matches
+    };
+    let mut summaries = response.by_session.clone();
+    summaries.sort_by(|left, right| {
+        let left_count = if use_occurrences {
+            left.occurrences
+        } else {
+            left.matching_lines
+        };
+        let right_count = if use_occurrences {
+            right.occurrences
+        } else {
+            right.matching_lines
+        };
+        right_count
+            .cmp(&left_count)
+            .then_with(|| left.session_key.cmp(&right.session_key))
+    });
+
+    match cli.effective_output() {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "total": total,
+                    "count_basis": if use_occurrences { "occurrences" } else { "matching_lines" },
+                    "by_session": summaries,
+                    "coverage": response.coverage,
+                }))?
+            );
+        }
+        _ if cli.quiet && args.count => println!("{total}"),
+        _ => {
+            for summary in &summaries {
+                let count = if use_occurrences {
+                    summary.occurrences
+                } else {
+                    summary.matching_lines
+                };
+                if args.with_date {
+                    let date = summary
+                        .source_modified_at
+                        .map(|value| value.format("%Y-%m-%d").to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    println!(
+                        "{} ({}) [{}]:{}",
+                        summary.session_key, summary.project_path, date, count
+                    );
+                } else {
+                    println!(
+                        "{} ({}):{}",
+                        summary.session_key, summary.project_path, count
+                    );
+                }
+            }
+            if summaries.len() > 1 {
+                println!();
+                println!("Total: {total}");
+            }
+        }
+    }
+    output_indexed_coverage_warning(cli, response);
+    Ok(())
+}
+
+fn output_indexed_files(
+    cli: &Cli,
+    args: &SearchArgs,
+    response: &IndexedSearchResponse,
+) -> Result<()> {
+    let mut summaries = response.by_session.clone();
+    summaries.sort_by(|left, right| {
+        right
+            .source_modified_at
+            .cmp(&left.source_modified_at)
+            .then_with(|| left.session_key.cmp(&right.session_key))
+    });
+    let total = summaries.len();
+    summaries.truncate(args.limit);
+    match cli.effective_output() {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "total_sessions": total,
+                "sessions": summaries,
+                "coverage": response.coverage,
+            }))?
+        ),
+        _ => {
+            for summary in &summaries {
+                println!("{}", summary.session_key);
+            }
+            if total > summaries.len() && !cli.quiet {
+                eprintln!(
+                    "Showing {} matching sessions (limit: {})",
+                    summaries.len(),
+                    args.limit
+                );
+            }
+        }
+    }
+    output_indexed_coverage_warning(cli, response);
+    Ok(())
+}
+
+fn output_indexed_match_only(cli: &Cli, response: &IndexedSearchResponse) -> Result<()> {
+    match cli.effective_output() {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "total_matches": response.total_matches,
+                "matches": response.matches.iter().map(|hit| &hit.matched_text).collect::<Vec<_>>(),
+                "coverage": response.coverage,
+            }))?
+        ),
+        _ => {
+            for hit in &response.matches {
+                println!("{}", hit.matched_text);
+            }
+        }
+    }
+    output_indexed_coverage_warning(cli, response);
+    Ok(())
+}
+
+fn run_indexed(cli: &Cli, args: &SearchArgs) -> Result<()> {
+    validate_indexed_args(args)?;
+    let selection = if args.provider.is_empty() {
+        let reference = args
+            .session
+            .as_deref()
+            .ok_or_else(|| SnatchError::InvalidArgument {
+                name: "provider".to_string(),
+                reason: "provider-index search requires --provider or a qualified session"
+                    .to_string(),
+            })?;
+        let key: crate::provider::LogicalSessionKey =
+            reference
+                .parse()
+                .map_err(|reason: String| SnatchError::InvalidArgument {
+                    name: "session".to_string(),
+                    reason,
+                })?;
+        crate::provider::registry::ProviderSelection::Explicit(vec![key.provider])
+    } else {
+        super::index::provider_selection(&args.provider)?
+    };
+    let index = ProviderSearchIndex::open_read_only(super::index::index_path(cli))?;
+    let (session_keys, restrict_session_keys, session_keys_are_scope_filter) =
+        indexed_session_filter(&index, &selection, args)?;
+    let exclude = args
+        .exclude
+        .as_deref()
+        .map(|pattern| ExactSearchMatcher::regex(pattern, args.ignore_case))
+        .transpose()
+        .map_err(|error| SnatchError::InvalidArgument {
+            name: "exclude".to_string(),
+            reason: error.to_string(),
+        })?;
+    let summary_only = args.files_only || args.count || args.aggregate_by_session;
+    let response = index.query(&IndexedSearchRequest {
+        selection: super::index::indexed_selection(&selection),
+        matcher: indexed_matcher(args)?,
+        exclude,
+        scope: BatchScope::from_search_args(args).search_scope(),
+        filters: IndexedSearchFilters {
+            session_keys,
+            restrict_session_keys,
+            session_keys_are_scope_filter,
+            project_contains: args.project.clone(),
+            message_types: args.message_type.iter().cloned().collect(),
+            model_contains: args.model.clone(),
+            tool_name_contains: args.tool_name.clone(),
+            git_branch_contains: args.git_branch.clone(),
+            min_processed_tokens: args.min_tokens,
+            max_processed_tokens: args.max_tokens,
+            include_spawned: !args.no_subagents,
+            ..Default::default()
+        },
+        context_lines: args.context,
+        order: if args.sort {
+            IndexedSearchOrder::Relevance
+        } else {
+            IndexedSearchOrder::Source
+        },
+        offset: 0,
+        limit: if summary_only { 0 } else { args.limit },
+    })?;
+    if args.files_only {
+        output_indexed_files(cli, args, &response)
+    } else if args.aggregate_by_session || args.count {
+        output_indexed_summary(cli, args, &response)
+    } else if args.match_only {
+        output_indexed_match_only(cli, &response)
+    } else {
+        super::index::output_search_response(cli, &response)
+    }
+}
+
 /// Run the search command.
 pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
+    let qualified_session = args
+        .session
+        .as_deref()
+        .is_some_and(|reference| super::helpers::provider_registry(cli).looks_qualified(reference));
+    if !args.provider.is_empty() || qualified_session {
+        return run_indexed(cli, args);
+    }
     // ── TSV batch mode ──────────────────────────────────────────────────
     // Design note: --patterns-tsv changes search's semantics from "find and display results"
     // to "batch count across heterogeneous queries." This is coherent for counting but may not

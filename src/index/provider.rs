@@ -139,6 +139,23 @@ pub struct ProviderIndexBuildManifest {
     pub warnings: Vec<IndexedSkip>,
 }
 
+/// Statistics for the committed provider-index snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProviderIndexStats {
+    /// Current provider-index schema.
+    pub schema_version: u64,
+    /// Total live Tantivy documents, including manifests.
+    pub document_count: u64,
+    /// Number of indexed source-session partitions.
+    pub session_count: usize,
+    /// Number of normalized entry documents across those partitions.
+    pub entry_count: usize,
+    /// Index size on disk in bytes.
+    pub size_bytes: u64,
+    /// Latest committed build, when one exists.
+    pub build: Option<ProviderIndexBuildManifest>,
+}
+
 fn validate_indexed_records(
     generation: &str,
     label: &str,
@@ -853,7 +870,7 @@ pub struct ProviderSearchIndex {
     index: Index,
     fields: ProviderIndexFields,
     reader: IndexReader,
-    writer: Arc<RwLock<IndexWriter>>,
+    writer: Option<Arc<RwLock<IndexWriter>>>,
     path: PathBuf,
 }
 
@@ -864,6 +881,7 @@ pub struct ProviderSearchIndex {
 pub(crate) struct IndexedEntryCandidateFilter {
     pub providers: Vec<String>,
     pub session_keys: Vec<String>,
+    pub session_keys_match_none: bool,
     pub logical_roots: Vec<String>,
     pub project_keys: Vec<String>,
     pub message_types: Vec<String>,
@@ -1053,12 +1071,49 @@ impl Drop for ProviderIndexTransaction<'_> {
 }
 
 impl ProviderSearchIndex {
-    /// Open or create a provider index. Existing incompatible schemas are
-    /// rejected without mutation and require an explicit rebuild.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
+    /// Default path shared with the legacy search index. Opening an old schema
+    /// is refused; `snatch index rebuild` performs the explicit replacement.
+    #[must_use]
+    pub fn default_index_dir() -> PathBuf {
+        directories::ProjectDirs::from("", "", "claude-snatch")
+            .map(|directories| directories.cache_dir().to_path_buf())
+            .unwrap_or_else(|| PathBuf::from(".claude-snatch-cache"))
+            .join("search-index")
+    }
+
+    fn open_with_access(path: &Path, create: bool, writable: bool) -> Result<Self> {
         refuse_rebuild_in_progress(path)?;
-        ensure_index_directory(path)?;
+        if create {
+            ensure_index_directory(path)?;
+        } else {
+            match std::fs::symlink_metadata(path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(SnatchError::IndexError(format!(
+                        "refusing provider index directory symlink: {}",
+                        path.display()
+                    )));
+                }
+                Ok(metadata) if !metadata.is_dir() => {
+                    return Err(SnatchError::IndexError(format!(
+                        "provider index path is not a directory: {}",
+                        path.display()
+                    )));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(SnatchError::IndexError(format!(
+                        "provider search index is not built at {}; run 'snatch index build'",
+                        path.display()
+                    )));
+                }
+                Err(error) => {
+                    return Err(SnatchError::io(
+                        format!("failed to inspect provider index path: {}", path.display()),
+                        error,
+                    ));
+                }
+            }
+        }
         let expected = build_schema();
         let index = if path.join("meta.json").exists() {
             let index = Index::open_in_dir(path).map_err(|error| {
@@ -1072,15 +1127,22 @@ impl ProviderSearchIndex {
                 )));
             }
             index
-        } else {
+        } else if create {
             Index::create_in_dir(path, expected.clone()).map_err(|error| {
                 SnatchError::IndexError(format!("failed to create provider index: {error}"))
             })?
+        } else {
+            return Err(SnatchError::IndexError(format!(
+                "provider search index is not built at {}; run 'snatch index build'",
+                path.display()
+            )));
         };
         // Tighten an existing current-schema directory before opening a
         // writer that may create lock/segment files. Legacy schemas return
         // above without any permission or content mutation.
-        secure_index_storage(path)?;
+        if writable {
+            secure_index_storage(path)?;
+        }
         let schema = index.schema();
         let fields = ProviderIndexFields::from_schema(&schema)?;
         let reader = index
@@ -1090,17 +1152,40 @@ impl ProviderSearchIndex {
             .map_err(|error| {
                 SnatchError::IndexError(format!("failed to create provider index reader: {error}"))
             })?;
-        let writer = index.writer(WRITER_MEMORY_BYTES).map_err(|error| {
-            SnatchError::IndexError(format!("failed to create provider index writer: {error}"))
-        })?;
-        // Cover lock files created while constructing the writer as well.
-        secure_index_storage(path)?;
+        let writer = if writable {
+            let writer = index.writer(WRITER_MEMORY_BYTES).map_err(|error| {
+                SnatchError::IndexError(format!("failed to create provider index writer: {error}"))
+            })?;
+            // Cover lock files created while constructing the writer as well.
+            secure_index_storage(path)?;
+            Some(Arc::new(RwLock::new(writer)))
+        } else {
+            None
+        };
         Ok(Self {
             index,
             fields,
             reader,
-            writer: Arc::new(RwLock::new(writer)),
+            writer,
             path: path.to_path_buf(),
+        })
+    }
+
+    /// Open or create a writable provider index. Existing incompatible
+    /// schemas are rejected without mutation and require an explicit rebuild.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_access(path.as_ref(), true, true)
+    }
+
+    /// Open an existing provider index without acquiring Tantivy's writer
+    /// lock or creating storage as a query side effect.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_access(path.as_ref(), false, false)
+    }
+
+    fn writer(&self) -> Result<&Arc<RwLock<IndexWriter>>> {
+        self.writer.as_ref().ok_or_else(|| {
+            SnatchError::IndexError("provider search index was opened read-only".to_string())
         })
     }
 
@@ -1114,6 +1199,46 @@ impl ProviderSearchIndex {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.reader.searcher().num_docs() == 0
+    }
+
+    /// Snapshot statistics without consulting provider sources.
+    pub fn stats(&self) -> Result<ProviderIndexStats> {
+        let manifests = self.session_manifests()?;
+        let entry_count = manifests.iter().fold(0_usize, |total, manifest| {
+            total.saturating_add(manifest.entry_count)
+        });
+        let size_bytes = walkdir::WalkDir::new(&self.path)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| entry.metadata().map_or(0, |metadata| metadata.len()))
+            .fold(0_u64, u64::saturating_add);
+        Ok(ProviderIndexStats {
+            schema_version: PROVIDER_INDEX_SCHEMA_VERSION,
+            document_count: self.reader.searcher().num_docs(),
+            session_count: manifests.len(),
+            entry_count,
+            size_bytes,
+            build: self.build_manifest()?,
+        })
+    }
+
+    /// Clear the current provider-index schema and publish the empty snapshot.
+    pub fn clear(&self) -> Result<()> {
+        let mut writer = self.writer()?.write();
+        writer.delete_all_documents().map_err(|error| {
+            SnatchError::IndexError(format!("failed to clear provider index: {error}"))
+        })?;
+        writer.commit().map_err(|error| {
+            SnatchError::IndexError(format!("failed to commit cleared provider index: {error}"))
+        })?;
+        drop(writer);
+        self.reader.reload().map_err(|error| {
+            SnatchError::IndexError(format!("failed to reload cleared provider index: {error}"))
+        })?;
+        secure_index_storage(&self.path)?;
+        Ok(())
     }
 
     fn base_document(&self, kind: &str, provider: &str, session_key: &str) -> TantivyDocument {
@@ -1213,7 +1338,7 @@ impl ProviderSearchIndex {
         }
         Ok(ProviderIndexTransaction {
             index: self,
-            writer: Some(self.writer.write()),
+            writer: Some(self.writer()?.write()),
             generation: generation.to_string(),
             selected,
             batch_keys: BTreeSet::new(),
@@ -1288,7 +1413,7 @@ impl ProviderSearchIndex {
             )));
         }
 
-        let mut writer = self.writer.write();
+        let mut writer = self.writer()?.write();
         let apply = (|| -> Result<()> {
             for key in batch_keys.iter().chain(removed_keys.iter()) {
                 writer.delete_term(Term::from_field_text(self.fields.session_key, key));
@@ -1422,6 +1547,12 @@ impl ProviderSearchIndex {
             if let Some(query) = Self::exact_terms(field, values) {
                 required.push(query);
             }
+        }
+        if filter.session_keys_match_none {
+            required.push(Box::new(TermQuery::new(
+                Term::from_field_text(self.fields.session_key, ""),
+                IndexRecordOption::Basic,
+            )));
         }
         if let Some(spawned) = filter.spawned {
             required.push(Box::new(TermQuery::new(
@@ -1857,6 +1988,34 @@ mod tests {
             .iter()
             .all(|entry| entry.session_key == sibling_key));
         assert!(!index.is_empty(), "the build manifest remains committed");
+    }
+
+    #[test]
+    fn read_only_open_neither_contends_for_the_writer_nor_permits_mutation() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("index");
+        let writable = ProviderSearchIndex::open(&path).unwrap();
+        writable
+            .apply_generation(
+                &[fake_batch("generation-1")],
+                &[],
+                &build_manifest("generation-1"),
+            )
+            .unwrap();
+
+        // The writable handle still owns Tantivy's writer lock. A read-only
+        // query handle must nevertheless open and see the committed snapshot.
+        let read_only = ProviderSearchIndex::open_read_only(&path).unwrap();
+        assert_eq!(read_only.session_manifests().unwrap().len(), 1);
+        assert!(read_only
+            .clear()
+            .unwrap_err()
+            .to_string()
+            .contains("read-only"));
+
+        let absent = dir.path().join("absent");
+        assert!(ProviderSearchIndex::open_read_only(&absent).is_err());
+        assert!(!absent.exists(), "a read-only open must not create storage");
     }
 
     #[cfg(unix)]

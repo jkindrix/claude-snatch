@@ -976,6 +976,11 @@ pub struct SearchArgs {
     /// Search pattern(s) (regex supported). Multiple patterns run in a single pass.
     pub pattern: Vec<String>,
 
+    /// Search a committed provider-index snapshot. Omit to preserve the
+    /// classic direct Claude search path; use `all` for represented providers.
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
+
     /// Search in specific project.
     #[arg(short = 'p', long)]
     pub project: Option<String>,
@@ -1510,6 +1515,11 @@ pub enum IndexSubcommand {
 /// Arguments for index build command.
 #[derive(Debug, Parser)]
 pub struct IndexBuildArgs {
+    /// Provider(s) to index. Defaults to claude-code; use `all` for every
+    /// available provider with partial failures recorded.
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
+
     /// Only index sessions from specific project.
     #[arg(short = 'p', long)]
     pub project: Option<String>,
@@ -1518,6 +1528,11 @@ pub struct IndexBuildArgs {
 /// Arguments for index rebuild command.
 #[derive(Debug, Parser)]
 pub struct IndexRebuildArgs {
+    /// Provider(s) to rebuild. Defaults to claude-code; use `all` for every
+    /// available provider. Rebuild requires complete coverage.
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
+
     /// Only rebuild sessions from specific project.
     #[arg(short = 'p', long)]
     pub project: Option<String>,
@@ -1528,6 +1543,11 @@ pub struct IndexRebuildArgs {
 pub struct IndexSearchArgs {
     /// Search query.
     pub query: String,
+
+    /// Indexed provider partition(s). Defaults to claude-code; use `all` for
+    /// every represented partition.
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
 
     /// Filter by message type.
     #[arg(short = 't', long = "type")]
@@ -1548,6 +1568,34 @@ pub struct IndexSearchArgs {
     /// Include thinking blocks.
     #[arg(long)]
     pub thinking: bool,
+
+    /// Case-insensitive regex or fuzzy matching.
+    #[arg(short = 'i', long)]
+    pub ignore_case: bool,
+
+    /// Enable fuzzy matching.
+    #[arg(short = 'f', long)]
+    pub fuzzy: bool,
+
+    /// Minimum fuzzy score (0-100).
+    #[arg(long, default_value = "60")]
+    pub fuzzy_threshold: u8,
+
+    /// Result offset in deterministic order.
+    #[arg(long, default_value = "0")]
+    pub offset: usize,
+
+    /// Same-scope exclusion regex.
+    #[arg(long)]
+    pub exclude: Option<String>,
+
+    /// Sort by exact matcher relevance.
+    #[arg(long)]
+    pub sort: bool,
+
+    /// Context lines retained inside each projected segment.
+    #[arg(short = 'C', long, default_value = "2")]
+    pub context: usize,
 
     /// Maximum number of results.
     #[arg(short = 'n', long)]

@@ -2495,7 +2495,8 @@ the skipped/stale reasons. Query execution never performs full provider
 rediscovery merely to decide freshness; responses identify the index
 generation/build time and its complete/partial coverage. A missing explicitly
 requested indexed provider is an error. `all` searches the represented
-partitions and reports incomplete/stale coverage rather than silently claiming
+partitions, retains selected-but-unrepresented providers in requested/skipped
+coverage, and reports incomplete/stale coverage rather than silently claiming
 a live exhaustive union.
 
 Exact CLI/MCP regex and fuzzy semantics run over the stored ordered segments.
@@ -2601,7 +2602,34 @@ session absent from the snapshot is an error. Adversarial tests cover repeated
 emissions, Unicode context, every typed filter class, inherited/spawn policy,
 partial-build retained partitions, missing selections, deterministic
 pagination/relevance, same-scope exclusion, and deleted rows from a replaced
-partition. Unit 4 (provider-aware CLI `index`/`search` routing) is next.
+partition.
+
+Unit 4 is implemented at the CLI boundary. The `index` command now operates on
+the provider schema at the existing configured index path: build defaults to
+`claude-code`, repeated `--provider` and `all` use the registry's established
+atomic/partial contract, filtered builds remain upsert-only, and rebuild
+requires complete unfiltered coverage before replacing an incompatible legacy
+schema. Status exposes schema/path/document/session/entry/build coverage;
+clear publishes an empty provider snapshot. Query/status opens are read-only:
+they neither create storage nor acquire Tantivy's 50-MiB writer lock, so
+concurrent snapshot readers do not contend with each other.
+
+Flagless `snatch search` remains on the classic direct-Claude path. An explicit
+`--provider` or registered qualified session routes to the committed index and
+never performs provider inventory/parsing. Regex/fuzzy, case, scope, context,
+project/session/model/tool/branch/token/date/recent filters, exclusion,
+ordering, count, files-only, aggregation, and match-only are implemented over
+the exact engine. Per-session line/occurrence summaries are computed
+independently of page retention, so aggregation cannot be reconstructed from a
+truncated page. Cross-session date/recent restrictions remain cross-session
+for inherited/spawn policy; only a specifically selected source session gains
+content-complete treatment. Batch/multi-pattern, no-limit, generic `--errors`,
+phase, and native UUID presentation are explicitly refused rather than
+ignored until their provider-neutral contracts exist. Tests build real
+temporary Claude and cross-provider indexes, exercise qualified-prefix and
+`all` queries, verify flagless search remains classic, prove legacy schemas
+require explicit rebuild, and hold a writable handle while opening a
+read-only query handle. Unit 5 (MCP `search_sessions` routing) is next.
 
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".
