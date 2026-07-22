@@ -751,6 +751,61 @@ fn test_export_produces_output() {
         .stdout(predicate::str::contains("Hello"));
 }
 
+#[test]
+fn export_can_disable_default_timestamps_and_usage() {
+    let tmp = setup_fixture_dir();
+
+    // Positive control: both default-on sections are present in the fixture.
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["export", SESSION_ID])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2025-01-15"))
+        .stdout(predicate::str::contains("## Statistics"))
+        .stdout(predicate::str::contains("*Tokens:"));
+
+    // Each explicit negative flag must remove its whole output class without
+    // suppressing the conversation body.
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["export", SESSION_ID, "--no-timestamps", "--no-usage"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Hello, Claude!"))
+        .stdout(predicate::str::contains("2025-01-15").not())
+        .stdout(predicate::str::contains("## Statistics").not())
+        .stdout(predicate::str::contains("*Tokens:").not());
+
+    let qualified = format!("claude-code:{SESSION_ID}");
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["export", &qualified, "--no-timestamps", "--no-usage"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Hello, Claude!"))
+        .stdout(predicate::str::contains("2025-01-15").not())
+        .stdout(predicate::str::contains("## Statistics").not())
+        .stdout(predicate::str::contains("*Tokens:").not());
+
+    // The flags also override the full normalized preset.
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "export",
+            SESSION_ID,
+            "--full",
+            "--no-timestamps",
+            "--no-usage",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Hello, Claude!"))
+        .stdout(predicate::str::contains("2025-01-15").not())
+        .stdout(predicate::str::contains("## Statistics").not())
+        .stdout(predicate::str::contains("*Tokens:").not());
+}
+
 /// Build a temp Claude dir holding a session whose user prompt contains a planted
 /// secret email, for end-to-end redaction tests.
 fn setup_secret_fixture_dir() -> TempDir {
@@ -3921,6 +3976,8 @@ fn provider_export_refuses_every_unsupported_flag_individually() {
         &["--no-tool-use"],
         &["--no-tool-results"],
         &["--no-images"],
+        &["--no-timestamps"],
+        &["--no-usage"],
         &["--system"],
         &["--only", "prompts"],
         &["--metadata"],

@@ -258,7 +258,7 @@ pub enum Commands {
     #[command(alias = "stat", display_order = 20)]
     Stats(StatsArgs),
 
-    /// Show a quick summary of Claude Code usage.
+    /// Show a quick summary of coding-agent usage.
     #[command(display_order = 21)]
     Summary(SummaryArgs),
 
@@ -798,9 +798,17 @@ pub struct ExportArgs {
     #[arg(long, default_value = "true")]
     pub timestamps: bool,
 
+    /// Exclude timestamps (overrides the on-by-default --timestamps).
+    #[arg(long = "no-timestamps", action = ArgAction::SetTrue)]
+    pub no_timestamps: bool,
+
     /// Include usage statistics.
     #[arg(long, default_value = "true")]
     pub usage: bool,
+
+    /// Exclude usage statistics (overrides the on-by-default --usage).
+    #[arg(long = "no-usage", action = ArgAction::SetTrue)]
+    pub no_usage: bool,
 
     /// Include metadata (UUIDs, etc.).
     #[arg(long)]

@@ -112,6 +112,12 @@ fn validate_raw_jsonl_compat(args: &ExportArgs) -> Result<()> {
     if args.no_images {
         bad.push("--no-images");
     }
+    if args.no_timestamps {
+        bad.push("--no-timestamps");
+    }
+    if args.no_usage {
+        bad.push("--no-usage");
+    }
     if args.redact.is_some() {
         bad.push("--redact");
     }
@@ -478,6 +484,8 @@ fn export_session_to_gist(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
     let (sidecar_count, sidecar_stats) = subagent_transcript_stats(&session);
     let options = if args.full {
         let mut opts = ExportOptions::full();
+        opts.include_timestamps = args.timestamps && !args.no_timestamps;
+        opts.include_usage = args.usage && !args.no_usage;
         opts.redaction = redaction;
         opts.redaction_preview = args.redact_preview;
         opts.only = only_filter;
@@ -490,9 +498,9 @@ fn export_session_to_gist(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
             include_tool_use: args.tool_use && !args.no_tool_use,
             include_tool_results: args.tool_results && !args.no_tool_results,
             include_system: args.system,
-            include_timestamps: args.timestamps,
+            include_timestamps: args.timestamps && !args.no_timestamps,
             relative_timestamps: false,
-            include_usage: args.usage,
+            include_usage: args.usage && !args.no_usage,
             include_metadata: args.metadata,
             include_images: args.images && !args.no_images,
             max_depth: None,
@@ -615,6 +623,8 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
     let (sidecar_count, sidecar_stats) = subagent_transcript_stats(&session);
     let options = if args.full {
         let mut opts = ExportOptions::full();
+        opts.include_timestamps = args.timestamps && !args.no_timestamps;
+        opts.include_usage = args.usage && !args.no_usage;
         opts.redaction = redaction;
         opts.redaction_preview = args.redact_preview;
         opts.only = only_filter;
@@ -627,9 +637,9 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
             include_tool_use: args.tool_use && !args.no_tool_use,
             include_tool_results: args.tool_results && !args.no_tool_results,
             include_system: args.system,
-            include_timestamps: args.timestamps,
+            include_timestamps: args.timestamps && !args.no_timestamps,
             relative_timestamps: false,
-            include_usage: args.usage,
+            include_usage: args.usage && !args.no_usage,
             include_metadata: args.metadata,
             include_images: args.images && !args.no_images,
             max_depth: None,
@@ -1259,8 +1269,8 @@ fn export_all_sessions_sqlite(cli: &Cli, args: &ExportArgs) -> Result<()> {
         include_tool_results: args.tool_results && !args.no_tool_results,
         include_images: args.images && !args.no_images,
         include_system: true,
-        include_usage: true,
-        include_timestamps: true,
+        include_usage: args.usage && !args.no_usage,
+        include_timestamps: args.timestamps && !args.no_timestamps,
         include_metadata: true,
         main_thread_only: false,
         redaction,
@@ -1644,6 +1654,8 @@ fn export_session(
     let (sidecar_count, sidecar_stats) = subagent_transcript_stats(&session);
     let options = if args.full {
         let mut opts = ExportOptions::full();
+        opts.include_timestamps = args.timestamps && !args.no_timestamps;
+        opts.include_usage = args.usage && !args.no_usage;
         opts.redaction = redaction;
         opts.redaction_preview = args.redact_preview;
         opts.only = only_filter;
@@ -1656,9 +1668,9 @@ fn export_session(
             include_tool_use: args.tool_use && !args.no_tool_use,
             include_tool_results: args.tool_results && !args.no_tool_results,
             include_system: args.system,
-            include_timestamps: args.timestamps,
+            include_timestamps: args.timestamps && !args.no_timestamps,
             relative_timestamps: false,
-            include_usage: args.usage,
+            include_usage: args.usage && !args.no_usage,
             include_metadata: args.metadata,
             include_images: args.images && !args.no_images,
             max_depth: None,
@@ -2478,7 +2490,9 @@ fn export_via_provider(cli: &Cli, args: &ExportArgs) -> Result<()> {
         system,
         only,
         timestamps,
+        no_timestamps,
         usage,
+        no_usage,
         metadata,
         main_thread,
         no_chain,
@@ -2524,7 +2538,9 @@ fn export_via_provider(cli: &Cli, args: &ExportArgs) -> Result<()> {
                 ("--system", *system),
                 ("--only", !only.is_empty()),
                 ("--timestamps=false", !*timestamps),
+                ("--no-timestamps", *no_timestamps),
                 ("--usage=false", !*usage),
+                ("--no-usage", *no_usage),
                 ("--metadata", *metadata),
                 ("--main-thread", *main_thread),
                 ("--no-chain", *no_chain),
@@ -2688,6 +2704,8 @@ fn normalized_provider_options(args: &ExportArgs) -> ExportOptions {
     let only = build_only_filter(&args.only);
     if args.full {
         let mut options = ExportOptions::full();
+        options.include_timestamps = args.timestamps && !args.no_timestamps;
+        options.include_usage = args.usage && !args.no_usage;
         options.redaction = redaction;
         options.redaction_preview = args.redact_preview;
         options.only = only;
@@ -2698,9 +2716,9 @@ fn normalized_provider_options(args: &ExportArgs) -> ExportOptions {
             include_tool_use: args.tool_use && !args.no_tool_use,
             include_tool_results: args.tool_results && !args.no_tool_results,
             include_system: args.system,
-            include_timestamps: args.timestamps,
+            include_timestamps: args.timestamps && !args.no_timestamps,
             relative_timestamps: false,
-            include_usage: args.usage,
+            include_usage: args.usage && !args.no_usage,
             include_metadata: args.metadata,
             include_images: args.images && !args.no_images,
             max_depth: None,
