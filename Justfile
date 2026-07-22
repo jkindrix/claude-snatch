@@ -3,7 +3,7 @@
 
 project_name := "claude-snatch"
 binary_name := "snatch"
-msrv := "1.75.0"
+msrv := "1.95"
 
 # Read version from Cargo.toml
 version := `grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/'`
@@ -158,7 +158,7 @@ ci-fast: fmt-check clippy check
 
 # MSRV check
 msrv-check:
-    rustup run {{msrv}} cargo check --all-features
+    rustup run {{msrv}} cargo check --all-features --locked
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Security
@@ -212,7 +212,7 @@ version:
     @echo "{{version}}"
 
 # Check release readiness
-release-check: ci security test-features
+release-check: ci security test-features msrv-check
     @echo "Release checks passed"
 
 # Check for clean working directory

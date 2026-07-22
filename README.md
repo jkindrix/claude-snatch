@@ -1,6 +1,6 @@
 # claude-snatch
 
-[![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 High-performance CLI and MCP tool for retrieving, analyzing, and exporting
@@ -463,7 +463,7 @@ and preserves provider-native records that do not yet have a normalized form:
 
 ### Requirements
 
-- Rust 1.75.0 or later
+- Rust 1.95.0 or later
 - Cargo
 
 ### Development Build
