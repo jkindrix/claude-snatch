@@ -1810,4 +1810,19 @@ fn project_collection_uses_one_bulk_inventory_not_per_session_resolution() {
     assert_eq!(calls.bulk.load(Ordering::SeqCst), 1);
     assert_eq!(calls.sessions.load(Ordering::SeqCst), 0);
     assert_eq!(calls.contexts.load(Ordering::SeqCst), 0);
+
+    let report = registry
+        .visit_filtered_parsed_project_sessions(
+            &selection,
+            crate::cache::global_cache(),
+            None,
+            false,
+            |_, _| false,
+            |_, _, _, _| panic!("descriptor filter must run before parsing"),
+        )
+        .expect("filtering every descriptor should not invoke parse");
+    assert!(report.warnings.is_empty());
+    assert_eq!(calls.bulk.load(Ordering::SeqCst), 2);
+    assert_eq!(calls.sessions.load(Ordering::SeqCst), 0);
+    assert_eq!(calls.contexts.load(Ordering::SeqCst), 0);
 }

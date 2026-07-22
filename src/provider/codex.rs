@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -39,6 +39,11 @@ const DEFAULT_MAX_COMPRESSED: u64 = 1 << 30; // 1 GiB
 /// zstd window_log_max: a PRACTICAL decoder-memory guard (2^27 = 128 MiB —
 /// zstd's own default refusal threshold), not the 2 GiB format ceiling.
 const WINDOW_LOG_MAX: u32 = 27;
+
+/// Bounded tail inspected for a cheap native activity-end timestamp during
+/// project inventory. Large/partial final records fall back honestly to the
+/// next earlier complete envelope or to other project-context evidence.
+const PROJECT_CONTEXT_TAIL_BYTES: u64 = 64 * 1024;
 
 /// Encode a path's native bytes as an injective, reversible locator string.
 ///
@@ -378,6 +383,56 @@ fn bump_vocab(map: &mut BTreeMap<String, u64>, dropped: &mut u64, truncated: &mu
     }
 }
 
+fn last_plain_envelope_timestamp(path: &Path) -> (Option<chrono::DateTime<chrono::Utc>>, bool) {
+    if path.extension().and_then(|extension| extension.to_str()) == Some("zst") {
+        return (None, false);
+    }
+    let Some(mut file) = File::open(path).ok() else {
+        return (None, false);
+    };
+    let Some(len) = file.metadata().ok().map(|metadata| metadata.len()) else {
+        return (None, false);
+    };
+    let tail_len = len.min(PROJECT_CONTEXT_TAIL_BYTES);
+    let start = len.saturating_sub(tail_len);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return (None, false);
+    }
+    let mut tail = Vec::with_capacity(tail_len as usize);
+    if file.read_to_end(&mut tail).is_err() {
+        return (None, false);
+    }
+    let lines: Vec<_> = tail.split(|byte| *byte == b'\n').collect();
+    let mut native_tail_unresolved = false;
+    for (index, line) in lines.iter().enumerate().rev() {
+        // A nonzero tail starts in the middle of a physical record. Never
+        // promote that partial prefix even if its suffix happens to parse.
+        if start > 0 && index == 0 {
+            continue;
+        }
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
+            native_tail_unresolved = true;
+            continue;
+        };
+        let Some(timestamp) = value.get("timestamp").and_then(serde_json::Value::as_str) else {
+            native_tail_unresolved = true;
+            continue;
+        };
+        if let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(timestamp) {
+            return (
+                Some(timestamp.with_timezone(&chrono::Utc)),
+                native_tail_unresolved,
+            );
+        }
+        native_tail_unresolved = true;
+    }
+    (None, native_tail_unresolved)
+}
+
 impl CodexProvider {
     /// Wrap a Codex home directory (`~/.codex` by default).
     pub fn new(codex_home: impl Into<PathBuf>) -> Self {
@@ -605,11 +660,11 @@ impl CodexProvider {
         &self,
         path: &Path,
     ) -> Result<super::project::SessionProjectContext, ProviderError> {
-        let metadata = std::fs::metadata(path)?;
-        let modified_at = metadata.modified().ok().map(chrono::DateTime::from);
+        let initial_metadata = std::fs::metadata(path)?;
+        let initial_modified = initial_metadata.modified().ok();
         let mut context = super::project::SessionProjectContext {
-            modified_at,
-            artifact_bytes: metadata.len(),
+            modified_at: initial_modified.map(chrono::DateTime::from),
+            artifact_bytes: initial_metadata.len(),
             ..Default::default()
         };
         // The child session's own session_meta is first even for the older
@@ -641,6 +696,21 @@ impl CodexProvider {
             }
             break;
         }
+        (context.ended_at, context.native_tail_unresolved) = last_plain_envelope_timestamp(path);
+        // Close the common inventory race where an append starts after the
+        // first stat but before/while the bounded reads. A changed source
+        // means the observed native tail is not a stable end; retain the
+        // latest mtime/size and let aggregate filters use their visibly
+        // counted conservative fallback. A write after this second stat is
+        // inherently concurrent with the snapshot and is handled on the next
+        // inventory pass.
+        let final_metadata = std::fs::metadata(path)?;
+        let final_modified = final_metadata.modified().ok();
+        if final_metadata.len() != initial_metadata.len() || final_modified != initial_modified {
+            context.native_tail_unresolved = true;
+        }
+        context.modified_at = final_modified.map(chrono::DateTime::from);
+        context.artifact_bytes = final_metadata.len();
         Ok(context)
     }
 
@@ -3163,6 +3233,28 @@ mod tests {
             sorted.sort();
             assert_eq!(ids, sorted, "artifact order must not follow read_dir");
         }
+    }
+
+    #[test]
+    fn project_context_uses_the_last_complete_plain_envelope_as_activity_end() {
+        let (_tmp, provider) = fixture();
+        let context = provider.project_context(&key(THREAD_A)).unwrap();
+        assert_eq!(
+            context.started_at.unwrap().to_rfc3339(),
+            "2026-07-16T23:39:21.575+00:00"
+        );
+        assert_eq!(
+            context.ended_at.unwrap().to_rfc3339(),
+            "2026-07-16T23:39:21.575+00:00"
+        );
+        assert!(context.native_tail_unresolved);
+
+        // Compressed inventory remains bounded: it does not decompress the
+        // whole artifact merely to obtain a tail timestamp.
+        let compressed = provider.project_context(&key(THREAD_B)).unwrap();
+        assert!(compressed.started_at.is_some());
+        assert!(compressed.ended_at.is_none());
+        assert!(!compressed.native_tail_unresolved);
     }
 
     #[cfg(unix)]

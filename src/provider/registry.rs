@@ -848,6 +848,50 @@ impl ProviderRegistry {
     where
         F: FnMut(&str, std::sync::Arc<super::ParsedSession>),
     {
+        self.visit_filtered_parsed_project_sessions(
+            selection,
+            cache,
+            project_filter,
+            include_subagents,
+            |_, _| true,
+            |project, session, _, parsed| {
+                let project_path = project
+                    .display_path
+                    .clone()
+                    .unwrap_or_else(|| project.identity.to_string());
+                let path = session.context.cwd.as_deref().unwrap_or(&project_path);
+                visit(path, parsed);
+            },
+        )
+    }
+
+    /// Stream only descriptor-matched sessions into a parsed-bundle visitor.
+    ///
+    /// `include` runs after project and typed-spawn filtering but before any
+    /// transcript is parsed. Aggregate consumers use this to apply cheap
+    /// native time/evidence filters without turning a bounded period query
+    /// into a full-corpus parse. The visitor also receives the typed
+    /// continuation root; forks retain their own root. Selection and
+    /// parse-failure behavior are the same as
+    /// [`Self::visit_parsed_project_sessions`].
+    pub fn visit_filtered_parsed_project_sessions<P, F>(
+        &self,
+        selection: &ProviderSelection,
+        cache: &crate::cache::CacheManager,
+        project_filter: Option<&str>,
+        include_subagents: bool,
+        mut include: P,
+        mut visit: F,
+    ) -> Result<ParsedProjectVisitReport, ProviderError>
+    where
+        P: FnMut(&super::project::UnifiedProject, &super::project::ProjectSession) -> bool,
+        F: FnMut(
+            &super::project::UnifiedProject,
+            &super::project::ProjectSession,
+            &super::LogicalSessionKey,
+            std::sync::Arc<super::ParsedSession>,
+        ),
+    {
         let collected = self.collect_project_union(selection)?;
         let atomic = matches!(selection, ProviderSelection::Explicit(_));
         let spawned: std::collections::BTreeSet<_> = collected
@@ -865,20 +909,29 @@ impl ProviderRegistry {
             if project_filter.is_some_and(|filter| !project.matches(filter)) {
                 continue;
             }
-            let project_path = project
-                .display_path
-                .clone()
-                .unwrap_or_else(|| project.identity.to_string());
+            let logical_roots: std::collections::BTreeMap<_, _> =
+                super::project::history_units(project, &collected.lineage)
+                    .into_iter()
+                    .flat_map(|unit| {
+                        let root = unit.root;
+                        unit.members
+                            .into_iter()
+                            .map(move |member| (member, root.clone()))
+                    })
+                    .collect();
             for session in &project.sessions {
                 let key = &session.descriptor.key;
                 if !include_subagents && spawned.contains(key) {
                     continue;
                 }
+                if !include(project, session) {
+                    continue;
+                }
                 let provider = self.get(&key.provider)?;
                 match streaming_parsed_session(cache, provider, &session.descriptor) {
                     Ok(parsed) => {
-                        let path = session.context.cwd.as_deref().unwrap_or(&project_path);
-                        visit(path, parsed);
+                        let logical_root = logical_roots.get(key).unwrap_or(key);
+                        visit(project, session, logical_root, parsed);
                     }
                     Err(error) if atomic => {
                         return Err(ProviderError::Other(format!(

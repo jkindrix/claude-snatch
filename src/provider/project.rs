@@ -31,6 +31,10 @@ pub struct SessionProjectContext {
     pub started_at: Option<DateTime<Utc>>,
     /// Last native event time, when cheaply available.
     pub ended_at: Option<DateTime<Utc>>,
+    /// The physical tail could not be resolved as a complete timestamped
+    /// native record. Aggregate period filters may conservatively consult
+    /// source modification time even when an earlier complete event exists.
+    pub native_tail_unresolved: bool,
     /// Source-artifact modification time.
     pub modified_at: Option<DateTime<Utc>>,
     /// Preferred source-artifact size.

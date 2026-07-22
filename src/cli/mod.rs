@@ -2678,6 +2678,11 @@ pub struct SummaryArgs {
     /// Default is 24 hours.
     #[arg(long, short = 'p', default_value = "24h")]
     pub period: String,
+
+    /// Source providers to summarize (repeatable; "all" = every installed
+    /// provider). Omit for the classic Claude-only response.
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
 }
 
 /// Arguments for the recent command.

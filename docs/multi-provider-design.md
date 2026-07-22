@@ -17,8 +17,8 @@ commands/tools are routed today. This section is the DURABLE roadmap: the
 tier framework, the deliberate deferrals with their rationale, and the
 architectural gaps — content worth keeping in git so the plan survives even
 if the registry is lost (see "Registry Blast Radius" in CLAUDE.md). The
-per-tool lists below are a **dated snapshot (audited through the recent-session
-inventory slice on 2026-07-22), not a live ledger** — consult goal
+per-tool lists below are a **dated snapshot (audited through the cross-session
+summary slice on 2026-07-22), not a live ledger** — consult goal
 #19 for current status rather than trusting these lists to stay in lock-step.
 
 Goal #18 (Codex ingest + normalization + core surfaces + Phase C/D) shipped
@@ -26,8 +26,8 @@ through commit `9031610`. Two honest framings of "how close to Claude↔Codex
 parity":
 - **By architectural effort** (ingest, normalize, core surfaces, the whole
   verification harness): ~70–75% — the hard, expensive part is done.
-- **By user-facing surface count:** 19 of 42 CLI commands route session data
-  through providers, 18 session-data commands remain unrouted, three
+- **By user-facing surface count:** 20 of 42 CLI commands route session data
+  through providers, 17 session-data commands remain unrouted, three
   registries are deliberately Claude-storage-scoped, and five commands are
   provider-independent. MCP has 13 routed tools, 3 unrouted tools, and 3
   deliberately Claude-storage-scoped registry tools. Raw command counts do
@@ -48,15 +48,16 @@ Provider-qualified and explicitly selected routes now cover CLI `digest`,
 plus MCP `get_tool_calls`, `get_session_digest`, `thread_topic`, session-mode
   `get_stats`, and `get_event_context`; CLI `diff` also resolves both targets
   independently through the provider seam; CLI `recent` now routes its
-  descriptor/lineage inventory without parsing transcripts.
+  descriptor/lineage inventory without parsing transcripts, and CLI `summary`
+  streams only descriptor-matched activity into its aggregate.
 The complete CLI audit is:
 
-- **Already routed (19):** `list`, `info`, `providers`, `doctor`, `lessons`,
+- **Already routed (20):** `list`, `info`, `providers`, `doctor`, `lessons`,
   `digest`, `thread`, `timeline`, `messages`, `chunks`, `file-history`,
   `file-evolution`, `stats`, `prompts`, `code`, `context`, `diff`, `recent`,
-  and `export`.
-- **Provider-neutral analysis/discovery candidates (5):** `pick`, `summary`,
-  `standup`, `health`, and `priorities`. These share
+  `summary`, and `export`.
+- **Provider-neutral analysis/discovery candidates (4):** `pick`, `standup`,
+  `health`, and `priorities`. These share
   canonical entries or descriptors,
   but project/union modes still need provider-qualified identity, lineage,
   partial-success, and missing-capability semantics; they are not all thin
@@ -2255,9 +2256,58 @@ metadata is intentionally absent until the tag store migration in P1.7.
 JSON provider output is wrapped with the pre-limit total, skipped providers,
 and project-context warnings; classic JSON remains its historical bare array.
 Tests pin typed continuation collapse, the flat view, partial `all` behavior,
-and a real-shape two-provider unified project. Later P1.4 analyses must not
-copy this descriptor-only contract: summary/health/priorities need separate
-rules for parsed evidence, inherited fork history, pricing, and registry scope.
+and a real-shape two-provider unified project. Other P1.4 analyses must not
+copy this descriptor-only contract: the summary route below adds parsed
+evidence/inherited-history/pricing rules, while health/priorities also need an
+explicit registry-scope contract.
+
+#### Cross-session summary routing (2026-07-22)
+
+`summary --provider ...` uses the project union's typed continuation roots and
+a pre-parse descriptor filter. The period means **logical sessions active in
+the period, with whole selected artifacts summarized**; it does not imply that
+tokens inside a long-running artifact were clipped exactly at the cutoff.
+Activity selection accepts native activity (final event, then start) inside the
+period. Source modification may decide selection only when no native end is
+available or the physical tail is unresolved; those conservative fallbacks are
+counted explicitly because they may represent compressed inventory, an active
+partial tail, or a recently copied cold artifact. A completed plain artifact's
+old native end is not made recent merely because the file was copied today.
+Missing activity time is included conservatively and reported. The provider
+registry owns the filtered streaming visitor so a 24h query does not parse the
+whole corpus before applying its cutoff.
+
+Codex plain-rollout project context now obtains native end time from the last
+complete envelope in a bounded 64 KiB tail read. It skips a truncated final
+record and uses the preceding complete record. Compressed cold storage is not
+decompressed merely for inventory; native start and source mtime remain bounded
+evidence, and the output states the period basis rather than presenting
+event-level precision it does not have.
+
+Summary session counts are continuation-collapsed logical identities;
+`session_descriptors_analyzed` exposes how many source sessions contributed.
+Spawned transcripts are excluded and fork-inherited entries are removed before
+analytics, preventing copied work from being counted twice. Project totals are
+keyed by unified project identity—not display path—so two repositories sharing
+a cwd remain distinct. The classic route's unrelated project-count defect was
+also fixed: `projects` now counts every project while `top_projects` remains a
+five-row display.
+
+Canonical usage is summed once from normalized entries. Pricing is evaluated
+under each provider's declared policy and then combined: mixed known/unpriced
+selection returns the known subtotal with `pricing_coverage: partial` plus the
+excluded providers/models; a wholly unpriced selection is unavailable, never
+zero. Provider inventory/lineage failures retain the atomic-explicit versus
+partial-but-reported-`all` contract, and per-session parse failures are surfaced
+as warnings under `all` rather than counted as analyzed sessions.
+
+The real 1-day union probe selected 26 logical sessions across 11 projects in
+2.19 seconds at roughly 312 MiB peak RSS on this machine; 11 logical sessions
+were selected through the visibly counted source-time fallback. A fixture pins
+the mixed-provider canonical totals (including cache reads without summing the
+cumulative observation twice), completed-native-tail cutoff, compressed and
+active-partial fallback reporting, fork-copy/spawn exclusion, partial-provider
+reporting, and the classic six-project/five-top-row distinction.
 
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".

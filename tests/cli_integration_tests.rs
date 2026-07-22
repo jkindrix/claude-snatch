@@ -813,6 +813,75 @@ fn test_stats_json_contains_token_counts() {
 }
 
 #[test]
+fn test_summary_counts_every_project_not_only_the_top_five() {
+    let tmp = TempDir::new().unwrap();
+    for index in 0..6_u8 {
+        let project = format!("/tmp/summary-project-{index}");
+        let project_dir = tmp
+            .path()
+            .join("projects")
+            .join(encode_project_path(&project));
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let session_id = format!("00000000-0000-0000-0000-{index:012}");
+        let entry = serde_json::json!({
+            "type": "user",
+            "uuid": format!("summary-entry-{index}"),
+            "parentUuid": null,
+            "timestamp": "2026-07-22T00:00:00Z",
+            "sessionId": session_id,
+            "version": "2.0.74",
+            "message": {"role": "user", "content": "summary fixture"}
+        });
+        std::fs::write(
+            project_dir.join(format!("{session_id}.jsonl")),
+            format!("{entry}\n"),
+        )
+        .unwrap();
+    }
+
+    let output = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["-o", "json", "summary", "--period", "1d"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["projects"], 6);
+    assert_eq!(value["sessions"], 6);
+    assert_eq!(value["top_projects"].as_array().unwrap().len(), 5);
+}
+
+#[cfg(feature = "codex")]
+#[test]
+fn test_provider_summary_all_reports_unavailable_providers_and_keeps_known_usage() {
+    let claude = setup_fixture_dir();
+    let output = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", claude.path())
+        .env("CODEX_HOME", claude.path().join("missing-codex-home"))
+        .args([
+            "-o",
+            "json",
+            "summary",
+            "--provider",
+            "all",
+            "--period",
+            "24m",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["sessions"], 1);
+    assert_eq!(value["total_tokens"], 140);
+    assert_eq!(value["pricing_coverage"], "complete");
+    assert_eq!(value["skipped_providers"][0]["provider"], "codex");
+}
+
+#[test]
 fn provider_routed_claude_stats_preserve_flagless_numeric_output() {
     let tmp = setup_fixture_dir();
     let missing_codex = tmp.path().join("no-codex-home");
@@ -2967,6 +3036,11 @@ mod codex_normalization_cli {
     use super::*;
 
     const THREAD: &str = "0198cccc-dddd-7eee-8fff-000011112222";
+    const SUMMARY_PARENT: &str = "0198dddd-0000-7000-8000-000000000001";
+    const SUMMARY_FORK: &str = "0198dddd-0000-7000-8000-000000000002";
+    const SUMMARY_SPAWN: &str = "0198dddd-0000-7000-8000-000000000003";
+    const SUMMARY_COMPRESSED: &str = "0198dddd-0000-7000-8000-000000000004";
+    const SUMMARY_ACTIVE_TAIL: &str = "0198dddd-0000-7000-8000-000000000005";
 
     /// A dual-stream codex fixture exercising the whole slice: human
     /// prompt (with event twin), reasoning, tool call/result, usage.
@@ -3018,6 +3092,379 @@ mod codex_normalization_cli {
         )
         .unwrap();
         tmp
+    }
+
+    fn fork_summary_home() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        let day = tmp.path().join("sessions/2026/07/16");
+        std::fs::create_dir_all(&day).unwrap();
+        let line = |timestamp: &str, kind: &str, payload: serde_json::Value| serde_json::json!({"timestamp": timestamp, "type": kind, "payload": payload});
+        let serialize = |records: &[serde_json::Value]| {
+            records
+                .iter()
+                .map(serde_json::Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n"
+        };
+        let parent = vec![
+            line(
+                "2026-07-16T08:00:00Z",
+                "session_meta",
+                serde_json::json!({
+                    "id": SUMMARY_PARENT, "cwd": "/tmp/fork-summary"
+                }),
+            ),
+            line(
+                "2026-07-16T08:00:01Z",
+                "turn_context",
+                serde_json::json!({
+                    "turn_id": "parent-turn", "model": "gpt-test"
+                }),
+            ),
+            line(
+                "2026-07-16T08:00:02Z",
+                "response_item",
+                serde_json::json!({
+                    "type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "parent prompt"}]
+                }),
+            ),
+            line(
+                "2026-07-16T08:00:02.1Z",
+                "event_msg",
+                serde_json::json!({
+                    "type": "user_message", "message": "parent prompt"
+                }),
+            ),
+            line(
+                "2026-07-16T08:00:03Z",
+                "response_item",
+                serde_json::json!({
+                    "type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "parent response"}]
+                }),
+            ),
+            line(
+                "2026-07-16T08:00:04Z",
+                "event_msg",
+                serde_json::json!({
+                    "type": "token_count", "info": {
+                        "last_token_usage": {"input_tokens": 100, "cached_input_tokens": 60,
+                            "output_tokens": 25, "total_tokens": 125},
+                        "total_token_usage": {"input_tokens": 100, "cached_input_tokens": 60,
+                            "output_tokens": 25, "total_tokens": 125}
+                    }
+                }),
+            ),
+        ];
+        std::fs::write(
+            day.join(format!(
+                "rollout-2026-07-16T08-00-00-{SUMMARY_PARENT}.jsonl"
+            )),
+            serialize(&parent),
+        )
+        .unwrap();
+
+        let mut copied = parent.clone();
+        for record in &mut copied {
+            record["timestamp"] = serde_json::json!("2026-07-16T09:00:00Z");
+        }
+        let mut fork = vec![line(
+            "2026-07-16T09:00:00Z",
+            "session_meta",
+            serde_json::json!({"id": SUMMARY_FORK, "cwd": "/tmp/fork-summary"}),
+        )];
+        fork.extend(copied);
+        fork.extend([
+            line(
+                "2026-07-16T09:00:01Z",
+                "turn_context",
+                serde_json::json!({
+                    "turn_id": "fork-turn", "model": "gpt-test"
+                }),
+            ),
+            line(
+                "2026-07-16T09:00:02Z",
+                "response_item",
+                serde_json::json!({
+                    "type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "fork prompt"}]
+                }),
+            ),
+            line(
+                "2026-07-16T09:00:02.1Z",
+                "event_msg",
+                serde_json::json!({
+                    "type": "user_message", "message": "fork prompt"
+                }),
+            ),
+            line(
+                "2026-07-16T09:00:03Z",
+                "response_item",
+                serde_json::json!({
+                    "type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "fork response"}]
+                }),
+            ),
+        ]);
+        std::fs::write(
+            day.join(format!("rollout-2026-07-16T09-00-00-{SUMMARY_FORK}.jsonl")),
+            serialize(&fork),
+        )
+        .unwrap();
+
+        let spawn = vec![
+            line(
+                "2026-07-16T10:00:00Z",
+                "session_meta",
+                serde_json::json!({
+                    "id": SUMMARY_SPAWN, "cwd": "/tmp/fork-summary",
+                    "source": {"subagent": {"thread_spawn": {
+                        "parent_thread_id": SUMMARY_PARENT, "depth": 1
+                    }}}
+                }),
+            ),
+            line(
+                "2026-07-16T10:00:01Z",
+                "turn_context",
+                serde_json::json!({
+                    "turn_id": "spawn-turn", "model": "gpt-test"
+                }),
+            ),
+            line(
+                "2026-07-16T10:00:02Z",
+                "response_item",
+                serde_json::json!({
+                    "type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "spawn response"}]
+                }),
+            ),
+            line(
+                "2026-07-16T10:00:03Z",
+                "event_msg",
+                serde_json::json!({
+                    "type": "token_count", "info": {
+                        "last_token_usage": {"input_tokens": 1000, "cached_input_tokens": 0,
+                            "output_tokens": 1000, "total_tokens": 2000},
+                        "total_token_usage": {"input_tokens": 1000, "cached_input_tokens": 0,
+                            "output_tokens": 1000, "total_tokens": 2000}
+                    }
+                }),
+            ),
+        ];
+        std::fs::write(
+            day.join(format!("rollout-2026-07-16T10-00-00-{SUMMARY_SPAWN}.jsonl")),
+            serialize(&spawn),
+        )
+        .unwrap();
+        tmp
+    }
+
+    fn activity_summary_content(id: &str) -> String {
+        let records = [
+            serde_json::json!({
+                "timestamp": "2020-01-01T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": id, "cwd": "/tmp/activity-summary"}
+            }),
+            serde_json::json!({
+                "timestamp": "2020-01-01T00:00:01Z",
+                "type": "turn_context",
+                "payload": {"turn_id": "compressed-turn", "model": "gpt-test"}
+            }),
+            serde_json::json!({
+                "timestamp": "2020-01-01T00:00:02Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "compressed response"}]}
+            }),
+        ];
+        records
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    }
+
+    fn compressed_summary_home() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        let day = tmp.path().join("sessions/2020/01/01");
+        std::fs::create_dir_all(&day).unwrap();
+        let content = activity_summary_content(SUMMARY_COMPRESSED);
+        let compressed = zstd::stream::encode_all(content.as_bytes(), 3).unwrap();
+        std::fs::write(
+            day.join(format!(
+                "rollout-2020-01-01T00-00-00-{SUMMARY_COMPRESSED}.jsonl.zst"
+            )),
+            compressed,
+        )
+        .unwrap();
+        tmp
+    }
+
+    fn active_tail_summary_home() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        let day = tmp.path().join("sessions/2020/01/01");
+        std::fs::create_dir_all(&day).unwrap();
+        let mut content = activity_summary_content(SUMMARY_ACTIVE_TAIL);
+        content.push_str(r#"{"timestamp":"2026-07-22T00:00:00Z","type":"response_item""#);
+        std::fs::write(
+            day.join(format!(
+                "rollout-2020-01-01T00-00-00-{SUMMARY_ACTIVE_TAIL}.jsonl"
+            )),
+            content,
+        )
+        .unwrap();
+        tmp
+    }
+
+    #[test]
+    fn provider_summary_aggregates_canonical_usage_and_marks_partial_pricing() {
+        let claude = setup_fixture_dir();
+        let codex = slice_home();
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "-o",
+                "json",
+                "summary",
+                "--provider",
+                "all",
+                "--period",
+                "24m",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["sessions"], 2);
+        assert_eq!(value["session_descriptors_analyzed"], 2);
+        assert_eq!(value["projects"], 2);
+        // Claude fixture: 140 work/processed. Native fixture: 65 work,
+        // 125 processed. The cumulative observation is reconciliation data,
+        // never a second usage emission.
+        assert_eq!(value["total_tokens"], 205);
+        assert_eq!(value["total_processed_tokens"], 265);
+        assert_eq!(value["pricing_coverage"], "partial");
+        assert!(value["estimated_cost"].as_f64().unwrap() > 0.0);
+        assert_eq!(value["unpriced_providers"], serde_json::json!(["codex"]));
+        assert_eq!(value["unpriced_models"], serde_json::json!(["gpt-test"]));
+        assert_eq!(value["skipped_providers"], serde_json::json!([]));
+
+        // Activity filtering uses the native last-event time before source
+        // mtime, so writing an old fixture today does not make it recent.
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "-o",
+                "json",
+                "summary",
+                "--provider",
+                "codex",
+                "--period",
+                "1d",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["sessions"], 0);
+        assert_eq!(value["activity_time_fallback_sessions"], 0);
+        assert_eq!(value["total_processed_tokens"], 0);
+        assert_eq!(value["pricing_coverage"], "not-applicable");
+    }
+
+    #[test]
+    fn provider_summary_reports_conservative_source_time_fallbacks() {
+        let claude = setup_fixture_dir();
+        let codex = compressed_summary_home();
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "-o",
+                "json",
+                "summary",
+                "--provider",
+                "codex",
+                "--period",
+                "1d",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        // Inventory deliberately does not decompress a cold artifact merely
+        // to find its tail. Its old native start plus current source mtime is
+        // included conservatively, and the weaker evidence is made visible.
+        assert_eq!(value["sessions"], 1);
+        assert_eq!(value["session_descriptors_analyzed"], 1);
+        assert_eq!(value["activity_time_fallback_sessions"], 1);
+
+        let active = active_tail_summary_home();
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", active.path())
+            .args([
+                "-o",
+                "json",
+                "summary",
+                "--provider",
+                "codex",
+                "--period",
+                "1d",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        // An unresolved physical tail is evidence that an actively-appended
+        // plain file may be newer than its last complete native event.
+        assert_eq!(value["sessions"], 1);
+        assert_eq!(value["activity_time_fallback_sessions"], 1);
+    }
+
+    #[test]
+    fn provider_summary_excludes_fork_copies_and_spawned_transcripts() {
+        let claude = setup_fixture_dir();
+        let codex = fork_summary_home();
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "-o",
+                "json",
+                "summary",
+                "--provider",
+                "codex",
+                "--period",
+                "24m",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        // Parent and fork are independent logical sessions. The spawn is
+        // excluded, and the copied parent usage inside the fork is not summed.
+        assert_eq!(value["sessions"], 2);
+        assert_eq!(value["session_descriptors_analyzed"], 2);
+        assert_eq!(value["total_tokens"], 65);
+        assert_eq!(value["total_processed_tokens"], 125);
+        assert_eq!(value["messages"], 4);
     }
 
     fn content_provenance_home() -> TempDir {
