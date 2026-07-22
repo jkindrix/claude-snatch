@@ -6,6 +6,8 @@
 //! request an explicit rebuild.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -672,6 +674,86 @@ fn build_schema() -> Schema {
     builder.build()
 }
 
+pub(super) fn rebuild_lock_path(path: &Path) -> Result<PathBuf> {
+    let parent = path.parent().ok_or_else(|| {
+        SnatchError::IndexError(format!(
+            "provider index target has no parent: {}",
+            path.display()
+        ))
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        SnatchError::IndexError(format!(
+            "provider index target has no final component: {}",
+            path.display()
+        ))
+    })?;
+    let mut lock_name = OsString::from(".");
+    lock_name.push(file_name);
+    lock_name.push(".snatch-rebuild.lock");
+    Ok(parent.join(lock_name))
+}
+
+pub(super) fn refuse_rebuild_in_progress(path: &Path) -> Result<()> {
+    let lock = rebuild_lock_path(path)?;
+    match std::fs::symlink_metadata(&lock) {
+        Ok(_) => {
+            return Err(SnatchError::IndexError(format!(
+                "search index rebuild is in progress for {}; retry after it completes",
+                path.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(SnatchError::io(
+                format!("failed to inspect rebuild lock {}", lock.display()),
+                error,
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) struct ProviderIndexRebuildLock {
+    path: PathBuf,
+}
+
+impl ProviderIndexRebuildLock {
+    pub(super) fn acquire(target: &Path, generation: &str) -> Result<Self> {
+        let path = rebuild_lock_path(target)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path).map_err(|error| {
+            SnatchError::io(
+                format!(
+                    "failed to acquire search-index rebuild lock {}",
+                    path.display()
+                ),
+                error,
+            )
+        })?;
+        if let Err(error) = writeln!(file, "generation={generation}") {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(SnatchError::io(
+                format!("failed to write rebuild lock {}", path.display()),
+                error,
+            ));
+        }
+        Ok(Self { path })
+    }
+}
+
+impl Drop for ProviderIndexRebuildLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 fn ensure_index_directory(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -940,6 +1022,7 @@ impl ProviderSearchIndex {
     /// rejected without mutation and require an explicit rebuild.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
+        refuse_rebuild_in_progress(path)?;
         ensure_index_directory(path)?;
         let expected = build_schema();
         let index = if path.join("meta.json").exists() {

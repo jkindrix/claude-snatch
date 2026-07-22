@@ -2460,8 +2460,11 @@ snippets can panic on Unicode, and no schema or source-revision manifest
 exists. The local index contained zero documents when this design was made.
 Existing non-empty indexes on other machines must nevertheless never be
 silently erased: opening an incompatible legacy schema reports that a rebuild
-is required, and explicit `index rebuild` constructs the replacement before
-atomically exchanging directories.
+is required, and explicit `index rebuild` constructs and verifies a complete
+sibling replacement before a cooperative-lock, backup-and-activate swap. Safe
+portable Rust cannot atomically exchange two non-empty directories on every
+supported platform, so the contract is deliberately the weaker recoverable
+two-phase operation rather than a false atomicity claim.
 
 The replacement is a provider-neutral, versioned snapshot of **typed search
 projections**. It is not a second source parser and does not retain native raw
@@ -2513,14 +2516,14 @@ The index stores sensitive transcript projections in a local cache, as the old
 index already did. Creation must enforce owner-only directory/file permissions
 where the platform supports them; status and documentation must name the
 storage path and snapshot/coverage state. Rebuild uses an exact validated
-target and recoverable/atomic replacement. No query, clear, or migration path
+target and recoverable staged replacement. No query, clear, or migration path
 may follow an unvalidated symlink or infer a broad deletion target.
 
 P1.5 delivery is split into independently gated units:
 
 1. shared typed segment extraction plus parity/adversarial tests;
 2. versioned schema, in-index manifests, transactional incremental update, and
-   atomic legacy rebuild;
+   recoverable staged legacy replacement;
 3. exact indexed query engine and mutation-tested stale/dedup/filter behavior;
 4. provider-aware `index` and CLI `search` routes with every option classified;
 5. MCP `search_sessions` routing, qualified provenance, pagination/coverage;
@@ -2554,11 +2557,19 @@ partitions in the build manifest. Adversarial tests independently mutate
 artifact revision, project metadata, spawn classification, inventory presence,
 and parse success.
 
-The unit-2 exit is not yet claimed. The explicit staged legacy-directory
-replacement still remains. It must be described honestly as either a
-genuinely atomic platform operation or a recoverable two-phase swap; a
-portable pair of renames must not be called an atomic exchange merely because
-each individual rename is atomic.
+Unit 2 is now implemented at the library boundary. Explicit rebuild constructs
+and verifies the entire sibling index before touching the target, requires a
+complete/unfiltered/failure-free build (a partial `all` staging index cannot
+preserve failed old partitions), refuses final-component symlinks, and uses an
+adjacent cooperative lock while moving the old directory to a unique backup
+and activating the replacement. Activation failure restores the old
+directory; cleanup failure leaves the old backup in place and reports its
+exact path. Both legacy and provider index opens honor the lock. Tests inject a
+failure after the backup move, prove restoration, prove a failed/partial staged
+build never touches the old index, and exercise real legacy-to-version-2
+replacement. This is a recoverable two-phase swap with a brief path-name gap,
+not a portable atomic directory exchange; readers already holding the old
+index retain their open handles.
 
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".

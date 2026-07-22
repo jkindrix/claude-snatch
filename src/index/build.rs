@@ -6,6 +6,8 @@
 //! generation-level atomicity without retaining the corpus in memory.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -63,6 +65,180 @@ pub struct ProviderIndexBuildReport {
     pub warnings: usize,
     /// Whether every selected provider had complete disappearance coverage.
     pub removal_coverage_complete: bool,
+}
+
+/// Result of a staged, recoverable provider-index directory replacement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProviderIndexRebuildReport {
+    /// Build result for the activated replacement.
+    pub build: ProviderIndexBuildReport,
+    /// Whether an existing index directory was replaced.
+    pub replaced_existing: bool,
+    /// Old directory retained because cleanup failed or its type changed
+    /// unexpectedly. The new index is active; callers should surface this.
+    pub retained_backup: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy)]
+enum ActivationFault {
+    None,
+    #[cfg(test)]
+    AfterBackup,
+}
+
+fn validate_rebuild_target(target: &Path) -> Result<&Path> {
+    let parent = target.parent().ok_or_else(|| {
+        SnatchError::IndexError(format!(
+            "provider index rebuild target has no parent: {}",
+            target.display()
+        ))
+    })?;
+    if target.file_name().is_none() {
+        return Err(SnatchError::IndexError(format!(
+            "provider index rebuild target has no final component: {}",
+            target.display()
+        )));
+    }
+    std::fs::create_dir_all(parent).map_err(|error| {
+        SnatchError::io(
+            format!(
+                "failed to create provider index parent: {}",
+                parent.display()
+            ),
+            error,
+        )
+    })?;
+    match std::fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(SnatchError::IndexError(format!(
+                "refusing provider index rebuild target symlink: {}",
+                target.display()
+            )));
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(SnatchError::IndexError(format!(
+                "provider index rebuild target is not a directory: {}",
+                target.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(SnatchError::io(
+                format!(
+                    "failed to inspect provider index rebuild target: {}",
+                    target.display()
+                ),
+                error,
+            ));
+        }
+    }
+    Ok(parent)
+}
+
+fn sibling_backup_path(target: &Path) -> Result<PathBuf> {
+    let parent = target.parent().ok_or_else(|| {
+        SnatchError::IndexError(format!(
+            "rebuild target has no parent: {}",
+            target.display()
+        ))
+    })?;
+    let file_name = target.file_name().ok_or_else(|| {
+        SnatchError::IndexError(format!(
+            "rebuild target has no final component: {}",
+            target.display()
+        ))
+    })?;
+    let mut name = OsString::from(".");
+    name.push(file_name);
+    name.push(".backup-");
+    name.push(uuid::Uuid::new_v4().to_string());
+    Ok(parent.join(name))
+}
+
+fn activate_staged_directory(
+    target: &Path,
+    staged: &Path,
+    generation: &str,
+    fault: ActivationFault,
+) -> Result<(bool, Option<PathBuf>)> {
+    let _lock = super::provider::ProviderIndexRebuildLock::acquire(target, generation)?;
+    validate_rebuild_target(target)?;
+    let replaced_existing = target.exists();
+    if !replaced_existing {
+        std::fs::rename(staged, target).map_err(|error| {
+            SnatchError::io(
+                format!(
+                    "failed to activate staged provider index {} at {}",
+                    staged.display(),
+                    target.display()
+                ),
+                error,
+            )
+        })?;
+        return Ok((false, None));
+    }
+
+    let backup = sibling_backup_path(target)?;
+    if backup.exists() {
+        return Err(SnatchError::IndexError(format!(
+            "provider index rebuild backup already exists: {}",
+            backup.display()
+        )));
+    }
+    std::fs::rename(target, &backup).map_err(|error| {
+        SnatchError::io(
+            format!(
+                "failed to move current provider index to backup {}",
+                backup.display()
+            ),
+            error,
+        )
+    })?;
+
+    #[cfg(test)]
+    if matches!(fault, ActivationFault::AfterBackup) {
+        std::fs::rename(&backup, target).map_err(|restore| {
+            SnatchError::io(
+                format!(
+                    "injected activation failure; restoring {} also failed",
+                    target.display()
+                ),
+                restore,
+            )
+        })?;
+        return Err(SnatchError::IndexError(
+            "injected provider-index activation failure".to_string(),
+        ));
+    }
+    #[cfg(not(test))]
+    let _ = fault;
+
+    if let Err(activate) = std::fs::rename(staged, target) {
+        return match std::fs::rename(&backup, target) {
+            Ok(()) => Err(SnatchError::io(
+                format!(
+                    "failed to activate staged provider index {}; previous index restored",
+                    staged.display()
+                ),
+                activate,
+            )),
+            Err(restore) => Err(SnatchError::IndexError(format!(
+                "failed to activate staged provider index ({activate}); failed to restore previous index ({restore}); previous index remains at {}",
+                backup.display()
+            ))),
+        };
+    }
+
+    let retained_backup = match std::fs::symlink_metadata(&backup) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            std::fs::remove_dir_all(&backup)
+                .err()
+                .map(|_| backup.clone())
+        }
+        Ok(_) | Err(_) => Some(backup),
+    };
+    Ok((true, retained_backup))
 }
 
 fn selected_provider_ids(
@@ -386,6 +562,71 @@ pub fn update_provider_index(
     })
 }
 
+/// Build a complete sibling index, verify its generation, then activate it
+/// with a cooperative-lock, backup-and-restore two-phase directory swap.
+///
+/// Portable Rust cannot atomically exchange two non-empty directories on all
+/// supported platforms. This operation therefore makes the weaker guarantee
+/// explicit: the old directory is untouched until the replacement is fully
+/// built; an activation failure restores it; an unexpected cleanup failure
+/// retains the old directory and reports its exact path.
+pub fn rebuild_provider_index(
+    target: impl AsRef<Path>,
+    registry: &ProviderRegistry,
+    options: &ProviderIndexBuildOptions<'_>,
+) -> Result<ProviderIndexRebuildReport> {
+    let target = target.as_ref();
+    let parent = validate_rebuild_target(target)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".snatch-provider-index-staging-")
+        .tempdir_in(parent)
+        .map_err(|error| {
+            SnatchError::io(
+                format!(
+                    "failed to create staged provider index beside {}",
+                    target.display()
+                ),
+                error,
+            )
+        })?;
+    let staged_index = ProviderSearchIndex::open(staging.path())?;
+    let build = update_provider_index(&staged_index, registry, options)?;
+    if !build.removal_coverage_complete {
+        return Err(SnatchError::IndexError(
+            "staged provider-index replacement requires a complete, unfiltered, failure-free build; previous index left untouched"
+                .to_string(),
+        ));
+    }
+    let staged_manifest = staged_index.build_manifest()?.ok_or_else(|| {
+        SnatchError::IndexError("staged provider index has no build manifest".to_string())
+    })?;
+    if staged_manifest.generation != options.generation {
+        return Err(SnatchError::IndexError(format!(
+            "staged provider index generation {} != expected {}",
+            staged_manifest.generation, options.generation
+        )));
+    }
+    drop(staged_index);
+    let staged_path = staging.keep();
+    let activated = activate_staged_directory(
+        target,
+        &staged_path,
+        &options.generation,
+        ActivationFault::None,
+    );
+    let (replaced_existing, retained_backup) = activated.map_err(|error| {
+        SnatchError::IndexError(format!(
+            "{error}; staged replacement remains at {}",
+            staged_path.display()
+        ))
+    })?;
+    Ok(ProviderIndexRebuildReport {
+        build,
+        replaced_existing,
+        retained_backup,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -678,5 +919,175 @@ mod tests {
         assert_eq!(index.session_manifests().unwrap(), before_manifests);
         assert_eq!(index.entries().unwrap(), before_entries);
         assert_eq!(index.build_manifest().unwrap(), before_build);
+    }
+
+    #[test]
+    fn staged_rebuild_replaces_legacy_only_after_a_complete_build() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("index");
+        let legacy = super::super::SearchIndex::open(&target).unwrap();
+        drop(legacy);
+        let legacy_schema = std::fs::read(target.join("meta.json")).unwrap();
+        let state = Arc::new(ProbeState::default());
+        let registry = registry(state);
+        let selection = ProviderSelection::Explicit(vec![ProviderId("fake".to_string())]);
+
+        let report = rebuild_provider_index(
+            &target,
+            &registry,
+            &options(&selection, "generation-rebuild"),
+        )
+        .unwrap();
+        assert!(report.replaced_existing);
+        assert!(report.retained_backup.is_none());
+        assert_ne!(
+            std::fs::read(target.join("meta.json")).unwrap(),
+            legacy_schema
+        );
+        let replacement = ProviderSearchIndex::open(&target).unwrap();
+        assert_eq!(replacement.session_manifests().unwrap().len(), 2);
+        assert_eq!(
+            replacement.build_manifest().unwrap().unwrap().generation,
+            "generation-rebuild"
+        );
+    }
+
+    #[test]
+    fn failed_staged_build_never_touches_the_legacy_target() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("index");
+        let legacy = super::super::SearchIndex::open(&target).unwrap();
+        drop(legacy);
+        let before = std::fs::read(target.join("meta.json")).unwrap();
+        let state = Arc::new(ProbeState::default());
+        state.fail_collision.store(true, Ordering::SeqCst);
+        let registry = registry(state);
+        let selection = ProviderSelection::Explicit(vec![ProviderId("fake".to_string())]);
+
+        assert!(rebuild_provider_index(
+            &target,
+            &registry,
+            &options(&selection, "generation-fails")
+        )
+        .is_err());
+        assert_eq!(std::fs::read(target.join("meta.json")).unwrap(), before);
+        assert!(super::super::SearchIndex::open(&target).is_ok());
+    }
+
+    #[test]
+    fn partial_all_rebuild_cannot_replace_a_complete_existing_snapshot() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("index");
+        let legacy = super::super::SearchIndex::open(&target).unwrap();
+        drop(legacy);
+        let before = std::fs::read(target.join("meta.json")).unwrap();
+        let state = Arc::new(ProbeState::default());
+        state.fail_collision.store(true, Ordering::SeqCst);
+        let registry = registry(state);
+        let all = ProviderSelection::All;
+
+        let error =
+            rebuild_provider_index(&target, &registry, &options(&all, "generation-partial"))
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("complete, unfiltered, failure-free"));
+        assert_eq!(std::fs::read(target.join("meta.json")).unwrap(), before);
+        assert!(super::super::SearchIndex::open(&target).is_ok());
+    }
+
+    #[test]
+    fn activation_failure_restores_the_previous_directory() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("index");
+        let staged = dir.path().join("staged");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::write(target.join("marker"), b"old").unwrap();
+        std::fs::write(staged.join("marker"), b"new").unwrap();
+
+        let error = activate_staged_directory(
+            &target,
+            &staged,
+            "generation-restore",
+            ActivationFault::AfterBackup,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("injected"));
+        assert_eq!(std::fs::read(target.join("marker")).unwrap(), b"old");
+        assert_eq!(std::fs::read(staged.join("marker")).unwrap(), b"new");
+        assert!(!std::fs::read_dir(dir.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".index.backup-")
+        }));
+        assert!(!super::super::provider::rebuild_lock_path(&target)
+            .unwrap()
+            .exists());
+    }
+
+    #[test]
+    fn cooperative_rebuild_lock_refuses_legacy_and_provider_opens() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("index");
+        let lock =
+            super::super::provider::ProviderIndexRebuildLock::acquire(&target, "generation-lock")
+                .unwrap();
+        let provider_error = ProviderSearchIndex::open(&target)
+            .err()
+            .unwrap()
+            .to_string();
+        let legacy_error = super::super::SearchIndex::open(&target)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(provider_error.contains("rebuild is in progress"));
+        assert!(legacy_error.contains("rebuild is in progress"));
+        drop(lock);
+        assert!(ProviderSearchIndex::open(&target).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_symlink_lock_still_blocks_index_creation() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("index");
+        let lock = super::super::provider::rebuild_lock_path(&target).unwrap();
+        symlink(dir.path().join("missing-lock-target"), &lock).unwrap();
+        let error = ProviderSearchIndex::open(&target)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("rebuild is in progress"));
+        assert!(!target.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_rebuild_refuses_a_target_symlink_without_following_it() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("marker"), b"untouched").unwrap();
+        let target = dir.path().join("index");
+        symlink(&real, &target).unwrap();
+        let state = Arc::new(ProbeState::default());
+        let registry = registry(state);
+        let selection = ProviderSelection::Explicit(vec![ProviderId("fake".to_string())]);
+
+        assert!(rebuild_provider_index(
+            &target,
+            &registry,
+            &options(&selection, "generation-symlink")
+        )
+        .is_err());
+        assert_eq!(std::fs::read(real.join("marker")).unwrap(), b"untouched");
+        assert!(!real.join("meta.json").exists());
     }
 }

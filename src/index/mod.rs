@@ -113,6 +113,7 @@ impl SearchIndex {
     /// Open or create a search index at the specified path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
+        provider::refuse_rebuild_in_progress(path)?;
 
         // Ensure directory exists
         if !path.exists() {
