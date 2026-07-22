@@ -1,11 +1,12 @@
-//! claude-snatch: High-performance CLI tool for extracting Claude Code conversation logs.
+//! claude-snatch: Retrieve, analyze, and export coding-agent session logs.
 //!
 //! This crate provides comprehensive extraction, analysis, and export capabilities
-//! for Claude Code JSONL session logs with maximum data fidelity.
+//! for Claude Code and Codex CLI session logs with maximum data fidelity.
 //!
 //! # Features
 //!
 //! - **Maximum Fidelity**: Extract all 77+ documented JSONL data elements
+//! - **Provider-aware ingestion**: Qualified identities, provenance, and typed lineage
 //! - **Beyond-JSONL**: Access 21+ supplementary data sources
 //! - **Rust Performance**: Native speed, 10-100x faster than alternatives
 //! - **Lossless Round-Trip**: Preserve unknown fields for forward compatibility
@@ -42,6 +43,7 @@
 //! - [`model`]: Core data structures for all message types and content blocks
 //! - [`parser`]: JSONL parsing with streaming support and error recovery
 //! - [`discovery`]: Session and project discovery across platforms
+//! - [`provider`]: Provider adapters, qualified identity, provenance, and lineage
 //! - [`reconstruction`]: Conversation tree building and linking
 //! - [`analytics`]: Statistics calculation and usage tracking
 //! - [`export`]: Output format generation (Markdown, JSON, etc.)

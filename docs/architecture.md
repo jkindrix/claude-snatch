@@ -1,301 +1,273 @@
 # Architecture Overview
 
-This document describes the high-level architecture of snatch, a high-performance Rust CLI tool for extracting and analyzing Claude Code conversation logs.
+snatch is a Rust CLI, library, and optional MCP server for retrieving,
+normalizing, analyzing, and exporting coding-agent session logs. Its central
+design is a provider seam: storage-specific adapters preserve native evidence
+while the existing conversation and analysis layers operate on a common model.
 
-## System Overview
+For the detailed decision history and acceptance invariants, see
+[multi-provider-design.md](multi-provider-design.md).
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                              snatch                                      │
-├─────────────────────────────────────────────────────────────────────────┤
-│  CLI Layer (clap)                                                        │
-│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐           │
-│  │  list   │ │ export  │ │ search  │ │  stats  │ │  watch  │           │
-│  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘           │
-├───────┴──────────┴──────────┴──────────┴──────────┴────────────────────┤
-├─────────────────────────────────────────────────────────────────────────┤
-│  Core Library                                                            │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐      │
-│  │Discovery │ │  Parser  │ │  Model   │ │Reconstruct│ │  Export  │      │
-│  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘      │
-│       │            │            │            │            │              │
-│  ┌────┴────────────┴────────────┴────────────┴────────────┴────┐       │
-│  │                        Analytics                              │       │
-│  └───────────────────────────────────────────────────────────────┘       │
-├─────────────────────────────────────────────────────────────────────────┤
-│  Infrastructure                                                          │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐                    │
-│  │  Cache   │ │  Config  │ │  Error   │ │Extraction│                    │
-│  └──────────┘ └──────────┘ └──────────┘ └──────────┘                    │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  Claude Code Data                                                        │
-│  ~/.claude/                                                              │
-│  ├── projects/                   # Encoded project paths                 │
-│  │   └── <encoded-path>/         # Per-project directory                 │
-│  │       └── <session-id>.jsonl  # Conversation logs                     │
-│  ├── filehistory/                # File backup system                    │
-│  ├── settings.json               # User settings                         │
-│  ├── mcp.json                    # MCP server config                     │
-│  └── commands/                   # Custom slash commands                 │
-└─────────────────────────────────────────────────────────────────────────┘
+## System overview
+
+```text
+CLI / MCP / library API
+        |
+        v
+ProviderRegistry ---- selection, qualified-id resolution, union policy
+        |
+        +---------------------+
+        |                     |
+ClaudeCodeProvider       CodexProvider
+~/.claude/projects       $CODEX_HOME/{sessions,archived_sessions}
+        |                     |
+        +----------+----------+
+                   v
+             ParsedSession
+  entries + provenance + semantics + diagnostics
+                   |
+                   v
+   Conversation::from_parsed_session
+       tree view + retained parsed bundle
+                   |
+          +--------+---------+
+          |                  |
+   analysis/indexing    normalized exporters
+
+SourceProvider --------------------------------> fidelity exporters
+                                         archive / native / raw-jsonl
 ```
 
-## Module Structure
+Flagless, unqualified commands retain the classic Claude-only behavior for
+compatibility. Provider-aware routes use the registry and parsed-bundle path.
+This deliberate dual route lets the migration proceed without silently
+changing established output.
 
-### `src/cli/` - Command Line Interface
+## Provider seam
 
-Handles command-line argument parsing and subcommand dispatch using clap.
+`src/provider/` owns provider discovery and source fidelity:
 
-```
-cli/
-├── mod.rs          # CLI structure and argument definitions
-├── commands/       # Subcommand implementations
-│   ├── export.rs   # Export conversations
-│   ├── list.rs     # List sessions/projects
-│   ├── search.rs   # Search functionality
-│   ├── stats.rs    # Analytics and statistics
-│   └── diff.rs     # Session comparison
-└── output.rs       # Output formatting helpers
-```
+- `mod.rs` defines identity, artifacts, capabilities, provenance, semantic
+  annotations, lineage, `ParsedSession`, and the `SourceProvider` trait.
+- `registry.rs` is the single construction, selection, resolution, and
+  cross-provider collection seam.
+- `claude_code.rs` adapts Claude project JSONL files and sidecar transcripts.
+- `codex.rs` discovers active, archived, plain, and zstd-compressed rollouts.
+- `codex_normalize.rs` maps the Codex native event vocabulary into the common
+  model and attaches provider-neutral semantics.
+- `project.rs` groups sessions using credential-free git/cwd evidence.
 
-### `src/model/` - Data Model
+`SourceProvider` supplies:
 
-Strongly-typed Rust structures for Claude Code JSONL format.
+- logical session discovery and physical artifact descriptors;
+- project evidence and typed lineage;
+- native diagnostics;
+- parsing into a complete `ParsedSession`;
+- revision tokens for cache invalidation;
+- universal lossless archive output and optional native/raw JSONL streams.
 
-```
-model/
-├── mod.rs          # Module exports
-├── message.rs      # Core message types (User, Assistant, System, etc.)
-├── content.rs      # Content block types (Text, Thinking, ToolUse, etc.)
-├── metadata.rs     # Session metadata structures
-├── tools.rs        # Tool definitions and results
-└── usage.rs        # Token usage tracking
-```
+Adapters stream large source artifacts. They do not place raw native records
+inside normalized entries, which avoids doubling cache memory and prevents an
+unsanitized native copy from leaking through redacted normalized exports.
 
-Key types:
-- `LogEntry`: Enum for all message types
-- `ContentBlock`: Enum for content variants
-- `ToolUse`, `ToolResult`: Tool interaction types
+## Identity and artifacts
 
-### `src/parser/` - JSONL Parser
+Three identities serve different purposes:
 
-Streaming parser for Claude Code JSONL files.
+| Type | Meaning |
+|------|---------|
+| `LogicalSessionKey` | Provider + namespace + native session id; stable logical identity |
+| `ArtifactId` | Stable identity of one physical file/row source |
+| `ArtifactRevision` | Opaque mutable-state token used for cache invalidation |
 
-```
-parser/
-├── mod.rs          # Parser interface
-└── streaming.rs    # Streaming iterator implementation
-```
+A logical session can have several artifacts: active and archived copies,
+plain and compressed twins, or backup roots. Appending to a file changes its
+revision, not its artifact or session identity.
 
-Features:
-- Line-by-line parsing for memory efficiency
-- Lenient parsing with error recovery
-- Schema version detection
-- Progress tracking
+The external qualified-id form is `provider:native-id` for the global
+namespace and `provider:namespace:native-id` otherwise. Literal `%` and `:`
+inside segments are escaped reversibly. `FromStr` and `Display` are strict
+inverses; identity comparisons never depend on the display string.
 
-### `src/reconstruction/` - Conversation Reconstruction
+## Registry and selection policy
 
-Reconstructs conversation trees from flat JSONL entries.
+`ProviderRegistry` constructs every compiled provider and retains unavailable
+providers with a reason. No command accumulates provider-specific fallback
+logic outside this seam.
 
-```
-reconstruction/
-├── mod.rs          # Reconstruction interface
-├── tree.rs         # Conversation tree structure
-└── thread.rs       # Thread extraction and branching
-```
+Selection rules are intentional:
 
-Features:
-- UUID-based parent/child linking
-- Branch detection and handling
-- Main thread extraction
-- Retry detection
+- no `--provider` plus an unqualified id uses the classic Claude route;
+- a qualified id is explicit opt-in to the provider it names;
+- repeated `--provider` selects an explicit set;
+- `--provider all` selects every compiled provider;
+- explicit selections are atomic on provider failures;
+- `all` may return partial results, but skipped providers are reported;
+- unqualified prefixes must be unique across every selected and successfully
+  searched provider; otherwise resolution refuses rather than guesses.
 
-### `src/export/` - Export Formats
+Union scans are explicit because they can be expensive on large corpora. Scope
+to one provider, project, session, or date range before using `all` whenever
+possible.
 
-Multiple export format implementations.
+## Parsed bundle and provenance
 
-```
-export/
-├── mod.rs          # Exporter trait and options
-├── markdown.rs     # Markdown exporter
-├── json.rs         # JSON/JSONL exporter
-├── html.rs         # HTML exporter
-├── text.rs         # Plain text exporter
-├── csv.rs          # CSV exporter
-├── xml.rs          # XML exporter
-└── sqlite.rs       # SQLite exporter
-```
+`ParsedSession` is the provider boundary. It retains:
 
-All exporters implement the `Exporter` trait:
+- `SessionDescriptor`: logical identity and all discovered artifacts;
+- `IdentifiedEntry`: normalized `LogEntry` values with deterministic ids;
+- `entry_origins`: entry-to-native-record reverse provenance;
+- `record_dispositions`: exactly one outcome for every native record;
+- `field_derivations`: machine-readable declarations for synthesized fields;
+- `semantics`: provider-neutral meaning attached by entry id;
+- source-backed file changes and coverage diagnostics;
+- ingestion diagnostics.
 
-```rust
-pub trait Exporter: Send + Sync {
-    fn export_conversation<W: Write>(
-        &self,
-        conversation: &Conversation,
-        writer: &mut W,
-        options: &ExportOptions,
-    ) -> Result<()>;
-}
-```
+Native records can map N:1 or 1:N. Every record is exactly one of:
 
-### `src/discovery/` - File Discovery
+- mapped to normalized entries;
+- intentionally suppressed with a typed reason and, where relevant, its
+  authoritative twin;
+- unknown but preserved as content-complete `LogEntry::Unknown` data;
+- recovered from a damaged record with a diagnostic;
+- unparseable with a diagnostic.
 
-Locates and organizes Claude Code data.
+`ParsedSession::validate_provenance()` cross-checks descriptors, entries,
+origins, dispositions, semantic sources, file-change evidence, diagnostics,
+and artifact membership. Unknown data is therefore visible drift, never a
+silent drop.
 
-```
-discovery/
-├── mod.rs          # Discovery interface
-├── paths.rs        # Path encoding/decoding
-├── project.rs      # Project abstraction
-├── session.rs      # Session abstraction
-└── hierarchy.rs    # Agent hierarchy building
-```
+## Semantic annotations
 
-Features:
-- Cross-platform path handling (Linux, macOS, WSL)
-- Project path encoding (% and - encoding)
-- Session discovery and metadata
-- Agent/subagent hierarchy detection
+Providers annotate normalized entries without teaching the analysis layer
+provider names. `EntrySemantics` carries independent axes such as:
 
-### `src/extraction/` - Data Extraction
+- prompt authorship and delivery mode;
+- native tool name and canonical `ToolKind`, keyed per tool call;
+- usage scope, aggregation, basis, raw values, and source record;
+- new activity versus fork-inherited history;
+- provider turn identity (separate from message identity);
+- compaction boundary and window metadata;
+- persisted state/checkpoint classification.
 
-Extracts specific data types from conversations.
+Consumers gate semantic behavior on the provider capability descriptor, not
+on whether an annotation map happens to be nonempty. This keeps classic Claude
+rendering stable while allowing richer sources to opt into semantic turns,
+failure classification, file changes, and usage accounting.
 
-```
-extraction/
-├── mod.rs          # Extraction interface
-├── backup.rs       # File backup handling
-├── commands.rs     # Custom command discovery
-├── mcp.rs          # MCP configuration
-├── rules.rs        # Project rules extraction
-└── settings.rs     # Settings file parsing
-```
+## Conversation reconstruction
 
-### `src/analytics/` - Analytics Engine
+`Conversation::from_parsed_session` is the sanctioned bridge from ingestion
+to analysis. It builds the existing UUID tree view while retaining the entire
+`Arc<ParsedSession>` as the authority for provenance and semantics.
 
-Computes statistics and insights.
+The tree's keep-first duplicate-UUID behavior affects only the view. The
+parsed bundle retains every identified entry and origin, and UUID-to-entry-id
+correlation follows the same keep-first rule. UUID-less entries remain
+available as ordered orphan entries.
 
-```
-analytics/
-├── mod.rs          # Analytics interface
-└── session.rs      # Session analytics
-```
+Classic construction from bare `Vec<LogEntry>` remains available for legacy
+callers and tests, but it has no provider provenance or semantic sidecar.
 
-Metrics:
-- Message counts by type
-- Token usage (input/output/cache)
-- Cost estimation
-- Tool invocation statistics
-- Thinking block analysis
-- Duration calculation
+## Lineage and project flow
 
-### `src/cache/` - Caching System
+Lineage is a typed graph, not a generic chain:
 
-LRU cache with mtime-based invalidation.
+```text
+Continuation: conversation A ----resume----> conversation B
+Fork:         source A -----------branch----> fork B
+Spawn:        parent A --------subagent-----> child B
 
-```
-cache/
-└── mod.rs          # Cache implementation
+Compaction:   intra-session window metadata (not a lineage edge)
 ```
 
-Features:
-- In-memory LRU cache
-- File modification time tracking
-- Configurable size limits
-- Automatic invalidation
+Dangling endpoints are permitted because a corpus can reference a deleted or
+unavailable parent. Spawn edges may carry the native tool-use id, agent type,
+and description.
 
-### `src/config/` - Configuration
+Project unions use native cwd/git evidence in this order: credential-free git
+remote, canonical git root, normalized cwd, then session identity fallback.
+Cross-provider activity views collapse only typed continuations and exclude
+fork-inherited history from new-work totals.
 
-Layered configuration system.
+## Fidelity tiers
 
-```
-config/
-└── mod.rs          # Config loading and merging
-```
+| Tier | Contract | Availability |
+|------|----------|--------------|
+| Normalized formats | Common model; filtering/redaction allowed; content-preserving but not byte-exact | Universal |
+| `archive` | Provider-defined lossless bundle with manifest and every artifact | Universal |
+| `native` | Exact bytes of the preferred physical artifact | Capability-gated |
+| `raw-jsonl` | Exact logical JSONL record stream; compressed sources are decoded | Capability-gated |
 
-### `src/error.rs` - Error Handling
+Source-fidelity tiers bypass normalized filtering and redaction. `archive` is
+the portable recovery promise; `native` is stronger only when an independent
+artifact byte representation exists.
 
-Unified error types using thiserror.
+## Caching
 
-## Data Flow
+The cache distinguishes lossless file identity (`PathBuf`) from provider
+logical identity (`LogicalSessionKey`). Provider bundles are revalidated with
+opaque aggregate parse tokens covering every artifact revision and all parse
+policy inputs, including safety limits.
 
-### Parsing Flow
+The configured cache budget is partitioned across metadata (10%), classic
+parsed entries (45%), and complete provider bundles (45%). Oversized values
+are returned to callers but refused by the cache so no partition can exceed
+its budget.
 
-```
-JSONL File → JsonlParser → LogEntry[] → Conversation → Export
-                 │                           │
-                 │                           │
-                 ▼                           ▼
-           ParseStats              ConversationTree
-```
+## Source layouts and safety
 
-## Design Principles
+Claude Code discovery reads project sessions beneath `~/.claude` or an
+explicit `--claude-dir`. Codex discovery reads `$CODEX_HOME` or `~/.codex`,
+including `sessions/` and `archived_sessions/`, plain `.jsonl`, and
+`.jsonl.zst` cold storage.
 
-### 1. Zero-Copy Where Possible
+Filesystem adapters preserve non-UTF-8 path identity, do not follow discovered
+artifact symlinks, reject special files, and resolve exports only against the
+discovered artifact set. Compressed input has independent input, output, and
+window-size bounds.
 
-The parser minimizes memory allocations:
-- Streaming line-by-line parsing
-- Reference-based content access
-- Lazy conversion where applicable
+## Main modules
 
-### 2. Graceful Degradation
+| Module | Responsibility |
+|--------|----------------|
+| `cli` | Clap arguments, routing, output rendering |
+| `mcp_server` | Optional 19-tool stdio MCP surface |
+| `provider` | Discovery adapters, registry, parsed bundles, provenance, lineage |
+| `model` | Common `LogEntry`, messages, content, usage |
+| `parser` | Classic JSONL parsing and recovery |
+| `reconstruction` | Conversation tree/view construction |
+| `analysis` | Digests, lessons, timelines, search, project analysis |
+| `analytics` | Usage, cost, tool, duration statistics |
+| `export` | Normalized output formats |
+| `index` | Provider-partitioned full-text index |
+| `cache` | Metadata, classic-entry, and provider-bundle caches |
+| `discovery` | Claude directory/project/session discovery |
+| `extraction` | Claude-specific settings, rules, hooks, and file history |
 
-Unknown or malformed data is handled gracefully:
-- `#[serde(other)]` for unknown enum variants
-- `#[serde(flatten)]` for unknown fields
-- Lenient parsing mode for recovery
+## Extension points
 
-### 3. Type Safety
+### Add a provider
 
-Strong typing throughout:
-- Enum variants for message types
-- Newtype wrappers where appropriate
-- Builder patterns for complex construction
+1. Implement `SourceProvider` and declare truthful capabilities.
+2. Define logical identity, artifact precedence, and revision tokens.
+3. Account for every native record with provenance and diagnostics.
+4. Emit provider-neutral semantics only where native evidence supports them.
+5. Add the provider to `ProviderRegistry` behind an appropriate feature.
+6. Test hostile identity, N:1/1:N provenance, source-fidelity round trips,
+   malformed input recovery, and unavailable-provider selection behavior.
 
-### 4. Separation of Concerns
+### Add an export format
 
-Clear module boundaries:
-- Parsing is independent of display
-- Model is independent of storage
-- Export is pluggable
+1. Implement the normalized `Exporter` contract in `src/export/`.
+2. Add the format to the library and CLI enums.
+3. Decide whether filters, redaction, and metadata apply.
+4. Test both classic and provider-routed conversations.
 
-### 5. Performance
+## Verification strategy
 
-Optimized for large files:
-- Streaming parser
-- LRU caching
-- Efficient data structures
-- Parallel processing where applicable
-
-## Extension Points
-
-### Adding a New Export Format
-
-1. Create `src/export/myformat.rs`
-2. Implement `Exporter` trait
-3. Add to `ExportFormat` enum
-4. Register in CLI
-
-### Adding a New Message Type
-
-1. Add variant to `LogEntry` enum
-2. Add serde rename if needed
-3. Update display/export logic
-4. Add tests
-
-## Testing Strategy
-
-```
-tests/
-├── integration_tests.rs    # Full pipeline tests
-└── fixtures/               # Test data
-    └── sessions/           # Sample JSONL files
-```
-
-- Unit tests: Per-module, testing individual functions
-- Integration tests: End-to-end pipeline testing
-- Property tests: Parser robustness (future)
+The suite combines unit and integration fixtures, cross-platform CI, hostile
+provider doubles, real-corpus opt-in conformance tests, source-derived semantic
+oracles, and mutation tests that prove those oracles reject deliberately
+broken output. Every semantic slice must state its exclusions; a green parser
+count alone is not evidence that normalization is correct.

@@ -1,318 +1,326 @@
 # Examples and Recipes
 
-Practical examples for common snatch use cases.
+These examples use the current CLI. Run `snatch <command> --help` for the
+complete option set.
 
-## Quick Start
+## Orient first
 
-### View Recent Sessions
-
-```bash
-# List all sessions
-snatch list
-
-# List sessions for a specific project
-snatch list --project /path/to/project
-
-# List with details
-snatch list --verbose
-```
-
-### Interactive Browsing
+Start with provider availability and narrow before reading message bodies:
 
 ```bash
-# Fuzzy-pick a session
-snatch pick
-
-# Scope the picker to a project
-snatch pick -p my-project
+snatch providers
+snatch list projects --provider codex
+snatch list sessions --provider codex -p /path/to/project -n 20
+snatch info codex:<session-id>
+snatch timeline codex:<session-id> -l 20
+snatch messages codex:<session-id> --detail conversation -l 20
 ```
 
-### Export a Conversation
+Flagless unqualified commands keep the classic Claude-only behavior:
 
 ```bash
-# Export to Markdown
-snatch export abc12345
-
-# Export to JSON
-snatch export abc12345 --format json --output conversation.json
-
-# Export with thinking blocks
-snatch export abc12345 --include-thinking
+snatch list sessions -n 20
+snatch info <claude-session-prefix>
+snatch messages <claude-session-prefix> --detail standard
 ```
 
-## Common Workflows
+## Provider selection
 
-### 1. Archive All Project Conversations
+### One provider
 
 ```bash
-#!/bin/bash
-# archive-project.sh
-
-PROJECT="/path/to/project"
-OUTPUT_DIR="./archives/$(date +%Y-%m-%d)"
-
-mkdir -p "$OUTPUT_DIR"
-
-snatch list --project "$PROJECT" --format json | \
-  jq -r '.sessions[].id' | \
-  while read session_id; do
-    snatch export "$session_id" \
-      --format markdown \
-      --output "$OUTPUT_DIR/${session_id}.md" \
-      --include-thinking \
-      --include-tools
-  done
-
-echo "Archived to $OUTPUT_DIR"
+snatch list sessions --provider claude-code
+snatch list sessions --provider codex
+snatch doctor --provider codex --all
+snatch chain --provider codex
 ```
 
-### 2. Search Across All Sessions
+### Explicit union
 
 ```bash
-# Search for a keyword in all sessions
-snatch search "API endpoint" --project /path/to/project
-
-# Search with context
-snatch search "error" --context 3
-
-# Search in specific date range
-snatch search "refactor" --after 2025-01-01 --before 2025-01-31
+snatch list projects --provider all
+snatch list sessions --provider all -p /path/to/project --since 7days
+snatch search "schema drift" --provider all -p /path/to/project
+snatch lessons --all --provider all -p /path/to/project
 ```
 
-### 3. Generate Project Documentation
+`--provider all` scans every selected corpus and can be expensive. Prefer a
+single provider and add project/date/session filters before requesting a full
+union. Repeating explicit provider flags is equivalent to an explicit subset:
 
 ```bash
-#!/bin/bash
-# generate-docs.sh
-
-# Export all sessions as a single document
-snatch export --project /path/to/project \
-  --format markdown \
-  --output docs/development-log.md \
-  --merge \
-  --include-thinking
-
-echo "Generated docs/development-log.md"
+snatch list sessions \
+  --provider claude-code \
+  --provider codex \
+  --project /path/to/project
 ```
 
-### 4. Analyze Token Usage
+### Qualified ids and ambiguity
+
+Provider listings emit qualified ids such as `claude-code:<uuid>` and
+`codex:<thread-id>`. A qualified id routes without a redundant flag:
 
 ```bash
-# Show token usage for a session
-snatch stats abc12345
-
-# Show usage for all sessions in a project
-snatch stats --project /path/to/project
-
-# Export usage to CSV
-snatch stats --project /path/to/project --format csv > usage.csv
+snatch info codex:<thread-id>
+snatch digest claude-code:<session-id>
+snatch tag name codex:<thread-id> "Parser investigation"
 ```
 
-### 5. Extract Code Blocks
+An unqualified prefix is resolved only within the selected/default scope and
+must be unique. If snatch reports ambiguity, copy a qualified id from `list`.
+
+## Progressive session reading
 
 ```bash
-# Extract all code from a session
-snatch extract abc12345 --type code --output code-blocks/
+# Prompt boundaries and compact turn summaries
+snatch chunks codex:<session-id>
+snatch timeline codex:<session-id>
 
-# Extract specific language
-snatch extract abc12345 --type code --language python --output python-code/
+# Conversation text without tool-only turns
+snatch messages codex:<session-id> --detail conversation
 
-# Extract with file metadata
-snatch extract abc12345 --type code --with-metadata
+# One prompt-boundary chunk, with tool details
+snatch messages codex:<session-id> --chunk 4 --detail full
+
+# Failed tool activity only
+snatch messages codex:<session-id> --chunk 2-5 --detail full --errors-only
 ```
 
-## Integration Examples
+This orientation → timeline/chunks → selected message detail workflow avoids
+placing an entire large transcript in the terminal or an agent context.
 
-### With Git Hooks
+## Search and topic threading
 
 ```bash
-#!/bin/bash
-# .git/hooks/post-commit
+# Classic direct search
+snatch search "authentication" -p /path/to/project
 
-# Archive Claude session after each commit
-SESSION=$(snatch list --project "$(pwd)" --limit 1 --format json | jq -r '.sessions[0].id')
+# Provider-aware indexed search
+snatch index build --provider codex
+snatch search "authentication" --provider codex -p /path/to/project
 
-if [ -n "$SESSION" ]; then
-  snatch export "$SESSION" \
-    --format markdown \
-    --output ".claude/archives/$(git rev-parse --short HEAD).md"
-fi
+# Build and search a complete provider union
+snatch index rebuild --provider all
+snatch search "migration" --provider all --since 30days
+
+# Chronological cross-session narrative
+snatch thread "retry policy" --provider all -p /path/to/project
 ```
 
-### With CI/CD
+Plain ASCII literals can use the index accelerator. Complex regex and fuzzy
+queries may require stored-projection scans; narrow them first on large
+snapshots.
 
-```yaml
-# .github/workflows/archive.yml
-name: Archive Conversations
+## Exporting
 
-on:
-  schedule:
-    - cron: '0 0 * * 0'  # Weekly
+### Normalized formats
 
-jobs:
-  archive:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install snatch
-        run: cargo install claude-snatch
-
-      - name: Archive conversations
-        run: |
-          snatch export --project . \
-            --format json \
-            --output archives/$(date +%Y-%m-%d).json
-
-      - name: Commit archives
-        run: |
-          git add archives/
-          git commit -m "chore: archive conversations"
-          git push
+```bash
+snatch export codex:<session-id> -f markdown -O conversation.md
+snatch export codex:<session-id> -f json-pretty -O conversation.json
+snatch export codex:<session-id> -f html --toc --dark -O conversation.html
+snatch export codex:<session-id> -f sqlite -O conversation.db
 ```
 
-### As a Library
+Normalized exports support filters and redaction:
 
-```rust
-use claude_snatch::{
-    discovery::ClaudeDirectory,
-    parser::JsonlParser,
-    reconstruction::Conversation,
-    analytics::SessionAnalytics,
-    export::{MarkdownExporter, ExportOptions, Exporter},
-};
+```bash
+snatch export <session-id> --only prompts,assistant -O readable.md
+snatch export <session-id> --no-thinking --no-tool-results -O compact.md
+snatch export <session-id> --redact security -O sanitized.md
+snatch export <session-id> --redact security --redact-preview
+```
 
-fn main() -> anyhow::Result<()> {
-    // Discover Claude directory
-    let claude_dir = ClaudeDirectory::discover()?;
+### Fidelity tiers
 
-    // Find a session
-    let session = claude_dir.find_session("abc12345")?
-        .expect("Session not found");
+```bash
+# Normalized JSONL: content-preserving, not byte-exact
+snatch export codex:<session-id> -f jsonl -O normalized.jsonl
 
-    // Parse the session
-    let mut parser = JsonlParser::new();
-    let entries = parser.parse_file(session.path())?;
+# Exact logical JSONL record stream (compressed sources are decoded)
+snatch export codex:<session-id> -f raw-jsonl -O rollout.jsonl
 
-    // Build conversation
-    let conversation = Conversation::from_entries(entries)?;
+# Exact bytes of the preferred artifact (possibly compressed)
+snatch export codex:<session-id> -f native -O preferred-artifact.bin
 
-    // Get analytics
-    let analytics = SessionAnalytics::from_conversation(&conversation);
-    let summary = analytics.summary_report();
+# Lossless manifest + every artifact of the logical session
+snatch export codex:<session-id> -f archive -O session.bundle
+```
 
-    println!("Messages: {}", summary.total_messages);
-    println!("Tokens: {}", summary.total_tokens);
-    println!("Cost: {}", summary.cost_string());
+Source-fidelity tiers intentionally do not apply content filters or redaction.
+Use a normalized format when transforming or sanitizing content.
 
-    // Export to Markdown
-    let exporter = MarkdownExporter::new();
-    let options = ExportOptions::default()
-        .with_thinking(true)
-        .with_tool_use(true);
+### Batch archive
 
-    let mut output = std::fs::File::create("output.md")?;
-    exporter.export_conversation(&conversation, &mut output, &options)?;
+```bash
+mkdir -p ./exports
+snatch export --all \
+  --provider codex \
+  --project /path/to/project \
+  --since 30days \
+  --format archive \
+  --out ./exports/ \
+  --overwrite \
+  --progress
+```
 
+Use `--provider all` only when the batch really should include every provider.
+
+## Analysis
+
+```bash
+snatch stats codex:<session-id> --all
+snatch digest codex:<session-id>
+snatch lessons codex:<session-id>
+snatch health /path/to/project --provider all --since 30days
+snatch priorities /path/to/project --provider all --since 30days
+snatch file-history src/main.rs --provider all -p /path/to/project
+snatch file-evolution src/main.rs /path/to/project --provider all
+```
+
+Provider pricing is explicit. Sources that cannot be honestly priced report
+cost as unavailable rather than `$0` or an approximate fallback rate.
+
+## Session metadata
+
+Tags, names, bookmarks, outcomes, notes, and links use qualified logical keys:
+
+```bash
+snatch tag add investigation -s codex:<session-id>
+snatch tag name codex:<session-id> "Investigate parser drift"
+snatch tag bookmark codex:<session-id>
+snatch tag outcome codex:<session-id> success
+snatch tag note codex:<session-id> "Validated against the native records"
+snatch tag link codex:<session-id> claude-code:<session-id>
+
+snatch list sessions --provider all --tag investigation
+snatch list sessions --provider all --bookmarked
+snatch info codex:<session-id>
+```
+
+Bulk date/project tagging and similarity remain Claude-only until a typed
+cross-provider contract exists; unsupported combinations refuse rather than
+silently ignoring provider scope.
+
+## Lineage and integrity
+
+```bash
+# Classic continuation chains
+snatch chain
+
+# Typed continuation/fork/spawn graph
+snatch chain --provider all
+
+# One normalized bundle
+snatch validate codex:<session-id>
+
+# Every selected provider
+snatch validate --provider all --all
+
+# Native vocabulary and coverage diagnostics
+snatch doctor --provider codex --all
+```
+
+Preserved unknown records are content-complete data, not automatic corruption.
+Use `doctor` for vocabulary drift and `validate` for source/provenance
+integrity.
+
+## Recover files from a Claude session
+
+`recover` (alias `restore`) reconstructs files from Claude Write/Edit tool
+operations. It is not a session-backup command and currently refuses other
+providers.
+
+```bash
+snatch recover <session-id> --preview
+snatch recover <session-id> --apply-edits --file "src/**/*.rs" --preview
+snatch recover <session-id> \
+  --apply-edits \
+  --strip-prefix /home/user/project \
+  --output-dir ./recovered \
+  --overwrite
+```
+
+## MCP server
+
+Install the current checkout, then restart/reconnect the MCP client:
+
+```bash
+./install.sh
+# Equivalent explicit command:
+cargo install --path . --locked --all-features --force
+
+snatch serve-mcp
+```
+
+Example stdio configuration:
+
+```json
+{
+  "mcpServers": {
+    "snatch": {
+      "command": "snatch",
+      "args": ["serve-mcp"]
+    }
+  }
+}
+```
+
+Replacing the binary does not restart an existing stdio subprocess.
+
+## Library provider discovery
+
+```rust,no_run
+use claude_snatch::provider::registry::{ProviderRegistry, ProviderSelection};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let registry = ProviderRegistry::with_defaults();
+    let selection = ProviderSelection::from_flags(&["all".to_string()])
+        .expect("valid provider selection");
+    let collected = registry.collect_selected_sessions(&selection)?;
+
+    for descriptor in collected.items {
+        println!("{}", descriptor.key);
+    }
+    for (provider, reason) in collected.skipped {
+        eprintln!("skipped {provider}: {reason}");
+    }
     Ok(())
 }
 ```
 
-## Advanced Recipes
-
-### Diff Two Sessions
-
-```bash
-# Compare two sessions
-snatch diff session1 session2
-
-# Show only message differences
-snatch diff session1 session2 --messages-only
-
-# Output as JSON
-snatch diff session1 session2 --format json
-```
-
-### Merge Agent Hierarchy
-
-```bash
-# Export parent session with all subagents
-snatch export parent-session --combine-agents
-
-# Show agent hierarchy
-snatch tree parent-session
-```
-
-### Extract Backup History
-
-```bash
-# List file backups from a session
-snatch backups abc12345
-
-# Extract specific file version
-snatch backups abc12345 --file src/main.rs --version 2
-
-# Diff backup versions
-snatch backups abc12345 --file src/main.rs --diff 1 2
-```
-
-### Generate Statistics Report
-
-```bash
-#!/bin/bash
-# weekly-report.sh
-
-echo "# Weekly Claude Usage Report"
-echo "Generated: $(date)"
-echo
-
-snatch stats \
-  --project /path/to/project \
-  --after "$(date -d '7 days ago' +%Y-%m-%d)" \
-  --format markdown
-
-echo
-echo "## Cost Summary"
-snatch stats \
-  --project /path/to/project \
-  --after "$(date -d '7 days ago' +%Y-%m-%d)" \
-  --summary-only
-```
-
-### Watch for New Sessions
-
-```bash
-#!/bin/bash
-# watch-sessions.sh
-
-snatch watch --project /path/to/project --on-new "
-  echo 'New session: \$SESSION_ID'
-  snatch export \$SESSION_ID --format markdown --output latest.md
-"
-```
+Explicit selections fail atomically. `all` can soften provider failures, but
+the skipped reasons remain part of the result.
 
 ## Troubleshooting
 
-### Session Not Found
+### Provider or session unavailable
 
 ```bash
-# List all sessions to find the correct ID
-snatch list --all
-
-# Check if Claude directory is correct
-snatch config show | grep claude_dir
+snatch providers --json
+snatch list sessions --provider codex --full-ids
+snatch info codex:<session-id> --json
 ```
 
-### Export Fails
+Check `CODEX_HOME` for Codex or `SNATCH_CLAUDE_DIR`/`--claude-dir` for Claude.
+Pre-envelope Codex files are discoverable and source-exportable but
+intentionally refused for normalized analysis.
+
+### Parse size refusal
 
 ```bash
-# Check if session exists
-snatch show abc12345
-
-# Try with verbose output
-snatch export abc12345 --verbose
-
-# Check permissions
-ls -la ~/.claude/projects/
+snatch info codex:<session-id> --max-file-size 104857600
 ```
 
+A nonzero value tightens provider guards. `0` means no additional user cap;
+it never disables built-in compressed-stream protections.
+
+### Installed binary still behaves like an old build
+
+```bash
+which -a snatch
+./install.sh --local
+```
+
+Ensure the intended install directory wins in `PATH`, then restart/reconnect
+the MCP client so it launches a new server process.

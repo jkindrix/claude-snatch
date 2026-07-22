@@ -1,6 +1,6 @@
 # claude-snatch
 
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 High-performance CLI and MCP tool for retrieving, analyzing, and exporting
@@ -8,7 +8,8 @@ Claude Code and OpenAI Codex CLI session logs with **maximum data fidelity**.
 
 ## Features
 
-- **Maximum Fidelity**: Extract all 77+ documented JSONL data elements
+- **Maximum Fidelity**: Preserve every native record with explicit provenance,
+  including records not yet normalized
 - **Claude Code + Codex CLI**: Provider-qualified sessions, normalized views,
   native/archive export, and cross-provider project history
 - **Multiple Export Formats**: Markdown, JSON, HTML, CSV, SQLite, JSONL, and more
@@ -73,19 +74,19 @@ snatch list sessions
 snatch list sessions -p /path/to/project
 
 # Export a session to Markdown
-snatch export <session-id> -o conversation.md
+snatch export <session-id> -O conversation.md
 
 # Export to JSON with pretty printing
-snatch export <session-id> -f json --pretty -o conversation.json
+snatch export <session-id> -f json --pretty -O conversation.json
 
-# Export to HTML (with dark theme)
-snatch export <session-id> -f html -o conversation.html
+# Export to HTML with the dark theme
+snatch export <session-id> -f html --dark -O conversation.html
 
 # Search across all sessions
 snatch search "pattern" -i  # case-insensitive
 
 # Show session statistics
-snatch stats -s <session-id>
+snatch stats <session-id>
 
 # Show global statistics across all sessions
 snatch stats --global
@@ -109,9 +110,9 @@ snatch timeline codex:<thread-id>
 snatch chunks codex:<thread-id>
 
 # Normalized and source-fidelity exports
-snatch export codex:<thread-id> -f markdown -o conversation.md
-snatch export codex:<thread-id> -f raw-jsonl -o rollout.jsonl
-snatch export codex:<thread-id> -f archive -o session.archive
+snatch export codex:<thread-id> -f markdown -O conversation.md
+snatch export codex:<thread-id> -f raw-jsonl -O rollout.jsonl
+snatch export codex:<thread-id> -f archive -O session.archive
 
 # Cross-provider project and lesson views
 snatch list projects --provider all
@@ -132,33 +133,47 @@ honestly priced from token counts as API spend.
 | Command | Alias | Description |
 |---------|-------|-------------|
 | `list` | `ls` | List projects and sessions |
-| `export` | `x` | Export conversations to various formats |
-| `search` | `s`, `find` | Search across sessions |
-| `stats` | `stat` | Show usage statistics |
-| `standup` | `daily` | Generate standup/progress report |
-| `digest` | `d` | Generate a concise digest of a session |
-| `lessons` | | Extract error→fix pairs and user corrections from a session |
-| `timeline` | | Show turn-by-turn timeline with timing and tool activity |
-| `messages` | `msgs` | Show messages for a session |
-| `info` | `i`, `show` | Display detailed information |
-| `pick` | `browse` | Interactively pick a session using fuzzy search |
-| `diff` | | Compare two sessions or files |
-| `tag` | | Manage session tags, names, and bookmarks |
-| `prompts` | | Extract user prompts from sessions |
-| `code` | | Extract code blocks from sessions |
-| `summary` | | Show quick summary of Claude Code usage |
-| `recent` | | List most recent sessions (shorthand for list -n 5) |
-| `backup` | `restore` | Backup and restore session snapshot files |
-| `extract` | `ext` | Extract beyond-JSONL data (settings, MCP, etc.) |
-| `index` | `idx` | Manage full-text search index |
+| `recent` | | List recent sessions |
+| `info` | `i`, `show` | Show session or project details |
+| `pick` | `browse` | Interactively select a session |
+| `chain` | | Show continuation chains or typed provider lineage |
+| `file-history` | | Find sessions that modified a file |
+| `search` | `s`, `find` | Search session content |
+| `thread` | | Thread a topic across sessions |
+| `stats` | `stat` | Show usage statistics and cost tracking |
+| `summary` | | Show a quick usage summary |
+| `standup` | `daily` | Generate an activity report |
+| `diff` | `d` | Compare sessions or conversation versions |
+| `lessons` | | Extract error→fix pairs and human corrections |
+| `health` | | Show a project health dashboard |
+| `file-evolution` | | Explain how and why a file changed |
+| `priorities` | | Suggest next work from project evidence |
+| `doctor` | | Diagnose schema drift and degraded coverage |
+| `providers` | | Report provider roots, capabilities, and availability |
+| `context` | | Zoom around a session event |
+| `timeline` | | Show a turn-by-turn narrative |
+| `messages` | `msgs` | Read messages at selectable detail levels |
+| `chunks` | | List prompt-boundary chunks |
+| `goals` | | Manage the Claude project-memory goal registry |
+| `digest` | | Generate a compact session digest |
+| `notes` | | Manage the Claude project-memory note registry |
+| `decisions` | | Manage the Claude project-memory decision registry |
+| `export` | `x` | Export normalized or source-fidelity data |
+| `grab` | | Bundle a Claude parent session and its subagents |
+| `code` | | Extract code blocks |
+| `prompts` | | Extract user prompts |
+| `recover` | `restore` | Reconstruct files from Write/Edit operations |
+| `watch` | | Watch active Claude sessions |
+| `tag` | | Manage qualified session metadata |
+| `cleanup` | `clean` | Clean old or empty Claude sessions |
+| `validate` | | Validate source and normalized integrity |
 | `cache` | | Manage the session cache |
-| `cleanup` | | Clean up old or empty sessions |
+| `index` | `idx` | Manage the provider-partitioned search index |
 | `config` | `cfg` | View and modify configuration |
-| `validate` | | Validate session files |
-| `watch` | | Watch for session changes |
+| `extract` | `ext` | Extract Claude-specific supplementary data |
 | `completions` | | Generate shell completions |
-| `quickstart` | `guide`, `examples` | Interactive guide for new users |
-| `serve` | `mcp` | Start the MCP server for AI agent integration |
+| `quickstart` | `guide`, `examples` | Show built-in usage guidance |
+| `serve-mcp` | `mcp` | Start the MCP server (when built with `mcp`) |
 
 ## MCP Server
 
@@ -171,7 +186,7 @@ When built with the `mcp` feature, claude-snatch runs as an MCP server over stdi
 cargo install --path . --locked --all-features --force
 
 # Start the server (stdio transport)
-snatch serve
+snatch serve-mcp
 ```
 
 Configure it in your Claude Code MCP settings:
@@ -181,7 +196,7 @@ Configure it in your Claude Code MCP settings:
   "mcpServers": {
     "snatch": {
       "command": "snatch",
-      "args": ["serve"]
+      "args": ["serve-mcp"]
     }
   }
 }
@@ -197,10 +212,16 @@ Configure it in your Claude Code MCP settings:
 | `get_session_timeline` | Turn-by-turn timeline with timing and tool activity |
 | `get_session_digest` | Concise summary of session activity and key moments |
 | `get_session_lessons` | Error→fix pairs and user corrections for retrospective learning |
+| `thread_topic` | Chronological cross-session topic thread with content provenance |
 | `get_stats` | Token usage and cost statistics |
 | `get_project_history` | Cross-session activity history for a project |
 | `search_sessions` | Full-text search across all sessions |
 | `get_tool_calls` | Tool call history with input summaries and error detection |
+| `get_file_history` | Source-backed file modification history |
+| `get_project_health` | Hotspots, rework, and failure trends |
+| `get_event_context` | Context around a message or timestamp |
+| `suggest_priorities` | Evidence-backed next-work suggestions |
+| `explain_file_evolution` | Conversation context for a file's changes |
 | `manage_goals` | Manage the Claude Code project-memory goal registry |
 | `manage_notes` | Manage the Claude Code project-memory note registry |
 | `manage_decisions` | Manage the Claude Code project-memory decision registry |
@@ -215,7 +236,7 @@ they reject `codex`/`all` rather than pretending their data is unified.
 
 The `src/analysis/` module powers session intelligence features across both CLI and MCP interfaces:
 
-- **Session digests** — concise summaries of activity, tools used, and key moments (`digest` / `d`)
+- **Session digests** — concise summaries of activity, tools used, and key moments (`digest`)
 - **Lesson extraction** — identifies error→fix pairs and user corrections from session history (`lessons`)
 - **Timeline construction** — turn-by-turn view of conversation flow with timing (`timeline`)
 - **Full-text search** — searches content, thinking blocks, and tool inputs (`search` / `s`)
@@ -263,7 +284,7 @@ phrases like "audit that session" or "debrief this session".
 Human-readable conversation transcript with syntax highlighting for code blocks.
 
 ```bash
-snatch export <session-id> -f markdown -o output.md
+snatch export <session-id> -f markdown -O output.md
 ```
 
 ### JSON
@@ -272,8 +293,8 @@ Normalized structured export that retains all JSONL elements (content-preserving
 not byte-exact — fields may be reordered; use `raw-jsonl` for a byte-faithful archive).
 
 ```bash
-snatch export <session-id> -f json -o output.json
-snatch export <session-id> -f json-pretty -o output.json  # Pretty-printed
+snatch export <session-id> -f json -O output.json
+snatch export <session-id> -f json-pretty -O output.json  # Pretty-printed
 ```
 
 ### HTML
@@ -281,7 +302,7 @@ snatch export <session-id> -f json-pretty -o output.json  # Pretty-printed
 Rich formatted output with dark/light theme support and collapsible sections.
 
 ```bash
-snatch export <session-id> -f html -o output.html
+snatch export <session-id> -f html -O output.html
 ```
 
 ### Plain Text
@@ -289,7 +310,7 @@ snatch export <session-id> -f html -o output.html
 Simple unformatted text output.
 
 ```bash
-snatch export <session-id> -f text -o output.txt
+snatch export <session-id> -f text -O output.txt
 ```
 
 ### CSV
@@ -297,7 +318,7 @@ snatch export <session-id> -f text -o output.txt
 Tabular format for spreadsheet analysis.
 
 ```bash
-snatch export <session-id> -f csv -o output.csv
+snatch export <session-id> -f csv -O output.csv
 ```
 
 ### SQLite
@@ -305,17 +326,28 @@ snatch export <session-id> -f csv -o output.csv
 Queryable database with full-text search support.
 
 ```bash
-snatch export <session-id> -f sqlite -o output.db
-snatch export --all -f sqlite -o archive.db  # Multi-session archive
+snatch export <session-id> -f sqlite -O output.db
+snatch export --all -f sqlite -O archive.db  # Multi-session archive
 ```
 
-### JSONL
+### JSONL and source-fidelity tiers
 
-Original format preservation for backup or re-import.
+`jsonl` is a normalized, content-preserving representation. It is not the
+original byte stream: fields can be reordered and provider-routed output adds
+versioned provenance wrappers.
 
 ```bash
-snatch export <session-id> -f jsonl -o output.jsonl
+snatch export <session-id> -f jsonl -O output.jsonl
+snatch export <qualified-id> -f raw-jsonl -O source.jsonl
+snatch export <qualified-id> -f native -O preferred-artifact.bin
+snatch export <qualified-id> -f archive -O session.bundle
 ```
+
+`raw-jsonl` streams the original logical JSONL record stream. `native` streams
+the exact bytes of the preferred artifact (which may be compressed). `archive`
+is the universal lossless tier and includes every discovered artifact plus a
+manifest. Source-fidelity exports bypass content filters and redaction; use a
+normalized format when transforming or sanitizing content.
 
 ## Export Options
 
@@ -325,16 +357,17 @@ snatch export <session-id> -f jsonl -o output.jsonl
 | `--tool-use` | true | Include tool use blocks |
 | `--tool-results` | true | Include tool results |
 | `--system` | false | Include system messages |
-| `--timestamps` | true | Include timestamps |
-| `--usage` | true | Include usage statistics |
+| `--timestamps` | true | Include timestamps (`--no-timestamps` disables them) |
+| `--usage` | true | Include usage statistics (`--no-usage` disables them) |
 | `--metadata` | false | Include metadata (UUIDs, etc.) |
-| `--main-thread` | true | Only export main thread (exclude branches) |
+| `--main-thread` | false | Only export main thread (exclude branches) |
 | `--pretty` | false | Pretty-print JSON output |
 | `--gist` | false | Upload export to GitHub Gist (requires `gh` CLI) |
 | `--gist-public` | false | Make the gist public (default is secret) |
 | `--gist-description` | - | Description for the gist |
 | `--toc` | false | Include table of contents/navigation sidebar (HTML only) |
 | `--dark` | false | Use dark theme (HTML only) |
+| `--images` | true | Include image blocks (`--no-images` disables them) |
 | `--clipboard` | false | Copy export to clipboard instead of writing to file/stdout |
 | `--redact` | - | Redact sensitive data (`security`, `all`) |
 | `--redact-preview` | false | Preview what would be redacted without removing |
@@ -343,7 +376,7 @@ snatch export <session-id> -f jsonl -o output.jsonl
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--session`, `-s` | - | Show stats for specific session |
+| positional `SESSION` | - | Show stats for a specific session |
 | `--project`, `-p` | - | Show stats for specific project |
 | `--global` | false | Show global stats across all sessions |
 | `--blocks` | false | Show 5-hour billing window breakdown |
@@ -363,7 +396,7 @@ snatch stats --blocks --sparkline
 snatch stats --global --all
 
 # Show session stats with tool usage
-snatch stats -s <session-id> --tools
+snatch stats <session-id> --tools
 ```
 
 ## Architecture
@@ -384,10 +417,11 @@ claude-snatch/
 │   ├── git/           # Git integration
 │   ├── goals/         # Goal management
 │   ├── index/         # Full-text search index
-│   ├── mcp_server/    # MCP server (14 tools for AI agent integration)
+│   ├── mcp_server/    # MCP server (19 tools for agent integration)
 │   ├── model/         # Data structures for all message types
 │   ├── notes/         # Note management
 │   ├── parser/        # JSONL parsing with streaming support
+│   ├── provider/      # Provider registry, adapters, provenance, lineage
 │   ├── reconstruction/# Conversation tree building
 │   ├── util/          # Utility functions
 │   ├── api.rs         # API types
@@ -403,7 +437,8 @@ claude-snatch/
 
 ## Data Model
 
-claude-snatch supports all 7 message types in Claude Code JSONL logs:
+The normalized model supports Claude Code's seven established entry families
+and preserves provider-native records that do not yet have a normalized form:
 
 | Type | Description |
 |------|-------------|
@@ -567,3 +602,4 @@ Contributions are welcome! Please ensure:
 ## Related Projects
 
 - [Claude Code](https://github.com/anthropics/claude-code) - The Anthropic CLI that generates these logs
+- [Codex CLI](https://github.com/openai/codex) - The coding-agent CLI whose rollout logs are supported

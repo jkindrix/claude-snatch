@@ -2,6 +2,11 @@
 
 snatch works out of the box; configuration is optional and uses sensible defaults.
 
+Provider source roots are intentionally configured outside the TOML file. The
+TOML schema controls display, caches, indexing, and budgets; source selection is
+explicit through environment/global CLI options so commands cannot silently
+switch corpora.
+
 ## Configuration Locations
 
 Configuration is loaded and merged in this order (later overrides earlier):
@@ -15,6 +20,76 @@ The user-config directory follows the platform convention (`$XDG_CONFIG_HOME` or
 `~/.config` on Linux, `~/Library/Application Support` on macOS, `%APPDATA%` on
 Windows), under `claude-snatch/config.toml`. Run `snatch config path` to print the
 exact location.
+
+## Provider sources and selection
+
+| Provider | Default root | Override |
+|----------|--------------|----------|
+| `claude-code` | `~/.claude` | global `--claude-dir PATH` or `SNATCH_CLAUDE_DIR` |
+| `codex` | `$CODEX_HOME`, otherwise `~/.codex` | set `CODEX_HOME` |
+
+There is no `codex_root` TOML key or `--codex-dir` CLI flag. Embedded/library
+callers can supply one with `provider::registry::RegistryConfig`.
+
+Provider-aware commands accept repeatable `--provider` values:
+
+```bash
+snatch providers
+snatch list sessions --provider codex
+snatch list sessions --provider claude-code --provider codex
+snatch list sessions --provider all
+snatch info codex:<native-session-id>
+```
+
+Without `--provider`, an unqualified reference uses the classic Claude route.
+A qualified id is itself an explicit provider selection. `--provider all` is
+an explicit full-corpus scan: unavailable providers are reported with partial
+results, while an explicitly named unavailable provider fails atomically.
+Scope large union operations by provider, project, session, or date whenever
+possible.
+
+Qualified ids are `provider:native-id` for the global namespace and
+`provider:namespace:native-id` for provider-local namespaces. Literal `%` and
+`:` within segments are escaped; copy ids from `snatch list --provider ...`
+rather than constructing them manually.
+
+## Parsing safety limits
+
+The global `--max-file-size BYTES` option (or `SNATCH_MAX_FILE_SIZE`) applies to
+classic parsing and tightens every selected provider's own limits. It never
+loosens a provider guard:
+
+- omitted or `0` means no additional user cap;
+- Claude files are bounded by the supplied nonzero value;
+- Codex plain and decompressed streams are bounded by the supplied nonzero
+  value in addition to built-in compressed/decompressed/window guards;
+- the effective policy participates in provider cache revision tokens, so
+  parses made under different limits cannot alias.
+
+Codex defaults currently cap compressed input at 1 GiB, decompressed output at
+4 GiB, and the zstd window at 128 MiB. These are safety ceilings, not promises
+that a file near the ceiling will fit the configured in-memory cache.
+
+## Build features
+
+| Feature | Default | Purpose |
+|---------|---------|---------|
+| `codex` | yes | Codex rollout discovery and streaming zstd decode |
+| `mcp` | no | stdio MCP server and its 19 tools |
+| `mmap` | no | memory-mapped classic parsing for large JSONL files |
+| `tracing` | no | additional tracing instrumentation |
+
+Examples:
+
+```bash
+cargo build                              # default provider set
+cargo build --no-default-features        # classic provider only
+cargo build --all-features               # all providers + MCP + mmap + tracing
+cargo install --path . --locked --all-features --force
+```
+
+After replacing an installed MCP-enabled binary, restart or reconnect the MCP
+client; an already-running stdio server continues using its old process image.
 
 ## File Format
 
@@ -77,7 +152,9 @@ show_in_stats = true
 
 ### `[budget]`
 
-Cost alerts based on estimated spend (see `snatch stats`).
+Cost alerts based on estimated spend (see `snatch stats`). Provider pricing is
+capability-gated: a source without an applicable exact rate table reports cost
+as unavailable rather than fabricating `$0` or applying a fallback model.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -121,3 +198,12 @@ Keys accepted by `config get` / `config set`:
 - `budget.daily_limit`, `budget.weekly_limit`, `budget.monthly_limit`, `budget.warning_threshold`, `budget.show_in_stats`
 
 `[index]` is read from the config file but is not exposed through `config set`.
+
+The provider search index is partitioned by provider and stores a snapshot of
+the selected corpus. Use explicit provider scope when building or searching:
+
+```bash
+snatch index build --provider codex
+snatch index rebuild --provider all
+snatch search "query" --provider all
+```

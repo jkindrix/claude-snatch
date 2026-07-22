@@ -1,322 +1,261 @@
 # Export Formats
 
-snatch supports multiple export formats for conversation logs. Each format has specific use cases and options.
+snatch separates normalized presentation formats from source-fidelity tiers.
+Choose the contract first: readable/filterable output, exact logical records,
+one exact artifact, or a lossless multi-artifact bundle.
 
-## Available Formats
+## Format matrix
 
-| Format | Extension | Use Case |
-|--------|-----------|----------|
-| Markdown | `.md` | Documentation, reading, sharing |
-| JSON | `.json` | Data processing, API integration |
-| JSON (Pretty) | `.json` | Human-readable JSON with indentation |
-| HTML | `.html` | Web viewing, archiving |
-| Plain Text | `.txt` | Simple text, compatibility |
-| CSV | `.csv` | Spreadsheet analysis |
-| SQLite | `.db` | Database queries, analysis |
-| JSONL | `.jsonl` | Normalized line-by-line export (filterable, not byte-faithful) |
-| raw-jsonl | `.jsonl` | Byte-faithful archival passthrough of the original log |
+| Format | Typical extension | Contract |
+|--------|-------------------|----------|
+| `markdown` / `md` | `.md` | Readable normalized transcript |
+| `json` | `.json` | Normalized structured conversation |
+| `json-pretty` | `.json` | Indented normalized JSON |
+| `text` | `.txt` | Plain normalized transcript |
+| `csv` | `.csv` | Tabular normalized entries |
+| `html` | `.html` | Self-contained rendered transcript |
+| `sqlite` | `.db` | Queryable normalized relational export |
+| `jsonl` | `.jsonl` | Normalized line-delimited representation |
+| `raw-jsonl` | `.jsonl` | Exact logical JSONL record stream |
+| `native` | provider-defined | Exact bytes of the preferred artifact |
+| `archive` | `.bundle` | Lossless manifest plus every artifact |
 
-## Command Line Usage
+Normalized output is universal. `archive` is the universal lossless tier.
+`native` and `raw-jsonl` are provider capabilities; `snatch providers` reports
+their availability.
+
+## Basic usage
 
 ```bash
-# Export to Markdown (default)
-snatch export <session-id>
-
-# Export to specific format
-snatch export <session-id> --format json
-snatch export <session-id> --format html
-snatch export <session-id> --format csv
-
-# Specify output file
-snatch export <session-id> --output conversation.md
-
-# Export with options
-snatch export <session-id> --include-thinking --include-tools
-
-# Export main thread only (exclude branches)
-snatch export <session-id> --main-thread
+snatch export <SESSION>                              # Markdown to stdout
+snatch export <SESSION> --format markdown -O out.md
+snatch export <SESSION> --format json-pretty -O out.json
+snatch export <SESSION> --format html --toc --dark -O out.html
+snatch export <SESSION> --format sqlite -O out.db
 ```
 
-## Format Details
+Provider-qualified ids route directly:
 
-### Markdown
-
-Best for documentation and sharing.
-
-```markdown
-# Conversation Export
-
-**Session**: abc12345-def6-7890-abcd-ef1234567890
-**Date**: 2025-01-15 10:30:00 UTC
-**Messages**: 42
-
----
-
-## User (10:30:15)
-
-Can you help me with this code?
-
----
-
-## Assistant (10:30:18)
-
-Of course! Let me analyze your code...
-
-```python
-def example():
-    return "Hello, World!"
-```
+```bash
+snatch export codex:<SESSION> -f markdown -O conversation.md
+snatch export claude-code:<SESSION> -f json -O conversation.json
 ```
 
-Options:
-- `--include-thinking`: Include thinking blocks in output
-- `--include-tools`: Include tool calls and results
-- `--main-thread`: Export only main conversation thread
+Use `-O` or `--out` for a destination path. Global `-o` / `--output` selects
+the CLI response encoding and is not the export destination option.
 
-### JSON
+## Normalized formats
 
-Structured data format for programmatic access.
+Normalized exporters consume the common `Conversation` model. They retain
+successfully parsed content but are not byte-exact: fields can be reordered,
+UUID-less entries can move relative to the tree view, and provider-routed
+JSONL adds versioned derivation/provenance wrappers.
 
-```json
-{
-  "version": "1.0",
-  "exported_at": "2025-01-15T10:30:00Z",
-  "exporter": "snatch",
-  "metadata": { "session_id": "abc12345-def6-7890-abcd-ef1234567890" },
-  "analytics": { "total_messages": 42 },
-  "tree": { },
-  "entries": [
-    {
-      "type": "user",
-      "timestamp": "2025-01-15T10:30:15Z",
-      "message": { "role": "user", "content": "Can you help me with this code?" }
-    },
-    {
-      "type": "assistant",
-      "timestamp": "2025-01-15T10:30:18Z",
-      "message": { "role": "assistant", "content": [{ "type": "text", "text": "..." }] }
-    }
-  ]
-}
+### Markdown and text
+
+```bash
+snatch export <SESSION> -f markdown -O conversation.md
+snatch export <SESSION> -f text -O conversation.txt
 ```
 
-The top-level conversation array is `entries` (one element per log entry). Use
-`--format json-pretty` for indented output.
+Markdown includes readable role sections, fenced code, tool activity, token
+statistics, and conversation/activity timing when available. It distinguishes
+the native record span from authoritative model turn duration instead of
+presenting trailing housekeeping activity as model latency.
+
+### JSON and JSONL
+
+```bash
+snatch export <SESSION> -f json -O conversation.json
+snatch export <SESSION> -f json-pretty -O conversation.json
+snatch export <SESSION> -f jsonl -O normalized.jsonl
+```
+
+Use JSON for one structured document and JSONL for line-oriented normalized
+processing. Neither is the original source stream.
 
 ### HTML
 
-Self-contained HTML file with embedded CSS for web viewing.
-
-Features:
-- Light (default) / dark theme support
-- Syntax highlighted code blocks
-- Collapsible thinking blocks
-- Responsive design
-
 ```bash
-# Light theme (default)
-snatch export <session-id> --format html
-
-# Dark theme
-snatch export <session-id> --format html --dark
+snatch export <SESSION> -f html -O conversation.html
+snatch export <SESSION> -f html --dark --toc -O conversation.html
 ```
 
-### Plain Text
-
-Simple text format without formatting.
-
-```
-=== Conversation Export ===
-Session: abc12345
-Date: 2025-01-15
-
---- User (10:30:15) ---
-Can you help me with this code?
-
---- Assistant (10:30:18) ---
-Of course! Let me analyze your code...
-```
-
-Options:
-- `--width <n>`: Set line width for wrapping (default: 80)
+HTML is self-contained and supports syntax highlighting, collapsible sections,
+light/dark themes, and an optional table of contents.
 
 ### CSV
 
-Spreadsheet-compatible format for data analysis.
-
-Columns:
-- `timestamp`: ISO 8601 timestamp
-- `type`: Message type (user/assistant/system/tool)
-- `content`: Message content (truncated if too long)
-- `tokens`: Token count (if available)
-- `model`: Model used (if available)
-
-```csv
-timestamp,type,content,tokens,model
-2025-01-15T10:30:15Z,user,"Can you help with this code?",12,
-2025-01-15T10:30:18Z,assistant,"Of course! Let me analyze...",45,claude-3.5-sonnet
+```bash
+snatch export <SESSION> -f csv -O conversation.csv
 ```
+
+CSV is intended for entry-level spreadsheet processing. Rich nested content is
+flattened or summarized; choose JSON/SQLite for lossless normalized structure.
 
 ### SQLite
 
-Database format for complex queries and analysis.
+```bash
+snatch export <SESSION> -f sqlite -O conversation.db
+sqlite3 conversation.db 'SELECT type, COUNT(*) FROM entries GROUP BY type'
+```
 
-Tables:
-- `sessions`: Session metadata
-- `entries`: One row per raw log entry, with full content
-- `content_blocks`: Content blocks belonging to an entry
-- `tool_uses`: Tool invocations
-- `tool_results`: Tool execution results
-- `thinking_blocks`: Extended thinking content
-- `usage_stats`: Per-session token/cost statistics (logical message counts)
-- `tool_usage`: Per-tool invocation counts
-- `entries_fts` / `thinking_fts`: Full-text search indexes
+The database includes session metadata, entries, content blocks, tool
+uses/results, thinking blocks, usage statistics, and full-text indexes.
+
+## Source-fidelity tiers
+
+### `raw-jsonl`
 
 ```bash
-# Export to SQLite
-snatch export <session-id> --format sqlite
-
-# Query the database
-sqlite3 session.db "SELECT * FROM entries WHERE role='assistant'"
+snatch export codex:<SESSION> -f raw-jsonl -O rollout.jsonl
 ```
 
-### JSONL (JSON Lines)
+Streams the unmodified logical JSONL record sequence. A compressed source is
+decoded because the contract is the JSONL stream, not its container bytes.
 
-Line-delimited JSON for streaming and processing.
-
-```jsonl
-{"type":"metadata","session_id":"abc12345","message_count":42}
-{"type":"user","timestamp":"2025-01-15T10:30:15Z","content":"Can you help?"}
-{"type":"assistant","timestamp":"2025-01-15T10:30:18Z","content":"Of course!"}
-```
-
-Ideal for:
-- Streaming processing
-- Large file handling
-- Log aggregation tools
-
-`jsonl` is normalized (content-preserving but reordered/reshaped). For a
-byte-for-byte copy of the original Claude Code log, use `raw-jsonl`.
-
-### raw-jsonl (archival passthrough)
-
-Byte-faithful passthrough of the original Claude Code JSONL — no parsing,
-filtering, redaction, or reordering. This is the archival mode.
+### `native`
 
 ```bash
-snatch export <session-id> --format raw-jsonl -O archive.jsonl
+snatch export codex:<SESSION> -f native -O preferred-artifact.bin
 ```
 
-Notes:
-- Rejects `--redact`, `--only`, and other transforming flags (it must stay
-  byte-identical to the source).
-- Single-file by design: subagent transcripts (the `subagents/` directory) are
-  **not** included; snatch warns when they exist so the omission isn't silent.
+Streams the exact bytes of the provider-selected preferred artifact. For a
+compressed twin, those bytes remain compressed. This tier does not include
+sibling artifacts.
 
-## Export Options
-
-### Common Options
-
-| Option | Description |
-|--------|-------------|
-| `--output <file>` | Output file path |
-| `--include-thinking` | Include thinking blocks |
-| `--include-tools` | Include tool calls and results |
-| `--main-thread` | Export only main thread |
-| `--no-timestamps` | Omit timestamps |
-| `--no-metadata` | Omit session metadata |
-
-### Privacy & Redaction Options
-
-| Option | Description |
-|--------|-------------|
-| `--redact security` | Redact API keys, passwords, tokens, secrets |
-| `--redact all` | Also redact emails, IP addresses, phone numbers |
-| `--redact-preview` | Preview what would be redacted without removing |
-| `--warn-pii` | Warn about potential PII without redacting |
-
-Example workflow for safe sharing:
+### `archive`
 
 ```bash
-# First, preview what will be redacted
-snatch export <session-id> --redact security --redact-preview
-
-# If satisfied, perform the actual redaction
-snatch export <session-id> --redact security --output safe-export.md
+snatch export codex:<SESSION> -f archive -O session.bundle
 ```
 
-Redaction replaces sensitive data with type-specific placeholders:
-- `[REDACTED:API_KEY]`
-- `[REDACTED:PASSWORD]`
-- `[REDACTED:EMAIL]`
-- `[REDACTED:IP_ADDRESS]`
+Writes a provider-defined lossless bundle with a manifest and every discovered
+artifact for the logical session. Use this tier when independent recovery of
+all native records matters.
 
-### Content Filtering
+Source-fidelity tiers bypass parsing transformations, content filters,
+redaction, templates, and presentation options. Incompatible combinations are
+rejected before the destination is replaced.
 
-Control which content appears in the export:
+## Content controls
 
-- `--only <types>`: Exclusive whitelist — include only the listed content types
-  (e.g. `--only prompts`, `--only tool-results`, `--only user`, `--only code`).
-  Accepts a comma-separated list.
-- `--no-thinking` / `--no-tool-use` / `--no-tool-results` / `--no-images`: Exclude
-  a content type while keeping everything else (the blocklist counterpart to
-  `--only`). `--no-images` prunes top-level image blocks; images embedded inside
-  tool-result content are not affected.
-- `--full`: Include everything (system messages, metadata, etc.).
-- `--warn-pii`: Scan the export (including tool-result content) for sensitive data
-  and warn before writing.
-
-`--only` is a focus filter; `--redact` is the privacy control. Use `--redact` to
-remove secrets, not `--only`.
-
-### Subagents
-
-- `--combine-agents`: Interleave a parent session with its subagent transcripts
-  into a single export (works with markdown/json/sqlite/jsonl).
-- `--subagents`: Affects `--all` batch listing only; inert on a single session.
-- `raw-jsonl` cannot include subagents (single-file); snatch warns when they exist.
-
-### Destinations
-
-- `-O, --out <FILE>`: Write to a file (otherwise stdout).
-- `--gist`: Upload the export to a GitHub gist (requires `gh`).
-- `--clipboard`: Copy the export to the clipboard.
-- `--template <name>`: Render with a custom template (`--template list` to see them).
-
-### Format-Specific Options
-
-- **HTML:** `--dark` (dark theme; default is light), `--toc` (table of contents).
-- **JSON:** `--pretty` (or use the `json-pretty` format).
-
-## Batch Export
-
-Export multiple sessions at once:
+Thinking, tool use, tool results, images, timestamps, and usage are enabled by
+default.
 
 ```bash
-# Export all sessions from a project
-snatch export --project /path/to/project --format markdown
-
-# Export sessions from a date range
-snatch export --all --project /path/to/project --since 2025-01-01 --until 2025-01-31
-
-# Export all matching sessions
-snatch export --all --project /path/to/project --format markdown
+snatch export <SESSION> --no-thinking
+snatch export <SESSION> --no-tool-use --no-tool-results
+snatch export <SESSION> --no-images
+snatch export <SESSION> --system --metadata
+snatch export <SESSION> --main-thread
+snatch export <SESSION> --no-timestamps --no-usage
 ```
 
-## Programmatic Export
+Exclusive filtering uses `--only`:
 
-Use snatch as a library:
+```bash
+snatch export <SESSION> --only prompts
+snatch export <SESSION> --only prompts,assistant
+snatch export <SESSION> --only tool-use,tool-results
+snatch export <SESSION> --only code
+```
 
-```rust
-use claude_snatch::export::{MarkdownExporter, ExportOptions, Exporter};
+`--full` enables the content-complete normalized preset: system entries,
+metadata, thinking, tool use, and tool results. The deprecated `--lossless`
+alias means the same normalized preset; it does not promise byte fidelity.
+
+## Privacy and redaction
+
+```bash
+# Mark what would be redacted without removing it
+snatch export <SESSION> --redact security --redact-preview
+
+# Redact credentials and security-sensitive values
+snatch export <SESSION> --redact security -O safe.md
+
+# Also redact emails, IP addresses, and phone numbers
+snatch export <SESSION> --redact all -O safe.md
+
+# Report possible PII without changing output
+snatch export <SESSION> --warn-pii
+```
+
+`--only` is a focus filter, not a privacy boundary. Use `--redact` when output
+will leave the trusted environment. Redaction is intentionally unavailable on
+source-fidelity tiers because altering bytes would violate their contract.
+
+## Chains and subagents
+
+```bash
+# Classic single-session export reconstructs continuation chains by default
+snatch export <SESSION> -O conversation.md
+
+# Restrict to the resolved file
+snatch export <SESSION> --no-chain -O one-file.md
+
+# Interleave Claude parent and subagent transcripts
+snatch export <SESSION> --combine-agents -O combined.md
+```
+
+`--subagents` affects `--all` batch discovery. `--combine-agents` applies to a
+single Claude parent export. Provider lineage and multi-artifact fidelity use
+the provider seam rather than the classic subagent directory mechanism.
+
+## Destinations
+
+```bash
+snatch export <SESSION> -O output.md
+snatch export <SESSION> --clipboard
+snatch export <SESSION> --gist
+snatch export <SESSION> --gist --gist-public
+snatch export <SESSION> --template my-template
+snatch export --list-templates
+```
+
+File destinations are written through a temporary file and renamed after a
+successful provider export. Use `--overwrite` when replacing existing output.
+
+## Batch export
+
+```bash
+mkdir -p ./exports
+
+snatch export --all \
+  --project /path/to/project \
+  --since 2026-07-01 \
+  --format markdown \
+  --out ./exports/ \
+  --progress
+
+snatch export --all \
+  --provider codex \
+  --format archive \
+  --out ./archives/ \
+  --overwrite
+```
+
+`--provider all` is an explicit full-union scan. Prefer one provider plus
+project/date filters for interactive work on large corpora.
+
+## Programmatic normalized export
+
+```rust,no_run
+use claude_snatch::export::{ExportOptions, Exporter, MarkdownExporter};
 use claude_snatch::reconstruction::Conversation;
 
-let conversation = Conversation::from_entries(entries)?;
-let exporter = MarkdownExporter::new();
-let options = ExportOptions::default()
-    .with_thinking(true)
-    .with_tool_use(true);
-
-let mut output = Vec::new();
-exporter.export_conversation(&conversation, &mut output, &options)?;
+fn write_markdown(
+    conversation: &Conversation,
+    mut output: impl std::io::Write,
+) -> claude_snatch::Result<()> {
+    let exporter = MarkdownExporter::new();
+    let options = ExportOptions::default()
+        .with_thinking(true)
+        .with_tool_use(true);
+    exporter.export_conversation(conversation, &mut output, &options)
+}
 ```
+
+Provider ingestion should construct the conversation through
+`Conversation::from_parsed_session` so entry ids, provenance, semantics, and
+diagnostics survive into consumers.
