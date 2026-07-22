@@ -780,8 +780,9 @@ pub struct GetSessionLessonsRequest {
     /// provider.
     pub provider: Option<Vec<String>>,
 
-    /// Lesson category filter: "errors" (error→fix pairs), "corrections"
-    /// (user corrections of agent behavior), "all". Default: "all".
+    /// Lesson category projection: "errors" (error→fix pairs), "corrections"
+    /// (user corrections of agent behavior), "all". The summary always
+    /// describes all categories in the session. Default: "all".
     pub category: Option<String>,
 
     /// Maximum lessons to return. Default: 30.
@@ -819,6 +820,8 @@ pub struct UserCorrection {
     pub timestamp: Option<String>,
     /// The user's correction text.
     pub user_text: String,
+    /// Dialogue evidence used to classify this message as corrective.
+    pub correction_basis: crate::analysis::lessons::CorrectionBasis,
     /// What the assistant was doing before (summary of previous response).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prior_assistant_summary: Option<String>,
@@ -839,10 +842,12 @@ pub struct SessionLessonsResponse {
 /// Summary of lessons found.
 #[derive(Debug, Serialize)]
 pub struct LessonsSummary {
+    /// Session-wide total, independent of the requested category projection.
     pub total_errors: usize,
     pub confirmed_tool_failures: usize,
     pub inferred_failure_signals: usize,
     pub entry_scope: String,
+    /// Session-wide total, independent of the requested category projection.
     pub total_corrections: usize,
     pub most_error_prone_tools: Vec<(String, usize)>,
 }

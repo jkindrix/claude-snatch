@@ -78,6 +78,8 @@ pub struct UserCorrectionEntry {
     pub user_text: String,
     /// What the assistant was doing before (summary of previous response).
     pub prior_assistant_summary: Option<String>,
+    /// High-precision dialogue signal that admitted this correction.
+    pub correction_basis: CorrectionBasis,
 }
 
 /// Summary statistics for extracted lessons.
@@ -159,6 +161,37 @@ pub struct FailureCounts {
     pub confirmed: usize,
     /// Heuristically inferred failure signals.
     pub inferred: usize,
+}
+
+/// Evidence that a human message is correcting the preceding assistant.
+///
+/// Corrections are pragmatic dialogue acts, not occurrences of words such as
+/// "already" or "again". These categories intentionally favor precision over
+/// recall so ordinary collaborative prose is not mislabeled as a correction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorrectionBasis {
+    /// Direct rejection such as "No, ..." or "That's not what I asked."
+    ExplicitRejection,
+    /// A direct instruction to stop, resume, or change the previous action.
+    BehavioralRedirect,
+    /// A clarification of the user's previously expressed intent.
+    IntentClarification,
+    /// Criticism of the assistant's prior work, reasoning, or behavior.
+    PerformanceCritique,
+}
+
+impl CorrectionBasis {
+    /// Stable human-facing label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitRejection => "explicit rejection",
+            Self::BehavioralRedirect => "behavioral redirect",
+            Self::IntentClarification => "intent clarification",
+            Self::PerformanceCritique => "performance critique",
+        }
+    }
 }
 
 impl FailureCounts {
@@ -474,15 +507,74 @@ fn build_soft_error_regex() -> Option<regex::Regex> {
     .ok()
 }
 
-/// User correction pattern: detect frustration, behavioral correction,
-/// or explicit instructions to change approach.
-fn build_correction_regex() -> Option<regex::Regex> {
-    regex::RegexBuilder::new(
-        r"(?:don'?t|(?:^|\W)stop\b|wrong|no[,.\!]|incorrect|that'?s not|instead|should have|why did you|why are you|already|again|what the (?:hell|fuck)|are you ever|sick of|wasting time|same (?:thing|fucking)|over and over|keep (?:doing|searching|looking|trying)|you can'?t|how many times)"
-    )
-    .case_insensitive(true)
-    .build()
-    .ok()
+/// Compiled dialogue-act patterns for high-precision correction detection.
+struct CorrectionPatterns {
+    explicit_rejection: regex::Regex,
+    behavioral_redirect: regex::Regex,
+    intent_clarification: regex::Regex,
+    performance_critique: regex::Regex,
+}
+
+fn build_correction_patterns() -> Option<CorrectionPatterns> {
+    let compile = |pattern| {
+        regex::RegexBuilder::new(pattern)
+            .case_insensitive(true)
+            .multi_line(true)
+            .build()
+            .ok()
+    };
+
+    Some(CorrectionPatterns {
+        // Sentence-level rejection avoids matching phrases such as "No action
+        // needed" while retaining "No, not yet" and "No. That is wrong."
+        explicit_rejection: compile(
+            r"(?:^|[.!?]\s+)(?:(?:no|nope|nah)\s*[,!.:](?:\s|$)|(?:that(?:'s| is)|this is|you(?:'re| are))\s+(?:wrong|incorrect|mistaken|not\s+(?:what|the|right)\b))|\bnot what i (?:asked|requested|said|meant|wanted)\b",
+        )?,
+        behavioral_redirect: compile(
+            r"(?:^|[.!?;]\s+)(?:please\s+)?stop\s+\w|(?:^|[.!?;]\s+)(?:please\s+)?never\s+(?:do|repeat|claim|try|use)\b|\bthis time\s+(?:don'?t|do not|stop|never)\s+\w|(?:^|[.!?;]\s+)(?:please\s+)?(?:continue|resume)\s+the\s+(?:previous|original|last)(?:\s+[\w.-]+){0,8}\s+(?:request|instruction|task)\b|(?:^|[.!?;]\s+)(?:please\s+)?(?:do|use|try|take|focus|proceed|leave|keep)\b[^.!?\n]{0,120}\binstead\b",
+        )?,
+        intent_clarification: compile(
+            r"\bwhat i\s+(?:actually|really)\s+(?:asked|requested|said|meant|wanted)\b|\bi\s+(?:didn'?t|did not)\s+(?:ask|request|say|mean|want)\b|\b(?:previous|original|last)(?:\s+[\w.-]+){0,8}\s+(?:request|instruction|task)\b[^.!?\n]{0,40}\bexactly\b",
+        )?,
+        performance_critique: compile(
+            r"\bwhy\s+(?:did|are|do|don'?t|didn'?t|not)\s+you\b|\bhow many times\b|\byou\s+(?:keep|kept|failed|forgot|ignored|missed|misread|misunderstood|misinterpreted|didn'?t|did not|haven't|have not|weren't|were not|aren't|are not|can'?t|cannot)\b|\b(?:issues?|problems?)\s+with\s+your\s+(?:work|answer|response|analysis|implementation)\b|\byour\s+(?:work|answer|response|analysis|implementation)\b[^.!?\n]{0,80}\b(?:wrong|incorrect|incomplete|missing|broken|flawed)\b|\bi\s+(?:don'?t|do not)\s+understand\s+(?:your|why you|what you)\b|\b(?:losing faith|wasting (?:my )?time|sick of|frustrat(?:ed|ing|ion))\b",
+        )?,
+    })
+}
+
+/// Classify a correction from one coherent set of signals. The returned score
+/// is also the ranking score, preventing the former gate/ranker disagreement.
+fn classify_correction(
+    text: &str,
+    patterns: &CorrectionPatterns,
+) -> Option<(u32, CorrectionBasis)> {
+    let signals = [
+        (
+            patterns.explicit_rejection.is_match(text),
+            400,
+            CorrectionBasis::ExplicitRejection,
+        ),
+        (
+            patterns.performance_critique.is_match(text),
+            350,
+            CorrectionBasis::PerformanceCritique,
+        ),
+        (
+            patterns.intent_clarification.is_match(text),
+            300,
+            CorrectionBasis::IntentClarification,
+        ),
+        (
+            patterns.behavioral_redirect.is_match(text),
+            250,
+            CorrectionBasis::BehavioralRedirect,
+        ),
+    ];
+    let signal_count = signals.iter().filter(|(matched, _, _)| *matched).count() as u32;
+    signals
+        .into_iter()
+        .find(|(matched, _, _)| *matched)
+        .map(|(_, base, basis)| (base + signal_count, basis))
 }
 
 fn classify_tool_result_with(
@@ -632,35 +724,6 @@ pub fn count_tool_failures<S: std::hash::BuildHasher>(
     counts
 }
 
-/// Score a correction candidate by how strongly it signals a real user
-/// correction. Counts distinct high-signal markers so the most significant
-/// corrections rank first and survive truncation, rather than whichever
-/// happened earliest (issue #26).
-fn correction_strength(text: &str) -> u32 {
-    let lower = text.to_lowercase();
-    const MARKERS: &[&str] = &[
-        "wrong",
-        "incorrect",
-        "stop",
-        "don't",
-        "dont",
-        "no,",
-        "no.",
-        "no!",
-        "not what",
-        "that's not",
-        "thats not",
-        "instead",
-        "should have",
-        "actually",
-        "i asked",
-        "i said",
-        "why did you",
-        "why are you",
-    ];
-    MARKERS.iter().filter(|m| lower.contains(**m)).count() as u32
-}
-
 /// Check if a user message is a compaction/continuation summary (false positive filter).
 fn is_summary_text(text: &str) -> bool {
     text.len() > 3000
@@ -794,8 +857,8 @@ fn extract_user_corrections_with<Human>(
 where
     Human: Fn(&LogEntry) -> bool,
 {
-    let correction_re = match build_correction_regex() {
-        Some(re) => re,
+    let correction_patterns = match build_correction_patterns() {
+        Some(patterns) => patterns,
         None => return Vec::new(),
     };
 
@@ -819,14 +882,25 @@ where
                 if !is_human(entry) {
                     continue;
                 }
+                // A correction is relational: without an assistant response to
+                // repair, this is an initial instruction or task constraint.
+                let Some(prior_assistant_summary) = prev_assistant_summary.clone() else {
+                    continue;
+                };
                 if let Some(text) = primary_content_text(entry) {
-                    if correction_re.is_match(&text) && text.len() > 10 && !is_summary_text(&text) {
+                    if text.len() <= 10 || is_summary_text(&text) {
+                        continue;
+                    }
+                    if let Some((strength, correction_basis)) =
+                        classify_correction(&text, &correction_patterns)
+                    {
                         scored.push((
-                            correction_strength(&text),
+                            strength,
                             UserCorrectionEntry {
                                 timestamp: entry.timestamp().map(|t| t.to_rfc3339()),
                                 user_text: truncate_text(&text, opts.correction_text_len),
-                                prior_assistant_summary: prev_assistant_summary.clone(),
+                                prior_assistant_summary: Some(prior_assistant_summary),
+                                correction_basis,
                             },
                         ));
                     }
@@ -875,27 +949,32 @@ fn extract_lessons_with<Human>(
 where
     Human: Fn(&LogEntry) -> bool,
 {
-    let mut error_fix_pairs = if opts.category == LessonCategory::Corrections {
-        Vec::new()
-    } else {
-        extract_error_fix_pairs_with(entries, opts, semantic)
-    };
-
-    let mut user_corrections = if opts.category == LessonCategory::Errors {
-        Vec::new()
-    } else {
-        extract_user_corrections_with(entries, opts, is_human)
-    };
+    // Compute session-wide facts before applying the category projection. A
+    // request for only corrections must not turn real failures into zeroes in
+    // the summary (and vice versa).
+    let all_error_fix_pairs = extract_error_fix_pairs_with(entries, opts, semantic);
+    let all_user_corrections = extract_user_corrections_with(entries, opts, is_human);
 
     // Summary reflects true totals (ranked from all errors, not just the limited set)
-    let total_errors = error_fix_pairs.len();
-    let confirmed_tool_failures = error_fix_pairs
+    let total_errors = all_error_fix_pairs.len();
+    let confirmed_tool_failures = all_error_fix_pairs
         .iter()
         .filter(|pair| pair.failure_kind == FailureKind::Confirmed)
         .count();
     let inferred_failure_signals = total_errors - confirmed_tool_failures;
-    let total_corrections = user_corrections.len();
-    let most_error_prone_tools = rank_error_prone_tools(&error_fix_pairs);
+    let total_corrections = all_user_corrections.len();
+    let most_error_prone_tools = rank_error_prone_tools(&all_error_fix_pairs);
+
+    let mut error_fix_pairs = if opts.category == LessonCategory::Corrections {
+        Vec::new()
+    } else {
+        all_error_fix_pairs
+    };
+    let mut user_corrections = if opts.category == LessonCategory::Errors {
+        Vec::new()
+    } else {
+        all_user_corrections
+    };
 
     // Truncate returned vectors to the requested limit
     error_fix_pairs.truncate(opts.limit);
@@ -1276,6 +1355,10 @@ mod tests {
         assert_eq!(corrections.len(), 1);
         assert!(corrections[0].user_text.contains("don't delete"));
         assert!(corrections[0].prior_assistant_summary.is_some());
+        assert_eq!(
+            corrections[0].correction_basis,
+            CorrectionBasis::ExplicitRejection
+        );
     }
 
     fn user_meta(text: &str) -> LogEntry {
@@ -1294,16 +1377,20 @@ mod tests {
     }
 
     #[test]
-    fn test_corrections_rank_by_strength_and_skip_meta() {
+    fn correction_classification_and_ranking_share_one_signal_set() {
         let entries = [
             assistant_text("Working on it."),
-            // Weak correction (single marker "again"), earliest.
+            // Ordinary collaboration containing the old standalone "again"
+            // marker is not a correction.
             user_text("Please run the tests again, thanks for the help here."),
             assistant_text("Sure."),
             // isMeta entry containing correction words must be excluded entirely.
             user_meta("no, that is wrong, stop"),
             assistant_text("OK."),
-            // Strong correction (several markers), latest.
+            // Structural redirect with no old ranking marker is retained.
+            user_text("Continue the previous request exactly as written."),
+            assistant_text("Continuing."),
+            // Explicit rejection ranks before the redirect.
             user_text("No, that's wrong. Stop doing that, do it the other way instead."),
         ];
         let refs: Vec<&LogEntry> = entries.iter().collect();
@@ -1313,17 +1400,70 @@ mod tests {
         assert_eq!(
             corrections.len(),
             2,
-            "meta excluded, two real corrections survive: {corrections:?}"
+            "ordinary 'again' and meta content are excluded: {corrections:?}"
         );
-        // The stronger correction ranks first even though it occurs later.
-        assert!(corrections[0]
-            .user_text
-            .to_lowercase()
-            .contains("stop doing that"));
-        assert!(corrections[1]
-            .user_text
-            .to_lowercase()
-            .contains("run the tests again"));
+        assert_eq!(
+            corrections[0].correction_basis,
+            CorrectionBasis::ExplicitRejection
+        );
+        assert_eq!(
+            corrections[1].correction_basis,
+            CorrectionBasis::IntentClarification
+        );
+    }
+
+    #[test]
+    fn ordinary_corpus_phrases_are_not_corrections() {
+        let entries = [
+            // No preceding assistant: an initial negative task constraint is
+            // not a correction of agent behavior.
+            user_text("Do NOT write any files; return findings as your final response."),
+            assistant_text("What would you like me to do?"),
+            user_text("Is this captured so we don't leave anything on the table?"),
+            assistant_text("Yes."),
+            user_text("Some of these findings may already be in context."),
+            assistant_text("Understood."),
+            user_text("One small note for later. No action needed."),
+            assistant_text("Thanks."),
+            user_text("I restarted Claude Code again and the server reconnected."),
+            assistant_text("Good."),
+            user_text("Demystify what is already complete and what remains."),
+        ];
+        let refs: Vec<&LogEntry> = entries.iter().collect();
+        let corrections = extract_user_corrections(&refs, &LessonOptions::default());
+        assert!(
+            corrections.is_empty(),
+            "ordinary uses of don't/already/again/no are not dialogue repair: {corrections:?}"
+        );
+    }
+
+    #[test]
+    fn corpus_shaped_dialogue_repairs_keep_their_basis() {
+        let entries = [
+            assistant_text("I will continue with a different task."),
+            user_text("Continue the previous B3.1.3 request exactly as written."),
+            assistant_text("Everything is fine."),
+            user_text("This other agent keeps raising issues with your work after every round."),
+            assistant_text("I chose not to read the conversation."),
+            user_text("Wait. Why did you not read through the conversation content?"),
+            assistant_text("You asked for a single artifact."),
+            user_text("What I really meant was a system of related artifacts."),
+            assistant_text("Here is the technical terminology."),
+            user_text("I don't understand your verbiage."),
+        ];
+        let refs: Vec<&LogEntry> = entries.iter().collect();
+        let corrections = extract_user_corrections(&refs, &LessonOptions::default());
+        let bases: std::collections::BTreeSet<_> = corrections
+            .iter()
+            .map(|correction| correction.correction_basis.as_str())
+            .collect();
+        assert_eq!(
+            corrections.len(),
+            5,
+            "all observed repair shapes survive: {corrections:?}"
+        );
+        assert!(bases.contains("intent clarification"));
+        assert!(bases.contains("performance critique"));
     }
 
     #[test]
@@ -1426,6 +1566,8 @@ mod tests {
         let result = extract_lessons(&refs, &opts);
         assert_eq!(result.error_fix_pairs.len(), 1);
         assert!(result.user_corrections.is_empty());
+        assert_eq!(result.summary.total_errors, 1);
+        assert_eq!(result.summary.total_corrections, 1);
     }
 
     #[test]
@@ -1445,6 +1587,9 @@ mod tests {
         let result = extract_lessons(&refs, &opts);
         assert!(result.error_fix_pairs.is_empty());
         assert_eq!(result.user_corrections.len(), 1);
+        assert_eq!(result.summary.total_errors, 1);
+        assert_eq!(result.summary.confirmed_tool_failures, 1);
+        assert_eq!(result.summary.total_corrections, 1);
     }
 
     #[test]

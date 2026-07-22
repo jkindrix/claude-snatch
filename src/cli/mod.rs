@@ -2050,7 +2050,8 @@ pub struct LessonsArgs {
     #[arg(long = "provider", value_name = "PROVIDER", action = clap::ArgAction::Append)]
     pub provider: Vec<String>,
 
-    /// Lesson category: errors, corrections, or all.
+    /// Returned lesson category: errors, corrections, or all. Summary totals
+    /// always describe all categories in the session.
     #[arg(short = 'c', long, default_value = "all")]
     pub category: Option<String>,
 

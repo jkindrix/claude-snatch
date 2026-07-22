@@ -2610,7 +2610,7 @@ impl SnatchServer {
     /// Extract operational lessons from a session: error→fix pairs and user corrections.
     /// Targets the most expensive compaction failure mode (negative result amnesia).
     #[tool(
-        description = "Extract lessons from an agent session: error->fix pairs (what failed and how it was resolved) and human corrections. Claude Code is the default; select another provider with provider or a qualified id. Provider tool and prompt semantics suppress content-shaped false positives."
+        description = "Extract lessons from an agent session: error->fix pairs (what failed and how it was resolved) and high-precision human corrections, each labeled with its dialogue evidence. Claude Code is the default; select another provider with provider or a qualified id. category filters the returned lists; summary totals always describe the full session. Provider tool and prompt semantics suppress content-shaped false positives."
     )]
     async fn get_session_lessons(&self, request: GetSessionLessonsRequest) -> ToolOutput {
         use crate::analysis::lessons::{
@@ -2673,6 +2673,7 @@ impl SnatchServer {
                 .map(|c| UserCorrection {
                     timestamp: c.timestamp,
                     user_text: c.user_text,
+                    correction_basis: c.correction_basis,
                     prior_assistant_summary: c.prior_assistant_summary,
                 })
                 .collect(),
@@ -5539,6 +5540,32 @@ mod tests {
         assert_eq!(lessons["summary"]["confirmed_tool_failures"], 1);
         assert_eq!(lessons["summary"]["inferred_failure_signals"], 1);
         assert_eq!(lessons["summary"]["entry_scope"], "whole_conversation");
+
+        let correction_projection = unwrap_output(
+            server
+                .get_session_lessons(GetSessionLessonsRequest {
+                    session_id: sid.to_string(),
+                    provider: None,
+                    category: Some("corrections".to_string()),
+                    limit: None,
+                })
+                .await,
+        );
+        let correction_projection: serde_json::Value =
+            serde_json::from_str(&correction_projection).unwrap();
+        assert_eq!(correction_projection["summary"]["total_errors"], 2);
+        assert_eq!(
+            correction_projection["summary"]["confirmed_tool_failures"],
+            1
+        );
+        assert_eq!(
+            correction_projection["summary"]["inferred_failure_signals"],
+            1
+        );
+        assert!(correction_projection["error_fix_pairs"]
+            .as_array()
+            .unwrap()
+            .is_empty());
 
         let invalid = server
             .get_tool_calls(GetToolCallsRequest {

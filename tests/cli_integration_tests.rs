@@ -2642,6 +2642,31 @@ mod codex_normalization_cli {
             value["user_corrections"][0]["user_text"],
             "No, use the exact context instead"
         );
+        assert_eq!(
+            value["user_corrections"][0]["correction_basis"],
+            "explicit_rejection"
+        );
+
+        let filtered = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "-o",
+                "json",
+                "lessons",
+                &format!("codex:{THREAD}"),
+                "--category",
+                "corrections",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let filtered: serde_json::Value = serde_json::from_slice(&filtered).unwrap();
+        assert_eq!(filtered["summary"]["total_errors"], 2);
+        assert_eq!(filtered["summary"]["total_corrections"], 1);
+        assert!(filtered.get("error_fix_pairs").is_none());
     }
 
     #[test]
@@ -2670,6 +2695,29 @@ mod codex_normalization_cli {
             value["error_fix_pairs"][0]["session_id"],
             format!("codex:{THREAD}")
         );
+
+        let projected = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "-o",
+                "json",
+                "lessons",
+                "--all",
+                "--provider",
+                "all",
+                "--category",
+                "corrections",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let projected: serde_json::Value = serde_json::from_slice(&projected).unwrap();
+        assert_eq!(projected["summary"]["total_errors"], 2);
+        assert_eq!(projected["summary"]["total_corrections"], 1);
+        assert!(projected["error_fix_pairs"].as_array().unwrap().is_empty());
 
         snatch_cmd()
             .env("SNATCH_CLAUDE_DIR", claude.path())

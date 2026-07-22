@@ -65,6 +65,7 @@ struct CorrectionOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     timestamp: Option<String>,
     user_text: String,
+    correction_basis: crate::analysis::lessons::CorrectionBasis,
     #[serde(skip_serializing_if = "Option::is_none")]
     prior_assistant_summary: Option<String>,
 }
@@ -208,6 +209,7 @@ pub fn run(cli: &Cli, args: &LessonsArgs) -> Result<()> {
                         session_id: None,
                         timestamp: c.timestamp,
                         user_text: c.user_text,
+                        correction_basis: c.correction_basis,
                         prior_assistant_summary: c.prior_assistant_summary,
                     })
                     .collect(),
@@ -377,13 +379,13 @@ fn run_provider_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
             inferred_failure_signals =
                 inferred_failure_signals.saturating_add(result.summary.inferred_failure_signals);
             total_corrections = total_corrections.saturating_add(result.summary.total_corrections);
+            for (tool, count) in &result.summary.most_error_prone_tools {
+                *tool_error_counts.entry(tool.clone()).or_default() += count;
+            }
             if result.error_fix_pairs.is_empty() && result.user_corrections.is_empty() {
                 continue;
             }
             sessions_with_lessons += 1;
-            for (tool, count) in &result.summary.most_error_prone_tools {
-                *tool_error_counts.entry(tool.clone()).or_default() += count;
-            }
             let qualified = unit.root.to_string();
             all_error_pairs.extend(
                 result
@@ -406,6 +408,7 @@ fn run_provider_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
                     session_id: Some(qualified.clone()),
                     timestamp: correction.timestamp,
                     user_text: correction.user_text,
+                    correction_basis: correction.correction_basis,
                     prior_assistant_summary: correction.prior_assistant_summary,
                 }
             }));
@@ -554,6 +557,10 @@ fn run_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
     let mut all_corrections = Vec::new();
     let mut tool_error_counts: HashMap<String, usize> = HashMap::new();
     let mut sessions_with_lessons = 0;
+    let mut total_errors = 0usize;
+    let mut confirmed_tool_failures = 0usize;
+    let mut inferred_failure_signals = 0usize;
+    let mut total_corrections = 0usize;
 
     let show_progress = sessions.len() > 10 && std::io::stderr().is_terminal() && !cli.quiet;
     let progress = if show_progress {
@@ -588,17 +595,25 @@ fn run_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
         };
         let result = extract_lessons_from_conversation(&conversation, &opts, false);
 
+        total_errors = total_errors.saturating_add(result.summary.total_errors);
+        confirmed_tool_failures =
+            confirmed_tool_failures.saturating_add(result.summary.confirmed_tool_failures);
+        inferred_failure_signals =
+            inferred_failure_signals.saturating_add(result.summary.inferred_failure_signals);
+        total_corrections = total_corrections.saturating_add(result.summary.total_corrections);
+
+        // Summary rankings are session-wide even when category projects the
+        // returned lists down to only errors or only corrections.
+        for (tool, count) in &result.summary.most_error_prone_tools {
+            *tool_error_counts.entry(tool.clone()).or_insert(0) += count;
+        }
+
         if result.error_fix_pairs.is_empty() && result.user_corrections.is_empty() {
             continue;
         }
         sessions_with_lessons += 1;
 
         let sid = session.session_id().to_string();
-
-        // Accumulate tool error counts
-        for (tool, count) in &result.summary.most_error_prone_tools {
-            *tool_error_counts.entry(tool.clone()).or_insert(0) += count;
-        }
 
         for p in result.error_fix_pairs {
             all_error_pairs.push(ErrorFixOutput {
@@ -618,6 +633,7 @@ fn run_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
                 session_id: Some(sid.clone()),
                 timestamp: c.timestamp,
                 user_text: c.user_text,
+                correction_basis: c.correction_basis,
                 prior_assistant_summary: c.prior_assistant_summary,
             });
         }
@@ -638,20 +654,10 @@ fn run_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
                 sessions_scanned: sessions.len(),
                 sessions_with_lessons,
                 summary: LessonsOutputSummary {
-                    total_errors: all_error_pairs.len(),
-                    confirmed_tool_failures: all_error_pairs
-                        .iter()
-                        .filter(|pair| {
-                            pair.failure_kind == crate::analysis::lessons::FailureKind::Confirmed
-                        })
-                        .count(),
-                    inferred_failure_signals: all_error_pairs
-                        .iter()
-                        .filter(|pair| {
-                            pair.failure_kind == crate::analysis::lessons::FailureKind::Inferred
-                        })
-                        .count(),
-                    total_corrections: all_corrections.len(),
+                    total_errors,
+                    confirmed_tool_failures,
+                    inferred_failure_signals,
+                    total_corrections,
                     most_error_prone_tools: most_error_prone,
                 },
                 error_fix_pairs: all_error_pairs,
@@ -672,8 +678,8 @@ fn run_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
                 "Lessons across {} sessions ({} with lessons, {} failure signals, {} corrections)\n",
                 sessions.len(),
                 sessions_with_lessons,
-                all_error_pairs.len(),
-                all_corrections.len(),
+                total_errors,
+                total_corrections,
             );
 
             if !all_error_pairs.is_empty() {
@@ -761,7 +767,12 @@ fn print_text_lessons(result: &LessonResult) {
         println!("User Corrections:");
         println!("{}", "-".repeat(60));
         for (i, correction) in result.user_corrections.iter().enumerate() {
-            println!("  {}. {}", i + 1, correction.user_text);
+            println!(
+                "  {}. [{}] {}",
+                i + 1,
+                correction.correction_basis.as_str(),
+                correction.user_text
+            );
             if let Some(ref prior) = correction.prior_assistant_summary {
                 println!("     After: {prior}");
             }
