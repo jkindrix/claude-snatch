@@ -2658,7 +2658,7 @@ impl SnatchServer {
     /// Extract operational lessons from a session: error→fix pairs and user corrections.
     /// Targets the most expensive compaction failure mode (negative result amnesia).
     #[tool(
-        description = "Extract lessons from an agent session: error->fix pairs (what failed and how it was resolved) and high-precision human corrections, each labeled with its dialogue evidence. Claude Code is the default; select another provider with provider or a qualified id. category filters the returned lists; summary totals always describe the full session. Provider tool and prompt semantics suppress content-shaped false positives."
+        description = "Extract lessons from an agent session: error->fix pairs (what failed and how it was resolved) and high-precision human corrections, each labeled with its dialogue evidence. Claude Code is the default; select another provider with provider or a qualified id. category filters the returned lists; summary totals always describe the full session. Provider tool and prompt semantics suppress content-shaped false positives. Best for recovery and continuity; to independently judge what happened (adversarial review), read the raw transcript with get_session_messages rather than this pre-extracted summary."
     )]
     async fn get_session_lessons(&self, request: GetSessionLessonsRequest) -> ToolOutput {
         use crate::analysis::lessons::{
