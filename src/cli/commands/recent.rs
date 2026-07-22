@@ -2,11 +2,17 @@
 //!
 //! A shorthand for `list -n 5` to quickly show recent sessions.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use chrono::{DateTime, Local, Utc};
 
 use crate::cli::{Cli, OutputFormat, RecentArgs};
 use crate::discovery::Session;
 use crate::error::Result;
+use crate::provider::{
+    project::UnifiedProject, registry::ProviderSelection, LineageEdge, LineageEdgeKind,
+    LogicalSessionKey,
+};
 use crate::tags::TagStore;
 use crate::util::truncate_path;
 
@@ -44,11 +50,353 @@ impl SessionInfo {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ProviderRecentMember {
+    key: LogicalSessionKey,
+    project_key: String,
+    project: String,
+    modified: Option<DateTime<Utc>>,
+    size_bytes: u64,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ProviderRecentRow {
+    provider: String,
+    qualified_id: String,
+    native_id: String,
+    latest_qualified_id: String,
+    continuation_member_count: usize,
+    continuation_members: Vec<String>,
+    project_key: String,
+    project: String,
+    modified: Option<DateTime<Utc>>,
+    size_bytes: u64,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ProviderRecentSkip {
+    provider: String,
+    reason: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ProviderRecentWarning {
+    qualified_id: String,
+    reason: &'static str,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ProviderRecentOutput {
+    sessions: Vec<ProviderRecentRow>,
+    total: usize,
+    skipped_providers: Vec<ProviderRecentSkip>,
+    warnings: Vec<ProviderRecentWarning>,
+}
+
+/// Provider-routed recent inventory.
+///
+/// This deliberately stays descriptor-only: recent-session discovery must not
+/// parse every transcript merely to obtain an entry count. Continuations are
+/// collapsed from typed lineage, while forks and spawned sessions remain
+/// independent rows. Tags are omitted until their store uses qualified keys.
+fn run_provider(cli: &Cli, args: &RecentArgs) -> Result<()> {
+    let selection = ProviderSelection::from_flags(&args.provider).map_err(|reason| {
+        crate::error::SnatchError::InvalidArgument {
+            name: "--provider".to_string(),
+            reason,
+        }
+    })?;
+    let registry = super::helpers::provider_registry(cli);
+
+    // A flat descriptor view does not need lineage and therefore must not
+    // fail merely because a provider's lineage capability is unavailable.
+    let (mut projects, lineage, skipped, warnings) = if args.no_chain {
+        let collected = registry.collect_unified_projects(&selection)?;
+        (
+            collected.projects,
+            Vec::new(),
+            collected.skipped,
+            collected.context_warnings,
+        )
+    } else {
+        let collected = registry.collect_project_union(&selection)?;
+        (
+            collected.projects,
+            collected.lineage,
+            collected.skipped,
+            collected.context_warnings,
+        )
+    };
+
+    if let Some(filter) = args.project.as_deref() {
+        projects.retain(|project| project.matches(filter));
+    }
+
+    let mut rows = provider_recent_rows(&projects, &lineage, args.no_chain);
+    rows.sort_by(|a, b| {
+        b.modified
+            .cmp(&a.modified)
+            .then_with(|| a.qualified_id.cmp(&b.qualified_id))
+    });
+    let total = rows.len();
+    rows.truncate(args.count);
+
+    let skipped_providers = skipped
+        .iter()
+        .map(|(provider, reason)| ProviderRecentSkip {
+            provider: provider.to_string(),
+            reason: reason.clone(),
+        })
+        .collect();
+    let warning_rows = warnings
+        .iter()
+        .map(|warning| ProviderRecentWarning {
+            qualified_id: warning.key.to_string(),
+            reason: "project metadata unavailable; session retained in its own project",
+        })
+        .collect();
+
+    match cli.effective_output() {
+        OutputFormat::Json => {
+            let output = ProviderRecentOutput {
+                sessions: rows,
+                total,
+                skipped_providers,
+                warnings: warning_rows,
+            };
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        OutputFormat::Tsv => {
+            println!(
+                "qualified_id\tproject\tmodified\tsize\tcontinuation_members\tlatest_qualified_id"
+            );
+            for row in &rows {
+                println!(
+                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    row.qualified_id,
+                    row.project,
+                    row.modified
+                        .map_or_else(String::new, |time| time.to_rfc3339()),
+                    row.size_bytes,
+                    row.continuation_member_count,
+                    row.latest_qualified_id,
+                );
+            }
+        }
+        OutputFormat::Compact => {
+            for row in &rows {
+                let project = truncate_path(&row.project, 40);
+                if row.continuation_member_count > 1 {
+                    println!(
+                        "{} {} (continuation: {}, latest {})",
+                        row.qualified_id,
+                        project,
+                        row.continuation_member_count,
+                        row.latest_qualified_id,
+                    );
+                } else {
+                    println!("{} {project}", row.qualified_id);
+                }
+            }
+        }
+        OutputFormat::Text => {
+            if rows.is_empty() {
+                if !cli.quiet {
+                    println!("No recent sessions found.");
+                }
+            } else {
+                println!("Recent Sessions");
+                println!("{}", "=".repeat(80));
+                println!();
+                for row in &rows {
+                    let time = row.modified.map_or_else(
+                        || "unknown".to_string(),
+                        |value| {
+                            value
+                                .with_timezone(&Local)
+                                .format("%Y-%m-%d %H:%M")
+                                .to_string()
+                        },
+                    );
+                    let project = truncate_path(&row.project, 45);
+                    let detail = if row.continuation_member_count > 1 {
+                        format!("{} continuation members", row.continuation_member_count)
+                    } else {
+                        String::new()
+                    };
+                    println!(
+                        "  {} │ {:45} │ {} │ {}",
+                        row.qualified_id, project, time, detail
+                    );
+                }
+                println!();
+                println!("Tip: Use 'snatch info <qualified-id>' for details.");
+            }
+        }
+    }
+
+    for (provider, reason) in skipped {
+        eprintln!("warning: provider '{provider}' skipped: {reason}");
+    }
+    if !warnings.is_empty() {
+        eprintln!(
+            "warning: {} session(s) lacked project metadata and were retained separately",
+            warnings.len()
+        );
+    }
+    Ok(())
+}
+
+fn provider_recent_rows(
+    projects: &[UnifiedProject],
+    lineage: &[LineageEdge],
+    no_chain: bool,
+) -> Vec<ProviderRecentRow> {
+    let mut rows = Vec::new();
+    for project in projects {
+        let project_key = project.identity.to_string();
+        let project_path = project
+            .display_path
+            .clone()
+            .unwrap_or_else(|| project_key.clone());
+        let members: BTreeMap<_, _> = project
+            .sessions
+            .iter()
+            .map(|session| {
+                let key = session.descriptor.key.clone();
+                (
+                    key.clone(),
+                    ProviderRecentMember {
+                        key,
+                        project_key: project_key.clone(),
+                        project: project_path.clone(),
+                        modified: session.context.modified_at,
+                        size_bytes: session.context.artifact_bytes,
+                    },
+                )
+            })
+            .collect();
+
+        if no_chain {
+            rows.extend(
+                members
+                    .values()
+                    .cloned()
+                    .map(|member| provider_recent_row(vec![member])),
+            );
+            continue;
+        }
+
+        let keys: BTreeSet<_> = members.keys().cloned().collect();
+        let spawned: BTreeSet<_> = lineage
+            .iter()
+            .filter_map(|edge| match edge.kind {
+                LineageEdgeKind::Spawn { .. } if keys.contains(&edge.to) => Some(edge.to.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut parents = BTreeMap::new();
+        for edge in lineage {
+            if edge.kind != LineageEdgeKind::Continuation
+                || !keys.contains(&edge.from)
+                || !keys.contains(&edge.to)
+            {
+                continue;
+            }
+            parents
+                .entry(edge.to.clone())
+                .and_modify(|parent: &mut LogicalSessionKey| {
+                    if edge.from < *parent {
+                        parent.clone_from(&edge.from);
+                    }
+                })
+                .or_insert_with(|| edge.from.clone());
+        }
+        let mut groups: BTreeMap<LogicalSessionKey, Vec<(usize, ProviderRecentMember)>> =
+            BTreeMap::new();
+        for member in members.values() {
+            let (root, depth) = continuation_root(&member.key, &parents, &spawned);
+            groups
+                .entry(root)
+                .or_default()
+                .push((depth, member.clone()));
+        }
+        for (_, mut grouped) in groups {
+            grouped.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.key.cmp(&b.1.key)));
+            rows.push(provider_recent_row(
+                grouped.into_iter().map(|(_, member)| member).collect(),
+            ));
+        }
+    }
+    rows
+}
+
+fn continuation_root(
+    key: &LogicalSessionKey,
+    parents: &BTreeMap<LogicalSessionKey, LogicalSessionKey>,
+    spawned: &BTreeSet<LogicalSessionKey>,
+) -> (LogicalSessionKey, usize) {
+    if spawned.contains(key) {
+        return (key.clone(), 0);
+    }
+    let mut current = key.clone();
+    let mut path = Vec::new();
+    loop {
+        if let Some(cycle_start) = path.iter().position(|seen| seen == &current) {
+            let root = path[cycle_start..]
+                .iter()
+                .min()
+                .cloned()
+                .expect("cycle contains current key");
+            return (root, 0);
+        }
+        path.push(current.clone());
+        let Some(parent) = parents.get(&current) else {
+            return (current, path.len().saturating_sub(1));
+        };
+        // Spawned sessions are independent recent rows, even if malformed or
+        // future lineage also describes them as continuation endpoints.
+        if spawned.contains(parent) {
+            return (key.clone(), 0);
+        }
+        current = parent.clone();
+    }
+}
+
+fn provider_recent_row(members: Vec<ProviderRecentMember>) -> ProviderRecentRow {
+    let root = members.first().expect("recent group is non-empty");
+    let latest = members
+        .iter()
+        .max_by(|a, b| a.modified.cmp(&b.modified).then_with(|| a.key.cmp(&b.key)))
+        .expect("recent group is non-empty");
+    ProviderRecentRow {
+        provider: root.key.provider.to_string(),
+        qualified_id: root.key.to_string(),
+        native_id: root.key.native_id.clone(),
+        latest_qualified_id: latest.key.to_string(),
+        continuation_member_count: members.len(),
+        continuation_members: members
+            .iter()
+            .map(|member| member.key.to_string())
+            .collect(),
+        project_key: root.project_key.clone(),
+        project: root.project.clone(),
+        modified: latest.modified,
+        size_bytes: members.iter().fold(0_u64, |total, member| {
+            total.saturating_add(member.size_bytes)
+        }),
+    }
+}
+
 /// Run the recent command.
 ///
 /// By default, resume chains are collapsed into one logical-conversation row
 /// keyed by the chain root. `--no-chain` restores the flat per-file view.
 pub fn run(cli: &Cli, args: &RecentArgs) -> Result<()> {
+    if !args.provider.is_empty() {
+        return run_provider(cli, args);
+    }
+
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
     let tag_store = TagStore::load()?;
 
@@ -360,4 +708,107 @@ fn print_session_line(session: &Session, tag_store: &TagStore) -> Result<()> {
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{
+        project::{ProjectIdentity, ProjectIdentityBasis, ProjectSession, SessionProjectContext},
+        ArtifactForm, ArtifactId, ArtifactRevision, ArtifactSnapshot, ProviderId, SessionArtifact,
+        SessionDescriptor, SessionNamespace,
+    };
+
+    fn key(id: &str) -> LogicalSessionKey {
+        LogicalSessionKey {
+            provider: ProviderId("test".into()),
+            namespace: SessionNamespace::global(),
+            native_id: id.into(),
+        }
+    }
+
+    fn project_session(id: &str, size: u64) -> ProjectSession {
+        let key = key(id);
+        ProjectSession {
+            descriptor: SessionDescriptor {
+                key: key.clone(),
+                artifacts: vec![SessionArtifact {
+                    snapshot: ArtifactSnapshot {
+                        id: ArtifactId {
+                            provider_instance: "fixture".into(),
+                            locator: id.into(),
+                        },
+                        revision: ArtifactRevision("r1".into()),
+                    },
+                    form: ArtifactForm::Database,
+                    archived: false,
+                }],
+            },
+            context: SessionProjectContext {
+                cwd: Some("/repo".into()),
+                artifact_bytes: size,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn provider_recent_collapses_only_continuations() {
+        let project = UnifiedProject {
+            identity: ProjectIdentity {
+                basis: ProjectIdentityBasis::Cwd,
+                value: "/repo".into(),
+            },
+            display_path: Some("/repo".into()),
+            cwd_variants: vec!["/repo".into()],
+            git_repository: None,
+            providers: vec![ProviderId("test".into())],
+            sessions: vec![
+                project_session("root", 1),
+                project_session("continued", 2),
+                project_session("fork", 4),
+                project_session("spawn", 8),
+            ],
+        };
+        let lineage = vec![
+            LineageEdge {
+                from: key("root"),
+                to: key("continued"),
+                kind: LineageEdgeKind::Continuation,
+            },
+            LineageEdge {
+                from: key("root"),
+                to: key("fork"),
+                kind: LineageEdgeKind::Fork,
+            },
+            LineageEdge {
+                from: key("root"),
+                to: key("spawn"),
+                kind: LineageEdgeKind::Spawn {
+                    tool_use_id: None,
+                    agent_type: None,
+                    description: None,
+                },
+            },
+        ];
+
+        let rows = provider_recent_rows(std::slice::from_ref(&project), &lineage, false);
+        assert_eq!(rows.len(), 3);
+        let root = rows
+            .iter()
+            .find(|row| row.native_id == "root")
+            .expect("continuation root");
+        assert_eq!(root.continuation_member_count, 2);
+        assert_eq!(root.size_bytes, 3);
+        assert!(rows
+            .iter()
+            .any(|row| { row.native_id == "fork" && row.continuation_member_count == 1 }));
+        assert!(rows
+            .iter()
+            .any(|row| { row.native_id == "spawn" && row.continuation_member_count == 1 }));
+
+        let flat = provider_recent_rows(&[project], &lineage, true);
+        assert_eq!(flat.len(), 4);
+        assert!(flat.iter().all(|row| row.continuation_member_count == 1));
+    }
 }

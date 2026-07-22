@@ -1218,6 +1218,90 @@ fn test_recent_no_chain_shows_members() {
 }
 
 #[test]
+fn test_provider_recent_collapses_typed_continuations_and_no_chain_is_flat() {
+    let tmp = setup_chain_dir();
+    let output = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "recent",
+            "-o",
+            "json",
+            "--provider",
+            "claude-code",
+            "-n",
+            "10",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["total"], 1);
+    assert_eq!(value["sessions"][0]["provider"], "claude-code");
+    assert_eq!(
+        value["sessions"][0]["qualified_id"],
+        format!("claude-code:{CHAIN_ROOT_ID}")
+    );
+    assert_eq!(value["sessions"][0]["continuation_member_count"], 2);
+    assert_eq!(
+        value["sessions"][0]["continuation_members"],
+        serde_json::json!([
+            format!("claude-code:{CHAIN_ROOT_ID}"),
+            format!("claude-code:{CHAIN_CONT_ID}"),
+        ])
+    );
+
+    let output = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "recent",
+            "-o",
+            "json",
+            "--provider",
+            "claude-code",
+            "--no-chain",
+            "-n",
+            "10",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["total"], 2);
+    assert!(value["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["continuation_member_count"] == 1));
+}
+
+#[cfg(feature = "codex")]
+#[test]
+fn test_provider_recent_all_reports_unavailable_providers_without_dropping_successes() {
+    let claude = setup_fixture_dir();
+    let output = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", claude.path())
+        .env("CODEX_HOME", claude.path().join("missing-codex-home"))
+        .args(["recent", "-o", "json", "--provider", "all", "-n", "10"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["total"], 1);
+    assert_eq!(value["sessions"][0]["provider"], "claude-code");
+    assert_eq!(value["skipped_providers"][0]["provider"], "codex");
+    assert!(value["skipped_providers"][0]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("not found"));
+}
+
+#[test]
 fn test_export_all_one_file_per_chain() {
     let tmp = setup_chain_dir();
     let out_dir = TempDir::new().unwrap();
@@ -2037,6 +2121,48 @@ mod codex_provider_cli {
             .map(|session| session["provider"].as_str().unwrap())
             .collect();
         assert_eq!(providers, ["claude-code", "codex"].into_iter().collect());
+    }
+
+    #[test]
+    fn recent_provider_all_uses_the_unified_project_and_qualified_ids() {
+        let claude = setup_fixture_dir();
+        let (codex, _) = setup_codex_home_with_cwd(PROJECT_PATH);
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "-o",
+                "json",
+                "recent",
+                "--provider",
+                "all",
+                "--project",
+                "test-project",
+                "-n",
+                "10",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["total"], 2);
+        assert_eq!(value["skipped_providers"], serde_json::json!([]));
+        assert_eq!(value["warnings"], serde_json::json!([]));
+        let rows = value["sessions"].as_array().unwrap();
+        let providers: std::collections::BTreeSet<_> = rows
+            .iter()
+            .map(|row| row["provider"].as_str().unwrap())
+            .collect();
+        assert_eq!(providers, ["claude-code", "codex"].into_iter().collect());
+        assert!(rows.iter().all(|row| {
+            row["qualified_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with(row["provider"].as_str().unwrap()))
+                && row["project"] == PROJECT_PATH
+                && row["continuation_member_count"] == 1
+        }));
     }
 
     #[test]

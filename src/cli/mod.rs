@@ -2687,12 +2687,18 @@ pub struct RecentArgs {
     #[arg(short = 'n', long, default_value = "5")]
     pub count: usize,
 
+    /// Source providers to scan (repeatable; "all" = every installed
+    /// provider). Omit for the classic Claude-only response.
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
+
     /// Filter to specific project (substring match).
     #[arg(short = 'p', long)]
     pub project: Option<String>,
 
-    /// Show each resume-chain file as its own row instead of collapsing the
-    /// chain into one logical conversation (restores the flat per-file view).
+    /// Show each logical provider session separately instead of collapsing
+    /// continuation chains. On the classic route this restores the flat
+    /// per-file view.
     #[arg(long)]
     pub no_chain: bool,
 }

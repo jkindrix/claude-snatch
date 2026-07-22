@@ -17,8 +17,8 @@ commands/tools are routed today. This section is the DURABLE roadmap: the
 tier framework, the deliberate deferrals with their rationale, and the
 architectural gaps — content worth keeping in git so the plan survives even
 if the registry is lost (see "Registry Blast Radius" in CLAUDE.md). The
-per-tool lists below are a **dated snapshot (audited through the semantic
-event-context routing slice on 2026-07-22), not a live ledger** — consult goal
+per-tool lists below are a **dated snapshot (audited through the recent-session
+inventory slice on 2026-07-22), not a live ledger** — consult goal
 #19 for current status rather than trusting these lists to stay in lock-step.
 
 Goal #18 (Codex ingest + normalization + core surfaces + Phase C/D) shipped
@@ -26,8 +26,8 @@ through commit `9031610`. Two honest framings of "how close to Claude↔Codex
 parity":
 - **By architectural effort** (ingest, normalize, core surfaces, the whole
   verification harness): ~70–75% — the hard, expensive part is done.
-- **By user-facing surface count:** 17 of 42 CLI commands route session data
-  through providers, 20 session-data commands remain unrouted, three
+- **By user-facing surface count:** 19 of 42 CLI commands route session data
+  through providers, 18 session-data commands remain unrouted, three
   registries are deliberately Claude-storage-scoped, and five commands are
   provider-independent. MCP has 13 routed tools, 3 unrouted tools, and 3
   deliberately Claude-storage-scoped registry tools. Raw command counts do
@@ -47,14 +47,16 @@ Provider-qualified and explicitly selected routes now cover CLI `digest`,
 `thread`, session-mode `stats`, single-session `prompts`/`code`, and `context`,
 plus MCP `get_tool_calls`, `get_session_digest`, `thread_topic`, session-mode
   `get_stats`, and `get_event_context`; CLI `diff` also resolves both targets
-  independently through the provider seam.
+  independently through the provider seam; CLI `recent` now routes its
+  descriptor/lineage inventory without parsing transcripts.
 The complete CLI audit is:
 
-- **Already routed (18):** `list`, `info`, `providers`, `doctor`, `lessons`,
+- **Already routed (19):** `list`, `info`, `providers`, `doctor`, `lessons`,
   `digest`, `thread`, `timeline`, `messages`, `chunks`, `file-history`,
-  `file-evolution`, `stats`, `prompts`, `code`, `context`, `diff`, and `export`.
-- **Provider-neutral analysis/discovery candidates (6):** `recent`, `pick`,
-  `summary`, `standup`, `health`, and `priorities`. These share
+  `file-evolution`, `stats`, `prompts`, `code`, `context`, `diff`, `recent`,
+  and `export`.
+- **Provider-neutral analysis/discovery candidates (5):** `pick`, `summary`,
+  `standup`, `health`, and `priorities`. These share
   canonical entries or descriptors,
   but project/union modes still need provider-qualified identity, lineage,
   partial-success, and missing-capability semantics; they are not all thin
@@ -2230,6 +2232,32 @@ was updated as one source-backed vocabulary unit rather than whitelisting only
 the two observed keys. Response-item `input_audio` remains content-complete as
 an unknown content block; no nonempty audio payload was present in the corpus,
 so richer audio presentation is not claimed.
+
+#### Recent-session inventory routing (2026-07-22)
+
+`recent --provider ...` is an inventory surface, not a transcript-analysis
+surface. It therefore uses provider-owned project context plus typed lineage
+without parsing every selected session merely to calculate entry counts.
+Flagless output remains the classic response. Explicit selections are atomic;
+`--provider all` is partial-but-reported; project filters use the unified
+project identity/path matcher; all provider rows carry qualified logical ids.
+
+The default provider view collapses only `Continuation` edges. Forks remain
+independent work streams, and spawned sessions remain visible as independent
+recent rows (matching the classic command's inclusion policy). `--no-chain`
+uses project inventory without requesting lineage at all and shows one row per
+logical provider session—not one row per physical artifact, since a provider
+session may have plain/compressed/archive twins. Sorting is latest source
+modification descending with qualified identity as the stable tie-breaker;
+the limit applies after continuation collapse. Qualified tag/name/bookmark
+metadata is intentionally absent until the tag store migration in P1.7.
+
+JSON provider output is wrapped with the pre-limit total, skipped providers,
+and project-context warnings; classic JSON remains its historical bare array.
+Tests pin typed continuation collapse, the flat view, partial `all` behavior,
+and a real-shape two-provider unified project. Later P1.4 analyses must not
+copy this descriptor-only contract: summary/health/priorities need separate
+rules for parsed evidence, inherited fork history, pricing, and registry scope.
 
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".
