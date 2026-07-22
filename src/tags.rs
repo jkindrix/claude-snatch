@@ -3,17 +3,22 @@
 //! Provides human-friendly labels for sessions, stored in a JSON file
 //! separate from the Claude session data.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::error::{Result, SnatchError};
+use crate::provider::{LogicalSessionKey, ProviderId, SessionNamespace};
 use crate::util::atomic_write;
 
 /// Tag storage filename.
 const TAGS_FILENAME: &str = "tags.json";
+
+/// Current tag-store wire format.
+const TAG_STORE_VERSION: u32 = 2;
 
 /// Session outcome classification for analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +128,7 @@ impl OutcomeStats {
 
 /// Session metadata including tags and optional name.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionMeta {
     /// Human-readable name for the session.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -139,9 +145,9 @@ pub struct SessionMeta {
     /// Notes/annotations for the session.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<SessionNote>,
-    /// Linked/continuation sessions (session IDs this is related to).
+    /// Linked/continuation sessions (qualified logical identities).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub linked_sessions: Vec<String>,
+    pub linked_sessions: Vec<LogicalSessionKey>,
 }
 
 impl SessionMeta {
@@ -156,19 +162,188 @@ impl SessionMeta {
     }
 }
 
-/// Tag store for session metadata.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TagStore {
-    /// Version of the tag store format.
-    #[serde(default = "default_version")]
-    pub version: u32,
-    /// Session metadata keyed by session ID.
-    #[serde(default)]
-    pub sessions: HashMap<String, SessionMeta>,
+/// A v2 session metadata record. The key is an object rather than a rendered
+/// string so persistent identity never depends on delimiter escaping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredSession {
+    key: LogicalSessionKey,
+    metadata: SessionMeta,
 }
 
-fn default_version() -> u32 {
-    1
+/// A record retained because it could not be interpreted safely.
+///
+/// Recovery records are written back verbatim inside the v2 envelope. They
+/// are never treated as live metadata, but they are also never discarded by a
+/// later valid edit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnresolvedTagRecord {
+    /// Schema version from which the record came.
+    pub source_version: u32,
+    /// Why the record was not admitted to the typed store.
+    pub reason: String,
+    /// Original record payload.
+    pub record: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TagStoreV2 {
+    version: u32,
+    sessions: Vec<StoredSession>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    unresolved: Vec<UnresolvedTagRecord>,
+}
+
+/// Tag store for session metadata.
+#[derive(Debug, Clone)]
+pub struct TagStore {
+    /// Version of the tag store format.
+    pub version: u32,
+    /// Session metadata keyed by structured logical identity.
+    pub sessions: BTreeMap<LogicalSessionKey, SessionMeta>,
+    /// Records preserved for manual recovery instead of being dropped.
+    pub unresolved: Vec<UnresolvedTagRecord>,
+    /// Whether this instance was loaded from a pre-v2 store. Not serialized.
+    migrated_from_legacy: bool,
+}
+
+impl Default for TagStore {
+    fn default() -> Self {
+        Self {
+            version: TAG_STORE_VERSION,
+            sessions: BTreeMap::new(),
+            unresolved: Vec::new(),
+            migrated_from_legacy: false,
+        }
+    }
+}
+
+impl Serialize for TagStore {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.as_v2().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TagStore {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let root = Value::deserialize(deserializer)?;
+        let version = store_version(&root).map_err(serde::de::Error::custom)?;
+        match version {
+            0 | 1 => Self::from_legacy_value(root, version),
+            TAG_STORE_VERSION => Self::from_v2_value(root),
+            other => Err(SnatchError::InvalidConfig {
+                message: format!(
+                    "Unsupported tags file version {other}; this build supports through {TAG_STORE_VERSION}"
+                ),
+            }),
+        }
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Legacy metadata differs only in the identity type used for links.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacySessionMeta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    bookmarked: bool,
+    #[serde(default)]
+    outcome: Option<SessionOutcome>,
+    #[serde(default)]
+    notes: Vec<SessionNote>,
+    #[serde(default)]
+    linked_sessions: Vec<String>,
+}
+
+impl LegacySessionMeta {
+    fn into_v2(self) -> SessionMeta {
+        SessionMeta {
+            name: self.name,
+            tags: self.tags,
+            bookmarked: self.bookmarked,
+            outcome: self.outcome,
+            notes: self.notes,
+            linked_sessions: self
+                .linked_sessions
+                .into_iter()
+                .map(|native_id| legacy_key(&native_id))
+                .collect(),
+        }
+    }
+}
+
+fn legacy_key(native_id: &str) -> LogicalSessionKey {
+    LogicalSessionKey {
+        provider: ProviderId::claude_code(),
+        namespace: SessionNamespace::global(),
+        native_id: native_id.to_string(),
+    }
+}
+
+fn store_version(root: &Value) -> std::result::Result<u32, String> {
+    let Some(raw_version) = root.get("version") else {
+        return Ok(0);
+    };
+    let version = raw_version
+        .as_u64()
+        .ok_or_else(|| "tags file version must be a non-negative integer".to_string())?;
+    u32::try_from(version)
+        .map_err(|_| "tags file version is outside the supported range".to_string())
+}
+
+fn preserve_legacy_backup(path: &Path) -> Result<()> {
+    let original = std::fs::read(path).map_err(|error| {
+        SnatchError::io(
+            format!("Failed to read legacy tags file: {}", path.display()),
+            error,
+        )
+    })?;
+    let stored_version = serde_json::from_slice::<Value>(&original)
+        .ok()
+        .and_then(|root| root.get("version").and_then(Value::as_u64))
+        .unwrap_or(0);
+    if stored_version >= u64::from(TAG_STORE_VERSION) {
+        return Ok(());
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(TAGS_FILENAME);
+    for suffix in 0_u32.. {
+        let backup_name = if suffix == 0 {
+            format!("{file_name}.v1.bak")
+        } else {
+            format!("{file_name}.v1.bak.{suffix}")
+        };
+        let backup = path.with_file_name(backup_name);
+        match std::fs::read(&backup) {
+            Ok(existing) if existing == original => return Ok(()),
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                atomic_write(&backup, &original)?;
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(SnatchError::io(
+                    format!("Failed to inspect tags backup: {}", backup.display()),
+                    error,
+                ));
+            }
+        }
+    }
+    unreachable!("u32 backup suffix space exhausted")
 }
 
 impl TagStore {
@@ -187,10 +362,7 @@ impl TagStore {
         let content = std::fs::read_to_string(path).map_err(|e| {
             SnatchError::io(format!("Failed to read tags file: {}", path.display()), e)
         })?;
-
-        serde_json::from_str(&content).map_err(|e| SnatchError::InvalidConfig {
-            message: format!("Invalid tags file: {e}"),
-        })
+        Self::from_json(&content)
     }
 
     /// Save tag store to default location.
@@ -201,50 +373,222 @@ impl TagStore {
 
     /// Save tag store to a specific path.
     pub fn save_to(&self, path: &Path) -> Result<()> {
-        let content =
-            serde_json::to_string_pretty(self).map_err(|e| SnatchError::InvalidConfig {
+        if self.migrated_from_legacy && path.exists() {
+            preserve_legacy_backup(path)?;
+        }
+
+        let content = serde_json::to_string_pretty(&self.as_v2()).map_err(|e| {
+            SnatchError::InvalidConfig {
                 message: format!("Failed to serialize tags: {e}"),
-            })?;
+            }
+        })?;
 
         atomic_write(path, content.as_bytes())?;
         Ok(())
     }
 
+    /// Parse either the structured v2 format or the legacy string-keyed
+    /// v0/v1 format. Legacy keys are always provider-native strings; a colon
+    /// in one never means that the old record was already qualified.
+    fn from_json(content: &str) -> Result<Self> {
+        let root: Value =
+            serde_json::from_str(content).map_err(|e| SnatchError::InvalidConfig {
+                message: format!("Invalid tags file: {e}"),
+            })?;
+        let version = store_version(&root).map_err(|message| SnatchError::InvalidConfig {
+            message: format!("Invalid tags file: {message}"),
+        })?;
+        match version {
+            0 | 1 => Self::from_legacy_value(root, version),
+            TAG_STORE_VERSION => Self::from_v2_value(root),
+            other => Err(SnatchError::InvalidConfig {
+                message: format!(
+                    "Unsupported tags file version {other}; this build supports through {TAG_STORE_VERSION}"
+                ),
+            }),
+        }
+    }
+
+    fn from_legacy_value(root: Value, version: u32) -> Result<Self> {
+        let sessions = root
+            .as_object()
+            .and_then(|object| object.get("sessions"))
+            .and_then(Value::as_object)
+            .ok_or_else(|| SnatchError::InvalidConfig {
+                message: "Invalid legacy tags file: 'sessions' must be an object".to_string(),
+            })?;
+        let mut store = Self {
+            migrated_from_legacy: true,
+            ..Self::default()
+        };
+        for (field, value) in root
+            .as_object()
+            .expect("sessions object came from a top-level object")
+        {
+            if field != "version" && field != "sessions" {
+                store.unresolved.push(UnresolvedTagRecord {
+                    source_version: version,
+                    reason: format!("unknown legacy top-level field '{field}'"),
+                    record: serde_json::json!({
+                        "top_level_field": field,
+                        "value": value,
+                    }),
+                });
+            }
+        }
+        for (native_id, raw_metadata) in sessions {
+            let key = legacy_key(native_id);
+            match serde_json::from_value::<LegacySessionMeta>(raw_metadata.clone()) {
+                Ok(metadata) => {
+                    store.sessions.insert(key, metadata.into_v2());
+                }
+                Err(error) => store.unresolved.push(UnresolvedTagRecord {
+                    source_version: version,
+                    reason: format!("invalid metadata for legacy session '{native_id}': {error}"),
+                    record: serde_json::json!({
+                        "legacy_session_id": native_id,
+                        "metadata": raw_metadata,
+                    }),
+                }),
+            }
+        }
+        Ok(store)
+    }
+
+    fn from_v2_value(root: Value) -> Result<Self> {
+        let object = root.as_object().ok_or_else(|| SnatchError::InvalidConfig {
+            message: "Invalid tags file: top level must be an object".to_string(),
+        })?;
+        let raw_sessions = object
+            .get("sessions")
+            .and_then(Value::as_array)
+            .ok_or_else(|| SnatchError::InvalidConfig {
+                message: "Invalid v2 tags file: 'sessions' must be an array".to_string(),
+            })?;
+        let mut store = Self::default();
+        if let Some(raw_unresolved) = object.get("unresolved") {
+            store.unresolved = serde_json::from_value(raw_unresolved.clone()).map_err(|error| {
+                SnatchError::InvalidConfig {
+                    message: format!("Invalid v2 tags recovery ledger: {error}"),
+                }
+            })?;
+        }
+        for (field, value) in object {
+            if field != "version" && field != "sessions" && field != "unresolved" {
+                store.unresolved.push(UnresolvedTagRecord {
+                    source_version: TAG_STORE_VERSION,
+                    reason: format!("unknown v2 top-level field '{field}'"),
+                    record: serde_json::json!({
+                        "top_level_field": field,
+                        "value": value,
+                    }),
+                });
+            }
+        }
+
+        for raw_record in raw_sessions {
+            match serde_json::from_value::<StoredSession>(raw_record.clone()) {
+                Ok(record) => {
+                    if record.key.provider.0.is_empty()
+                        || record.key.namespace.0.is_empty()
+                        || record.key.native_id.is_empty()
+                    {
+                        store.unresolved.push(UnresolvedTagRecord {
+                            source_version: TAG_STORE_VERSION,
+                            reason: "logical session key contains an empty segment".to_string(),
+                            record: raw_record.clone(),
+                        });
+                    } else {
+                        match store.sessions.entry(record.key) {
+                            std::collections::btree_map::Entry::Vacant(entry) => {
+                                entry.insert(record.metadata);
+                            }
+                            std::collections::btree_map::Entry::Occupied(entry) => {
+                                store.unresolved.push(UnresolvedTagRecord {
+                                    source_version: TAG_STORE_VERSION,
+                                    reason: format!(
+                                        "duplicate logical session key '{}'",
+                                        entry.key()
+                                    ),
+                                    record: raw_record.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+                Err(error) => store.unresolved.push(UnresolvedTagRecord {
+                    source_version: TAG_STORE_VERSION,
+                    reason: format!("invalid v2 session record: {error}"),
+                    record: raw_record.clone(),
+                }),
+            }
+        }
+        Ok(store)
+    }
+
+    fn as_v2(&self) -> TagStoreV2 {
+        TagStoreV2 {
+            version: TAG_STORE_VERSION,
+            sessions: self
+                .sessions
+                .iter()
+                .map(|(key, metadata)| StoredSession {
+                    key: key.clone(),
+                    metadata: metadata.clone(),
+                })
+                .collect(),
+            unresolved: self.unresolved.clone(),
+        }
+    }
+
     /// Get metadata for a session.
     pub fn get(&self, session_id: &str) -> Option<&SessionMeta> {
-        // Support both full and short IDs
-        self.sessions.get(session_id).or_else(|| {
-            // Try to find by prefix match
-            self.sessions
-                .iter()
-                .find(|(k, _)| k.starts_with(session_id))
-                .map(|(_, v)| v)
+        let key = legacy_key(session_id);
+        self.get_key(&key).or_else(|| {
+            let mut matches = self.sessions.iter().filter(|(candidate, _)| {
+                candidate.provider == key.provider
+                    && candidate.namespace == key.namespace
+                    && candidate.native_id.starts_with(session_id)
+            });
+            let first = matches.next().map(|(_, metadata)| metadata);
+            if matches.next().is_some() {
+                None
+            } else {
+                first
+            }
         })
     }
 
-    /// Get mutable metadata for a session, creating if needed.
-    pub fn get_or_create(&mut self, session_id: &str) -> &mut SessionMeta {
-        // First check if exists by prefix
-        let full_id = self
-            .sessions
-            .keys()
-            .find(|k| k.starts_with(session_id))
-            .cloned();
+    /// Get metadata by exact logical identity.
+    pub fn get_key(&self, key: &LogicalSessionKey) -> Option<&SessionMeta> {
+        self.sessions.get(key)
+    }
 
-        let key = full_id.unwrap_or_else(|| session_id.to_string());
-        self.sessions.entry(key).or_default()
+    /// Get mutable metadata by exact logical identity, creating if needed.
+    pub fn get_or_create_key(&mut self, key: &LogicalSessionKey) -> &mut SessionMeta {
+        self.sessions.entry(key.clone()).or_default()
     }
 
     /// Set or update the name for a session.
     pub fn set_name(&mut self, session_id: &str, name: Option<String>) {
-        let meta = self.get_or_create(session_id);
+        self.set_name_key(&legacy_key(session_id), name);
+    }
+
+    /// Set or update the name for a qualified session.
+    pub fn set_name_key(&mut self, key: &LogicalSessionKey, name: Option<String>) {
+        let meta = self.get_or_create_key(key);
         meta.name = name;
-        self.cleanup_empty(session_id);
+        self.cleanup_empty_key(key);
     }
 
     /// Add a tag to a session.
     pub fn add_tag(&mut self, session_id: &str, tag: &str) -> bool {
-        let meta = self.get_or_create(session_id);
+        self.add_tag_key(&legacy_key(session_id), tag)
+    }
+
+    /// Add a tag to a qualified session.
+    pub fn add_tag_key(&mut self, key: &LogicalSessionKey, tag: &str) -> bool {
+        let meta = self.get_or_create_key(key);
         let tag = normalize_tag(tag);
         if meta.tags.contains(&tag) {
             false
@@ -257,28 +601,20 @@ impl TagStore {
 
     /// Remove a tag from a session.
     pub fn remove_tag(&mut self, session_id: &str, tag: &str) -> bool {
-        if let Some(meta) = self.sessions.get_mut(session_id) {
-            let tag = normalize_tag(tag);
-            if let Some(pos) = meta.tags.iter().position(|t| t == &tag) {
+        let Some(key) = self.resolve_id(session_id).cloned() else {
+            return false;
+        };
+        self.remove_tag_key(&key, tag)
+    }
+
+    /// Remove a tag from a qualified session.
+    pub fn remove_tag_key(&mut self, key: &LogicalSessionKey, tag: &str) -> bool {
+        let tag = normalize_tag(tag);
+        if let Some(meta) = self.sessions.get_mut(key) {
+            if let Some(pos) = meta.tags.iter().position(|existing| existing == &tag) {
                 meta.tags.remove(pos);
-                self.cleanup_empty(session_id);
+                self.cleanup_empty_key(key);
                 return true;
-            }
-        }
-        // Try prefix match
-        let full_id = self
-            .sessions
-            .keys()
-            .find(|k| k.starts_with(session_id))
-            .cloned();
-        if let Some(full_id) = full_id {
-            let tag = normalize_tag(tag);
-            if let Some(meta) = self.sessions.get_mut(&full_id) {
-                if let Some(pos) = meta.tags.iter().position(|t| t == &tag) {
-                    meta.tags.remove(pos);
-                    self.cleanup_empty(&full_id);
-                    return true;
-                }
             }
         }
         false
@@ -286,33 +622,43 @@ impl TagStore {
 
     /// Set bookmark status.
     pub fn set_bookmark(&mut self, session_id: &str, bookmarked: bool) {
-        let meta = self.get_or_create(session_id);
-        meta.bookmarked = bookmarked;
-        self.cleanup_empty(session_id);
+        self.set_bookmark_key(&legacy_key(session_id), bookmarked);
     }
 
-    /// Get all bookmarked session IDs.
-    pub fn bookmarked_sessions(&self) -> Vec<&str> {
+    /// Set bookmark status for a qualified session.
+    pub fn set_bookmark_key(&mut self, key: &LogicalSessionKey, bookmarked: bool) {
+        let meta = self.get_or_create_key(key);
+        meta.bookmarked = bookmarked;
+        self.cleanup_empty_key(key);
+    }
+
+    /// Get all bookmarked session keys.
+    pub fn bookmarked_sessions(&self) -> Vec<&LogicalSessionKey> {
         self.sessions
             .iter()
             .filter(|(_, m)| m.bookmarked)
-            .map(|(id, _)| id.as_str())
+            .map(|(key, _)| key)
             .collect()
     }
 
     /// Set outcome classification for a session.
     pub fn set_outcome(&mut self, session_id: &str, outcome: Option<SessionOutcome>) {
-        let meta = self.get_or_create(session_id);
+        self.set_outcome_key(&legacy_key(session_id), outcome);
+    }
+
+    /// Set outcome classification for a qualified session.
+    pub fn set_outcome_key(&mut self, key: &LogicalSessionKey, outcome: Option<SessionOutcome>) {
+        let meta = self.get_or_create_key(key);
         meta.outcome = outcome;
-        self.cleanup_empty(session_id);
+        self.cleanup_empty_key(key);
     }
 
     /// Get all sessions with a specific outcome.
-    pub fn sessions_with_outcome(&self, outcome: SessionOutcome) -> Vec<&str> {
+    pub fn sessions_with_outcome(&self, outcome: SessionOutcome) -> Vec<&LogicalSessionKey> {
         self.sessions
             .iter()
             .filter(|(_, m)| m.outcome == Some(outcome))
-            .map(|(id, _)| id.as_str())
+            .map(|(key, _)| key)
             .collect()
     }
 
@@ -333,7 +679,12 @@ impl TagStore {
 
     /// Add a note to a session.
     pub fn add_note(&mut self, session_id: &str, text: &str, label: Option<&str>) {
-        let meta = self.get_or_create(session_id);
+        self.add_note_key(&legacy_key(session_id), text, label);
+    }
+
+    /// Add a note to a qualified session.
+    pub fn add_note_key(&mut self, key: &LogicalSessionKey, text: &str, label: Option<&str>) {
+        let meta = self.get_or_create_key(key);
         let note = if let Some(label) = label {
             SessionNote::with_label(text, label)
         } else {
@@ -344,29 +695,19 @@ impl TagStore {
 
     /// Remove a note from a session by index.
     pub fn remove_note(&mut self, session_id: &str, index: usize) -> bool {
-        // Try exact match first
-        if let Some(meta) = self.sessions.get_mut(session_id) {
+        let Some(key) = self.resolve_id(session_id).cloned() else {
+            return false;
+        };
+        self.remove_note_key(&key, index)
+    }
+
+    /// Remove a note from a qualified session by index.
+    pub fn remove_note_key(&mut self, key: &LogicalSessionKey, index: usize) -> bool {
+        if let Some(meta) = self.sessions.get_mut(key) {
             if index < meta.notes.len() {
                 meta.notes.remove(index);
-                self.cleanup_empty(session_id);
+                self.cleanup_empty_key(key);
                 return true;
-            }
-            return false;
-        }
-
-        // Try prefix match
-        let full_id = self
-            .sessions
-            .keys()
-            .find(|k| k.starts_with(session_id))
-            .cloned();
-        if let Some(full_id) = full_id {
-            if let Some(meta) = self.sessions.get_mut(&full_id) {
-                if index < meta.notes.len() {
-                    meta.notes.remove(index);
-                    self.cleanup_empty(&full_id);
-                    return true;
-                }
             }
         }
         false
@@ -374,23 +715,16 @@ impl TagStore {
 
     /// Clear all notes for a session.
     pub fn clear_notes(&mut self, session_id: &str) {
-        if let Some(meta) = self.sessions.get_mut(session_id) {
-            meta.notes.clear();
-            self.cleanup_empty(session_id);
-            return;
+        if let Some(key) = self.resolve_id(session_id).cloned() {
+            self.clear_notes_key(&key);
         }
+    }
 
-        // Try prefix match
-        let full_id = self
-            .sessions
-            .keys()
-            .find(|k| k.starts_with(session_id))
-            .cloned();
-        if let Some(full_id) = full_id {
-            if let Some(meta) = self.sessions.get_mut(&full_id) {
-                meta.notes.clear();
-                self.cleanup_empty(&full_id);
-            }
+    /// Clear all notes for a qualified session.
+    pub fn clear_notes_key(&mut self, key: &LogicalSessionKey) {
+        if let Some(meta) = self.sessions.get_mut(key) {
+            meta.notes.clear();
+            self.cleanup_empty_key(key);
         }
     }
 
@@ -399,12 +733,17 @@ impl TagStore {
         self.get(session_id).map(|m| m.notes.as_slice())
     }
 
+    /// Get notes for a qualified session.
+    pub fn get_notes_key(&self, key: &LogicalSessionKey) -> Option<&[SessionNote]> {
+        self.get_key(key).map(|metadata| metadata.notes.as_slice())
+    }
+
     /// Get all sessions with notes.
-    pub fn sessions_with_notes(&self) -> Vec<&str> {
+    pub fn sessions_with_notes(&self) -> Vec<&LogicalSessionKey> {
         self.sessions
             .iter()
             .filter(|(_, m)| !m.notes.is_empty())
-            .map(|(id, _)| id.as_str())
+            .map(|(key, _)| key)
             .collect()
     }
 
@@ -414,12 +753,12 @@ impl TagStore {
     }
 
     /// Get all sessions with a specific tag.
-    pub fn sessions_with_tag(&self, tag: &str) -> Vec<&str> {
+    pub fn sessions_with_tag(&self, tag: &str) -> Vec<&LogicalSessionKey> {
         let tag = normalize_tag(tag);
         self.sessions
             .iter()
             .filter(|(_, m)| m.tags.contains(&tag))
-            .map(|(id, _)| id.as_str())
+            .map(|(key, _)| key)
             .collect()
     }
 
@@ -436,46 +775,58 @@ impl TagStore {
     }
 
     /// Remove entry if it has no useful metadata.
-    fn cleanup_empty(&mut self, session_id: &str) {
-        if let Some(meta) = self.sessions.get(session_id) {
+    fn cleanup_empty_key(&mut self, key: &LogicalSessionKey) {
+        if let Some(meta) = self.sessions.get(key) {
             if meta.is_empty() {
-                self.sessions.remove(session_id);
+                self.sessions.remove(key);
             }
         }
     }
 
     /// Resolve a short session ID to a full ID if it exists in the store.
-    pub fn resolve_id<'a>(&'a self, short_id: &str) -> Option<&'a str> {
-        if self.sessions.contains_key(short_id) {
-            // Return the stored key, not the input
-            return self
-                .sessions
-                .keys()
-                .find(|k| *k == short_id)
-                .map(|s| s.as_str());
+    pub fn resolve_id<'a>(&'a self, short_id: &str) -> Option<&'a LogicalSessionKey> {
+        let exact = legacy_key(short_id);
+        if let Some((key, _)) = self.sessions.get_key_value(&exact) {
+            return Some(key);
         }
-        self.sessions
-            .keys()
-            .find(|k| k.starts_with(short_id))
-            .map(|s| s.as_str())
+        let mut matches = self.sessions.keys().filter(|key| {
+            key.provider == ProviderId::claude_code()
+                && key.namespace == SessionNamespace::global()
+                && key.native_id.starts_with(short_id)
+        });
+        let first = matches.next();
+        if matches.next().is_some() {
+            None
+        } else {
+            first
+        }
     }
 
     /// Link two sessions together (bidirectional relationship).
     /// Returns true if the link was created, false if it already existed.
     pub fn link_sessions(&mut self, session_a: &str, session_b: &str) -> bool {
+        self.link_session_keys(&legacy_key(session_a), &legacy_key(session_b))
+    }
+
+    /// Link two qualified sessions together (bidirectional relationship).
+    pub fn link_session_keys(
+        &mut self,
+        session_a: &LogicalSessionKey,
+        session_b: &LogicalSessionKey,
+    ) -> bool {
         // Add B to A's links
-        let meta_a = self.get_or_create(session_a);
-        let already_linked_a = meta_a.linked_sessions.contains(&session_b.to_string());
+        let meta_a = self.get_or_create_key(session_a);
+        let already_linked_a = meta_a.linked_sessions.contains(session_b);
         if !already_linked_a {
-            meta_a.linked_sessions.push(session_b.to_string());
+            meta_a.linked_sessions.push(session_b.clone());
             meta_a.linked_sessions.sort();
         }
 
         // Add A to B's links
-        let meta_b = self.get_or_create(session_b);
-        let already_linked_b = meta_b.linked_sessions.contains(&session_a.to_string());
+        let meta_b = self.get_or_create_key(session_b);
+        let already_linked_b = meta_b.linked_sessions.contains(session_a);
         if !already_linked_b {
-            meta_b.linked_sessions.push(session_a.to_string());
+            meta_b.linked_sessions.push(session_a.clone());
             meta_b.linked_sessions.sort();
         }
 
@@ -486,6 +837,15 @@ impl TagStore {
     /// Unlink two sessions (bidirectional).
     /// Returns true if a link was removed, false if they weren't linked.
     pub fn unlink_sessions(&mut self, session_a: &str, session_b: &str) -> bool {
+        self.unlink_session_keys(&legacy_key(session_a), &legacy_key(session_b))
+    }
+
+    /// Unlink two qualified sessions.
+    pub fn unlink_session_keys(
+        &mut self,
+        session_a: &LogicalSessionKey,
+        session_b: &LogicalSessionKey,
+    ) -> bool {
         let mut removed = false;
 
         // Remove B from A's links
@@ -505,25 +865,32 @@ impl TagStore {
         }
 
         // Cleanup empty entries
-        self.cleanup_empty(session_a);
-        self.cleanup_empty(session_b);
+        self.cleanup_empty_key(session_a);
+        self.cleanup_empty_key(session_b);
 
         removed
     }
 
     /// Get all sessions linked to a given session.
-    pub fn get_linked_sessions(&self, session_id: &str) -> Vec<&str> {
+    pub fn get_linked_sessions(&self, session_id: &str) -> Vec<&LogicalSessionKey> {
         self.get(session_id)
-            .map(|m| m.linked_sessions.iter().map(|s| s.as_str()).collect())
+            .map(|m| m.linked_sessions.iter().collect())
+            .unwrap_or_default()
+    }
+
+    /// Get all sessions linked to a qualified session.
+    pub fn get_linked_session_keys(&self, key: &LogicalSessionKey) -> Vec<&LogicalSessionKey> {
+        self.get_key(key)
+            .map(|metadata| metadata.linked_sessions.iter().collect())
             .unwrap_or_default()
     }
 
     /// Get all sessions that have any links.
-    pub fn sessions_with_links(&self) -> Vec<&str> {
+    pub fn sessions_with_links(&self) -> Vec<&LogicalSessionKey> {
         self.sessions
             .iter()
             .filter(|(_, m)| !m.linked_sessions.is_empty())
-            .map(|(id, _)| id.as_str())
+            .map(|(key, _)| key)
             .collect()
     }
 }
@@ -558,6 +925,10 @@ pub fn default_tags_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn contains_native(keys: &[&LogicalSessionKey], native_id: &str) -> bool {
+        keys.iter().any(|key| key.native_id == native_id)
+    }
 
     #[test]
     fn test_normalize_tag() {
@@ -636,7 +1007,7 @@ mod tests {
         assert!(store.get(session_id).unwrap().bookmarked);
 
         let bookmarked = store.bookmarked_sessions();
-        assert!(bookmarked.contains(&session_id));
+        assert!(contains_native(&bookmarked, session_id));
 
         store.set_bookmark(session_id, false);
         assert!(store.get(session_id).is_none());
@@ -665,8 +1036,8 @@ mod tests {
 
         let sessions = store.sessions_with_tag("feature");
         assert_eq!(sessions.len(), 2);
-        assert!(sessions.contains(&"session1"));
-        assert!(sessions.contains(&"session2"));
+        assert!(contains_native(&sessions, "session1"));
+        assert!(contains_native(&sessions, "session2"));
     }
 
     #[test]
@@ -738,12 +1109,12 @@ mod tests {
 
         let successful = store.sessions_with_outcome(SessionOutcome::Success);
         assert_eq!(successful.len(), 2);
-        assert!(successful.contains(&"session1"));
-        assert!(successful.contains(&"session2"));
+        assert!(contains_native(&successful, "session1"));
+        assert!(contains_native(&successful, "session2"));
 
         let failed = store.sessions_with_outcome(SessionOutcome::Failed);
         assert_eq!(failed.len(), 1);
-        assert!(failed.contains(&"session3"));
+        assert!(contains_native(&failed, "session3"));
     }
 
     #[test]
@@ -895,8 +1266,8 @@ mod tests {
 
         let sessions = store.sessions_with_notes();
         assert_eq!(sessions.len(), 2);
-        assert!(sessions.contains(&"session1"));
-        assert!(sessions.contains(&"session2"));
+        assert!(contains_native(&sessions, "session1"));
+        assert!(contains_native(&sessions, "session2"));
     }
 
     #[test]
@@ -936,7 +1307,7 @@ mod tests {
     #[test]
     fn test_session_meta_is_empty_with_links() {
         let meta = SessionMeta {
-            linked_sessions: vec!["other-session".to_string()],
+            linked_sessions: vec![legacy_key("other-session")],
             ..Default::default()
         };
         assert!(!meta.is_empty());
@@ -951,10 +1322,10 @@ mod tests {
 
         // Check both directions
         let linked1 = store.get_linked_sessions("session1");
-        assert!(linked1.contains(&"session2"));
+        assert!(contains_native(&linked1, "session2"));
 
         let linked2 = store.get_linked_sessions("session2");
-        assert!(linked2.contains(&"session1"));
+        assert!(contains_native(&linked2, "session1"));
     }
 
     #[test]
@@ -1003,10 +1374,10 @@ mod tests {
 
         let with_links = store.sessions_with_links();
         assert_eq!(with_links.len(), 3); // session1, session2, session3
-        assert!(with_links.contains(&"session1"));
-        assert!(with_links.contains(&"session2"));
-        assert!(with_links.contains(&"session3"));
-        assert!(!with_links.contains(&"session4"));
+        assert!(contains_native(&with_links, "session1"));
+        assert!(contains_native(&with_links, "session2"));
+        assert!(contains_native(&with_links, "session3"));
+        assert!(!contains_native(&with_links, "session4"));
     }
 
     #[test]
@@ -1019,6 +1390,197 @@ mod tests {
         let loaded: TagStore = serde_json::from_str(&json).unwrap();
 
         let linked = loaded.get_linked_sessions("session1");
-        assert!(linked.contains(&"session2"));
+        assert!(contains_native(&linked, "session2"));
+    }
+
+    #[test]
+    fn legacy_migration_treats_colons_as_native_and_migrates_links() {
+        let store = TagStore::from_json(
+            r#"{
+                "version": 1,
+                "sessions": {
+                    "codex:not-qualified": {
+                        "name": "literal legacy id",
+                        "linked_sessions": ["other:literal"]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let key = legacy_key("codex:not-qualified");
+        let metadata = store.get_key(&key).unwrap();
+        assert_eq!(metadata.name.as_deref(), Some("literal legacy id"));
+        assert_eq!(metadata.linked_sessions, vec![legacy_key("other:literal")]);
+        assert!(store.migrated_from_legacy);
+        assert_eq!(store.version, TAG_STORE_VERSION);
+    }
+
+    #[test]
+    fn legacy_save_is_structured_reversible_and_backed_up_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(TAGS_FILENAME);
+        let legacy = br#"{"version":1,"sessions":{"session-a":{"tags":["keep"]}}}"#;
+        std::fs::write(&path, legacy).unwrap();
+
+        let mut store = TagStore::load_from(&path).unwrap();
+        store.set_bookmark("session-a", true);
+        store.save_to(&path).unwrap();
+
+        assert_eq!(
+            std::fs::read(path.with_file_name("tags.json.v1.bak")).unwrap(),
+            legacy
+        );
+        let wire: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(wire["version"], TAG_STORE_VERSION);
+        assert!(wire["sessions"].is_array());
+        assert_eq!(wire["sessions"][0]["key"]["provider"], "claude-code");
+        assert_eq!(wire["sessions"][0]["key"]["namespace"], "global");
+        assert_eq!(wire["sessions"][0]["key"]["native_id"], "session-a");
+
+        // Saving the same migrated in-memory value again must not back up the
+        // already-migrated v2 file as though it were another legacy source.
+        store.save_to(&path).unwrap();
+        assert!(!path.with_file_name("tags.json.v1.bak.1").exists());
+
+        let loaded = TagStore::load_from(&path).unwrap();
+        let metadata = loaded.get("session-a").unwrap();
+        assert_eq!(metadata.tags, vec!["keep"]);
+        assert!(metadata.bookmarked);
+    }
+
+    #[test]
+    fn malformed_and_duplicate_records_survive_in_recovery_ledger() {
+        let valid = serde_json::json!({
+            "key": {
+                "provider": "claude-code",
+                "namespace": "global",
+                "native_id": "same"
+            },
+            "metadata": {"tags": ["valid"]}
+        });
+        let duplicate = serde_json::json!({
+            "key": {
+                "provider": "claude-code",
+                "namespace": "global",
+                "native_id": "same"
+            },
+            "metadata": {"tags": ["must-not-overwrite"]}
+        });
+        let malformed = serde_json::json!({
+            "key": {
+                "provider": "",
+                "namespace": "global",
+                "native_id": "broken"
+            },
+            "metadata": {"bookmarked": true}
+        });
+        let root = serde_json::json!({
+            "version": TAG_STORE_VERSION,
+            "sessions": [valid, duplicate.clone(), malformed.clone()]
+        });
+
+        let store = TagStore::from_json(&root.to_string()).unwrap();
+        assert_eq!(store.sessions.len(), 1);
+        assert_eq!(store.unresolved.len(), 2);
+        assert_eq!(store.unresolved[0].record, duplicate);
+        assert_eq!(store.unresolved[1].record, malformed);
+
+        let encoded = serde_json::to_string(&store).unwrap();
+        let reloaded = TagStore::from_json(&encoded).unwrap();
+        assert_eq!(reloaded.sessions.len(), 1);
+        assert_eq!(reloaded.unresolved.len(), 2);
+    }
+
+    #[test]
+    fn malformed_legacy_metadata_is_preserved_not_dropped() {
+        let store = TagStore::from_json(
+            r#"{
+                "version": 1,
+                "sessions": {
+                    "good": {"tags": ["keep"]},
+                    "bad": {"outcome": "future-value", "notes": [42]}
+                }
+            }"#,
+        )
+        .unwrap();
+        assert!(store.get("good").is_some());
+        assert!(store.get("bad").is_none());
+        assert_eq!(store.unresolved.len(), 1);
+        assert_eq!(store.unresolved[0].record["legacy_session_id"], "bad");
+    }
+
+    #[test]
+    fn unknown_legacy_metadata_field_quarantines_the_complete_record() {
+        let store = TagStore::from_json(
+            r#"{
+                "version": 1,
+                "sessions": {
+                    "future": {"tags": ["keep"], "future_field": {"nested": true}}
+                }
+            }"#,
+        )
+        .unwrap();
+        assert!(store.sessions.is_empty());
+        assert_eq!(store.unresolved.len(), 1);
+        assert_eq!(
+            store.unresolved[0].record["metadata"]["future_field"]["nested"],
+            true
+        );
+    }
+
+    #[test]
+    fn identical_native_ids_across_providers_and_namespaces_do_not_alias() {
+        let mut store = TagStore::default();
+        let claude = legacy_key("same");
+        let other_provider = LogicalSessionKey {
+            provider: ProviderId("other-provider".to_string()),
+            namespace: SessionNamespace::global(),
+            native_id: "same".to_string(),
+        };
+        let other_namespace = LogicalSessionKey {
+            provider: ProviderId::claude_code(),
+            namespace: SessionNamespace("imported".to_string()),
+            native_id: "same".to_string(),
+        };
+        store.add_tag_key(&claude, "claude");
+        store.add_tag_key(&other_provider, "provider");
+        store.add_tag_key(&other_namespace, "namespace");
+
+        assert_eq!(store.sessions.len(), 3);
+        assert_eq!(store.get_key(&claude).unwrap().tags, vec!["claude"]);
+        assert_eq!(
+            store.get_key(&other_provider).unwrap().tags,
+            vec!["provider"]
+        );
+        assert_eq!(
+            store.get_key(&other_namespace).unwrap().tags,
+            vec!["namespace"]
+        );
+    }
+
+    #[test]
+    fn ambiguous_legacy_prefix_does_not_choose_by_map_order() {
+        let mut store = TagStore::default();
+        store.add_tag("same-one", "one");
+        store.add_tag("same-two", "two");
+        assert!(store.get("same").is_none());
+        assert!(store.resolve_id("same").is_none());
+    }
+
+    #[test]
+    fn future_store_version_is_refused_without_downgrade() {
+        let error = TagStore::from_json(r#"{"version":99,"sessions":[]}"#).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Unsupported tags file version 99"));
+    }
+
+    #[test]
+    fn malformed_version_is_not_reinterpreted_as_legacy() {
+        let error = TagStore::from_json(r#"{"version":"2","sessions":{}}"#).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("version must be a non-negative integer"));
     }
 }

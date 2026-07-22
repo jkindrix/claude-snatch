@@ -2792,6 +2792,31 @@ unchanged. These decisions close P1.6; any future implementation must introduce
 and test the named evidence/mutation contract first rather than inferring it
 from existing archive, revision-token, or file-change surfaces.
 
+#### Qualified metadata store (P1.7 storage contract, 2026-07-22)
+
+The session tag/name/bookmark/outcome/note/link store now has a real v2 wire
+format. Sessions are an ordered record array whose identity is the structured
+`LogicalSessionKey` object (`provider`, `namespace`, `native_id`); links use the
+same structured type. Rendered qualified ids are presentation and input syntax,
+never persistent map keys. This keeps identical native ids independent across
+providers and provider namespaces and avoids making delimiter escaping part of
+the storage model.
+
+Legacy v0/v1 object keys and linked ids are interpreted verbatim as Claude Code
+native ids, including literal colons. They are never guessed to be prequalified.
+The first in-place legacy rewrite preserves the original bytes in a non-
+overwriting `tags.json.v1.bak[.N]` sibling before atomically writing v2. Invalid
+per-session metadata, duplicate v2 identities, empty key segments, and unknown
+record fields are retained in a serialized recovery ledger rather than dropped;
+malformed JSON, malformed versions, and unsupported future store versions are
+refused without rewriting the source. Prefix lookup no longer chooses an
+arbitrary hash-map match when more than one stored identity matches.
+
+This slice changes only storage and typed access. Provider-aware `tag` routing
+and qualified metadata in `info`/`list`/`recent` land next, after each consumer
+stops swallowing store-load failures and is tested against namespace-colliding
+native ids.
+
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".
 - [x] Drift-coverage claims must state checked vs unchecked counts

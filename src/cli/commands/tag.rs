@@ -279,29 +279,35 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
 
             match cli.effective_output() {
                 OutputFormat::Json => {
-                    println!("{}", serde_json::to_string_pretty(&bookmarked)?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&stored_ids(&bookmarked))?
+                    );
                 }
                 OutputFormat::Tsv => {
                     println!("session_id\tname");
                     for id in &bookmarked {
-                        let name = store.get(id).and_then(|m| m.name.as_deref()).unwrap_or("");
-                        println!("{}\t{}", id, name);
+                        let name = store
+                            .get_key(id)
+                            .and_then(|m| m.name.as_deref())
+                            .unwrap_or("");
+                        println!("{}\t{}", stored_id(id), name);
                     }
                 }
                 OutputFormat::Compact => {
                     for id in &bookmarked {
-                        println!("{}", short_id(id));
+                        println!("{}", short_key(id));
                     }
                 }
                 OutputFormat::Text => {
                     println!("Bookmarked sessions ({}):", bookmarked.len());
                     for id in &bookmarked {
                         let name = store
-                            .get(id)
+                            .get_key(id)
                             .and_then(|m| m.name.as_deref())
                             .map(|n| format!(" - {}", n))
                             .unwrap_or_default();
-                        println!("  {}{}", short_id(id), name);
+                        println!("  {}{}", short_key(id), name);
                     }
                 }
             }
@@ -316,29 +322,32 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
 
             match cli.effective_output() {
                 OutputFormat::Json => {
-                    println!("{}", serde_json::to_string_pretty(&sessions)?);
+                    println!("{}", serde_json::to_string_pretty(&stored_ids(&sessions))?);
                 }
                 OutputFormat::Tsv => {
                     println!("session_id\tname");
                     for id in &sessions {
-                        let name = store.get(id).and_then(|m| m.name.as_deref()).unwrap_or("");
-                        println!("{}\t{}", id, name);
+                        let name = store
+                            .get_key(id)
+                            .and_then(|m| m.name.as_deref())
+                            .unwrap_or("");
+                        println!("{}\t{}", stored_id(id), name);
                     }
                 }
                 OutputFormat::Compact => {
                     for id in &sessions {
-                        println!("{}", short_id(id));
+                        println!("{}", short_key(id));
                     }
                 }
                 OutputFormat::Text => {
                     println!("Sessions with tag '{}' ({}):", tag, sessions.len());
                     for id in &sessions {
                         let name = store
-                            .get(id)
+                            .get_key(id)
                             .and_then(|m| m.name.as_deref())
                             .map(|n| format!(" - {}", n))
                             .unwrap_or_default();
-                        println!("  {}{}", short_id(id), name);
+                        println!("  {}{}", short_key(id), name);
                     }
                 }
             }
@@ -372,29 +381,32 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
 
                 match cli.effective_output() {
                     OutputFormat::Json => {
-                        println!("{}", serde_json::to_string_pretty(&sessions)?);
+                        println!("{}", serde_json::to_string_pretty(&stored_ids(&sessions))?);
                     }
                     OutputFormat::Tsv => {
                         println!("session_id\tname\toutcome");
                         for id in &sessions {
-                            let name = store.get(id).and_then(|m| m.name.as_deref()).unwrap_or("");
-                            println!("{}\t{}\t{}", id, name, outcome);
+                            let name = store
+                                .get_key(id)
+                                .and_then(|m| m.name.as_deref())
+                                .unwrap_or("");
+                            println!("{}\t{}\t{}", stored_id(id), name, outcome);
                         }
                     }
                     OutputFormat::Compact => {
                         for id in &sessions {
-                            println!("{}", short_id(id));
+                            println!("{}", short_key(id));
                         }
                     }
                     OutputFormat::Text => {
                         println!("Sessions with outcome '{}' ({}):", outcome, sessions.len());
                         for id in &sessions {
                             let name = store
-                                .get(id)
+                                .get_key(id)
                                 .and_then(|m| m.name.as_deref())
                                 .map(|n| format!(" - {}", n))
                                 .unwrap_or_default();
-                            println!("  {}{}", short_id(id), name);
+                            println!("  {}{}", short_key(id), name);
                         }
                     }
                 }
@@ -608,18 +620,21 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
 
                 match cli.effective_output() {
                     OutputFormat::Json => {
-                        println!("{}", serde_json::to_string_pretty(&linked)?);
+                        println!("{}", serde_json::to_string_pretty(&stored_ids(&linked))?);
                     }
                     OutputFormat::Tsv => {
                         println!("session_id\tname");
                         for id in &linked {
-                            let name = store.get(id).and_then(|m| m.name.as_deref()).unwrap_or("");
-                            println!("{}\t{}", id, name);
+                            let name = store
+                                .get_key(id)
+                                .and_then(|m| m.name.as_deref())
+                                .unwrap_or("");
+                            println!("{}\t{}", stored_id(id), name);
                         }
                     }
                     OutputFormat::Compact => {
                         for id in &linked {
-                            println!("{}", short_id(id));
+                            println!("{}", short_key(id));
                         }
                     }
                     OutputFormat::Text => {
@@ -630,11 +645,11 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                         );
                         for id in &linked {
                             let name = store
-                                .get(id)
+                                .get_key(id)
                                 .and_then(|m| m.name.as_deref())
                                 .map(|n| format!(" - {}", n))
                                 .unwrap_or_default();
-                            println!("  {}{}", short_id(id), name);
+                            println!("  {}{}", short_key(id), name);
                         }
                     }
                 }
@@ -651,12 +666,12 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                         let data: Vec<_> = sessions
                             .iter()
                             .map(|id| {
-                                let linked = store.get_linked_sessions(id);
+                                let linked = store.get_linked_session_keys(id);
                                 serde_json::json!({
-                                    "session_id": id,
-                                    "name": store.get(id).and_then(|m| m.name.as_ref()),
+                                    "session_id": stored_id(id),
+                                    "name": store.get_key(id).and_then(|m| m.name.as_ref()),
                                     "linked_count": linked.len(),
-                                    "linked": linked
+                                    "linked": stored_ids(&linked),
                                 })
                             })
                             .collect();
@@ -665,28 +680,31 @@ pub fn run(cli: &Cli, args: &TagArgs) -> Result<()> {
                     OutputFormat::Tsv => {
                         println!("session_id\tname\tlinked_count");
                         for id in &sessions {
-                            let name = store.get(id).and_then(|m| m.name.as_deref()).unwrap_or("");
-                            let linked = store.get_linked_sessions(id);
-                            println!("{}\t{}\t{}", id, name, linked.len());
+                            let name = store
+                                .get_key(id)
+                                .and_then(|m| m.name.as_deref())
+                                .unwrap_or("");
+                            let linked = store.get_linked_session_keys(id);
+                            println!("{}\t{}\t{}", stored_id(id), name, linked.len());
                         }
                     }
                     OutputFormat::Compact => {
                         for id in &sessions {
-                            println!("{}", short_id(id));
+                            println!("{}", short_key(id));
                         }
                     }
                     OutputFormat::Text => {
                         println!("Sessions with links ({}):", sessions.len());
                         for id in &sessions {
                             let name = store
-                                .get(id)
+                                .get_key(id)
                                 .and_then(|m| m.name.as_deref())
                                 .map(|n| format!(" \"{}\"", n))
                                 .unwrap_or_default();
-                            let linked = store.get_linked_sessions(id);
+                            let linked = store.get_linked_session_keys(id);
                             println!(
                                 "  {}{} -> {} linked session{}",
-                                short_id(id),
+                                short_key(id),
                                 name,
                                 linked.len(),
                                 if linked.len() == 1 { "" } else { "s" }
@@ -1052,7 +1070,7 @@ fn resolve_session_id(cli: &Cli, prefix: &str) -> Result<String> {
     // First try to find in existing tag store
     let store = TagStore::load()?;
     if let Some(full_id) = store.resolve_id(prefix) {
-        return Ok(full_id.to_string());
+        return Ok(full_id.native_id.clone());
     }
 
     // Then try to find in actual session files
@@ -1094,6 +1112,30 @@ fn short_id(id: &str) -> String {
     }
 }
 
+fn short_key(key: &crate::provider::LogicalSessionKey) -> String {
+    if key.provider == crate::provider::ProviderId::claude_code()
+        && key.namespace == crate::provider::SessionNamespace::global()
+    {
+        short_id(&key.native_id)
+    } else {
+        key.to_string()
+    }
+}
+
+fn stored_id(key: &crate::provider::LogicalSessionKey) -> String {
+    if key.provider == crate::provider::ProviderId::claude_code()
+        && key.namespace == crate::provider::SessionNamespace::global()
+    {
+        key.native_id.clone()
+    } else {
+        key.to_string()
+    }
+}
+
+fn stored_ids(keys: &[&crate::provider::LogicalSessionKey]) -> Vec<String> {
+    keys.iter().map(|key| stored_id(key)).collect()
+}
+
 /// Get session IDs matching date/project filters for bulk operations.
 fn get_filtered_sessions(
     cli: &Cli,
@@ -1133,5 +1175,21 @@ mod tests {
     fn test_short_id() {
         assert_eq!(short_id("40afc8a7-3fcb-4d29-b1ee-100b81b8c6c0"), "40afc8a7");
         assert_eq!(short_id("short"), "short");
+    }
+
+    #[test]
+    fn stored_id_preserves_classic_output_and_qualifies_other_identities() {
+        let classic = crate::provider::LogicalSessionKey {
+            provider: crate::provider::ProviderId::claude_code(),
+            namespace: crate::provider::SessionNamespace::global(),
+            native_id: "native".to_string(),
+        };
+        let other = crate::provider::LogicalSessionKey {
+            provider: crate::provider::ProviderId("other".to_string()),
+            namespace: crate::provider::SessionNamespace::global(),
+            native_id: "native".to_string(),
+        };
+        assert_eq!(stored_id(&classic), "native");
+        assert_eq!(stored_id(&other), "other:native");
     }
 }

@@ -48,7 +48,10 @@ use crate::model::LogEntry;
 // ============================================================================
 
 /// Identifies a session-log provider ("claude-code", "codex", ...).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
 pub struct ProviderId(pub String);
 
 impl ProviderId {
@@ -76,7 +79,10 @@ impl fmt::Display for ProviderId {
 /// providers with database-local integer ids must scope them. Equivalent
 /// backup roots of the same installation share a namespace; genuinely
 /// separate installations must not collide accidentally.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
 pub struct SessionNamespace(pub String);
 
 impl SessionNamespace {
@@ -89,7 +95,10 @@ impl SessionNamespace {
 /// Global logical identity of a session: what "the same session" means even
 /// when several physical artifacts (archived copies, compressed twins,
 /// backups, fork-embedded history) exist.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(deny_unknown_fields)]
 pub struct LogicalSessionKey {
     /// Which provider owns the session.
     pub provider: ProviderId,
