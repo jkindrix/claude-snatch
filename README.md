@@ -29,12 +29,21 @@ Claude Code and OpenAI Codex CLI session logs with **maximum data fidelity**.
 git clone https://github.com/jkindrix/claude-snatch.git
 cd claude-snatch
 
-# Build in release mode
-cargo build --release
-
-# Install to ~/.cargo/bin
-cargo install --path .
+# Install this checkout to ~/.cargo/bin with Codex + MCP support.
+# Re-running ./install.sh replaces an installed build of the same version.
+./install.sh
 ```
+
+For a remote install, use:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jkindrix/claude-snatch/main/install.sh | bash
+```
+
+The piped installer uses a published binary when available and otherwise
+builds the current `main` branch with Cargo. After updating an MCP-enabled
+installation, restart or reconnect the MCP client so its stdio subprocess uses
+the replacement binary.
 
 #### Shell Completions
 
@@ -158,8 +167,8 @@ When built with the `mcp` feature, claude-snatch runs as an MCP server over stdi
 ### Setup
 
 ```bash
-# Build with MCP support
-cargo build --release --features mcp
+# Install the checkout with MCP support (and replace the same package version)
+cargo install --path . --locked --all-features --force
 
 # Start the server (stdio transport)
 snatch serve

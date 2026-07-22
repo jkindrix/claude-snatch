@@ -405,8 +405,8 @@ MCP server mode
 
 snatch serve-mcp                      # start MCP server
 
-# Requires the mcp feature. Build with:
-# cargo install claude-snatch --features mcp
+# Requires the mcp feature. From a checkout:
+# cargo install --path . --locked --all-features --force
 
 Shell completions
 

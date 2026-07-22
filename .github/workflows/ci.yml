@@ -116,7 +116,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build --release --locked --all-features --target ${{ matrix.target }}
 
       - name: Create artifact directory
         run: mkdir -p dist
