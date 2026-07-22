@@ -28,6 +28,35 @@ are the ground truth that keeps the corpus honest.
 3. **Shape-diff validation.** A periodic check confirms synthetic shapes still
    match a fresh sample of real sessions, so CC format drift is noticed.
 
+### Executable native-corpus audit
+
+The provider semantic audit is opt-in because it reads private, machine-local
+session artifacts and emits aggregate counts only. Run it with:
+
+```bash
+just audit-native-corpus
+```
+
+The recipe deliberately fails when the native corpus is unavailable or empty.
+Directly invoking the ignored tests retains a skip-on-absence mode for
+development, so it must not be used as evidence that a real-corpus audit ran.
+The conformance test independently derives expected provenance, prompt, usage,
+lineage, compaction/state, tool-lifecycle, and file-change allocations from the
+native record stream. Mutation tests in the normal suite prove those oracles
+reject representative corruptions.
+
+For the explicit full-provider inventory performance check, run:
+
+```bash
+just benchmark-provider-union
+```
+
+That local GNU/Linux benchmark defaults to generous ceilings of 10 seconds and
+256 MiB peak RSS. Normal CI avoids machine-specific timing assertions and
+instead pins the deterministic algorithmic contract: one bulk inventory call,
+zero per-session rediscovery, bounded native prelude reads, and filtering
+before parse.
+
 ### Version policy
 
 Every JSONL entry carries a per-entry `"version"` stamp (the CC version that

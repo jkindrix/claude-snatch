@@ -66,6 +66,38 @@ test-features:
     {{cargo}} test --no-default-features --features codex -j {{jobs}}
     {{cargo}} test --all-features -j {{jobs}}
 
+# Run aggregate-only semantic audits against the local native corpus.
+# Unlike invoking the ignored tests directly, this fails if the corpus is
+# unavailable or empty, preventing a hollow green audit.
+audit-native-corpus:
+    SNATCH_REQUIRE_REAL_CORPUS=1 {{cargo}} test --all-features --locked codex_real_corpus -- --ignored --test-threads=1 --nocapture
+
+# Reproduce the explicit full-union inventory benchmark on a GNU/Linux host.
+# Normal CI pins the algorithmic contract (one bulk inventory, no per-session
+# rediscovery); this opt-in gate catches machine-local wall-time/RSS regressions.
+benchmark-provider-union max_seconds="10" max_rss_kib="262144":
+    #!/usr/bin/env bash
+    if [[ ! -x /usr/bin/time ]] || ! /usr/bin/time --version 2>&1 | grep -q GNU; then
+        echo "error: benchmark-provider-union requires GNU /usr/bin/time" >&2
+        exit 1
+    fi
+    {{cargo}} build --release --all-features --locked -j {{jobs}}
+    metrics=$(mktemp)
+    trap 'rm -f "$metrics"' EXIT
+    /usr/bin/time -f '%e %M' -o "$metrics" \
+        target/release/{{binary_name}} --json list sessions --provider all >/dev/null
+    read -r elapsed rss_kib < "$metrics"
+    echo "provider union: ${elapsed}s, ${rss_kib} KiB peak RSS"
+    if ! awk -v actual="$elapsed" -v limit="{{max_seconds}}" \
+        'BEGIN { exit !(actual <= limit) }'; then
+        echo "error: ${elapsed}s exceeds {{max_seconds}}s ceiling" >&2
+        exit 1
+    fi
+    if (( rss_kib > {{max_rss_kib}} )); then
+        echo "error: ${rss_kib} KiB exceeds {{max_rss_kib}} KiB ceiling" >&2
+        exit 1
+    fi
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Lint
 # ─────────────────────────────────────────────────────────────────────────────

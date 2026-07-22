@@ -1907,6 +1907,41 @@ mod tests {
         }
     }
 
+    /// Discover the private native corpus for opt-in audit tests.
+    ///
+    /// Ordinary direct test invocations retain the historical skip behavior.
+    /// The `just audit-native-corpus` recipe sets
+    /// `SNATCH_REQUIRE_REAL_CORPUS`, turning absence, discovery failure, or an
+    /// empty inventory into a hard failure so an audit cannot report a hollow
+    /// green result.
+    fn real_corpus() -> Option<(CodexProvider, Vec<SessionDescriptor>)> {
+        let required = std::env::var_os("SNATCH_REQUIRE_REAL_CORPUS").is_some();
+        let provider = match CodexProvider::discover() {
+            Ok(provider) => provider,
+            Err(error) if required => panic!("required native corpus is unavailable: {error}"),
+            Err(error) => {
+                eprintln!("native corpus unavailable; skipping: {error}");
+                return None;
+            }
+        };
+        let sessions = match provider.sessions() {
+            Ok(sessions) => sessions,
+            Err(error) if required => {
+                panic!("required native corpus cannot be inventoried: {error}")
+            }
+            Err(error) => {
+                eprintln!("native corpus cannot be inventoried; skipping: {error}");
+                return None;
+            }
+        };
+        if sessions.is_empty() {
+            assert!(!required, "required native corpus inventory is empty");
+            eprintln!("native corpus inventory is empty; skipping");
+            return None;
+        }
+        Some((provider, sessions))
+    }
+
     /// Deliberately awkward lineage fixture:
     /// - an old-format fork whose copied parent records rewrite timestamps;
     /// - usage pending at the copied-prefix boundary (must NOT attach to the
@@ -2023,12 +2058,7 @@ mod tests {
     #[test]
     #[ignore = "requires a real $CODEX_HOME; aggregate-only, opt-in"]
     fn codex_real_corpus_lesson_shape_census() {
-        let Ok(provider) = CodexProvider::discover() else {
-            eprintln!("no Codex home; skipping");
-            return;
-        };
-        let Ok(sessions) = provider.sessions() else {
-            eprintln!("no sessions; skipping");
+        let Some((provider, sessions)) = real_corpus() else {
             return;
         };
         let mut totals: std::collections::BTreeMap<&'static str, usize> =
@@ -2183,12 +2213,7 @@ mod tests {
     #[test]
     #[ignore = "requires a real $CODEX_HOME; aggregate-only, opt-in"]
     fn codex_real_corpus_conformance() {
-        let Ok(p) = CodexProvider::discover() else {
-            eprintln!("no Codex home; skipping");
-            return;
-        };
-        let Ok(sessions) = p.sessions() else {
-            eprintln!("no sessions; skipping");
+        let Some((p, sessions)) = real_corpus() else {
             return;
         };
         let mut totals = IngestionDiagnostics::default();
