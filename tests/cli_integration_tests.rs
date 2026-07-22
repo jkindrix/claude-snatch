@@ -45,6 +45,49 @@ fn setup_fixture_dir() -> TempDir {
     tmp
 }
 
+/// Add a minimal searchable session to the standard test project.
+fn write_search_session(tmp: &TempDir, session_id: &str, text: &str, model: Option<&str>) {
+    let encoded = encode_project_path(PROJECT_PATH);
+    let project_dir = tmp.path().join("projects").join(encoded);
+    std::fs::create_dir_all(&project_dir).expect("failed to create project dir");
+
+    let entry = if let Some(model) = model {
+        serde_json::json!({
+            "type": "assistant",
+            "uuid": format!("entry-{session_id}"),
+            "parentUuid": null,
+            "timestamp": "2025-01-15T10:00:01.000Z",
+            "sessionId": session_id,
+            "version": "2.0.74",
+            "message": {
+                "id": format!("message-{session_id}"),
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": text}],
+                "model": model,
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1}
+            }
+        })
+    } else {
+        serde_json::json!({
+            "type": "user",
+            "uuid": format!("entry-{session_id}"),
+            "parentUuid": null,
+            "timestamp": "2025-01-15T10:00:00.000Z",
+            "sessionId": session_id,
+            "version": "2.0.74",
+            "message": {"role": "user", "content": text}
+        })
+    };
+
+    std::fs::write(
+        project_dir.join(format!("{session_id}.jsonl")),
+        format!("{entry}\n"),
+    )
+    .expect("failed to write search session");
+}
+
 #[allow(deprecated)] // cargo_bin_cmd! replacement is unstable
 fn snatch_cmd() -> Command {
     Command::cargo_bin("snatch").expect("snatch binary not found")
@@ -105,6 +148,149 @@ fn test_search_no_match_returns_empty() {
         .assert()
         .success()
         .stdout(predicate::str::contains("aaaaaaaa").not());
+}
+
+/// `--files-only` is grep-like: one very noisy session consumes one result,
+/// not the entire raw-match budget. The noisy session is written last so it is
+/// searched first under the newest-first discovery contract.
+#[test]
+fn test_search_files_only_limits_distinct_sessions_not_matches() {
+    let tmp = TempDir::new().expect("temp dir");
+    // The noisy ID also sorts first when filesystem timestamp resolution
+    // collapses the writes into a tie (notably on some Windows filesystems).
+    let noisy_id = "00000000-0000-0000-0000-000000000001";
+    let quiet_id = "00000000-0000-0000-0000-000000000002";
+    write_search_session(&tmp, quiet_id, "needle", None);
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    write_search_session(&tmp, noisy_id, &"needle\n".repeat(60), None);
+
+    let out = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["search", "--files-only", "needle", "-o", "json"])
+        .output()
+        .expect("files-only search failed");
+    assert!(out.status.success(), "search failed: {out:?}");
+    let ids: Vec<String> = serde_json::from_slice(&out.stdout).expect("JSON session-id array");
+    assert_eq!(ids, vec![noisy_id, quiet_id]);
+}
+
+/// The visible limit applies to distinct sessions, truncation is reported, and
+/// text/JSON preserve the same deterministic order.
+#[test]
+fn test_search_files_only_limit_and_order_contract() {
+    let tmp = TempDir::new().expect("temp dir");
+    for i in 0..51 {
+        let session_id = format!("{i:08x}-0000-0000-0000-000000000000");
+        write_search_session(&tmp, &session_id, "common-target", None);
+    }
+
+    let limited = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "search",
+            "--files-only",
+            "--limit",
+            "50",
+            "common-target",
+            "-o",
+            "json",
+        ])
+        .output()
+        .expect("limited files-only search failed");
+    assert!(limited.status.success(), "search failed: {limited:?}");
+    let limited_ids: Vec<String> =
+        serde_json::from_slice(&limited.stdout).expect("JSON session-id array");
+    assert_eq!(limited_ids.len(), 50);
+    assert!(String::from_utf8_lossy(&limited.stderr).contains("use --no-limit for all"));
+
+    let zero = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "search",
+            "--files-only",
+            "--limit",
+            "0",
+            "common-target",
+            "-o",
+            "json",
+        ])
+        .output()
+        .expect("zero-limit files-only search failed");
+    assert!(zero.status.success(), "search failed: {zero:?}");
+    assert_eq!(zero.stdout, b"[]\n");
+    assert!(String::from_utf8_lossy(&zero.stderr).contains("use --no-limit for all"));
+
+    let json = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "search",
+            "--files-only",
+            "--no-limit",
+            "common-target",
+            "-o",
+            "json",
+        ])
+        .output()
+        .expect("unbounded JSON search failed");
+    assert!(json.status.success(), "search failed: {json:?}");
+    let json_ids: Vec<String> =
+        serde_json::from_slice(&json.stdout).expect("JSON session-id array");
+    assert_eq!(json_ids.len(), 51);
+
+    let text = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args(["search", "--files-only", "--no-limit", "common-target"])
+        .output()
+        .expect("unbounded text search failed");
+    assert!(text.status.success(), "search failed: {text:?}");
+    let text_ids: Vec<String> = String::from_utf8(text.stdout)
+        .expect("UTF-8 text output")
+        .lines()
+        .map(String::from)
+        .collect();
+    assert_eq!(text_ids, json_ids);
+}
+
+/// Model filtering remains entry-scoped in the files-only fast path.
+#[test]
+fn test_search_files_only_preserves_model_filter() {
+    let tmp = TempDir::new().expect("temp dir");
+    let opus_id = "10000000-0000-0000-0000-000000000001";
+    let sonnet_id = "10000000-0000-0000-0000-000000000002";
+    write_search_session(&tmp, opus_id, "model-target", Some("claude-opus-4-8"));
+    write_search_session(&tmp, sonnet_id, "model-target", Some("claude-sonnet-4-6"));
+
+    let matching = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "search",
+            "--files-only",
+            "--model",
+            "opus",
+            "model-target",
+            "-o",
+            "json",
+        ])
+        .output()
+        .expect("model-filtered search failed");
+    assert!(matching.status.success(), "search failed: {matching:?}");
+    let ids: Vec<String> = serde_json::from_slice(&matching.stdout).expect("JSON session-id array");
+    assert_eq!(ids, vec![opus_id]);
+
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "search",
+            "--files-only",
+            "--model",
+            "definitely-not-a-model",
+            "model-target",
+            "-o",
+            "json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq("[]\n"));
 }
 
 /// Run a batch (`-o json`) search and return an exact pattern -> count map,

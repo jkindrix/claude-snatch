@@ -634,6 +634,18 @@ fn collect_sessions(cli: &Cli, args: &SearchArgs) -> Result<Vec<Session>> {
         sessions.retain(|s| !s.is_subagent());
     }
 
+    // `--files-only` exposes discovery order directly and stops after a
+    // bounded number of distinct sessions. Make both the selected membership
+    // and its rendering deterministic, including when mtimes tie.
+    if args.files_only {
+        sessions.sort_by(|a, b| {
+            b.modified_time()
+                .cmp(&a.modified_time())
+                .then_with(|| a.session_id().cmp(b.session_id()))
+                .then_with(|| a.path().cmp(b.path()))
+        });
+    }
+
     Ok(sessions)
 }
 
@@ -1007,7 +1019,8 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
 
     let mut total_matches = 0;
     let mut all_results = Vec::new();
-    let mut sessions_with_matches: HashSet<String> = HashSet::new();
+    let mut sessions_with_matches = Vec::new();
+    let mut seen_session_ids: HashSet<String> = HashSet::new();
     // Maps session_id -> (project_path, match_count, modified_time)
     let mut match_counts: std::collections::HashMap<String, SessionMatchCount> =
         std::collections::HashMap::new();
@@ -1037,6 +1050,17 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
             regex: regex.clone(),
             scope,
         })
+    } else {
+        None
+    };
+
+    // In files-only mode, `--limit` counts distinct session IDs rather than
+    // matching lines. Scan one result beyond the visible limit so the
+    // truncation notice is based on evidence rather than an exact-boundary
+    // guess. `usize::MAX` cannot have a lookahead, but is effectively
+    // unbounded in practice.
+    let files_only_scan_limit = if args.files_only && !args.no_limit {
+        Some(args.limit.saturating_add(1))
     } else {
         None
     };
@@ -1071,11 +1095,29 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
                 }
             }
 
+            if args.files_only {
+                let entry_matches = if let Some(ref bp) = count_mode_pattern {
+                    count_pattern_matches(entry, bp) > 0
+                } else {
+                    !search_entry(entry, &regex, args).is_empty()
+                };
+
+                if entry_matches {
+                    let session_id = session.session_id().to_string();
+                    if seen_session_ids.insert(session_id.clone()) {
+                        sessions_with_matches.push(session_id);
+                    }
+                    // grep -l semantics: after the first match, nothing else
+                    // in this physical session can affect the result.
+                    break;
+                }
+                continue;
+            }
+
             if let Some(ref bp) = count_mode_pattern {
                 // Count mode: use occurrence-based counting (same as batch path)
                 let entry_count = count_pattern_matches(entry, bp);
                 if entry_count > 0 {
-                    sessions_with_matches.insert(session.session_id().to_string());
                     total_matches += entry_count;
                     session_match_count += entry_count;
                 }
@@ -1084,8 +1126,6 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
                 let matches = search_entry(entry, &regex, args);
 
                 if !matches.is_empty() {
-                    sessions_with_matches.insert(session.session_id().to_string());
-
                     for m in matches {
                         total_matches += 1;
                         session_match_count += 1;
@@ -1124,6 +1164,13 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
             if !args.no_limit && total_matches >= args.limit {
                 break;
             }
+        }
+
+        if args.files_only {
+            if files_only_scan_limit.is_some_and(|limit| sessions_with_matches.len() >= limit) {
+                break;
+            }
+            continue;
         }
 
         if session_match_count > 0 {
@@ -1169,7 +1216,18 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
 
     // Output results based on mode
     if args.files_only {
+        let files_only_truncated = !args.no_limit && sessions_with_matches.len() > args.limit;
+        if files_only_truncated {
+            sessions_with_matches.truncate(args.limit);
+        }
         output_files_only(cli, &sessions_with_matches)?;
+        if files_only_truncated && !cli.quiet {
+            eprintln!(
+                "Showing {} matching sessions (limit: {}, use --no-limit for all)",
+                sessions_with_matches.len(),
+                args.limit
+            );
+        }
     } else if args.aggregate_by_session {
         output_aggregate(cli, &match_counts, total_matches)?;
     } else if args.count {
@@ -1196,11 +1254,10 @@ fn matches_message_type(entry: &LogEntry, type_filter: &str) -> bool {
 }
 
 /// Output only session IDs with matches.
-fn output_files_only(cli: &Cli, sessions: &HashSet<String>) -> Result<()> {
+fn output_files_only(cli: &Cli, sessions: &[String]) -> Result<()> {
     match cli.effective_output() {
         OutputFormat::Json => {
-            let sessions_vec: Vec<&String> = sessions.iter().collect();
-            println!("{}", serde_json::to_string_pretty(&sessions_vec)?);
+            println!("{}", serde_json::to_string_pretty(sessions)?);
         }
         _ => {
             for session_id in sessions {
