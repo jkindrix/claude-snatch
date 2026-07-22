@@ -4,7 +4,7 @@
 //! This command provides a streamlined way to extract just the human-typed
 //! prompts without tool results, system messages, or other noise.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 
@@ -40,6 +40,21 @@ struct FrequencyOutput {
 struct PromptSource {
     provider: String,
     qualified_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PromptProviderSkip {
+    provider: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone)]
+struct PromptCollectionMeta {
+    providers: Vec<String>,
+    session_descriptors_analyzed: usize,
+    date_filter_fallback_descriptors: usize,
+    skipped_providers: Vec<PromptProviderSkip>,
+    warnings: Vec<String>,
 }
 
 /// Statistics about prompts.
@@ -90,6 +105,16 @@ struct ContainsOutput {
     provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     qualified_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_descriptors_analyzed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    date_filter_fallback_descriptors: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    providers: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skipped_providers: Option<Vec<PromptProviderSkip>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warnings: Option<Vec<String>>,
 }
 
 /// Compute frequency distribution of prompts.
@@ -121,9 +146,15 @@ fn compute_frequency(prompts: &[Prompt], args: &PromptsArgs) -> Vec<FrequencyEnt
 
     // Sort by count (descending) or length (descending)
     if args.sort_by_length {
-        entries.sort_by_key(|b| std::cmp::Reverse(b.prompt.len()));
+        entries.sort_by(|a, b| {
+            b.prompt
+                .chars()
+                .count()
+                .cmp(&a.prompt.chars().count())
+                .then_with(|| a.prompt.cmp(&b.prompt))
+        });
     } else {
-        entries.sort_by_key(|b| std::cmp::Reverse(b.count));
+        entries.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.prompt.cmp(&b.prompt)));
     }
 
     entries
@@ -144,7 +175,7 @@ fn compute_stats(prompts: &[Prompt]) -> PromptsStats {
     let reused = unique - single_use;
 
     // Length statistics
-    let mut lengths: Vec<usize> = prompts.iter().map(|p| p.text.len()).collect();
+    let mut lengths: Vec<usize> = prompts.iter().map(|p| p.text.chars().count()).collect();
     lengths.sort_unstable();
 
     let total_chars: usize = lengths.iter().sum();
@@ -220,7 +251,7 @@ fn compute_stats(prompts: &[Prompt]) -> PromptsStats {
             },
         })
         .collect();
-    freq_entries.sort_by_key(|b| std::cmp::Reverse(b.count));
+    freq_entries.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.prompt.cmp(&b.prompt)));
     freq_entries.truncate(10);
 
     PromptsStats {
@@ -245,13 +276,22 @@ fn compute_stats(prompts: &[Prompt]) -> PromptsStats {
 
 /// Deduplicate prompts, keeping only unique entries.
 fn deduplicate_prompts(prompts: Vec<Prompt>) -> Vec<Prompt> {
-    let mut seen: HashMap<String, Prompt> = HashMap::new();
+    let mut seen = BTreeSet::new();
+    prompts
+        .into_iter()
+        .filter(|prompt| seen.insert(prompt.text.clone()))
+        .collect()
+}
 
-    for prompt in prompts {
-        seen.entry(prompt.text.clone()).or_insert(prompt);
+fn truncate_prompt_display(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
     }
-
-    seen.into_values().collect()
+    if max_chars <= 3 {
+        return text.chars().take(max_chars).collect();
+    }
+    let prefix: String = text.chars().take(max_chars - 3).collect();
+    format!("{prefix}...")
 }
 
 /// Write frequency output as JSON.
@@ -261,6 +301,7 @@ fn write_frequency_json<W: Write>(
     total_prompts: usize,
     session_count: Option<usize>,
     source: Option<&PromptSource>,
+    collection: Option<&PromptCollectionMeta>,
 ) -> Result<()> {
     let output = FrequencyOutput {
         entries: entries.to_vec(),
@@ -277,12 +318,28 @@ fn write_frequency_json<W: Write>(
         provider: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         qualified_id: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_descriptors_analyzed: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        date_filter_fallback_descriptors: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        providers: Option<&'a [String]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        skipped_providers: Option<&'a [PromptProviderSkip]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        warnings: Option<&'a [String]>,
     }
     let json_out = JsonOutput {
         frequency: output,
         session_count,
         provider: source.map(|source| source.provider.as_str()),
         qualified_id: source.map(|source| source.qualified_id.as_str()),
+        session_descriptors_analyzed: collection.map(|meta| meta.session_descriptors_analyzed),
+        date_filter_fallback_descriptors: collection
+            .map(|meta| meta.date_filter_fallback_descriptors),
+        providers: collection.map(|meta| meta.providers.as_slice()),
+        skipped_providers: collection.map(|meta| meta.skipped_providers.as_slice()),
+        warnings: collection.map(|meta| meta.warnings.as_slice()),
     };
     serde_json::to_writer_pretty(&mut *writer, &json_out)?;
     writeln!(writer)?;
@@ -308,8 +365,8 @@ fn write_frequency_text<W: Write>(
             .map(|p| format!(" ({:.1}%)", p))
             .unwrap_or_default();
         // Truncate long prompts for display (unless --no-truncate)
-        let display_text = if !no_truncate && entry.prompt.len() > 80 {
-            format!("{}...", &entry.prompt[..77])
+        let display_text = if !no_truncate && entry.prompt.chars().count() > 80 {
+            truncate_prompt_display(&entry.prompt, 80)
         } else {
             entry.prompt.clone()
         };
@@ -326,6 +383,7 @@ fn write_stats_json<W: Write>(
     stats: &PromptsStats,
     session_count: Option<usize>,
     source: Option<&PromptSource>,
+    collection: Option<&PromptCollectionMeta>,
 ) -> Result<()> {
     #[derive(Serialize)]
     struct JsonOutput<'a> {
@@ -337,12 +395,28 @@ fn write_stats_json<W: Write>(
         provider: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         qualified_id: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_descriptors_analyzed: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        date_filter_fallback_descriptors: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        providers: Option<&'a [String]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        skipped_providers: Option<&'a [PromptProviderSkip]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        warnings: Option<&'a [String]>,
     }
     let json_out = JsonOutput {
         stats,
         session_count,
         provider: source.map(|source| source.provider.as_str()),
         qualified_id: source.map(|source| source.qualified_id.as_str()),
+        session_descriptors_analyzed: collection.map(|meta| meta.session_descriptors_analyzed),
+        date_filter_fallback_descriptors: collection
+            .map(|meta| meta.date_filter_fallback_descriptors),
+        providers: collection.map(|meta| meta.providers.as_slice()),
+        skipped_providers: collection.map(|meta| meta.skipped_providers.as_slice()),
+        warnings: collection.map(|meta| meta.warnings.as_slice()),
     };
     serde_json::to_writer_pretty(&mut *writer, &json_out)?;
     writeln!(writer)?;
@@ -417,8 +491,8 @@ fn write_stats_text<W: Write>(
     writeln!(writer, "Top Prompts by Frequency:")?;
     for (i, entry) in stats.top_prompts.iter().enumerate() {
         // Truncate long prompts for display (unless --no-truncate)
-        let display_text = if !no_truncate && entry.prompt.len() > 60 {
-            format!("{}...", &entry.prompt[..57])
+        let display_text = if !no_truncate && entry.prompt.chars().count() > 60 {
+            truncate_prompt_display(&entry.prompt, 60)
         } else {
             entry.prompt.clone()
         };
@@ -533,12 +607,6 @@ fn filter_system_messages(prompts: Vec<Prompt>) -> Vec<Prompt> {
 
 /// Run the prompts command.
 pub fn run(cli: &Cli, args: &PromptsArgs) -> Result<()> {
-    if !args.provider.is_empty() && args.session.is_none() {
-        return Err(SnatchError::InvalidArgument {
-            name: "session".to_string(),
-            reason: "provider-routed prompts currently requires one session; cross-session prompt unions are a separate project-analysis slice".to_string(),
-        });
-    }
     // Validate arguments
     if args.session.is_none() && !args.all && args.project.is_none() {
         return Err(SnatchError::InvalidArgument {
@@ -550,6 +618,10 @@ pub fn run(cli: &Cli, args: &PromptsArgs) -> Result<()> {
     // If a specific session is provided
     if let Some(ref session_id) = args.session {
         return extract_single_session(cli, args, session_id);
+    }
+
+    if !args.provider.is_empty() {
+        return extract_provider_multiple_sessions(cli, args);
     }
 
     // Otherwise, extract from multiple sessions
@@ -616,6 +688,7 @@ fn extract_single_session(cli: &Cli, args: &PromptsArgs, session_id: &str) -> Re
             &parsed,
             args,
             resolution.provider.capabilities().semantic_annotations,
+            false,
         );
         (
             prompts,
@@ -671,14 +744,21 @@ fn extract_single_session(cli: &Cli, args: &PromptsArgs, session_id: &str) -> Re
     if args.stats {
         let stats = compute_stats(&prompts);
         if use_json {
-            write_stats_json(&mut writer, &stats, None, source.as_ref())?;
+            write_stats_json(&mut writer, &stats, None, source.as_ref(), None)?;
         } else {
             write_stats_text(&mut writer, &stats, None, args.no_truncate)?;
         }
     } else if args.frequency {
         let entries = compute_frequency(&prompts, args);
         if use_json {
-            write_frequency_json(&mut writer, &entries, total_prompts, None, source.as_ref())?;
+            write_frequency_json(
+                &mut writer,
+                &entries,
+                total_prompts,
+                None,
+                source.as_ref(),
+                None,
+            )?;
         } else {
             write_frequency_text(&mut writer, &entries, total_prompts, args.no_truncate)?;
         }
@@ -696,6 +776,11 @@ fn extract_single_session(cli: &Cli, args: &PromptsArgs, session_id: &str) -> Re
             session_count: None,
             provider: source.as_ref().map(|source| source.provider.clone()),
             qualified_id: source.as_ref().map(|source| source.qualified_id.clone()),
+            session_descriptors_analyzed: None,
+            date_filter_fallback_descriptors: None,
+            providers: None,
+            skipped_providers: None,
+            warnings: None,
         };
         if use_json {
             write_contains_json(&mut writer, &output)?;
@@ -721,6 +806,7 @@ fn extract_single_session(cli: &Cli, args: &PromptsArgs, session_id: &str) -> Re
                 total_before_limit,
                 None,
                 source.as_ref(),
+                None,
             )?;
         } else {
             write_prompts(&mut writer, &prompts, args, None)?;
@@ -745,6 +831,200 @@ fn extract_single_session(cli: &Cli, args: &PromptsArgs, session_id: &str) -> Re
     }
 
     Ok(())
+}
+
+fn context_overlaps_date_range(
+    context: &crate::provider::project::SessionProjectContext,
+    since: Option<std::time::SystemTime>,
+    until: Option<std::time::SystemTime>,
+) -> (bool, bool) {
+    if since.is_none() && until.is_none() {
+        return (true, false);
+    }
+
+    let start = context.started_at.map(std::time::SystemTime::from);
+    let native_end = if context.native_tail_unresolved {
+        None
+    } else {
+        context.ended_at
+    };
+    let end = if native_end.is_some() {
+        native_end
+    } else {
+        [context.ended_at, context.started_at, context.modified_at]
+            .into_iter()
+            .flatten()
+            .max()
+    }
+    .map(std::time::SystemTime::from);
+
+    let used_fallback = (since.is_some() && native_end.is_none())
+        || (until.is_some() && context.started_at.is_none());
+    if since.is_some_and(|cutoff| end.is_some_and(|timestamp| timestamp < cutoff)) {
+        return (false, used_fallback);
+    }
+    if until.is_some_and(|cutoff| start.is_some_and(|timestamp| timestamp > cutoff)) {
+        return (false, used_fallback);
+    }
+    (true, used_fallback)
+}
+
+fn sort_prompts_chronologically(prompts: &mut [Prompt]) {
+    prompts.sort_by(|a, b| {
+        a.sort_timestamp
+            .cmp(&b.sort_timestamp)
+            .then_with(|| a.sort_tiebreak.cmp(&b.sort_tiebreak))
+    });
+}
+
+/// Extract prompts from a provider-selected session/project union.
+fn extract_provider_multiple_sessions(cli: &Cli, args: &PromptsArgs) -> Result<()> {
+    use crate::provider::registry::ProviderSelection;
+
+    let selection = ProviderSelection::from_flags(&args.provider).map_err(|reason| {
+        SnatchError::InvalidArgument {
+            name: "--provider".to_string(),
+            reason,
+        }
+    })?;
+    let since = args.since.as_deref().map(parse_date_filter).transpose()?;
+    let until = args.until.as_deref().map(parse_date_filter).transpose()?;
+    let grep_regex = build_grep_regex(args)?;
+    let registry = super::helpers::provider_registry(cli);
+    let mut providers: BTreeSet<_> = registry
+        .select(&selection)?
+        .providers
+        .into_iter()
+        .map(|provider| provider.id().to_string())
+        .collect();
+    let mut prompts = Vec::new();
+    let mut sessions_with_prompts = BTreeSet::new();
+    let mut unique_prompts = BTreeSet::new();
+    let mut date_filter_fallbacks = BTreeSet::new();
+    let mut session_descriptors_analyzed = 0_usize;
+    let mut total_matching_prompts = 0_usize;
+    let use_json = matches!(cli.effective_output(), OutputFormat::Json);
+
+    let report = registry.visit_filtered_parsed_project_sessions(
+        &selection,
+        crate::cache::global_cache(),
+        args.project.as_deref(),
+        args.subagents,
+        |_, session| {
+            let (include, used_fallback) =
+                context_overlaps_date_range(&session.context, since, until);
+            if include && used_fallback {
+                date_filter_fallbacks.insert(session.descriptor.key.clone());
+            }
+            include
+        },
+        |project, session, logical_root, parsed| {
+            session_descriptors_analyzed += 1;
+            let semantic_annotations = registry
+                .get(&session.descriptor.key.provider)
+                .expect("visited session came from a registered provider")
+                .capabilities()
+                .semantic_annotations;
+            let mut session_prompts =
+                extract_prompts_from_parsed_session(&parsed, args, semantic_annotations, true);
+            if args.exclude_system {
+                session_prompts = filter_system_messages(session_prompts);
+            }
+            session_prompts =
+                filter_prompts_by_grep(session_prompts, grep_regex.as_ref(), args.invert_match);
+            if session_prompts.is_empty() {
+                return;
+            }
+
+            sessions_with_prompts.insert(logical_root.clone());
+            total_matching_prompts = total_matching_prompts.saturating_add(session_prompts.len());
+            let qualified_id = session.descriptor.key.to_string();
+            let provider = session.descriptor.key.provider.to_string();
+            let project_key = project.identity.to_string();
+            let project_path = project
+                .display_path
+                .clone()
+                .unwrap_or_else(|| project_key.clone());
+            for (index, mut prompt) in session_prompts.into_iter().enumerate() {
+                if args.unique && !args.stats && !args.frequency && args.contains.is_none() {
+                    unique_prompts.insert(prompt.text.clone());
+                }
+                prompt.sort_tiebreak = format!("{qualified_id}:{index:020}");
+                if args.separators || use_json {
+                    prompt.session_id = Some(qualified_id.clone());
+                    prompt.project_path = Some(project_path.clone());
+                }
+                if use_json {
+                    prompt.provider = Some(provider.clone());
+                    prompt.qualified_id = Some(qualified_id.clone());
+                    prompt.project_key = Some(project_key.clone());
+                }
+                prompts.push(prompt);
+            }
+
+            // The global limit bounds retained prompt memory without being
+            // multiplied by the number of sessions. Every session is still
+            // scanned so total_count and coverage metadata remain exact.
+            if let Some(limit) = args.limit {
+                sort_prompts_chronologically(&mut prompts);
+                if args.unique && !args.stats && !args.frequency && args.contains.is_none() {
+                    prompts = deduplicate_prompts(std::mem::take(&mut prompts));
+                }
+                prompts.truncate(limit);
+            }
+        },
+    )?;
+
+    sort_prompts_chronologically(&mut prompts);
+    for (provider, _) in &report.skipped {
+        providers.remove(&provider.to_string());
+    }
+    let mut warnings = report.warnings;
+    if !date_filter_fallbacks.is_empty() {
+        warnings.push(format!(
+            "{} session descriptors used conservative source-time evidence for date filtering",
+            date_filter_fallbacks.len()
+        ));
+    }
+    warnings.sort();
+    warnings.dedup();
+    let metadata = PromptCollectionMeta {
+        providers: providers.into_iter().collect(),
+        session_descriptors_analyzed,
+        date_filter_fallback_descriptors: date_filter_fallbacks.len(),
+        skipped_providers: report
+            .skipped
+            .into_iter()
+            .map(|(provider, reason)| PromptProviderSkip {
+                provider: provider.to_string(),
+                reason,
+            })
+            .collect(),
+        warnings,
+    };
+    let standard_total_count = if args.unique {
+        unique_prompts.len()
+    } else {
+        total_matching_prompts
+    };
+    let result = render_multiple_prompts(
+        cli,
+        args,
+        prompts,
+        sessions_with_prompts.len(),
+        Some(&metadata),
+        Some(standard_total_count),
+    );
+    for skipped in &metadata.skipped_providers {
+        eprintln!(
+            "warning: provider '{}' skipped: {}",
+            skipped.provider, skipped.reason
+        );
+    }
+    for warning in &metadata.warnings {
+        eprintln!("warning: {warning}");
+    }
+    result
 }
 
 /// Extract prompts from multiple sessions.
@@ -858,7 +1138,19 @@ fn extract_multiple_sessions(cli: &Cli, args: &PromptsArgs) -> Result<()> {
         }
     }
 
+    render_multiple_prompts(cli, args, all_prompts, session_count, None, None)
+}
+
+fn render_multiple_prompts(
+    cli: &Cli,
+    args: &PromptsArgs,
+    mut all_prompts: Vec<Prompt>,
+    session_count: usize,
+    collection: Option<&PromptCollectionMeta>,
+    standard_total_count: Option<usize>,
+) -> Result<()> {
     let total_prompts = all_prompts.len();
+    let use_json = matches!(cli.effective_output(), OutputFormat::Json);
 
     // Write output
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.output_file {
@@ -877,7 +1169,7 @@ fn extract_multiple_sessions(cli: &Cli, args: &PromptsArgs) -> Result<()> {
     if args.stats {
         let stats = compute_stats(&all_prompts);
         if use_json {
-            write_stats_json(&mut writer, &stats, Some(session_count), None)?;
+            write_stats_json(&mut writer, &stats, Some(session_count), None, collection)?;
         } else {
             write_stats_text(&mut writer, &stats, Some(session_count), args.no_truncate)?;
         }
@@ -890,6 +1182,7 @@ fn extract_multiple_sessions(cli: &Cli, args: &PromptsArgs) -> Result<()> {
                 total_prompts,
                 Some(session_count),
                 None,
+                collection,
             )?;
         } else {
             write_frequency_text(&mut writer, &entries, total_prompts, args.no_truncate)?;
@@ -908,6 +1201,12 @@ fn extract_multiple_sessions(cli: &Cli, args: &PromptsArgs) -> Result<()> {
             session_count: Some(session_count),
             provider: None,
             qualified_id: None,
+            session_descriptors_analyzed: collection.map(|meta| meta.session_descriptors_analyzed),
+            date_filter_fallback_descriptors: collection
+                .map(|meta| meta.date_filter_fallback_descriptors),
+            providers: collection.map(|meta| meta.providers.clone()),
+            skipped_providers: collection.map(|meta| meta.skipped_providers.clone()),
+            warnings: collection.map(|meta| meta.warnings.clone()),
         };
         if use_json {
             write_contains_json(&mut writer, &output)?;
@@ -921,7 +1220,7 @@ fn extract_multiple_sessions(cli: &Cli, args: &PromptsArgs) -> Result<()> {
         }
 
         // Apply limit for standard output (not already applied for stats/frequency which use all data)
-        let total_before_limit = all_prompts.len();
+        let total_before_limit = standard_total_count.unwrap_or(all_prompts.len());
         if let Some(limit) = args.limit {
             all_prompts.truncate(limit);
         }
@@ -933,6 +1232,7 @@ fn extract_multiple_sessions(cli: &Cli, args: &PromptsArgs) -> Result<()> {
                 total_before_limit,
                 Some(session_count),
                 None,
+                collection,
             )?;
         } else {
             // Group prompts by session for text output if separators are enabled
@@ -1016,6 +1316,16 @@ struct Prompt {
     session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     project_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    qualified_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_key: Option<String>,
+    #[serde(skip)]
+    sort_timestamp: chrono::DateTime<chrono::Utc>,
+    #[serde(skip)]
+    sort_tiebreak: String,
 }
 
 /// Collection of prompts for JSON output.
@@ -1029,6 +1339,16 @@ struct PromptsOutput {
     provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     qualified_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_descriptors_analyzed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    date_filter_fallback_descriptors: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    providers: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skipped_providers: Option<Vec<PromptProviderSkip>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warnings: Option<Vec<String>>,
 }
 
 /// Extract prompts from a session.
@@ -1055,11 +1375,22 @@ fn extract_prompts_from_parsed_session(
     parsed: &crate::provider::ParsedSession,
     args: &PromptsArgs,
     semantic_annotations: bool,
+    new_activity_only: bool,
 ) -> Vec<Prompt> {
     parsed
         .entries
         .iter()
         .filter(|identified| {
+            if new_activity_only
+                && parsed
+                    .semantics
+                    .get(&identified.id)
+                    .is_some_and(|semantics| {
+                        semantics.activity != crate::provider::ActivityKind::New
+                    })
+            {
+                return false;
+            }
             if !semantic_annotations {
                 return is_human_prompt(&identified.entry);
             }
@@ -1079,7 +1410,7 @@ fn prompt_from_entry(entry: &LogEntry, args: &PromptsArgs) -> Option<Prompt> {
     };
     let text = extract_user_prompt_text(entry)?;
     let trimmed = text.trim();
-    if trimmed.len() < args.min_length {
+    if trimmed.chars().count() < args.min_length {
         return None;
     }
     Some(Prompt {
@@ -1089,6 +1420,11 @@ fn prompt_from_entry(entry: &LogEntry, args: &PromptsArgs) -> Option<Prompt> {
             .then(|| user.timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
         session_id: None,
         project_path: None,
+        provider: None,
+        qualified_id: None,
+        project_key: None,
+        sort_timestamp: user.timestamp,
+        sort_tiebreak: String::new(),
     })
 }
 
@@ -1099,6 +1435,7 @@ fn write_prompts_json<W: Write>(
     total_count: usize,
     session_count: Option<usize>,
     source: Option<&PromptSource>,
+    collection: Option<&PromptCollectionMeta>,
 ) -> Result<()> {
     let output = PromptsOutput {
         prompts: prompts.to_vec(),
@@ -1106,6 +1443,12 @@ fn write_prompts_json<W: Write>(
         session_count,
         provider: source.map(|source| source.provider.clone()),
         qualified_id: source.map(|source| source.qualified_id.clone()),
+        session_descriptors_analyzed: collection.map(|meta| meta.session_descriptors_analyzed),
+        date_filter_fallback_descriptors: collection
+            .map(|meta| meta.date_filter_fallback_descriptors),
+        providers: collection.map(|meta| meta.providers.clone()),
+        skipped_providers: collection.map(|meta| meta.skipped_providers.clone()),
+        warnings: collection.map(|meta| meta.warnings.clone()),
     };
     serde_json::to_writer_pretty(&mut *writer, &output)?;
     writeln!(writer)?;
@@ -1162,19 +1505,148 @@ mod tests {
             timestamp: None,
             session_id: None,
             project_path: None,
+            provider: None,
+            qualified_id: None,
+            project_key: None,
+            sort_timestamp: chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            sort_tiebreak: String::new(),
         }
     }
 
     #[test]
     fn test_prompt_struct() {
-        let prompt = Prompt {
-            text: "Hello world".to_string(),
-            timestamp: Some("2025-12-30 12:00:00 UTC".to_string()),
-            session_id: None,
-            project_path: None,
-        };
+        let mut prompt = make_prompt("Hello world");
+        prompt.timestamp = Some("2025-12-30 12:00:00 UTC".to_string());
         assert_eq!(prompt.text, "Hello world");
         assert!(prompt.timestamp.is_some());
+    }
+
+    #[test]
+    fn deduplication_keeps_first_occurrence_order() {
+        let prompts = vec![
+            make_prompt("zebra"),
+            make_prompt("alpha"),
+            make_prompt("zebra"),
+            make_prompt("beta"),
+        ];
+        let texts: Vec<_> = deduplicate_prompts(prompts)
+            .into_iter()
+            .map(|prompt| prompt.text)
+            .collect();
+        assert_eq!(texts, ["zebra", "alpha", "beta"]);
+    }
+
+    #[test]
+    fn frequency_ties_are_deterministic() {
+        let args = PromptsArgs {
+            session: None,
+            provider: Vec::new(),
+            all: true,
+            project: None,
+            since: None,
+            until: None,
+            min_length: 0,
+            limit: None,
+            subagents: false,
+            output_file: None,
+            separators: false,
+            timestamps: false,
+            numbered: false,
+            grep: None,
+            ignore_case: false,
+            invert_match: false,
+            exclude_system: false,
+            frequency: true,
+            stats: false,
+            unique: false,
+            sort_by_length: false,
+            min_count: None,
+            no_truncate: false,
+            contains: None,
+        };
+        let prompts = vec![make_prompt("zebra"), make_prompt("alpha")];
+        let entries = compute_frequency(&prompts, &args);
+        assert_eq!(entries[0].prompt, "alpha");
+        assert_eq!(entries[1].prompt, "zebra");
+    }
+
+    #[test]
+    fn text_analysis_truncates_unicode_at_a_character_boundary() {
+        let prompt = make_prompt(&"🙂".repeat(100));
+        let entry = FrequencyEntry {
+            prompt: prompt.text,
+            count: 1,
+            percentage: Some(100.0),
+        };
+        let mut frequency = Vec::new();
+        write_frequency_text(&mut frequency, std::slice::from_ref(&entry), 1, false).unwrap();
+        assert!(String::from_utf8(frequency).unwrap().contains("..."));
+
+        let stats = compute_stats(&[make_prompt(&"界".repeat(100))]);
+        assert_eq!(stats.total_characters, 100);
+        assert!((stats.average_length - 100.0).abs() < f64::EPSILON);
+        assert_eq!(stats.min_length, 100);
+        assert_eq!(stats.max_length, 100);
+        let mut rendered = Vec::new();
+        write_stats_text(&mut rendered, &stats, None, false).unwrap();
+        assert!(String::from_utf8(rendered).unwrap().contains("..."));
+    }
+
+    #[test]
+    fn date_overlap_never_invents_a_start_from_the_end() {
+        let ended_at = chrono::DateTime::parse_from_rfc3339("2026-07-20T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let until = std::time::SystemTime::from(
+            chrono::DateTime::parse_from_rfc3339("2026-07-10T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        );
+        let context = crate::provider::project::SessionProjectContext {
+            ended_at: Some(ended_at),
+            modified_at: Some(ended_at),
+            ..Default::default()
+        };
+        assert_eq!(
+            context_overlaps_date_range(&context, None, Some(until)),
+            (true, true),
+            "without native start evidence the session must be included conservatively"
+        );
+    }
+
+    #[test]
+    fn date_overlap_prefers_a_complete_native_end_over_fresh_mtime() {
+        let ended_at = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let modified_at = chrono::DateTime::parse_from_rfc3339("2026-07-22T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let since = std::time::SystemTime::from(
+            chrono::DateTime::parse_from_rfc3339("2026-07-17T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        );
+        let complete = crate::provider::project::SessionProjectContext {
+            ended_at: Some(ended_at),
+            modified_at: Some(modified_at),
+            ..Default::default()
+        };
+        assert_eq!(
+            context_overlaps_date_range(&complete, Some(since), None),
+            (false, false)
+        );
+
+        let unresolved = crate::provider::project::SessionProjectContext {
+            native_tail_unresolved: true,
+            ..complete
+        };
+        assert_eq!(
+            context_overlaps_date_range(&unresolved, Some(since), None),
+            (true, true)
+        );
     }
 
     #[test]

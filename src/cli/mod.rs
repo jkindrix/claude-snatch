@@ -1890,9 +1890,9 @@ pub struct PromptsArgs {
     /// Session ID to extract prompts from (supports short prefixes).
     pub session: Option<String>,
 
-    /// Route a single-session request through a session-log provider.
-    /// Cross-session provider unions are handled in the project-analysis
-    /// phase and are refused here for now.
+    /// Route through one or more session-log providers. Repeat for an
+    /// explicit union, or pass `all`; cross-session use still requires
+    /// `--all` or `--project`.
     #[arg(long = "provider", value_name = "PROVIDER")]
     pub provider: Vec<String>,
 

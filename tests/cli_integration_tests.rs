@@ -973,6 +973,48 @@ fn provider_routed_claude_prompts_and_code_preserve_classic_results() {
     assert_eq!(routed_code, classic_code);
 }
 
+#[test]
+fn provider_routed_claude_prompt_union_preserves_classic_content() {
+    let home = setup_fixture_dir();
+    let missing_codex = home.path().join("no-codex-home");
+    let run = |provider: bool| {
+        let mut cmd = snatch_cmd();
+        cmd.env("SNATCH_CLAUDE_DIR", home.path())
+            .env("CODEX_HOME", &missing_codex)
+            .args(["-o", "json", "prompts", "--all"]);
+        if provider {
+            cmd.args(["--provider", "claude-code"]);
+        }
+        let output = cmd.assert().success().get_output().stdout.clone();
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+    };
+
+    let classic = run(false);
+    let mut routed = run(true);
+    assert_eq!(routed["providers"], serde_json::json!(["claude-code"]));
+    assert_eq!(routed["session_descriptors_analyzed"], 1);
+    for prompt in routed["prompts"].as_array_mut().unwrap() {
+        let object = prompt.as_object_mut().unwrap();
+        object.remove("provider");
+        object.remove("qualified_id");
+        object.remove("project_key");
+        let native = object["session_id"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("claude-code:")
+            .unwrap()
+            .to_string();
+        object.insert("session_id".to_string(), serde_json::json!(native));
+    }
+    let object = routed.as_object_mut().unwrap();
+    object.remove("session_descriptors_analyzed");
+    object.remove("date_filter_fallback_descriptors");
+    object.remove("providers");
+    object.remove("skipped_providers");
+    object.remove("warnings");
+    assert_eq!(routed, classic);
+}
+
 /// Regression for #25: `--models` must emit a per-model breakdown for a single
 /// session, and must not appear without the flag.
 #[test]
@@ -3233,6 +3275,21 @@ mod codex_normalization_cli {
                 }),
             ),
             line(
+                "2026-07-16T10:00:01.5Z",
+                "response_item",
+                serde_json::json!({
+                    "type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "spawn prompt"}]
+                }),
+            ),
+            line(
+                "2026-07-16T10:00:01.6Z",
+                "event_msg",
+                serde_json::json!({
+                    "type": "user_message", "message": "spawn prompt"
+                }),
+            ),
+            line(
                 "2026-07-16T10:00:02Z",
                 "response_item",
                 serde_json::json!({
@@ -3272,6 +3329,17 @@ mod codex_normalization_cli {
                 "timestamp": "2020-01-01T00:00:01Z",
                 "type": "turn_context",
                 "payload": {"turn_id": "compressed-turn", "model": "gpt-test"}
+            }),
+            serde_json::json!({
+                "timestamp": "2020-01-01T00:00:01.5Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "compressed prompt"}]}
+            }),
+            serde_json::json!({
+                "timestamp": "2020-01-01T00:00:01.6Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "compressed prompt"}
             }),
             serde_json::json!({
                 "timestamp": "2020-01-01T00:00:02Z",
@@ -4141,7 +4209,7 @@ mod codex_normalization_cli {
     }
 
     #[test]
-    fn provider_prompts_require_one_session_and_refuse_cross_session_flags() {
+    fn provider_prompts_require_union_scope_and_single_session_refuses_cross_flags() {
         let claude = setup_fixture_dir();
         let codex = content_provenance_home();
         snatch_cmd()
@@ -4150,7 +4218,7 @@ mod codex_normalization_cli {
             .args(["prompts", "--provider", "codex"])
             .assert()
             .failure()
-            .stderr(predicate::str::contains("requires one session"));
+            .stderr(predicate::str::contains("Specify a session ID"));
 
         let qualified = format!("codex:{THREAD}");
         let unsupported: &[(&str, &[&str])] = &[
@@ -4170,6 +4238,215 @@ mod codex_normalization_cli {
                 .assert()
                 .failure()
                 .stderr(predicate::str::contains(*flag));
+        }
+    }
+
+    #[test]
+    fn provider_prompt_union_uses_new_work_and_typed_spawn_projection() {
+        let claude = setup_fixture_dir();
+        let codex = fork_summary_home();
+        let run = |extra: &[&str]| {
+            let output = snatch_cmd()
+                .env("SNATCH_CLAUDE_DIR", claude.path())
+                .env("CODEX_HOME", codex.path())
+                .args(["-o", "json", "prompts", "--provider", "codex", "--all"])
+                .args(extra)
+                .assert()
+                .success()
+                .get_output()
+                .stdout
+                .clone();
+            serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+        };
+
+        let value = run(&[]);
+        assert_eq!(value["providers"], serde_json::json!(["codex"]));
+        assert_eq!(value["session_descriptors_analyzed"], 2);
+        assert_eq!(value["session_count"], 2);
+        assert_eq!(value["total_count"], 2);
+        assert_eq!(value["skipped_providers"], serde_json::json!([]));
+        let prompts = value["prompts"].as_array().unwrap();
+        assert_eq!(prompts.len(), 2);
+        assert_eq!(prompts[0]["text"], "parent prompt");
+        assert_eq!(prompts[1]["text"], "fork prompt");
+        assert!(prompts.iter().all(|prompt| prompt["provider"] == "codex"));
+        assert!(prompts
+            .iter()
+            .all(|prompt| prompt["session_id"].as_str().unwrap().starts_with("codex:")));
+        assert!(prompts
+            .iter()
+            .all(|prompt| prompt["qualified_id"] == prompt["session_id"]));
+        assert!(prompts
+            .iter()
+            .all(|prompt| prompt["project_key"].is_string()));
+
+        let limited = run(&["--limit", "1"]);
+        assert_eq!(limited["total_count"], 2);
+        assert_eq!(limited["prompts"].as_array().unwrap().len(), 1);
+        assert_eq!(limited["prompts"][0]["text"], "parent prompt");
+
+        let with_spawn = run(&["--subagents"]);
+        assert_eq!(with_spawn["session_descriptors_analyzed"], 3);
+        assert_eq!(with_spawn["session_count"], 3);
+        assert_eq!(with_spawn["total_count"], 3);
+        assert_eq!(with_spawn["prompts"][2]["text"], "spawn prompt");
+
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "-o",
+                "json",
+                "prompts",
+                "--provider",
+                "codex",
+                "--project",
+                "fork-summary",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let project: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(project["total_count"], 2);
+        assert_eq!(project["session_count"], 2);
+    }
+
+    #[test]
+    fn provider_prompt_union_filters_by_native_time_before_parsing() {
+        let claude = setup_fixture_dir();
+        let codex = fork_summary_home();
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "-o",
+                "json",
+                "prompts",
+                "--provider",
+                "codex",
+                "--all",
+                "--since",
+                "2026-07-17",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["session_descriptors_analyzed"], 0);
+        assert_eq!(value["session_count"], 0);
+        assert_eq!(value["total_count"], 0);
+        assert_eq!(value["prompts"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn provider_prompt_union_surfaces_conservative_date_fallbacks() {
+        let claude = setup_fixture_dir();
+        let codex = compressed_summary_home();
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "-o",
+                "json",
+                "prompts",
+                "--provider",
+                "codex",
+                "--all",
+                "--since",
+                "2026-07-17",
+            ])
+            .assert()
+            .success()
+            .stderr(predicate::str::contains(
+                "used conservative source-time evidence",
+            ))
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["session_descriptors_analyzed"], 1);
+        assert_eq!(value["date_filter_fallback_descriptors"], 1);
+        assert_eq!(value["total_count"], 1);
+        assert_eq!(value["prompts"][0]["text"], "compressed prompt");
+        assert_eq!(value["warnings"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn provider_prompt_union_excludes_harness_context_and_reports_partial_all() {
+        let claude = setup_fixture_dir();
+        let codex = content_provenance_home();
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "prompts", "--provider", "codex", "--all"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["total_count"], 2);
+        let rendered = value["prompts"].to_string();
+        assert!(rendered.contains("let human = true"));
+        assert!(rendered.contains("package main"));
+        assert!(!rendered.contains("let harness = true"));
+
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", claude.path().join("missing-codex-home"))
+            .args(["-o", "json", "prompts", "--provider", "all", "--all"])
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("provider 'codex' skipped"))
+            .get_output()
+            .stdout
+            .clone();
+        let partial: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(partial["providers"], serde_json::json!(["claude-code"]));
+        assert_eq!(partial["skipped_providers"][0]["provider"], "codex");
+        assert!(partial["total_count"].as_u64().unwrap() > 0);
+
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", claude.path().join("missing-codex-home"))
+            .args(["-o", "json", "prompts", "--provider", "codex", "--all"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("not found"));
+    }
+
+    #[test]
+    fn provider_prompt_union_json_modes_report_collection_coverage() {
+        let claude = setup_fixture_dir();
+        let codex = fork_summary_home();
+        let modes: &[&[&str]] = &[
+            &[],
+            &["--stats"],
+            &["--frequency"],
+            &["--contains", "prompt"],
+        ];
+        for mode in modes {
+            let output = snatch_cmd()
+                .env("SNATCH_CLAUDE_DIR", claude.path())
+                .env("CODEX_HOME", codex.path())
+                .args(["-o", "json", "prompts", "--provider", "codex", "--all"])
+                .args(*mode)
+                .assert()
+                .success()
+                .get_output()
+                .stdout
+                .clone();
+            let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(value["providers"], serde_json::json!(["codex"]));
+            assert_eq!(value["session_descriptors_analyzed"], 2);
+            assert_eq!(value["date_filter_fallback_descriptors"], 0);
+            assert_eq!(value["session_count"], 2);
+            assert_eq!(value["skipped_providers"], serde_json::json!([]));
+            assert_eq!(value["warnings"], serde_json::json!([]));
         }
     }
 

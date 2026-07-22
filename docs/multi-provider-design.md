@@ -2309,6 +2309,50 @@ cumulative observation twice), completed-native-tail cutoff, compressed and
 active-partial fallback reporting, fork-copy/spawn exclusion, partial-provider
 reporting, and the classic six-project/five-top-row distinction.
 
+#### Cross-session prompt routing (2026-07-22)
+
+Multi-session and project-scoped `prompts --provider ...` use the registry's
+filtered streaming visitor rather than collecting parsed bundles for the whole
+corpus. Explicit provider selections are atomic; `--provider all` preserves
+successful results while reporting unavailable providers and per-session parse
+warnings. Flagless prompt extraction remains on the classic route.
+
+The provider projection uses native `PromptAuthorship::Human` where semantic
+annotations exist and the established Claude heuristic otherwise. Only
+`ActivityKind::New` entries contribute, so copied fork history does not become
+a second prompt emission. Spawned transcripts are excluded by typed lineage
+unless `--subagents` is explicit. Session counts collapse typed continuations
+but leave forks as distinct work streams. JSON rows carry provider-qualified
+session identity and unified project identity; every provider-union JSON mode
+(standard, stats, frequency, and contains) carries analyzed-descriptor,
+provider, skipped-provider, warning, and date-fallback coverage.
+
+Ordering is native prompt timestamp ascending, then qualified identity and
+entry order as stable tie-breakers. `--limit` is one global chronological
+limit, never a per-session multiplier; collection continues after the retained
+set is full so the standard response's pre-limit total and provider coverage
+remain exact. Retained prompt bodies are bounded by the limit. With
+`--unique`, exact distinct-total reporting necessarily retains the set of
+distinct texts while keeping only the earliest requested rows; this is the
+explicit memory exception rather than a hidden false claim of constant space.
+Deduplication preserves first-emission order, and frequency/statistics ties
+are deterministic.
+
+Date filters select whole session artifacts before parsing; they do not claim
+to clip individual prompts at the exact boundary. Selection uses native
+start/end evidence. A complete native end beats a recently copied artifact's
+mtime. Compressed inventory, unresolved active tails, or missing native bounds
+may require conservative source-time evidence; the count and one bounded
+warning are machine-visible. A missing start never borrows the end timestamp
+and falsely excludes a session from an `--until` overlap query.
+
+Fixtures pin parent/fork new-work projection, default and opt-in spawn
+handling, global limiting, project selection, native-time exclusion,
+compressed source-time fallback, harness-context rejection, and partial
+provider success. Prompt length statistics and minimum-length filtering count
+Unicode scalar values rather than bytes, and human-readable truncation cannot
+split a multibyte character.
+
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".
 - [x] Drift-coverage claims must state checked vs unchecked counts
