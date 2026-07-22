@@ -2760,6 +2760,38 @@ without `--provider`. On the live corpus,
 passed provenance, while the two previously known unparseable records remained
 honest source failures rather than being hidden or conflated with drift.
 
+#### Source-operation capability decisions (P1.6 closure, 2026-07-22)
+
+The remaining Claude-only utilities do not map honestly onto the current
+universal provider contract, and no speculative capability booleans were added:
+
+- `grab` means a whole logical graph, not one transcript. A readable provider
+  graph bundle needs typed traversal, deterministic node ordering, per-node
+  provenance, and a manifest; a fidelity bundle must nest each node's archive
+  without claiming byte identity for the aggregate. Until that format exists,
+  qualified ids are refused before export. The error directs users to
+  single-session markdown/archive exports and `chain --provider`.
+- `watch` needs a provider-owned, cheap change cursor plus active/inactive state
+  and rewrite/truncation semantics. Repeated whole-corpus discovery or comparing
+  normalized vector lengths every 500 ms is not an acceptable substitute.
+  Qualified ids are refused before the polling loop, with point-in-time
+  `messages`/`timeline` as the alternative.
+- `cleanup` remains Claude-only and has no provider selector. Provider cleanup
+  requires an explicit ownership/mutation method, recoverable deletion policy,
+  multi-artifact logical-session semantics, and an active-session safety proof;
+  callers must never derive deletion paths from artifact locators.
+- `recover` requires provider-owned full-content reconstruction evidence and an
+  integrity model. File-change declarations, patches, or successful shell
+  commands prove changes, not complete recoverable file bytes. Qualified ids
+  are refused before output-directory creation, with provider-aware file
+  history/evolution as inspection alternatives.
+
+Integration tests prove the three session-taking commands reject qualified
+ids before filesystem effects, while their flagless classic routes remain
+unchanged. These decisions close P1.6; any future implementation must introduce
+and test the named evidence/mutation contract first rather than inferring it
+from existing archive, revision-token, or file-change surfaces.
+
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".
 - [x] Drift-coverage claims must state checked vs unchecked counts

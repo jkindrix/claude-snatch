@@ -13,6 +13,13 @@ use crate::error::Result;
 
 /// Run the grab command by delegating to `export` with fixed defaults.
 pub fn run(cli: &Cli, args: &GrabArgs) -> Result<()> {
+    super::helpers::refuse_qualified_provider_reference(
+        cli,
+        &args.session,
+        "grab",
+        "provider-qualified sessions require a typed graph-bundle contract; use `snatch export <SESSION> -f markdown` for one readable session, `-f archive` for a lossless single-session bundle, and `snatch chain --provider ...` to inspect lineage",
+    )?;
+
     // Build the equivalent `export` invocation. The leading element is the
     // binary-name slot that clap ignores.
     let mut argv: Vec<String> = vec!["grab".to_string(), args.session.clone()];

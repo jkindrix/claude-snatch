@@ -19,6 +19,14 @@ use super::get_claude_dir;
 
 /// Run the watch command.
 pub fn run(cli: &Cli, args: &WatchArgs) -> Result<()> {
+    if let Some(session) = &args.session {
+        super::helpers::refuse_qualified_provider_reference(
+            cli,
+            session,
+            "watch",
+            "provider-qualified sessions require a provider-owned active-artifact change cursor; use `snatch messages` or `snatch timeline` for point-in-time views",
+        )?;
+    }
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
     let poll_interval = Duration::from_millis(args.interval);
 

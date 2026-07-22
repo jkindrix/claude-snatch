@@ -90,6 +90,12 @@ pub struct RecoveredFile {
 
 /// Run the recover command.
 pub fn run(cli: &Cli, args: &RecoverArgs) -> Result<()> {
+    super::helpers::refuse_qualified_provider_reference(
+        cli,
+        &args.session,
+        "recover",
+        "provider-qualified sessions require provider-owned full-content reconstruction evidence; use `snatch file-history` or `snatch file-evolution` to inspect observed changes",
+    )?;
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
 
     // Find the session

@@ -2318,6 +2318,42 @@ fn test_provider_all_mixed_with_explicit_is_refused() {
         .stderr(predicate::str::contains("cannot be combined"));
 }
 
+#[test]
+fn flagless_source_operations_keep_their_classic_routes() {
+    let claude = setup_fixture_dir();
+    let output_parent = TempDir::new().unwrap();
+    let grab_output = output_parent.path().join("classic.md");
+
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", claude.path())
+        .args(["grab", SESSION_ID, "-O", grab_output.to_str().unwrap()])
+        .assert()
+        .success();
+    assert!(grab_output.exists());
+
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", claude.path())
+        .args(["watch", SESSION_ID])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Watching 1 session"));
+
+    let recover_output = output_parent.path().join("recover-output");
+    snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", claude.path())
+        .args([
+            "recover",
+            SESSION_ID,
+            "-O",
+            recover_output.to_str().unwrap(),
+            "--preview",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("No file operations found"));
+    assert!(!recover_output.exists());
+}
+
 #[cfg(feature = "codex")]
 mod codex_provider_cli {
     use super::*;
@@ -2611,6 +2647,50 @@ mod codex_provider_cli {
         assert_eq!(invalid["results"][0]["source_complete"], false);
         assert_eq!(invalid["results"][0]["provenance_valid"], true);
         assert_eq!(invalid["results"][0]["is_valid"], false);
+    }
+
+    #[test]
+    fn unsupported_source_operations_refuse_qualified_sessions_before_side_effects() {
+        let claude = setup_fixture_dir();
+        let (codex, _) = setup_codex_home();
+        let qualified = format!("codex:{CODEX_THREAD}");
+        let output_parent = TempDir::new().unwrap();
+        let grab_output = output_parent.path().join("must-not-exist.md");
+        let recover_output = output_parent.path().join("must-not-exist");
+
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["grab", &qualified, "-O", grab_output.to_str().unwrap()])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("typed graph-bundle contract"));
+        assert!(!grab_output.exists());
+
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["watch", &qualified])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("active-artifact change cursor"));
+
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "recover",
+                &qualified,
+                "-O",
+                recover_output.to_str().unwrap(),
+                "--preview",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "full-content reconstruction evidence",
+            ));
+        assert!(!recover_output.exists());
     }
 
     #[test]

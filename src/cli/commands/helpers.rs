@@ -786,6 +786,27 @@ pub fn provider_registry(cli: &crate::cli::Cli) -> crate::provider::registry::Pr
     )
 }
 
+/// Refuse a provider-qualified session on a command whose source capability
+/// has not been defined.
+///
+/// This check runs before classic discovery or any
+/// filesystem mutation, so a qualified id never degrades into a misleading
+/// Claude-only lookup or partially executes the wrong operation.
+pub fn refuse_qualified_provider_reference(
+    cli: &crate::cli::Cli,
+    reference: &str,
+    command: &str,
+    reason: &str,
+) -> crate::error::Result<()> {
+    if reference.contains(':') && provider_registry(cli).looks_qualified(reference) {
+        return Err(crate::error::SnatchError::InvalidArgument {
+            name: command.to_string(),
+            reason: reason.to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Table-driven refusal for provider-routed commands.
 ///
 /// Round-18 blocker 3: every argument a route does not implement must be
