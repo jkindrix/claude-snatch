@@ -2724,6 +2724,42 @@ This does not imply graph-bundle, live-tail, deletion, or file-recovery
 capabilities. Those operations remain independently gated by source evidence
 and mutation authority. Generic provider validation is the next P1.6 slice.
 
+#### Generic provider validation (P1.6 slice 2, 2026-07-22)
+
+`snatch validate` also preserves its flagless Claude behavior. An explicit
+provider selection—or a qualified session id—performs a fresh provider parse
+without consulting the cache, checks the session descriptor, requires the
+provider to return the requested logical session, runs the complete
+`ParsedSession::validate_provenance()` cross-validator, and reports source
+completeness independently from provenance validity. Recovered or unparseable
+native records make source validation fail; parseable records deliberately
+retained as `Unknown` remain valid and are counted without being mislabeled as
+schema drift. Only the provider's `diagnostics()` implementation can interpret
+native vocabulary, through `doctor --provider`.
+
+The provider route therefore refuses the classic `--schema`,
+`--unknown-fields`, and `--relationships` flags with redirects to the relevant
+provider-neutral surface; it never applies Claude-shaped schema or parent-tree
+rules to another source. A provider inventory has no portable "most recent"
+ordering, so provider validation requires an explicit session or `--all`.
+Explicit selections are atomic for provider construction/inventory, while
+`all` remains partial-but-reported; individual parse/source failures are
+retained as per-session validation results and produce a nonzero exit.
+The investigation also closed an adjacent registry seam: session inventories,
+project-context inventories, resolution, and cached/streamed parse acquisition
+now reject descriptors or parsed bundles owned by a different provider, and a
+parse result must match the exact requested logical key. Flattened inventory
+can no longer let an adapter route work through a forged provider id.
+
+Adversarial coverage includes a provider returning the wrong logical session,
+a cross-provider inventory/lineage injection, a diagnostics/provenance mismatch,
+preserved native records, malformed native input, healthy and partial `all`,
+explicit-provider failure, every refused legacy flag, and qualified-id routing
+without `--provider`. On the live corpus,
+243 sessions and 249,332 native records validated in 2.79 seconds: all bundles
+passed provenance, while the two previously known unparseable records remained
+honest source failures rather than being hidden or conflated with drift.
+
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".
 - [x] Drift-coverage claims must state checked vs unchecked counts

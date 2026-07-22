@@ -2478,6 +2478,142 @@ mod codex_provider_cli {
     }
 
     #[test]
+    fn validate_provider_checks_source_and_provenance_without_claude_flags() {
+        let claude = setup_fixture_dir();
+        let (codex, _) = setup_codex_home();
+        let qualified = format!("codex:{CODEX_THREAD}");
+
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "validate", &qualified])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let output: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(output["sessions_validated"], 1);
+        assert_eq!(output["total_records"], 3);
+        assert_eq!(output["total_errors"], 0);
+        assert_eq!(output["results"][0]["provider"], "codex");
+        assert_eq!(output["results"][0]["qualified_id"], qualified);
+        assert_eq!(output["results"][0]["provenance_valid"], true);
+        assert_eq!(output["results"][0]["source_complete"], true);
+        assert_eq!(output["results"][0]["is_valid"], true);
+        assert_eq!(output["skipped_providers"], serde_json::json!([]));
+        let baseline_unknown = output["results"][0]["diagnostics"]["unknown"]
+            .as_u64()
+            .unwrap();
+
+        let all_output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "validate", "--provider", "all", "--all"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let all_output: serde_json::Value = serde_json::from_slice(&all_output).unwrap();
+        assert_eq!(all_output["sessions_validated"], 2);
+        assert_eq!(all_output["skipped_providers"], serde_json::json!([]));
+
+        for flag in ["--schema", "--unknown-fields", "--relationships"] {
+            snatch_cmd()
+                .env("SNATCH_CLAUDE_DIR", claude.path())
+                .env("CODEX_HOME", codex.path())
+                .args(["validate", &qualified, flag])
+                .assert()
+                .failure()
+                .stderr(predicate::str::contains("not supported"));
+        }
+
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["validate", "--provider", "codex"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "requires a session reference or --all",
+            ));
+
+        let missing_home_parent = TempDir::new().unwrap();
+        let missing_home = missing_home_parent.path().join("missing-codex-home");
+        let partial = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", &missing_home)
+            .args(["-o", "json", "validate", "--provider", "all", "--all"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let partial: serde_json::Value = serde_json::from_slice(&partial).unwrap();
+        assert_eq!(partial["sessions_validated"], 1);
+        assert_eq!(partial["skipped_providers"][0]["provider"], "codex");
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", &missing_home)
+            .args(["validate", "--provider", "codex", "--all"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("provider 'codex' is unavailable"));
+
+        let path = codex
+            .path()
+            .join("sessions/2026/07/16")
+            .join(format!("rollout-2026-07-16T10-00-00-{CODEX_THREAD}.jsonl"));
+        use std::io::Write as _;
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap(),
+            "{{\"timestamp\":\"2026-07-16T10:00:02.000Z\",\"type\":\"future_record\",\"payload\":{{\"answer\":42}}}}"
+        )
+        .unwrap();
+        let drift = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "validate", &qualified])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let drift: serde_json::Value = serde_json::from_slice(&drift).unwrap();
+        assert_eq!(
+            drift["results"][0]["diagnostics"]["unknown"],
+            baseline_unknown + 1
+        );
+        assert_eq!(drift["results"][0]["source_complete"], true);
+        assert_eq!(drift["results"][0]["is_valid"], true);
+        assert_eq!(drift["results"][0]["warnings"], serde_json::json!([]));
+
+        writeln!(
+            std::fs::OpenOptions::new().append(true).open(path).unwrap(),
+            "not-json"
+        )
+        .unwrap();
+        let invalid = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "validate", &qualified])
+            .assert()
+            .failure()
+            .get_output()
+            .stdout
+            .clone();
+        let invalid: serde_json::Value = serde_json::from_slice(&invalid).unwrap();
+        assert_eq!(invalid["results"][0]["diagnostics"]["unparseable"], 1);
+        assert_eq!(invalid["results"][0]["source_complete"], false);
+        assert_eq!(invalid["results"][0]["provenance_valid"], true);
+        assert_eq!(invalid["results"][0]["is_valid"], false);
+    }
+
+    #[test]
     fn provider_index_all_build_and_search_span_both_providers() {
         let claude = setup_fixture_dir();
         let (codex, _) = setup_codex_home();

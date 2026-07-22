@@ -6,12 +6,29 @@ use crate::cli::{Cli, OutputFormat, ValidateArgs};
 use crate::error::{Result, SnatchError};
 use crate::model::{LogEntry, SchemaVersion};
 use crate::parser::JsonlParser;
+use crate::provider::registry::ProviderSelection;
+use crate::provider::{IngestionDiagnostics, ParsedSession, SourceProvider};
 use crate::reconstruction::Conversation;
 
 use super::get_claude_dir;
 
 /// Run the validate command.
 pub fn run(cli: &Cli, args: &ValidateArgs) -> Result<()> {
+    if !args.provider.is_empty() {
+        let registry = super::helpers::provider_registry(cli);
+        return run_provider(cli, args, &registry);
+    }
+    if let Some(session) = args
+        .session
+        .as_deref()
+        .filter(|session| session.contains(':'))
+    {
+        let registry = super::helpers::provider_registry(cli);
+        if registry.looks_qualified(session) {
+            return run_provider(cli, args, &registry);
+        }
+    }
+
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
 
     let sessions = if args.all {
@@ -125,6 +142,327 @@ pub fn run(cli: &Cli, args: &ValidateArgs) -> Result<()> {
         std::process::exit(1);
     }
 
+    Ok(())
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+struct ProviderIngestionSummary {
+    mapped: usize,
+    suppressed: usize,
+    unknown: usize,
+    recovered: usize,
+    unparseable: usize,
+}
+
+impl From<&IngestionDiagnostics> for ProviderIngestionSummary {
+    fn from(value: &IngestionDiagnostics) -> Self {
+        Self {
+            mapped: value.mapped,
+            suppressed: value.suppressed,
+            unknown: value.unknown,
+            recovered: value.recovered,
+            unparseable: value.unparseable,
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ProviderValidationResult {
+    provider: String,
+    qualified_id: String,
+    entry_count: usize,
+    record_count: usize,
+    is_valid: bool,
+    source_complete: bool,
+    provenance_valid: bool,
+    diagnostics: ProviderIngestionSummary,
+    errors: Vec<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ProviderValidationSkip {
+    provider: String,
+    reason: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ProviderValidationReport {
+    sessions_validated: usize,
+    total_records: usize,
+    total_entries: usize,
+    total_errors: usize,
+    total_warnings: usize,
+    results: Vec<ProviderValidationResult>,
+    skipped_providers: Vec<ProviderValidationSkip>,
+}
+
+fn run_provider(
+    cli: &Cli,
+    args: &ValidateArgs,
+    registry: &crate::provider::registry::ProviderRegistry,
+) -> Result<()> {
+    // COMPLETE classification: these legacy checks describe Claude's native
+    // schema/tree and must never be silently applied to another provider.
+    let ValidateArgs {
+        session,
+        provider: _,
+        all,
+        schema,
+        unknown_fields,
+        relationships,
+    } = args;
+    super::helpers::refuse_unsupported_flags(
+        "validate --provider (source and normalized-provenance validation)",
+        &[
+            ("--schema (use doctor --provider for native drift)", *schema),
+            (
+                "--unknown-fields (use doctor --provider for native drift)",
+                *unknown_fields,
+            ),
+            (
+                "--relationships (use chain --provider for typed lineage)",
+                *relationships,
+            ),
+        ],
+    )?;
+
+    if session.is_some() && *all {
+        return Err(SnatchError::InvalidArgument {
+            name: "validate".to_string(),
+            reason: "a session reference cannot be combined with --all".to_string(),
+        });
+    }
+    if session.is_none() && !*all {
+        return Err(SnatchError::InvalidArgument {
+            name: "validate --provider".to_string(),
+            reason: "requires a session reference or --all; provider inventories do not imply a portable recent order"
+                .to_string(),
+        });
+    }
+
+    let mut results = Vec::new();
+    let skipped = if let Some(reference) = session {
+        let resolution = registry.resolve_with_default_policy(&args.provider, reference)?;
+        let key = resolution.key.clone();
+        results.push(validate_provider_parse(
+            resolution.provider,
+            &key,
+            Vec::new(),
+            resolution.provider.parse(&key),
+        ));
+        Vec::new()
+    } else {
+        let selection = ProviderSelection::from_flags(&args.provider).map_err(|reason| {
+            SnatchError::InvalidArgument {
+                name: "--provider".to_string(),
+                reason,
+            }
+        })?;
+        let collected = registry.collect_selected_sessions(&selection)?;
+        for descriptor in collected.items {
+            let provider = registry.get(&descriptor.key.provider)?;
+            let descriptor_violations = descriptor.validate();
+            let key = descriptor.key.clone();
+            let parsed = provider.parse_discovered(&descriptor);
+            results.push(validate_provider_parse(
+                provider,
+                &key,
+                descriptor_violations,
+                parsed,
+            ));
+        }
+        collected.skipped
+    };
+
+    let skipped_providers = skipped
+        .into_iter()
+        .map(|(provider, reason)| ProviderValidationSkip {
+            provider: provider.to_string(),
+            reason,
+        })
+        .collect::<Vec<_>>();
+    let report = ProviderValidationReport {
+        sessions_validated: results.len(),
+        total_records: results.iter().map(|result| result.record_count).sum(),
+        total_entries: results.iter().map(|result| result.entry_count).sum(),
+        total_errors: results.iter().map(|result| result.errors.len()).sum(),
+        total_warnings: results
+            .iter()
+            .map(|result| result.warnings.len())
+            .sum::<usize>()
+            + skipped_providers.len(),
+        results,
+        skipped_providers,
+    };
+    render_provider_report(cli, &report)?;
+    if report.total_errors > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn validate_provider_parse(
+    provider: &dyn SourceProvider,
+    expected_key: &crate::provider::LogicalSessionKey,
+    descriptor_violations: Vec<String>,
+    parsed: std::result::Result<ParsedSession, crate::provider::ProviderError>,
+) -> ProviderValidationResult {
+    let mut errors = descriptor_violations
+        .into_iter()
+        .map(|violation| format!("Descriptor: {violation}"))
+        .collect::<Vec<_>>();
+    let warnings = Vec::new();
+    let parsed = match parsed {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            errors.push(format!("Parse error: {error}"));
+            return ProviderValidationResult {
+                provider: provider.id().to_string(),
+                qualified_id: expected_key.to_string(),
+                entry_count: 0,
+                record_count: 0,
+                is_valid: false,
+                source_complete: false,
+                provenance_valid: false,
+                diagnostics: ProviderIngestionSummary::default(),
+                errors,
+                warnings,
+            };
+        }
+    };
+
+    if parsed.descriptor.key != *expected_key {
+        errors.push(format!(
+            "Provider returned session {} while validating {expected_key}",
+            parsed.descriptor.key
+        ));
+    }
+    let provenance_violations = parsed.validate_provenance();
+    let provenance_valid = provenance_violations.is_empty()
+        && parsed.descriptor.key == *expected_key
+        && errors.is_empty();
+    errors.extend(
+        provenance_violations
+            .into_iter()
+            .map(|violation| format!("Provenance: {violation}")),
+    );
+
+    let diagnostics = ProviderIngestionSummary::from(&parsed.diagnostics);
+    if diagnostics.recovered > 0 {
+        errors.push(format!(
+            "{} damaged native record(s) were only partially recovered",
+            diagnostics.recovered
+        ));
+    }
+    if diagnostics.unparseable > 0 {
+        errors.push(format!(
+            "{} native record(s) could not be parsed",
+            diagnostics.unparseable
+        ));
+    }
+    let source_complete = diagnostics.recovered == 0 && diagnostics.unparseable == 0;
+
+    ProviderValidationResult {
+        provider: provider.id().to_string(),
+        qualified_id: expected_key.to_string(),
+        entry_count: parsed.entries.len(),
+        record_count: parsed.record_dispositions.len(),
+        is_valid: errors.is_empty(),
+        source_complete,
+        provenance_valid,
+        diagnostics,
+        errors,
+        warnings,
+    }
+}
+
+fn render_provider_report(cli: &Cli, report: &ProviderValidationReport) -> Result<()> {
+    match cli.effective_output() {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(report)?),
+        OutputFormat::Tsv => {
+            println!(
+                "provider\tqualified_id\trecords\tentries\tmapped\tsuppressed\tunknown\trecovered\tunparseable\tprovenance_valid\tsource_complete\tvalid"
+            );
+            for result in &report.results {
+                println!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    result.provider,
+                    result.qualified_id,
+                    result.record_count,
+                    result.entry_count,
+                    result.diagnostics.mapped,
+                    result.diagnostics.suppressed,
+                    result.diagnostics.unknown,
+                    result.diagnostics.recovered,
+                    result.diagnostics.unparseable,
+                    result.provenance_valid,
+                    result.source_complete,
+                    result.is_valid,
+                );
+            }
+        }
+        OutputFormat::Compact => {
+            for result in &report.results {
+                println!(
+                    "{}:{} ({}R/{}E/{}W)",
+                    result.qualified_id,
+                    if result.is_valid { "OK" } else { "FAIL" },
+                    result.record_count,
+                    result.errors.len(),
+                    result.warnings.len()
+                );
+            }
+        }
+        OutputFormat::Text => {
+            println!("Provider Validation Results");
+            println!("===========================");
+            println!();
+            println!("Sessions Validated: {}", report.sessions_validated);
+            println!("Native Records:     {}", report.total_records);
+            println!("Normalized Entries: {}", report.total_entries);
+            println!("Total Errors:       {}", report.total_errors);
+            println!("Total Warnings:     {}", report.total_warnings);
+            println!();
+            for result in &report.results {
+                println!(
+                    "{} {} ({} records, {} entries, {}E/{}W)",
+                    if result.is_valid { "✓" } else { "✗" },
+                    result.qualified_id,
+                    result.record_count,
+                    result.entry_count,
+                    result.errors.len(),
+                    result.warnings.len()
+                );
+                for error in &result.errors {
+                    println!("    ERROR: {error}");
+                }
+                if !cli.quiet {
+                    for warning in &result.warnings {
+                        println!("    WARN:  {warning}");
+                    }
+                }
+            }
+            println!();
+            if report.total_errors == 0 {
+                println!("All parsed sessions passed source and provenance validation.");
+            } else {
+                println!(
+                    "Validation completed with {} error(s).",
+                    report.total_errors
+                );
+            }
+        }
+    }
+
+    if cli.effective_output() != OutputFormat::Json && !cli.quiet {
+        for skipped in &report.skipped_providers {
+            eprintln!(
+                "Warning: provider '{}' was skipped: {}",
+                skipped.provider, skipped.reason
+            );
+        }
+    }
     Ok(())
 }
 
@@ -311,4 +649,48 @@ struct ValidationReport {
     total_errors: usize,
     total_warnings: usize,
     results: Vec<ValidationResult>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::fake::{colliding_key, multi_artifact_key, FakeProvider};
+
+    #[test]
+    fn generic_validation_rejects_broken_provenance_but_not_preserved_records() {
+        let provider = FakeProvider;
+        let key = multi_artifact_key();
+        let parsed = provider.parse(&key).unwrap();
+
+        let valid = validate_provider_parse(&provider, &key, Vec::new(), Ok(parsed.clone()));
+        assert!(valid.is_valid);
+        assert!(valid.provenance_valid);
+        assert!(valid.source_complete);
+        assert_eq!(valid.diagnostics.unknown, 1);
+        assert!(valid.warnings.is_empty());
+
+        let mut broken = parsed;
+        broken.diagnostics.mapped += 1;
+        let invalid = validate_provider_parse(&provider, &key, Vec::new(), Ok(broken));
+        assert!(!invalid.is_valid);
+        assert!(!invalid.provenance_valid);
+        assert!(invalid
+            .errors
+            .iter()
+            .any(|error| error.contains("do not match disposition tallies")));
+    }
+
+    #[test]
+    fn generic_validation_rejects_a_provider_returning_the_wrong_session() {
+        let provider = FakeProvider;
+        let parsed = provider.parse(&multi_artifact_key()).unwrap();
+
+        let invalid = validate_provider_parse(&provider, &colliding_key(), Vec::new(), Ok(parsed));
+        assert!(!invalid.is_valid);
+        assert!(!invalid.provenance_valid);
+        assert!(invalid
+            .errors
+            .iter()
+            .any(|error| error.contains("while validating")));
+    }
 }

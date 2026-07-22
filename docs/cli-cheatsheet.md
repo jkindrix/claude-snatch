@@ -382,6 +382,12 @@ snatch validate --all                 # validate all sessions
 snatch validate --all --schema        # check schema compatibility
 snatch validate --all --unknown-fields  # report unknown fields
 snatch validate --all --relationships # check parent-child relationships
+snatch validate codex:<ID>            # provider source + provenance checks
+snatch validate --provider all --all  # validate every selected provider
+
+Provider mode reports record dispositions without treating preserved native
+records as schema drift. Use doctor --provider for drift and chain --provider
+for typed relationships; Claude-only flags above are refused in provider mode.
 
 Cache management
 

@@ -369,7 +369,7 @@ pub enum Commands {
     #[command(alias = "clean", display_order = 51)]
     Cleanup(CleanupArgs),
 
-    /// Validate session file integrity.
+    /// Validate session source and normalized integrity.
     #[command(display_order = 52)]
     Validate(ValidateArgs),
 
@@ -1278,6 +1278,11 @@ pub struct ValidateArgs {
     /// Session ID to validate (supports short prefixes like "780893e4").
     /// Optional with --all flag.
     pub session: Option<String>,
+
+    /// Validate provider source decoding and normalized provenance. Repeatable;
+    /// `all` selects every installed provider.
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
 
     /// Validate all sessions.
     #[arg(short = 'a', long)]

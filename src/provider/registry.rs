@@ -209,6 +209,41 @@ impl Default for ProviderRegistry {
     }
 }
 
+fn validate_descriptor_owner(
+    provider_id: &ProviderId,
+    descriptor: &super::SessionDescriptor,
+) -> Result<(), ProviderError> {
+    if descriptor.key.provider != *provider_id {
+        return Err(ProviderError::Other(format!(
+            "provider '{provider_id}' returned a session descriptor owned by '{}'",
+            descriptor.key.provider
+        )));
+    }
+    Ok(())
+}
+
+fn provider_sessions(
+    provider: &dyn SourceProvider,
+) -> Result<Vec<super::SessionDescriptor>, ProviderError> {
+    let descriptors = provider.sessions()?;
+    let provider_id = provider.id();
+    for descriptor in &descriptors {
+        validate_descriptor_owner(&provider_id, descriptor)?;
+    }
+    Ok(descriptors)
+}
+
+fn provider_sessions_with_context(
+    provider: &dyn SourceProvider,
+) -> Result<super::SessionProjectContexts, ProviderError> {
+    let sessions = provider.sessions_with_project_context()?;
+    let provider_id = provider.id();
+    for (descriptor, _) in &sessions {
+        validate_descriptor_owner(&provider_id, descriptor)?;
+    }
+    Ok(sessions)
+}
+
 // ============================================================================
 // Provider selection + session resolution (the B2 resolution matrix)
 // ============================================================================
@@ -367,8 +402,7 @@ impl ProviderRegistry {
                 .expect("membership just checked");
             // The native-id part of a qualified reference may still be a
             // prefix; the provider is fixed, prefix rules unchanged.
-            let candidates: Vec<LogicalSessionKey> = provider
-                .sessions()?
+            let candidates: Vec<LogicalSessionKey> = provider_sessions(provider)?
                 .into_iter()
                 .map(|d| d.key)
                 .filter(|k| k.namespace == key.namespace && k.native_id.starts_with(&key.native_id))
@@ -389,7 +423,7 @@ impl ProviderRegistry {
             let mut candidates = Vec::new();
             let mut searched: Vec<&dyn SourceProvider> = Vec::new();
             for provider in &selected.providers {
-                match provider.sessions() {
+                match provider_sessions(*provider) {
                     Ok(descriptors) => {
                         candidates.extend(
                             descriptors
@@ -565,7 +599,7 @@ impl ProviderRegistry {
         let mut items = Vec::new();
         let mut scanned = 0usize;
         for provider in &selected.providers {
-            match provider.sessions() {
+            match provider_sessions(*provider) {
                 Ok(mut descriptors) => {
                     // Providers arrive in id order; keys sort within each.
                     descriptors.sort_by(|a, b| a.key.cmp(&b.key));
@@ -678,7 +712,7 @@ impl ProviderRegistry {
         > = std::collections::HashMap::new();
 
         for provider in &selected.providers {
-            let mut sessions = match provider.sessions_with_project_context() {
+            let mut sessions = match provider_sessions_with_context(*provider) {
                 Ok(sessions) => sessions,
                 Err(error) if atomic => return Err(error),
                 Err(error) => {
@@ -1054,7 +1088,7 @@ impl ProviderRegistry {
             match provider
                 .parse_discovered(&descriptor)
                 .map_err(crate::error::SnatchError::from)
-                .and_then(|parsed| validate_provider_session(provider, parsed))
+                .and_then(|parsed| validate_provider_session(provider, &descriptor.key, parsed))
             {
                 Ok(parsed) => visit(&project_path, std::sync::Arc::new(parsed)),
                 Err(error) if atomic => {
@@ -1117,20 +1151,37 @@ fn streaming_parsed_session(
         return Ok(parsed);
     }
     let parsed = provider.parse_discovered(descriptor)?;
-    validate_provider_session(provider, parsed).map(std::sync::Arc::new)
+    validate_provider_session(provider, &descriptor.key, parsed).map(std::sync::Arc::new)
 }
 
 fn parse_and_validate_provider_session(
     provider: &dyn SourceProvider,
     key: &LogicalSessionKey,
 ) -> crate::error::Result<super::ParsedSession> {
-    validate_provider_session(provider, provider.parse(key)?)
+    validate_provider_session(provider, key, provider.parse(key)?)
 }
 
 fn validate_provider_session(
     provider: &dyn SourceProvider,
+    expected_key: &LogicalSessionKey,
     parsed: super::ParsedSession,
 ) -> crate::error::Result<super::ParsedSession> {
+    if parsed.descriptor.key != *expected_key {
+        return Err(ProviderError::Other(format!(
+            "provider '{}' returned session {} while parsing {expected_key}",
+            provider.id(),
+            parsed.descriptor.key
+        ))
+        .into());
+    }
+    if parsed.descriptor.key.provider != provider.id() {
+        return Err(ProviderError::Other(format!(
+            "provider '{}' returned parsed data owned by '{}'",
+            provider.id(),
+            parsed.descriptor.key.provider
+        ))
+        .into());
+    }
     let violations = parsed.validate_provenance();
     if !violations.is_empty() {
         return Err(ProviderError::Other(format!(

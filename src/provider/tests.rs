@@ -814,8 +814,8 @@ impl SourceProvider for SmallProvider {
     }
 }
 
-/// Deliberately violates provider ownership by trying to inject a `small`
-/// endpoint into its lineage graph.
+/// Deliberately violates provider ownership by trying to inject `small`
+/// identities into both its session inventory and lineage graph.
 struct ForeignLineageProvider;
 
 impl SourceProvider for ForeignLineageProvider {
@@ -826,7 +826,10 @@ impl SourceProvider for ForeignLineageProvider {
         ProviderCapabilities::default()
     }
     fn sessions(&self) -> Result<Vec<SessionDescriptor>, ProviderError> {
-        Ok(Vec::new())
+        Ok(vec![SessionDescriptor {
+            key: SmallProvider::key("421"),
+            artifacts: vec![],
+        }])
     }
     fn lineage(&self) -> Result<Vec<LineageEdge>, ProviderError> {
         Ok(vec![LineageEdge {
@@ -1314,6 +1317,53 @@ impl SourceProvider for InvalidProvenanceProvider {
     }
 }
 
+/// A provider that returns a valid bundle for the wrong requested key. The
+/// bundle validates internally, so acquisition must check request identity
+/// independently from provenance consistency.
+struct WrongSessionProvider;
+
+impl SourceProvider for WrongSessionProvider {
+    fn id(&self) -> ProviderId {
+        FakeProvider.id()
+    }
+    fn capabilities(&self) -> ProviderCapabilities {
+        FakeProvider.capabilities()
+    }
+    fn sessions(&self) -> Result<Vec<SessionDescriptor>, ProviderError> {
+        FakeProvider.sessions()
+    }
+    fn lineage(&self) -> Result<Vec<LineageEdge>, ProviderError> {
+        FakeProvider.lineage()
+    }
+    fn parse(&self, _key: &LogicalSessionKey) -> Result<ParsedSession, ProviderError> {
+        FakeProvider.parse(&colliding_key())
+    }
+    fn parse_cache_token(&self, key: &LogicalSessionKey) -> Result<String, ProviderError> {
+        FakeProvider.parse_cache_token(key)
+    }
+    fn write_archive(
+        &self,
+        key: &LogicalSessionKey,
+        out: &mut dyn std::io::Write,
+    ) -> Result<(), ProviderError> {
+        FakeProvider.write_archive(key, out)
+    }
+    fn write_native(
+        &self,
+        artifact: &ArtifactId,
+        out: &mut dyn std::io::Write,
+    ) -> Result<(), ProviderError> {
+        FakeProvider.write_native(artifact, out)
+    }
+    fn write_raw_jsonl(
+        &self,
+        key: &LogicalSessionKey,
+        out: &mut dyn std::io::Write,
+    ) -> Result<(), ProviderError> {
+        FakeProvider.write_raw_jsonl(key, out)
+    }
+}
+
 #[test]
 fn cached_parsed_session_rejects_invalid_provider_output_before_caching() {
     use super::registry::cached_parsed_session;
@@ -1326,6 +1376,21 @@ fn cached_parsed_session_rejects_invalid_provider_output_before_caching() {
         .expect_err("invalid provider bundle must be refused")
         .to_string();
     assert!(error.contains("invalid normalized provenance"), "{error}");
+    assert_eq!(cache.provider_sessions.stats().entry_count, 0);
+}
+
+#[test]
+fn cached_parsed_session_rejects_a_valid_bundle_for_the_wrong_key() {
+    use super::registry::cached_parsed_session;
+    let cache = crate::cache::CacheManager::new(&crate::config::CacheConfig {
+        enabled: true,
+        ..Default::default()
+    });
+    let key = multi_artifact_key();
+    let error = cached_parsed_session(&cache, &WrongSessionProvider, &key)
+        .expect_err("wrong-session provider bundle must be refused")
+        .to_string();
+    assert!(error.contains("returned session"), "{error}");
     assert_eq!(cache.provider_sessions.stats().entry_count, 0);
 }
 
@@ -1642,7 +1707,7 @@ fn compact_projection_failure_is_atomic_explicit_and_reported_under_all() {
 }
 
 #[test]
-fn collect_lineage_rejects_cross_provider_edge_injection() {
+fn registry_rejects_cross_provider_inventory_and_lineage_injection() {
     let mut registry = ProviderRegistry::new();
     registry
         .register(RegisteredProvider {
@@ -1660,6 +1725,25 @@ fn collect_lineage_rejects_cross_provider_edge_injection() {
         .unwrap();
 
     let explicit = ProviderSelection::Explicit(vec![ProviderId("foreign".into())]);
+    let inventory_error = registry
+        .collect_selected_sessions(&explicit)
+        .err()
+        .expect("explicit inventory must reject a foreign descriptor")
+        .to_string();
+    assert!(
+        inventory_error.contains("descriptor owned by 'small'"),
+        "got: {inventory_error}"
+    );
+    let inventory = registry
+        .collect_selected_sessions(&ProviderSelection::All)
+        .expect("healthy inventory keeps all-selection successful");
+    assert!(inventory
+        .items
+        .iter()
+        .all(|descriptor| descriptor.key.provider == ProviderId("small".into())));
+    assert_eq!(inventory.skipped.len(), 1);
+    assert_eq!(inventory.skipped[0].0, ProviderId("foreign".into()));
+
     let error = registry
         .collect_selected_lineage(&explicit)
         .err()
