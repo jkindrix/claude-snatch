@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Standardized `--subagents` flag across all commands (was `--include-agents` in some)
 - `--main-thread` now defaults to false (exports all entries by default)
+- Human-readable exports distinguish physical record bounds and transcript span
+  from native reported turn time and the last completed-turn timestamp
 
 ### Fixed
 - HTML export missing closing `>` on meta generator tag
@@ -43,6 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Export data loss issue where only 13-75% of entries were captured
 - Empty sessions appearing in SQLite multi-session exports
 - Tool results extraction from user messages to SQLite
+- Trailing housekeeping records no longer masquerade as the conversation end or
+  active duration in Markdown and text exports
 
 ## [0.1.0] - 2025-12-30
 

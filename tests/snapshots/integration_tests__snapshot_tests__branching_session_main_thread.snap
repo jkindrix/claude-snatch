@@ -4,9 +4,9 @@ expression: markdown
 ---
 # Claude Code Conversation
 
-**Started:** 2025-01-15 12:00:00 UTC
-**Ended:** 2025-01-15 12:01:15 UTC
-**Span:** 1m 15s
+**First Record:** 2025-01-15 12:00:00 UTC
+**Last Record:** 2025-01-15 12:01:15 UTC
+**Transcript Span:** 1m 15s
 
 ## Statistics
 - **Messages (logical):** 6 (3 user, 3 assistant)

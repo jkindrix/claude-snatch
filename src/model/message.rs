@@ -835,6 +835,22 @@ pub struct SystemMessage {
     pub extra: IndexMap<String, Value>,
 }
 
+impl SystemMessage {
+    /// Return the native per-turn duration when this is a valid
+    /// `turn_duration` event.
+    ///
+    /// The raw field deliberately stays in `extra`: a future malformed or
+    /// differently-typed `durationMs` must remain round-trippable instead of
+    /// making the whole system record fail deserialization.
+    #[must_use]
+    pub fn turn_duration_ms(&self) -> Option<u64> {
+        if self.subtype != Some(SystemSubtype::TurnDuration) {
+            return None;
+        }
+        self.extra.get("durationMs").and_then(Value::as_u64)
+    }
+}
+
 /// System message subtypes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SystemSubtype {
@@ -859,6 +875,8 @@ pub enum SystemSubtype {
     Init,
     /// Session resume event.
     Resume,
+    /// Native end-of-turn timing event.
+    TurnDuration,
     /// Permission request/grant event.
     Permission,
     /// Tool execution event.
@@ -879,6 +897,7 @@ serde_string_enum!(SystemSubtype {
     Rename => "rename",
     Init => "init",
     Resume => "resume",
+    TurnDuration => "turn_duration",
     Permission => "permission",
     Tool => "tool",
 } other Other);
@@ -1266,6 +1285,11 @@ mod tests {
             Ok(entry) => {
                 assert_eq!(entry.uuid(), Some("3c6c72db-test"));
                 assert_eq!(entry.message_type(), "system");
+                let LogEntry::System(system) = entry else {
+                    panic!("Expected System variant");
+                };
+                assert_eq!(system.subtype, Some(SystemSubtype::TurnDuration));
+                assert_eq!(system.turn_duration_ms(), Some(31_226));
             }
             Err(e) => panic!("Failed to parse turn_duration system entry: {e}"),
         }
@@ -1428,25 +1452,39 @@ mod tests {
     }
 
     #[test]
-    fn test_system_subtype_unknown_preserved_verbatim() {
-        // An unmodeled system subtype is retained as Other(<string>), not
-        // collapsed to a nameless placeholder, and serializes back to the
-        // original string.
+    fn test_system_turn_duration_roundtrips_typed_fields() {
         let json = r#"{"type":"system","subtype":"turn_duration","uuid":"sy9","timestamp":"2026-06-21T00:00:06Z","sessionId":"s","durationMs":31226}"#;
         let entry: LogEntry = serde_json::from_str(json).unwrap();
         if let LogEntry::System(s) = &entry {
-            assert_eq!(
-                s.subtype,
-                Some(SystemSubtype::Other("turn_duration".to_string()))
-            );
+            assert_eq!(s.subtype, Some(SystemSubtype::TurnDuration));
+            assert_eq!(s.turn_duration_ms(), Some(31_226));
             let reser = serde_json::to_value(&entry).unwrap();
             assert_eq!(
                 reser.get("subtype").and_then(Value::as_str),
                 Some("turn_duration")
             );
+            assert_eq!(
+                reser.get("durationMs").and_then(Value::as_u64),
+                Some(31_226)
+            );
         } else {
             panic!("Expected System variant");
         }
+    }
+
+    #[test]
+    fn test_system_turn_duration_preserves_unmodeled_value() {
+        let json = r#"{"type":"system","subtype":"turn_duration","uuid":"sy10","timestamp":"2026-06-21T00:00:06Z","sessionId":"s","durationMs":"future-format"}"#;
+        let entry: LogEntry = serde_json::from_str(json).unwrap();
+        let LogEntry::System(system) = &entry else {
+            panic!("Expected System variant");
+        };
+        assert_eq!(system.subtype, Some(SystemSubtype::TurnDuration));
+        assert_eq!(system.turn_duration_ms(), None);
+        assert_eq!(
+            serde_json::to_value(&entry).unwrap().get("durationMs"),
+            Some(&Value::String("future-format".to_string()))
+        );
     }
 
     #[test]

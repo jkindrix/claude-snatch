@@ -47,6 +47,7 @@ pub mod history;
 
 use chrono::{DateTime, Datelike, Duration, Utc};
 use indexmap::IndexMap;
+use std::collections::HashSet;
 
 use crate::model::{usage::AggregatedUsage, AssistantMessage, ContentBlock, LogEntry};
 use crate::reconstruction::Conversation;
@@ -60,6 +61,15 @@ pub struct SessionAnalytics {
     pub start_time: Option<DateTime<Utc>>,
     /// Session end time.
     pub end_time: Option<DateTime<Utc>>,
+    /// Sum of native per-turn durations, deduplicated by event UUID.
+    pub reported_turn_duration_ms: u64,
+    /// Number of distinct native turn-duration events included in the sum.
+    pub reported_turn_count: usize,
+    /// Timestamp of the latest native turn-duration event.
+    pub last_turn_end_time: Option<DateTime<Utc>>,
+    /// Native turn-duration UUIDs already counted. This also protects callers
+    /// that feed entries directly rather than through reconstruction.
+    reported_turn_duration_uuids: HashSet<String>,
     /// Message counts by type.
     pub message_counts: MessageCounts,
     /// Tool invocation counts by tool name.
@@ -188,6 +198,23 @@ impl SessionAnalytics {
                             .error_counts
                             .entry("api_error".to_string())
                             .or_insert(0) += 1;
+                    }
+                    if *subtype == crate::model::SystemSubtype::TurnDuration {
+                        if let Some(duration_ms) = system.turn_duration_ms() {
+                            if self
+                                .reported_turn_duration_uuids
+                                .insert(system.uuid.clone())
+                            {
+                                self.reported_turn_duration_ms =
+                                    self.reported_turn_duration_ms.saturating_add(duration_ms);
+                                self.reported_turn_count += 1;
+                                if self.last_turn_end_time.is_none()
+                                    || Some(system.timestamp) > self.last_turn_end_time
+                                {
+                                    self.last_turn_end_time = Some(system.timestamp);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -341,6 +368,34 @@ impl SessionAnalytics {
                     total_secs % 60
                 )
             }
+        })
+    }
+
+    /// Get the summed native turn duration as a human-readable string.
+    ///
+    /// This is deliberately called "reported turn time": the producer may
+    /// include tool/service waits, so it is not presented as CPU or model-only
+    /// active time.
+    #[must_use]
+    pub fn reported_turn_duration_string(&self) -> Option<String> {
+        if self.reported_turn_count == 0 {
+            return None;
+        }
+
+        let total_secs = self.reported_turn_duration_ms / 1_000;
+        Some(if total_secs == 0 {
+            "<1s".to_string()
+        } else if total_secs < 60 {
+            format!("{total_secs}s")
+        } else if total_secs < 3_600 {
+            format!("{}m {}s", total_secs / 60, total_secs % 60)
+        } else {
+            format!(
+                "{}h {}m {}s",
+                total_secs / 3_600,
+                (total_secs % 3_600) / 60,
+                total_secs % 60
+            )
         })
     }
 
@@ -2173,6 +2228,68 @@ mod tests {
         // message_count tracks distinct turns, consistent with assistant count.
         assert_eq!(analytics.usage.message_count, 2);
         assert_eq!(analytics.message_counts.assistant, 2);
+    }
+
+    #[test]
+    fn test_reported_turn_duration_is_summed_and_uuid_deduplicated() {
+        let turn = |uuid: &str, timestamp: &str, duration: serde_json::Value| {
+            serde_json::from_value::<crate::model::LogEntry>(serde_json::json!({
+                "type": "system",
+                "subtype": "turn_duration",
+                "uuid": uuid,
+                "timestamp": timestamp,
+                "sessionId": "s",
+                "durationMs": duration
+            }))
+            .unwrap()
+        };
+
+        let first = turn(
+            "duration-1",
+            "2026-07-22T00:00:01Z",
+            serde_json::json!(1_250),
+        );
+        let second = turn(
+            "duration-2",
+            "2026-07-22T00:01:03Z",
+            serde_json::json!(62_500),
+        );
+        let malformed = turn(
+            "duration-3",
+            "2026-07-22T00:02:00Z",
+            serde_json::json!("future-format"),
+        );
+
+        let mut analytics = SessionAnalytics::default();
+        analytics.process_entry(&first);
+        analytics.process_entry(&first); // copied history: same native event
+        analytics.process_entry(&second);
+        analytics.process_entry(&malformed);
+
+        assert_eq!(analytics.reported_turn_count, 2);
+        assert_eq!(analytics.reported_turn_duration_ms, 63_750);
+        assert_eq!(
+            analytics.reported_turn_duration_string().as_deref(),
+            Some("1m 3s")
+        );
+        assert_eq!(
+            analytics.last_turn_end_time,
+            Some("2026-07-22T00:01:03Z".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_reported_turn_duration_under_one_second_is_not_zero() {
+        let entry: crate::model::LogEntry = serde_json::from_str(
+            r#"{"type":"system","subtype":"turn_duration","uuid":"duration-fast","timestamp":"2026-07-22T00:00:01Z","sessionId":"s","durationMs":195}"#,
+        )
+        .unwrap();
+        let mut analytics = SessionAnalytics::default();
+        analytics.process_entry(&entry);
+        assert_eq!(
+            analytics.reported_turn_duration_string().as_deref(),
+            Some("<1s")
+        );
     }
 
     #[test]

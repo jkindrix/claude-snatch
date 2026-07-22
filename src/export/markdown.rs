@@ -141,13 +141,23 @@ impl MarkdownExporter {
         // Timestamps
         if options.include_timestamps {
             if let Some(start) = analytics.start_time {
-                writeln!(writer, "**Started:** {}", format_timestamp(&start))?;
+                writeln!(writer, "**First Record:** {}", format_timestamp(&start))?;
             }
             if let Some(end) = analytics.end_time {
-                writeln!(writer, "**Ended:** {}", format_timestamp(&end))?;
+                writeln!(writer, "**Last Record:** {}", format_timestamp(&end))?;
             }
             if let Some(span) = analytics.duration_string() {
-                writeln!(writer, "**Span:** {span}")?;
+                writeln!(writer, "**Transcript Span:** {span}")?;
+            }
+            if let Some(last_turn_end) = analytics.last_turn_end_time {
+                writeln!(
+                    writer,
+                    "**Last Turn Ended:** {}",
+                    format_timestamp(&last_turn_end)
+                )?;
+            }
+            if let Some(reported) = analytics.reported_turn_duration_string() {
+                writeln!(writer, "**Reported Turn Time:** {reported}")?;
             }
         }
 

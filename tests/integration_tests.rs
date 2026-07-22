@@ -247,7 +247,7 @@ mod reconstruction {
 mod export {
     use super::*;
     use claude_snatch::export::{
-        ExportOptions, Exporter, HtmlExporter, JsonExporter, MarkdownExporter,
+        ExportOptions, Exporter, HtmlExporter, JsonExporter, MarkdownExporter, TextExporter,
     };
 
     #[test]
@@ -297,6 +297,47 @@ mod export {
             output_str.contains("Assistant") || output_str.contains("assistant"),
             "Should have Assistant content"
         );
+    }
+
+    #[test]
+    fn test_exports_separate_record_span_from_reported_turn_time() {
+        let raw_entries = [
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"timestamp":"2026-07-21T23:39:02Z","sessionId":"s","version":"2.1.0","message":{"role":"user","content":"hello"}}"#,
+            r#"{"type":"assistant","uuid":"a1","parentUuid":"u1","timestamp":"2026-07-21T23:39:44Z","sessionId":"s","version":"2.1.0","message":{"id":"m1","type":"message","role":"assistant","model":"claude-fable-5","content":[{"type":"text","text":"hi"}]}}"#,
+            r#"{"type":"system","subtype":"turn_duration","uuid":"d1","parentUuid":"a1","timestamp":"2026-07-21T23:39:45Z","sessionId":"s","version":"2.1.0","durationMs":43328}"#,
+            r#"{"type":"system","subtype":"shell-cwd-reset","uuid":"h1","parentUuid":"d1","timestamp":"2026-07-22T01:00:05Z","sessionId":"s","version":"2.1.0"}"#,
+        ];
+        let entries = raw_entries
+            .iter()
+            .map(|raw| serde_json::from_str(raw).unwrap())
+            .collect();
+        let conversation =
+            Conversation::from_entries(entries).expect("Failed to build conversation");
+        let options = ExportOptions::default();
+
+        let mut markdown = Vec::new();
+        MarkdownExporter::new()
+            .export_conversation(&conversation, &mut markdown, &options)
+            .unwrap();
+        let markdown = String::from_utf8(markdown).unwrap();
+        assert!(markdown.contains("**First Record:** 2026-07-21 23:39:02 UTC"));
+        assert!(markdown.contains("**Last Record:** 2026-07-22 01:00:05 UTC"));
+        assert!(markdown.contains("**Transcript Span:** 1h 21m 3s"));
+        assert!(markdown.contains("**Last Turn Ended:** 2026-07-21 23:39:45 UTC"));
+        assert!(markdown.contains("**Reported Turn Time:** 43s"));
+        assert!(!markdown.contains("**Ended:**"));
+
+        let mut text = Vec::new();
+        TextExporter::new()
+            .export_conversation(&conversation, &mut text, &options)
+            .unwrap();
+        let text = String::from_utf8(text).unwrap();
+        assert!(text.contains("First Record: 2026-07-21 23:39:02 UTC"));
+        assert!(text.contains("Last Record: 2026-07-22 01:00:05 UTC"));
+        assert!(text.contains("Transcript Span: 1h 21m 3s"));
+        assert!(text.contains("Last Turn Ended: 2026-07-21 23:39:45 UTC"));
+        assert!(text.contains("Reported Turn Time: 43s"));
+        assert!(!text.contains("Ended: 2026-07-22 01:00:05 UTC"));
     }
 
     #[test]
