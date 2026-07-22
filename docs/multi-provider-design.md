@@ -2450,6 +2450,83 @@ piping. The test suite separately pins namespace-collision visibility,
 deterministic global limiting, Unicode-safe identity rendering, and preflight
 refusal of the unsupported path action.
 
+#### Versioned cross-provider search index (P1.5 design, 2026-07-22)
+
+The existing Tantivy index is a Claude-only prototype, not a migration target:
+incremental builds append duplicate documents, deleted/changed sessions leave
+stale rows, `--thinking` is ignored, session counts and update times are
+placeholders, query filters are interpolated into query syntax, byte-sliced
+snippets can panic on Unicode, and no schema or source-revision manifest
+exists. The local index contained zero documents when this design was made.
+Existing non-empty indexes on other machines must nevertheless never be
+silently erased: opening an incompatible legacy schema reports that a rebuild
+is required, and explicit `index rebuild` constructs the replacement before
+atomically exchanging directories.
+
+The replacement is a provider-neutral, versioned snapshot of **typed search
+projections**. It is not a second source parser and does not retain native raw
+records. Each searchable entry document carries the complete escaped
+`LogicalSessionKey`, deterministic `EntryId`, provider, project identity and
+display path, typed continuation root, spawn/activity classification, native
+or normalized timestamp, message/model/tool metadata, and ordered typed text
+segments (human/assistant/system/summary, reasoning, tool input, tool result,
+and preserved unknown content where the scope contract permits it). Segment
+extraction is one shared analysis primitive used by direct and indexed search,
+so index construction cannot invent different search semantics.
+
+One manifest document per source session is committed in the same Tantivy
+transaction as that session's entry documents. It records the provider parse
+cache token, an index-metadata fingerprint (project, continuation root, spawn
+state, and index schema), source bounds, and build generation. A changed token
+or metadata fingerprint replaces that session's documents exactly once;
+unchanged sessions are skipped; a complete successful provider inventory
+prunes disappeared sessions. Project-filtered builds are upsert-only because a
+partial inventory cannot prove deletion. Their incomplete removal coverage is
+machine-visible until a complete provider build/rebuild supersedes it.
+
+Build failure semantics mirror the provider registry but protect the previous
+snapshot. Explicit selections are transactional: any selected-provider or
+session failure rolls the generation back. `all` may commit successful
+providers/sessions, preserves the previous partition for failures, and records
+the skipped/stale reasons. Query execution never performs full provider
+rediscovery merely to decide freshness; responses identify the index
+generation/build time and its complete/partial coverage. A missing explicitly
+requested indexed provider is an error. `all` searches the represented
+partitions and reports incomplete/stale coverage rather than silently claiming
+a live exhaustive union.
+
+Exact CLI/MCP regex and fuzzy semantics run over the stored ordered segments.
+Tantivy field filters narrow provider/session/project/type/model/tool/time and
+activity candidates. Full-text term acceleration may be used only when a
+source-independent test proves the extracted candidate query cannot create
+false negatives; otherwise the exact matcher scans the filtered stored
+projection. Relevance ordering, context, occurrence counts, and limits are
+computed by the same matcher as direct search, not substituted with Tantivy's
+token relevance. Flagless CLI/MCP search remains on the classic Claude route
+until routed parity is pinned; explicit `--provider` uses the index. Cross-
+session provider search excludes `InheritedHistory` and typed spawns according
+to each surface's existing option, while a specifically selected source
+session remains content-complete and MCP chain expansion uses typed
+continuation membership.
+
+The index stores sensitive transcript projections in a local cache, as the old
+index already did. Creation must enforce owner-only directory/file permissions
+where the platform supports them; status and documentation must name the
+storage path and snapshot/coverage state. Rebuild uses an exact validated
+target and recoverable/atomic replacement. No query, clear, or migration path
+may follow an unvalidated symlink or infer a broad deletion target.
+
+P1.5 delivery is split into independently gated units:
+
+1. shared typed segment extraction plus parity/adversarial tests;
+2. versioned schema, in-index manifests, transactional incremental update, and
+   atomic legacy rebuild;
+3. exact indexed query engine and mutation-tested stale/dedup/filter behavior;
+4. provider-aware `index` and CLI `search` routes with every option classified;
+5. MCP `search_sessions` routing, qualified provenance, pagination/coverage;
+6. real-corpus build/query benchmarks proving no per-query source rediscovery,
+   bounded result retention, routed-Claude parity, and cross-provider results.
+
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".
 - [x] Drift-coverage claims must state checked vs unchecked counts
