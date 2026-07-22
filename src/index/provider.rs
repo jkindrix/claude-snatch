@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::Write as _;
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,8 +16,10 @@ use chrono::{DateTime, Utc};
 use parking_lot::{RwLock, RwLockWriteGuard};
 use serde::{Deserialize, Serialize};
 use tantivy::collector::DocSetCollector;
-use tantivy::query::AllQuery;
-use tantivy::schema::{Field, Schema, Value, FAST, INDEXED, STORED, STRING, TEXT};
+use tantivy::query::{AllQuery, BooleanQuery, EnableScoring, Query, RangeQuery, TermQuery};
+use tantivy::schema::{
+    Field, IndexRecordOption, Schema, Value, FAST, INDEXED, STORED, STRING, TEXT,
+};
 use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 
 use crate::analysis::search::{
@@ -29,7 +32,7 @@ use crate::provider::{
 };
 
 /// Current provider-index schema. A change requires an explicit rebuild.
-pub const PROVIDER_INDEX_SCHEMA_VERSION: u64 = 2;
+pub const PROVIDER_INDEX_SCHEMA_VERSION: u64 = 3;
 
 const WRITER_MEMORY_BYTES: usize = 50_000_000;
 
@@ -42,6 +45,7 @@ mod fields {
     pub const PROJECT_KEY: &str = "project_key";
     pub const PROJECT_PATH: &str = "project_path";
     pub const ENTRY_ID: &str = "entry_id";
+    pub const ENTRY_ORDER: &str = "entry_order";
     pub const TIMESTAMP_MILLIS: &str = "timestamp_millis";
     pub const MESSAGE_TYPE: &str = "message_type";
     pub const MODEL: &str = "model";
@@ -290,6 +294,10 @@ pub struct IndexedSearchEntry {
     pub project_path: String,
     /// Deterministic normalized entry identity.
     pub entry_id: String,
+    /// Zero-based normalized entry order inside the source-session
+    /// partition. Escaped entry-id strings are identity, not sortable
+    /// ordinals.
+    pub entry_order: usize,
     /// Normalized/native event time.
     pub timestamp: Option<DateTime<Utc>>,
     /// Normalized entry discriminator.
@@ -420,7 +428,7 @@ impl IndexedSessionBatch {
             ));
         }
         let mut entry_ids = BTreeSet::new();
-        for entry in &self.entries {
+        for (expected_order, entry) in self.entries.iter().enumerate() {
             if entry.session_key != self.manifest.session_key {
                 violations.push(format!(
                     "entry {} belongs to {}, expected {}",
@@ -441,6 +449,12 @@ impl IndexedSessionBatch {
                 violations.push(format!(
                     "session {} repeats entry id {}",
                     self.manifest.session_key, entry.entry_id
+                ));
+            }
+            if entry.entry_order != expected_order {
+                violations.push(format!(
+                    "session {} entry {} has order {}, expected {}",
+                    self.manifest.session_key, entry.entry_id, entry.entry_order, expected_order
                 ));
             }
         }
@@ -529,7 +543,8 @@ pub fn project_parsed_session(
     let entries = parsed
         .entries
         .iter()
-        .map(|identified| {
+        .enumerate()
+        .map(|(entry_order, identified)| {
             let projection = project_entry_for_search(&identified.entry);
             segment_count = segment_count.saturating_add(projection.segments.len());
             coverage.images_omitted = coverage
@@ -556,6 +571,7 @@ pub fn project_parsed_session(
                 project_key: project_key.to_string(),
                 project_path: project_path.to_string(),
                 entry_id: identified.id.to_string(),
+                entry_order,
                 timestamp: identified.entry.timestamp(),
                 message_type: identified.entry.message_type().to_string(),
                 model: entry_model(&identified.entry),
@@ -604,6 +620,7 @@ struct ProviderIndexFields {
     project_key: Field,
     project_path: Field,
     entry_id: Field,
+    entry_order: Field,
     timestamp_millis: Field,
     message_type: Field,
     model: Field,
@@ -635,6 +652,7 @@ impl ProviderIndexFields {
             project_key: field(fields::PROJECT_KEY)?,
             project_path: field(fields::PROJECT_PATH)?,
             entry_id: field(fields::ENTRY_ID)?,
+            entry_order: field(fields::ENTRY_ORDER)?,
             timestamp_millis: field(fields::TIMESTAMP_MILLIS)?,
             message_type: field(fields::MESSAGE_TYPE)?,
             model: field(fields::MODEL)?,
@@ -660,6 +678,7 @@ fn build_schema() -> Schema {
     builder.add_text_field(fields::PROJECT_KEY, STRING | STORED);
     builder.add_text_field(fields::PROJECT_PATH, STRING | STORED);
     builder.add_text_field(fields::ENTRY_ID, STRING | STORED);
+    builder.add_u64_field(fields::ENTRY_ORDER, INDEXED | FAST | STORED);
     builder.add_i64_field(fields::TIMESTAMP_MILLIS, INDEXED | FAST | STORED);
     builder.add_text_field(fields::MESSAGE_TYPE, STRING | STORED);
     builder.add_text_field(fields::MODEL, STRING | STORED);
@@ -836,6 +855,22 @@ pub struct ProviderSearchIndex {
     reader: IndexReader,
     writer: Arc<RwLock<IndexWriter>>,
     path: PathBuf,
+}
+
+/// Exact indexed fields that may safely narrow the candidate scan without
+/// changing regex/fuzzy semantics. Substring fields remain post-filters in
+/// the query layer rather than being interpolated into Tantivy syntax.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct IndexedEntryCandidateFilter {
+    pub providers: Vec<String>,
+    pub session_keys: Vec<String>,
+    pub logical_roots: Vec<String>,
+    pub project_keys: Vec<String>,
+    pub message_types: Vec<String>,
+    pub activities: Vec<String>,
+    pub spawned: Option<bool>,
+    pub timestamp_from_millis: Option<i64>,
+    pub timestamp_until_millis: Option<i64>,
 }
 
 /// One bounded writer transaction for a provider-index generation.
@@ -1100,6 +1135,10 @@ impl ProviderSearchIndex {
         document.add_text(self.fields.project_key, &entry.project_key);
         document.add_text(self.fields.project_path, &entry.project_path);
         document.add_text(self.fields.entry_id, &entry.entry_id);
+        document.add_u64(
+            self.fields.entry_order,
+            u64::try_from(entry.entry_order).unwrap_or(u64::MAX),
+        );
         document.add_text(self.fields.message_type, &entry.message_type);
         document.add_text(self.fields.activity, &entry.activity);
         document.add_u64(self.fields.spawned, u64::from(entry.spawned));
@@ -1339,6 +1378,129 @@ impl ProviderSearchIndex {
         Ok(values)
     }
 
+    fn exact_terms(field: Field, values: &[String]) -> Option<Box<dyn Query>> {
+        if values.is_empty() {
+            return None;
+        }
+        let terms = values
+            .iter()
+            .map(|value| {
+                Box::new(TermQuery::new(
+                    Term::from_field_text(field, value),
+                    IndexRecordOption::Basic,
+                )) as Box<dyn Query>
+            })
+            .collect();
+        Some(Box::new(BooleanQuery::union(terms)))
+    }
+
+    /// Visit stored entry projections after narrowing only on exact typed
+    /// fields. This deliberately never parses user text as Tantivy query
+    /// syntax and never uses tokenized full-text terms as a necessary filter.
+    ///
+    /// Candidates are decoded one at a time rather than accumulated into a
+    /// corpus-sized vector. Manual iteration mirrors Tantivy's collector path
+    /// by consulting each segment's alive bitset, so replaced partitions
+    /// cannot leak deleted documents into a query.
+    pub(crate) fn visit_candidate_entries(
+        &self,
+        filter: &IndexedEntryCandidateFilter,
+        mut visitor: impl FnMut(IndexedSearchEntry) -> Result<()>,
+    ) -> Result<()> {
+        let mut required: Vec<Box<dyn Query>> = vec![Box::new(TermQuery::new(
+            Term::from_field_text(self.fields.doc_kind, KIND_ENTRY),
+            IndexRecordOption::Basic,
+        ))];
+        for (field, values) in [
+            (self.fields.provider, &filter.providers),
+            (self.fields.session_key, &filter.session_keys),
+            (self.fields.logical_root, &filter.logical_roots),
+            (self.fields.project_key, &filter.project_keys),
+            (self.fields.message_type, &filter.message_types),
+            (self.fields.activity, &filter.activities),
+        ] {
+            if let Some(query) = Self::exact_terms(field, values) {
+                required.push(query);
+            }
+        }
+        if let Some(spawned) = filter.spawned {
+            required.push(Box::new(TermQuery::new(
+                Term::from_field_u64(self.fields.spawned, u64::from(spawned)),
+                IndexRecordOption::Basic,
+            )));
+        }
+        if filter.timestamp_from_millis.is_some() || filter.timestamp_until_millis.is_some() {
+            let lower = filter
+                .timestamp_from_millis
+                .map_or(Bound::Unbounded, |value| {
+                    Bound::Included(Term::from_field_i64(self.fields.timestamp_millis, value))
+                });
+            let upper = filter
+                .timestamp_until_millis
+                .map_or(Bound::Unbounded, |value| {
+                    Bound::Included(Term::from_field_i64(self.fields.timestamp_millis, value))
+                });
+            required.push(Box::new(RangeQuery::new(lower, upper)));
+        }
+
+        let query = BooleanQuery::intersection(required);
+        let searcher = self.reader.searcher();
+        let weight = query
+            .weight(EnableScoring::disabled_from_searcher(&searcher))
+            .map_err(|error| {
+                SnatchError::IndexError(format!("index candidate query failed: {error}"))
+            })?;
+        for segment in searcher.segment_readers() {
+            let store = segment.get_store_reader(1).map_err(|error| {
+                SnatchError::IndexError(format!("failed to open indexed candidates: {error}"))
+            })?;
+            let alive = segment.alive_bitset();
+            let mut visit_error = None;
+            weight
+                .for_each_no_score(segment, &mut |docs| {
+                    for &doc_id in docs {
+                        if visit_error.is_some()
+                            || alive.is_some_and(|alive| !alive.is_alive(doc_id))
+                        {
+                            continue;
+                        }
+                        let result = (|| {
+                            let document: TantivyDocument = store.get(doc_id).map_err(|error| {
+                                SnatchError::IndexError(format!(
+                                    "failed to load indexed candidate: {error}"
+                                ))
+                            })?;
+                            let payload = document
+                                .get_first(self.fields.payload)
+                                .and_then(|value| value.as_str())
+                                .ok_or_else(|| {
+                                    SnatchError::IndexError(
+                                        "indexed entry candidate has no stored payload".to_string(),
+                                    )
+                                })?;
+                            let entry = serde_json::from_str(payload).map_err(|error| {
+                                SnatchError::IndexError(format!(
+                                    "indexed entry payload is invalid for schema {}: {error}",
+                                    PROVIDER_INDEX_SCHEMA_VERSION
+                                ))
+                            })?;
+                            visitor(entry)
+                        })();
+                        if let Err(error) = result {
+                            visit_error = Some(error);
+                        }
+                    }
+                })
+                .map_err(|error| {
+                    SnatchError::IndexError(format!("index candidate scan failed: {error}"))
+                })?;
+            if let Some(error) = visit_error {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
     /// Sorted session manifests in the current committed snapshot.
     pub fn session_manifests(&self) -> Result<Vec<IndexedSessionManifest>> {
         let mut manifests: Vec<IndexedSessionManifest> = self.documents_of_kind(KIND_SESSION)?;
@@ -1365,6 +1527,7 @@ impl ProviderSearchIndex {
         entries.sort_by(|a, b| {
             a.session_key
                 .cmp(&b.session_key)
+                .then_with(|| a.entry_order.cmp(&b.entry_order))
                 .then_with(|| a.entry_id.cmp(&b.entry_id))
         });
         Ok(entries)

@@ -2535,7 +2535,7 @@ search share one typed, ordered entry projection that retains repeated equal
 segments, native tool-call metadata, user-carried tool results, and
 machine-visible omission coverage without storing base64 image payloads. The
 low-level core of unit 2 is implemented alongside (not over) the legacy index:
-an exact version-2 schema; canonical provider/session/root identities; one
+an exact versioned schema; canonical provider/session/root identities; one
 source-session manifest per partition; one build manifest per committed
 generation; complete parsed-bundle projection; pre-writer cross-document and
 build-coverage validation; exact delete-and-replace transactions; and
@@ -2566,10 +2566,42 @@ and activating the replacement. Activation failure restores the old
 directory; cleanup failure leaves the old backup in place and reports its
 exact path. Both legacy and provider index opens honor the lock. Tests inject a
 failure after the backup move, prove restoration, prove a failed/partial staged
-build never touches the old index, and exercise real legacy-to-version-2
+build never touches the old index, and exercise real legacy-to-current-schema
 replacement. This is a recoverable two-phase swap with a brief path-name gap,
 not a portable atomic directory exchange; readers already holding the old
 index retain their open handles.
+
+Unit 3 is implemented at the library boundary. The classic CLI and provider
+index now invoke one exact matcher over the shared ordered projections for
+regex/fuzzy matching, line context, relevance, scope, exclusion, and
+occurrence counting. This deliberately makes projected block/emission
+boundaries authoritative: equal repeated segments remain independent, tool
+results carried by user entries participate in tool scope, and binary images
+remain omitted with coverage rather than searched as base64. Unicode case and
+word-boundary handling is character-safe. Schema version 3 adds a validated
+normalized `entry_order`; escaped `EntryId` strings remain identities and are
+never misused as sortable numeric ordinals.
+
+The indexed query engine narrows only exact typed Tantivy fields (provider,
+qualified session/root, project key, message type, time, activity, spawn),
+then applies all substring/semantic filters and positive/exclusion matching to
+the stored payload—no user filter is interpolated into query syntax and no
+tokenized full-text term is trusted as a necessary candidate. Candidate
+payloads stream one document at a time with Tantivy's deleted-document bitset
+enforced; the query retains only the bounded `offset + limit` result window
+rather than materializing every candidate projection. Results expose
+matching-line and occurrence cardinality separately, use deterministic source
+or relevance ordering with bounded pages/windows, keep specifically selected
+sessions content-complete, and default cross-session queries to new,
+non-spawned activity. Every response carries generation/build time,
+represented/searched/latest-complete providers, skips/warnings, and an honest
+incomplete flag. An old retained partition absent from the latest complete set
+is searchable but explicitly unverified; an explicitly requested provider or
+session absent from the snapshot is an error. Adversarial tests cover repeated
+emissions, Unicode context, every typed filter class, inherited/spawn policy,
+partial-build retained partitions, missing selections, deterministic
+pagination/relevance, same-scope exclusion, and deleted rows from a replaced
+partition. Unit 4 (provider-aware CLI `index`/`search` routing) is next.
 
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".

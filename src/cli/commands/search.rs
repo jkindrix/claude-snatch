@@ -10,6 +10,12 @@ use chrono::{DateTime, Utc};
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::{Regex, RegexBuilder};
 
+#[cfg(test)]
+use crate::analysis::search::expand_to_word_boundaries;
+use crate::analysis::search::{
+    count_projection_matches, project_entry_for_search, projection_matches, search_projection,
+    ExactSearchMatcher, ProjectedSearchMatch, SearchScope,
+};
 use crate::cli::{Cli, OutputFormat, SearchArgs};
 use crate::discovery::Session;
 use crate::error::{Result, SnatchError};
@@ -17,132 +23,6 @@ use crate::model::{ContentBlock, LogEntry};
 
 /// (project_path, match_count, last_modified) for a session's search matches.
 type SessionMatchCount = (String, usize, Option<SystemTime>);
-
-/// Fuzzy matching result with score.
-#[derive(Debug)]
-struct FuzzyMatch {
-    /// Match score (0-100).
-    score: u8,
-    /// Start index of match in the text.
-    start: usize,
-    /// End index of match in the text.
-    end: usize,
-}
-
-/// Perform fuzzy matching (fzf-style subsequence matching with scoring).
-///
-/// Returns a match result if the pattern characters appear in order in the text
-/// and the calculated score meets the threshold.
-fn fuzzy_match(pattern: &str, text: &str, ignore_case: bool, threshold: u8) -> Option<FuzzyMatch> {
-    let pattern_chars: Vec<char> = if ignore_case {
-        pattern.to_lowercase().chars().collect()
-    } else {
-        pattern.chars().collect()
-    };
-
-    let text_chars: Vec<char> = text.chars().collect();
-    let text_lower: Vec<char> = if ignore_case {
-        text.to_lowercase().chars().collect()
-    } else {
-        text_chars.clone()
-    };
-
-    if pattern_chars.is_empty() {
-        return None;
-    }
-
-    // Find the best matching position using a simple greedy approach
-    let mut pattern_idx = 0;
-    let mut match_positions: Vec<usize> = Vec::new();
-
-    for (text_idx, &ch) in text_lower.iter().enumerate() {
-        if pattern_idx < pattern_chars.len() && ch == pattern_chars[pattern_idx] {
-            match_positions.push(text_idx);
-            pattern_idx += 1;
-        }
-    }
-
-    // All pattern characters must be found
-    if pattern_idx != pattern_chars.len() {
-        return None;
-    }
-
-    // Calculate score based on match quality
-    let score = calculate_fuzzy_score(&match_positions, &text_chars, &pattern_chars, ignore_case);
-
-    if score < threshold {
-        return None;
-    }
-
-    // Get the match range
-    let start = match_positions.first().copied().unwrap_or(0);
-    let end = match_positions.last().copied().unwrap_or(0) + 1;
-
-    Some(FuzzyMatch { score, start, end })
-}
-
-/// Calculate fuzzy match score (0-100).
-///
-/// Scoring factors:
-/// - Consecutive character matches (bonus)
-/// - Start of word matches (bonus)
-/// - Exact case matches (bonus)
-/// - Shorter match span (bonus)
-fn calculate_fuzzy_score(
-    positions: &[usize],
-    text_chars: &[char],
-    pattern_chars: &[char],
-    ignore_case: bool,
-) -> u8 {
-    if positions.is_empty() {
-        return 0;
-    }
-
-    let mut score: f64 = 50.0; // Base score for finding all characters
-
-    // Bonus for consecutive matches
-    let mut consecutive_count = 0;
-    for window in positions.windows(2) {
-        if window[1] == window[0] + 1 {
-            consecutive_count += 1;
-        }
-    }
-    let consecutive_ratio = consecutive_count as f64 / (positions.len().max(1) - 1).max(1) as f64;
-    score += consecutive_ratio * 25.0;
-
-    // Bonus for start of word matches
-    let mut word_start_count = 0;
-    for &pos in positions {
-        if pos == 0 || !text_chars[pos - 1].is_alphanumeric() {
-            word_start_count += 1;
-        }
-    }
-    let word_start_ratio = word_start_count as f64 / positions.len() as f64;
-    score += word_start_ratio * 15.0;
-
-    // Bonus for exact case matches (when not ignoring case)
-    if !ignore_case {
-        let mut case_match_count = 0;
-        for (i, &pos) in positions.iter().enumerate() {
-            if i < pattern_chars.len() && text_chars[pos] == pattern_chars[i] {
-                case_match_count += 1;
-            }
-        }
-        let case_ratio = case_match_count as f64 / positions.len() as f64;
-        score += case_ratio * 5.0;
-    }
-
-    // Penalty for spread-out matches (prefer compact matches)
-    if positions.len() > 1 {
-        // Safety: positions.len() > 1 guarantees first/last return Some
-        let span = positions.last().expect("len > 1") - positions.first().expect("len > 1") + 1;
-        let ideal_span = positions.len();
-        let compactness = ideal_span as f64 / span as f64;
-        score += (compactness - 0.5) * 10.0; // -5 to +5 adjustment
-    }
-
-    score.clamp(0.0, 100.0) as u8
-}
 
 use super::get_claude_dir;
 
@@ -335,11 +215,9 @@ impl BatchScope {
 
     /// Build from SearchArgs flags (for positional multi-pattern).
     fn from_search_args(args: &SearchArgs) -> Self {
-        if args.all {
-            Self::All
-        } else if args.thinking_only {
+        if args.thinking_only {
             Self::ThinkingOnly
-        } else if args.thinking && args.tools {
+        } else if args.all || (args.thinking && args.tools) {
             Self::All
         } else if args.thinking {
             Self::Thinking
@@ -355,6 +233,17 @@ impl BatchScope {
             Self::Default
         }
     }
+    fn search_scope(&self) -> SearchScope {
+        match self {
+            Self::Default => SearchScope::Default,
+            Self::Thinking => SearchScope::Thinking,
+            Self::ThinkingOnly => SearchScope::ThinkingOnly,
+            Self::Assistant => SearchScope::Assistant,
+            Self::User => SearchScope::User,
+            Self::Tools => SearchScope::Tools,
+            Self::All => SearchScope::All,
+        }
+    }
 }
 
 /// A pattern with its own scope for batch processing.
@@ -364,152 +253,13 @@ struct BatchPattern {
     scope: BatchScope,
 }
 
-/// Extract searchable text from an entry for a given scope.
-fn extract_text_for_scope<'a>(entry: &'a LogEntry, scope: &BatchScope) -> Vec<&'a str> {
-    match (entry, scope) {
-        // Default scope: user text + assistant text
-        (LogEntry::User(user), BatchScope::Default | BatchScope::User | BatchScope::All) => {
-            match &user.message {
-                crate::model::UserContent::Simple(s) => vec![s.content.as_str()],
-                crate::model::UserContent::Blocks(b) => b
-                    .content
-                    .iter()
-                    .filter_map(|c| {
-                        if let ContentBlock::Text(t) = c {
-                            Some(t.text.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect(),
-            }
-        }
-        // Thinking (additive): user text is included
-        (LogEntry::User(user), BatchScope::Thinking) => match &user.message {
-            crate::model::UserContent::Simple(s) => vec![s.content.as_str()],
-            crate::model::UserContent::Blocks(b) => b
-                .content
-                .iter()
-                .filter_map(|c| {
-                    if let ContentBlock::Text(t) = c {
-                        Some(t.text.as_str())
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-        },
-        (
-            LogEntry::Assistant(assistant),
-            BatchScope::Default | BatchScope::Assistant | BatchScope::All,
-        ) => assistant
-            .message
-            .content
-            .iter()
-            .filter_map(|block| {
-                if let ContentBlock::Text(t) = block {
-                    Some(t.text.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect(),
-        // Thinking (additive): assistant text + thinking blocks
-        (LogEntry::Assistant(assistant), BatchScope::Thinking) => assistant
-            .message
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text(t) => Some(t.text.as_str()),
-                ContentBlock::Thinking(t) => Some(t.thinking.as_str()),
-                _ => None,
-            })
-            .collect(),
-        // ThinkingOnly (exclusive): thinking blocks only
-        (LogEntry::Assistant(assistant), BatchScope::ThinkingOnly) => assistant
-            .message
-            .content
-            .iter()
-            .filter_map(|block| {
-                if let ContentBlock::Thinking(t) = block {
-                    Some(t.thinking.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect(),
-        // Tools scope tool-use inputs are owned strings — handled separately
-        (LogEntry::Assistant(_), BatchScope::Tools) => vec![],
-        (LogEntry::System(sys), BatchScope::Default | BatchScope::Thinking | BatchScope::All) => {
-            sys.content.as_deref().into_iter().collect()
-        }
-        (
-            LogEntry::Summary(summary),
-            BatchScope::Default | BatchScope::Thinking | BatchScope::All,
-        ) => {
-            vec![summary.summary.as_str()]
-        }
-        _ => vec![],
-    }
-}
-
-/// Count regex matches across text chunks.
-fn count_regex_in_texts(regex: &Regex, texts: &[&str]) -> usize {
-    texts.iter().map(|t| regex.find_iter(t).count()).sum()
-}
-
-/// Count matches in tool-use/tool-result blocks (needs owned strings).
-fn count_tool_matches(entry: &LogEntry, regex: &Regex) -> usize {
-    match entry {
-        LogEntry::Assistant(assistant) => {
-            let mut count = 0;
-            for block in &assistant.message.content {
-                match block {
-                    ContentBlock::ToolUse(tool) => {
-                        let input_str = serde_json::to_string(&tool.input).unwrap_or_default();
-                        count += regex.find_iter(&input_str).count();
-                    }
-                    ContentBlock::ToolResult(result) => {
-                        if let Some(content) = &result.content {
-                            if let crate::model::content::ToolResultContent::String(text) = content
-                            {
-                                count += regex.find_iter(text).count();
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            count
-        }
-        // Note: single-pattern search_entry does NOT search User tool results,
-        // only Assistant ToolUse/ToolResult blocks. Keep batch path consistent.
-        _ => 0,
-    }
-}
-
 /// Count all matches for one pattern against one entry.
 fn count_pattern_matches(entry: &LogEntry, pattern: &BatchPattern) -> usize {
-    let texts = extract_text_for_scope(entry, &pattern.scope);
-    let mut count = count_regex_in_texts(&pattern.regex, &texts);
-
-    // Tool content requires owned strings, handled separately
-    if pattern.scope == BatchScope::Tools || pattern.scope == BatchScope::All {
-        count += count_tool_matches(entry, &pattern.regex);
-    }
-
-    // All scope on assistant also includes thinking
-    if pattern.scope == BatchScope::All {
-        if let LogEntry::Assistant(assistant) = entry {
-            for block in &assistant.message.content {
-                if let ContentBlock::Thinking(t) = block {
-                    count += pattern.regex.find_iter(&t.thinking).count();
-                }
-            }
-        }
-    }
-
-    count
+    count_projection_matches(
+        &project_entry_for_search(entry),
+        &ExactSearchMatcher::Regex(pattern.regex.clone()),
+        pattern.scope.search_scope(),
+    )
 }
 
 /// Whether `regex` matches any content a search in `scope` would inspect for
@@ -521,30 +271,11 @@ fn count_pattern_matches(entry: &LogEntry, pattern: &BatchPattern) -> usize {
 /// silently fails to suppress matches inside that content. This mirrors the
 /// scope coverage of `count_pattern_matches` and `search_entry`.
 fn entry_matches_in_scope(entry: &LogEntry, regex: &Regex, scope: &BatchScope) -> bool {
-    if extract_text_for_scope(entry, scope)
-        .iter()
-        .any(|t| regex.is_match(t))
-    {
-        return true;
-    }
-
-    // Tool-use/tool-result content (owned strings, like count_tool_matches).
-    if (*scope == BatchScope::Tools || *scope == BatchScope::All)
-        && count_tool_matches(entry, regex) > 0
-    {
-        return true;
-    }
-
-    // Thinking under --all (other thinking scopes already include it above).
-    if *scope == BatchScope::All {
-        if let LogEntry::Assistant(assistant) = entry {
-            return assistant.message.content.iter().any(
-                |block| matches!(block, ContentBlock::Thinking(t) if regex.is_match(&t.thinking)),
-            );
-        }
-    }
-
-    false
+    projection_matches(
+        &project_entry_for_search(entry),
+        &ExactSearchMatcher::Regex(regex.clone()),
+        scope.search_scope(),
+    )
 }
 
 /// Parse a TSV patterns file into batch patterns.
@@ -1675,306 +1406,26 @@ struct SearchResult {
     post_compaction: Option<bool>,
 }
 
-/// A match within an entry.
-struct Match {
-    location: String,
-    line: String,
-    context_before: String,
-    matched_text: String,
-    context_after: String,
-    /// Relevance score (0-100).
-    score: u8,
-}
-
-/// Matcher enum to support both regex and fuzzy matching.
-enum Matcher<'a> {
-    Regex(&'a Regex),
-    Fuzzy {
-        pattern: &'a str,
-        ignore_case: bool,
-        threshold: u8,
-    },
-}
-
-impl Matcher<'_> {
-    fn is_match(&self, text: &str) -> bool {
-        match self {
-            Matcher::Regex(regex) => regex.is_match(text),
-            Matcher::Fuzzy {
-                pattern,
-                ignore_case,
-                threshold,
-            } => fuzzy_match(pattern, text, *ignore_case, *threshold).is_some(),
-        }
-    }
-
-    fn find_matches_in(&self, text: &str, location: &str, context: usize) -> Vec<Match> {
-        match self {
-            Matcher::Regex(regex) => find_matches(text, regex, location, context),
-            Matcher::Fuzzy {
-                pattern,
-                ignore_case,
-                threshold,
-            } => find_fuzzy_matches(text, pattern, location, context, *ignore_case, *threshold),
-        }
-    }
-}
+type Match = ProjectedSearchMatch;
 
 /// Search an entry for matches.
 fn search_entry(entry: &LogEntry, regex: &Regex, args: &SearchArgs) -> Vec<Match> {
-    // Create the appropriate matcher
-    // Safety: search_entry is only called from the single-pattern path
     let matcher = if args.fuzzy {
-        Matcher::Fuzzy {
-            pattern: &args.pattern[0],
-            ignore_case: args.ignore_case,
-            threshold: args.fuzzy_threshold,
-        }
+        ExactSearchMatcher::fuzzy(
+            args.pattern[0].clone(),
+            args.ignore_case,
+            args.fuzzy_threshold,
+        )
     } else {
-        Matcher::Regex(regex)
+        ExactSearchMatcher::Regex(regex.clone())
     };
-
-    let mut matches = Vec::new();
-
-    match entry {
-        LogEntry::User(user) if !args.thinking_only => {
-            // Search user content (skip when --thinking-only is set)
-            let text = match &user.message {
-                crate::model::UserContent::Simple(s) => s.content.clone(),
-                crate::model::UserContent::Blocks(b) => b
-                    .content
-                    .iter()
-                    .filter_map(|c| match c {
-                        ContentBlock::Text(t) => Some(t.text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            };
-
-            if matcher.is_match(&text) {
-                matches.extend(matcher.find_matches_in(&text, "user message", args.context));
-            }
-        }
-        LogEntry::Assistant(assistant) => {
-            for block in &assistant.message.content {
-                match block {
-                    ContentBlock::Text(text) if !args.thinking_only => {
-                        // Skip assistant text when --thinking-only is set
-                        if matcher.is_match(&text.text) {
-                            matches.extend(matcher.find_matches_in(
-                                &text.text,
-                                "assistant text",
-                                args.context,
-                            ));
-                        }
-                    }
-                    ContentBlock::Thinking(thinking)
-                        if args.thinking || args.thinking_only || args.all =>
-                    {
-                        if matcher.is_match(&thinking.thinking) {
-                            matches.extend(matcher.find_matches_in(
-                                &thinking.thinking,
-                                "thinking",
-                                args.context,
-                            ));
-                        }
-                    }
-                    ContentBlock::ToolUse(tool)
-                        if !args.thinking_only && (args.tools || args.all) =>
-                    {
-                        let input_str = serde_json::to_string(&tool.input).unwrap_or_default();
-                        if matcher.is_match(&input_str) {
-                            matches.extend(matcher.find_matches_in(
-                                &input_str,
-                                &format!("tool:{}", tool.name),
-                                args.context,
-                            ));
-                        }
-                    }
-                    ContentBlock::ToolResult(result)
-                        if !args.thinking_only && (args.tools || args.all) =>
-                    {
-                        if let Some(content) = &result.content {
-                            if let crate::model::content::ToolResultContent::String(text) = content
-                            {
-                                if matcher.is_match(text) {
-                                    matches.extend(matcher.find_matches_in(
-                                        text,
-                                        "tool result",
-                                        args.context,
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        LogEntry::System(system) if !args.thinking_only => {
-            if let Some(content) = &system.content {
-                if matcher.is_match(content) {
-                    matches.extend(matcher.find_matches_in(content, "system", args.context));
-                }
-            }
-        }
-        LogEntry::Summary(summary) if !args.thinking_only => {
-            if matcher.is_match(&summary.summary) {
-                matches.extend(matcher.find_matches_in(&summary.summary, "summary", args.context));
-            }
-        }
-        _ => {}
-    }
-
-    matches
-}
-
-/// Find matches with context in text.
-fn find_matches(text: &str, regex: &Regex, location: &str, context_lines: usize) -> Vec<Match> {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut matches = Vec::new();
-    let mut seen_lines = std::collections::HashSet::new();
-
-    for (line_num, line) in lines.iter().enumerate() {
-        if regex.is_match(line) && !seen_lines.contains(&line_num) {
-            seen_lines.insert(line_num);
-
-            // Get context
-            let start = line_num.saturating_sub(context_lines);
-            let end = (line_num + context_lines + 1).min(lines.len());
-
-            let context_before = lines[start..line_num].join("\n");
-            let context_after = lines[(line_num + 1)..end].join("\n");
-
-            // Extract matched portion and calculate score
-            let (matched_text, score) = if let Some(m) = regex.find(line) {
-                let matched = m.as_str().to_string();
-                let score = calculate_regex_score(line, &matched, m.start());
-                (matched, score)
-            } else {
-                (line.to_string(), 50) // Base score for full-line match
-            };
-
-            matches.push(Match {
-                location: location.to_string(),
-                line: (*line).to_string(),
-                context_before,
-                matched_text,
-                context_after,
-                score,
-            });
-        }
-    }
-
-    matches
-}
-
-/// Calculate relevance score for a regex match.
-fn calculate_regex_score(line: &str, matched: &str, match_start: usize) -> u8 {
-    let mut score: f64 = 50.0; // Base score
-
-    // Bonus for matches at start of line (0-15 points)
-    if match_start == 0 {
-        score += 15.0;
-    } else if match_start < 10 {
-        score += 10.0 - match_start as f64;
-    }
-
-    // Bonus for larger match coverage (0-20 points)
-    let coverage = matched.len() as f64 / line.len().max(1) as f64;
-    score += coverage * 20.0;
-
-    // Bonus for word boundary matches (0-10 points)
-    let at_word_start = match_start == 0
-        || !line
-            .chars()
-            .nth(match_start.saturating_sub(1))
-            .map(|c| c.is_alphanumeric())
-            .unwrap_or(false);
-    let at_word_end = match_start + matched.len() >= line.len()
-        || !line
-            .chars()
-            .nth(match_start + matched.len())
-            .map(|c| c.is_alphanumeric())
-            .unwrap_or(false);
-
-    if at_word_start && at_word_end {
-        score += 10.0; // Full word match
-    } else if at_word_start || at_word_end {
-        score += 5.0; // Partial word boundary
-    }
-
-    score.clamp(0.0, 100.0) as u8
-}
-
-/// Expand a substring to word boundaries within the given text.
-///
-/// Given start/end indices that may be mid-word, expand them to include
-/// complete words at both ends for better readability.
-fn expand_to_word_boundaries(text: &str, start: usize, end: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() || start >= chars.len() {
-        return text.to_string();
-    }
-
-    // Expand start backwards to word boundary (or start of string)
-    let mut expanded_start = start;
-    while expanded_start > 0 && chars[expanded_start - 1].is_alphanumeric() {
-        expanded_start -= 1;
-    }
-
-    // Expand end forwards to word boundary (or end of string)
-    let mut expanded_end = end.min(chars.len());
-    while expanded_end < chars.len() && chars[expanded_end].is_alphanumeric() {
-        expanded_end += 1;
-    }
-
-    chars[expanded_start..expanded_end].iter().collect()
-}
-
-/// Find fuzzy matches with context in text.
-fn find_fuzzy_matches(
-    text: &str,
-    pattern: &str,
-    location: &str,
-    context_lines: usize,
-    ignore_case: bool,
-    threshold: u8,
-) -> Vec<Match> {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut matches = Vec::new();
-    let mut seen_lines = std::collections::HashSet::new();
-
-    for (line_num, line) in lines.iter().enumerate() {
-        if let Some(fuzzy_result) = fuzzy_match(pattern, line, ignore_case, threshold) {
-            if !seen_lines.contains(&line_num) {
-                seen_lines.insert(line_num);
-
-                // Get context
-                let start = line_num.saturating_sub(context_lines);
-                let end = (line_num + context_lines + 1).min(lines.len());
-
-                let context_before = lines[start..line_num].join("\n");
-                let context_after = lines[(line_num + 1)..end].join("\n");
-
-                // Expand matched_text to word boundaries for readability
-                let expanded_text =
-                    expand_to_word_boundaries(line, fuzzy_result.start, fuzzy_result.end);
-
-                matches.push(Match {
-                    location: location.to_string(),
-                    line: (*line).to_string(),
-                    context_before,
-                    matched_text: expanded_text,
-                    context_after,
-                    score: fuzzy_result.score,
-                });
-            }
-        }
-    }
-
-    matches
+    let scope = BatchScope::from_search_args(args).search_scope();
+    search_projection(
+        &project_entry_for_search(entry),
+        &matcher,
+        scope,
+        args.context,
+    )
 }
 
 /// Format match label in a non-redundant way.
@@ -2005,170 +1456,6 @@ fn format_match_label(entry_type: &str, location: &str) -> String {
 mod tests {
     #![allow(clippy::trivial_regex)]
     use super::*;
-
-    #[test]
-    fn test_find_matches_single_line() {
-        let regex = Regex::new("hello").unwrap();
-        let matches = find_matches("hello world", &regex, "test", 0);
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].matched_text, "hello");
-    }
-
-    #[test]
-    fn test_find_matches_with_context() {
-        let regex = Regex::new("target").unwrap();
-        let text = "line 1\nline 2\ntarget line\nline 4\nline 5";
-        let matches = find_matches(text, &regex, "test", 1);
-        assert_eq!(matches.len(), 1);
-        assert!(matches[0].context_before.contains("line 2"));
-        assert!(matches[0].context_after.contains("line 4"));
-    }
-
-    #[test]
-    fn test_find_matches_no_match() {
-        let regex = Regex::new("notfound").unwrap();
-        let matches = find_matches("hello world", &regex, "test", 0);
-        assert!(matches.is_empty());
-    }
-
-    // Fuzzy matching tests
-
-    #[test]
-    fn test_fuzzy_match_exact() {
-        // Exact match should have very high score
-        let text = "hello world";
-        let result = fuzzy_match("hello", text, false, 60);
-        assert!(result.is_some());
-        let m = result.unwrap();
-        let matched = expand_to_word_boundaries(text, m.start, m.end);
-        assert_eq!(matched, "hello");
-        assert!(m.score >= 80); // High score for exact match
-    }
-
-    #[test]
-    fn test_fuzzy_match_subsequence() {
-        // Characters in order but not consecutive: "hlo" in "hello"
-        let text = "hello";
-        let result = fuzzy_match("hlo", text, false, 50);
-        assert!(result.is_some());
-        let m = result.unwrap();
-        let matched = expand_to_word_boundaries(text, m.start, m.end);
-        assert_eq!(matched, "hello");
-    }
-
-    #[test]
-    fn test_fuzzy_match_case_insensitive() {
-        let text = "hello world";
-        let result = fuzzy_match("HELLO", text, true, 60);
-        assert!(result.is_some());
-        let m = result.unwrap();
-        let matched = expand_to_word_boundaries(text, m.start, m.end);
-        assert_eq!(matched, "hello");
-    }
-
-    #[test]
-    fn test_fuzzy_match_case_sensitive_fail() {
-        // Should fail if case doesn't match and ignore_case is false
-        let result = fuzzy_match("HELLO", "hello world", false, 60);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_fuzzy_match_threshold() {
-        // With very high threshold, scattered matches should fail
-        let result = fuzzy_match("abc", "a___b___c", false, 90);
-        assert!(result.is_none()); // Scattered match should have low score
-    }
-
-    #[test]
-    fn test_fuzzy_match_no_match() {
-        let result = fuzzy_match("xyz", "hello world", false, 50);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_fuzzy_match_partial_pattern() {
-        // Only partial pattern found
-        let result = fuzzy_match("abc", "ab", false, 50);
-        assert!(result.is_none()); // 'c' is not found
-    }
-
-    #[test]
-    fn test_fuzzy_match_word_boundary_bonus() {
-        // "hw" matching "hello world" should find h at start, w at word start
-        let result = fuzzy_match("hw", "hello world", false, 50);
-        assert!(result.is_some());
-        let m = result.unwrap();
-        // Should have decent score due to word boundary matches
-        assert!(m.score >= 60);
-    }
-
-    #[test]
-    fn test_find_fuzzy_matches_single_line() {
-        // text comes first, then pattern
-        let matches = find_fuzzy_matches("hello world", "hello", "test", 0, false, 60);
-        assert_eq!(matches.len(), 1);
-        assert!(matches[0].matched_text.contains("hello"));
-    }
-
-    #[test]
-    fn test_find_fuzzy_matches_multiline() {
-        let text = "first line\nhello world\nlast line";
-        // text comes first, then pattern
-        let matches = find_fuzzy_matches(text, "hello", "test", 1, false, 60);
-        assert_eq!(matches.len(), 1);
-        assert!(matches[0].context_before.contains("first"));
-        assert!(matches[0].context_after.contains("last"));
-    }
-
-    #[test]
-    fn test_fuzzy_score_consecutive_bonus() {
-        // "ab" in "ab" should score higher than "ab" in "a_b"
-        let result_consecutive = fuzzy_match("ab", "ab", false, 0);
-        let result_scattered = fuzzy_match("ab", "a_b", false, 0);
-
-        assert!(result_consecutive.is_some());
-        assert!(result_scattered.is_some());
-
-        let score_consecutive = result_consecutive.unwrap().score;
-        let score_scattered = result_scattered.unwrap().score;
-
-        assert!(score_consecutive > score_scattered);
-    }
-
-    #[test]
-    fn test_regex_score_word_boundary() {
-        // Full word match at start should score high
-        let score1 = calculate_regex_score("hello world", "hello", 0);
-        assert!(
-            score1 >= 75,
-            "Start + word boundary should score >= 75, got {}",
-            score1
-        );
-
-        // Match in middle without word boundary should score lower
-        let score2 = calculate_regex_score("the hello world", "ello", 5);
-        assert!(score2 < score1, "Middle match should score lower");
-
-        // Match at word boundary in middle
-        let score3 = calculate_regex_score("the hello world", "hello", 4);
-        assert!(
-            score3 > score2,
-            "Word boundary match should score higher than partial"
-        );
-    }
-
-    #[test]
-    fn test_regex_score_coverage() {
-        // Larger coverage should score higher
-        let score_full = calculate_regex_score("hello", "hello", 0);
-        let score_partial = calculate_regex_score("hello world", "hello", 0);
-
-        assert!(
-            score_full > score_partial,
-            "Full coverage should score higher"
-        );
-    }
 
     #[test]
     fn test_matches_git_branch_exact() {

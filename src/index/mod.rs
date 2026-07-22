@@ -14,6 +14,8 @@
 pub mod build;
 /// Versioned provider-neutral storage and projection contracts.
 pub mod provider;
+/// Exact provider-index regex/fuzzy query execution.
+pub mod query;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
