@@ -300,6 +300,7 @@ impl SourceProvider for FakeProvider {
             ToolSemantics {
                 kind: ToolKind::FileWrite,
                 native_name: "fake_apply_patch".into(),
+                lifecycle: Vec::new(),
             },
         );
         tools.insert(
@@ -307,6 +308,7 @@ impl SourceProvider for FakeProvider {
             ToolSemantics {
                 kind: ToolKind::Shell,
                 native_name: "fake_exec".into(),
+                lifecycle: Vec::new(),
             },
         );
         semantics.insert(

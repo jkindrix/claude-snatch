@@ -1315,8 +1315,9 @@ impl SourceProvider for CodexProvider {
             match serde_json::from_slice::<serde_json::Value>(&buf) {
                 Ok(value) => {
                     // B3: parsed records are collected and normalized after
-                    // the read loop (mapped records keep the B1 deterministic
-                    // ids `(ordinal, 0)` — round-21 constraint 1).
+                    // the read loop (a record's primary entry keeps the B1
+                    // deterministic id `(ordinal, 0)`; true 1:N projections
+                    // use stable additional subindices).
                     parsed_records.push((record, value));
                 }
                 Err(e) => {
@@ -1963,6 +1964,8 @@ mod tests {
         let (mut human_boundaries, mut human_midturn) = (0usize, 0usize);
         let (mut compactions, mut replacement_items, mut world_full, mut world_patch, mut ghosts) =
             (0usize, 0usize, 0usize, 0usize, 0usize);
+        let (mut lifecycle_paired, mut lifecycle_event_only, mut lifecycle_ambiguous) =
+            (0usize, 0usize, 0usize);
         let mut preserved_unknown_families: std::collections::BTreeMap<String, u64> =
             std::collections::BTreeMap::new();
         let mut expected_lineage: std::collections::BTreeSet<LineageEdge> =
@@ -2286,6 +2289,29 @@ mod tests {
                     world_patch += state_audit.world_patch;
                     ghosts += state_audit.ghost_snapshots;
 
+                    // (e) Native-only tool-lifecycle allocation: each end
+                    // record must either enrich its one proven response-item
+                    // call, emit one event-only operation, or remain exact
+                    // Unknown when ownership is ambiguous. Mutation controls
+                    // below prove wrong-owner, wrong-field, and missing-result
+                    // output are rejected.
+                    let lifecycle_audit =
+                        audit_tool_lifecycle(&d.key, &raw_records, &session, first_new_after_fork);
+                    assert!(
+                        lifecycle_audit.is_empty(),
+                        "tool lifecycle audit failed: {} violation(s)",
+                        lifecycle_audit.len()
+                    );
+                    for expected in
+                        independent_lifecycle_expectations(&raw_records, first_new_after_fork)
+                    {
+                        match expected.owner {
+                            AuditLifecycleOwner::Paired(_) => lifecycle_paired += 1,
+                            AuditLifecycleOwner::EventOnly => lifecycle_event_only += 1,
+                            AuditLifecycleOwner::Ambiguous => lifecycle_ambiguous += 1,
+                        }
+                    }
+
                     // physical record — compare against an independent count
                     // of the preferred artifact's records. Active sessions
                     // can append between the parse and the count; a mismatch
@@ -2389,7 +2415,9 @@ mod tests {
              {raced} raced, human prompts: {human_boundaries} boundary + \
              {human_midturn} midturn, compaction/state: {compactions} boundaries + \
              {replacement_items} replacement items + {world_full} world full + \
-             {world_patch} world patch + {ghosts} ghost checkpoints, records: {totals:?}",
+             {world_patch} world patch + {ghosts} ghost checkpoints, lifecycle: \
+             {lifecycle_paired} paired + {lifecycle_event_only} event-only + \
+             {lifecycle_ambiguous} ambiguous, records: {totals:?}",
             n = sessions.len()
         );
         eprintln!("preserved unknown families: {preserved_unknown_families:?}");
@@ -2402,9 +2430,7 @@ mod tests {
         let allowed_preserved_unknown: std::collections::BTreeSet<&str> = [
             "event_msg/context_compacted",
             "event_msg/entered_review_mode",
-            "event_msg/exec_command_end",
             "event_msg/exited_review_mode",
-            "event_msg/patch_apply_end",
             "event_msg/task_complete",
             "event_msg/task_started",
             "event_msg/thread_goal_updated",
@@ -2412,7 +2438,6 @@ mod tests {
             "event_msg/thread_settings_applied",
             "event_msg/token_count",
             "event_msg/turn_aborted",
-            "event_msg/web_search_end",
             "response_item/ghost_snapshot",
             "session_meta/-",
             "turn_context/-",
@@ -3873,6 +3898,782 @@ mod tests {
             .map(|(i, l)| (i as u64, serde_json::from_str(l).unwrap()))
             .collect();
         (tmp, parsed, raw)
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum AuditLifecycleFamily {
+        Exec,
+        Patch,
+        Web,
+    }
+
+    #[derive(Debug)]
+    enum AuditLifecycleOwner {
+        Paired(u64),
+        EventOnly,
+        Ambiguous,
+    }
+
+    #[derive(Debug)]
+    struct AuditLifecycleExpectation<'a> {
+        ordinal: u64,
+        family: AuditLifecycleFamily,
+        call_id: Option<&'a str>,
+        payload: &'a serde_json::Value,
+        owner: AuditLifecycleOwner,
+    }
+
+    /// Native-only lifecycle allocation. This intentionally does not call the
+    /// normalizer's match planner: it walks independent window keys and exact
+    /// web actions, then the audit below compares that expectation with every
+    /// emitted entry, disposition, origin, and semantic observation.
+    fn independent_lifecycle_expectations(
+        raw: &[(u64, serde_json::Value)],
+        first_new_after_fork: Option<u64>,
+    ) -> Vec<AuditLifecycleExpectation<'_>> {
+        type Key<'a> = (usize, AuditLifecycleFamily, &'a str);
+        let mut window = 0usize;
+        let mut calls: std::collections::BTreeMap<Key<'_>, Vec<(u64, &serde_json::Value)>> =
+            std::collections::BTreeMap::new();
+        let mut events: Vec<(
+            usize,
+            u64,
+            AuditLifecycleFamily,
+            Option<&str>,
+            &serde_json::Value,
+        )> = Vec::new();
+
+        for (ordinal, value) in raw {
+            if is_audit_boundary(*ordinal, value, first_new_after_fork) {
+                window = window.saturating_add(1);
+            }
+            let envelope = value["type"].as_str().unwrap_or("");
+            let payload = &value["payload"];
+            let payload_type = payload["type"].as_str().unwrap_or("");
+            if envelope == "response_item" {
+                let candidate = match payload_type {
+                    "function_call" if payload["name"] == "exec_command" => payload["call_id"]
+                        .as_str()
+                        .map(|id| (AuditLifecycleFamily::Exec, id)),
+                    "custom_tool_call" if payload["name"] == "apply_patch" => payload["call_id"]
+                        .as_str()
+                        .map(|id| (AuditLifecycleFamily::Patch, id)),
+                    "web_search_call" => payload["id"]
+                        .as_str()
+                        .or_else(|| payload["call_id"].as_str())
+                        .map(|id| (AuditLifecycleFamily::Web, id)),
+                    _ => None,
+                };
+                if let Some((family, id)) = candidate.filter(|(_, id)| !id.is_empty()) {
+                    calls
+                        .entry((window, family, id))
+                        .or_default()
+                        .push((*ordinal, payload));
+                }
+            } else if envelope == "event_msg" {
+                let family = match payload_type {
+                    "exec_command_end" => Some(AuditLifecycleFamily::Exec),
+                    "patch_apply_end" => Some(AuditLifecycleFamily::Patch),
+                    "web_search_end" => Some(AuditLifecycleFamily::Web),
+                    _ => None,
+                };
+                if let Some(family) = family {
+                    events.push((
+                        window,
+                        *ordinal,
+                        family,
+                        payload["call_id"].as_str().filter(|id| !id.is_empty()),
+                        payload,
+                    ));
+                }
+            }
+        }
+
+        let mut event_counts: std::collections::BTreeMap<Key<'_>, usize> =
+            std::collections::BTreeMap::new();
+        for (window, _, family, call_id, _) in &events {
+            if let Some(call_id) = call_id {
+                *event_counts
+                    .entry((*window, *family, *call_id))
+                    .or_default() += 1;
+            }
+        }
+        events
+            .into_iter()
+            .map(|(window, ordinal, family, call_id, payload)| {
+                let owner = call_id.map_or(AuditLifecycleOwner::Ambiguous, |call_id| {
+                    let key = (window, family, call_id);
+                    let candidates = calls.get(&key).map(Vec::as_slice).unwrap_or_default();
+                    if event_counts.get(&key).copied().unwrap_or(0) != 1 || candidates.len() > 1 {
+                        AuditLifecycleOwner::Ambiguous
+                    } else if let [(target, target_payload)] = candidates {
+                        if family == AuditLifecycleFamily::Web
+                            && payload.get("action") != target_payload.get("action")
+                        {
+                            AuditLifecycleOwner::Ambiguous
+                        } else {
+                            AuditLifecycleOwner::Paired(*target)
+                        }
+                    } else {
+                        AuditLifecycleOwner::EventOnly
+                    }
+                });
+                AuditLifecycleExpectation {
+                    ordinal,
+                    family,
+                    call_id,
+                    payload,
+                    owner,
+                }
+            })
+            .collect()
+    }
+
+    fn audit_tool_lifecycle(
+        key: &crate::provider::LogicalSessionKey,
+        raw: &[(u64, serde_json::Value)],
+        parsed: &crate::provider::ParsedSession,
+        first_new_after_fork: Option<u64>,
+    ) -> Vec<String> {
+        let mut violations = Vec::new();
+        let expectations = independent_lifecycle_expectations(raw, first_new_after_fork);
+        let disposition = |ordinal| {
+            parsed
+                .record_dispositions
+                .iter()
+                .find(|d| d.record.ordinal == ordinal)
+        };
+        let tool_calls = |call_id: &str| {
+            parsed
+                .entries
+                .iter()
+                .filter_map(|entry| match &entry.entry {
+                    crate::model::LogEntry::Assistant(message) => message
+                        .message
+                        .tool_uses()
+                        .into_iter()
+                        .find(|tool| tool.id == call_id)
+                        .map(|_| entry.id.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        for expected in expectations {
+            let Some(actual_disposition) = disposition(expected.ordinal) else {
+                violations.push(format!(
+                    "lifecycle #{} has no disposition",
+                    expected.ordinal
+                ));
+                continue;
+            };
+            match expected.owner {
+                AuditLifecycleOwner::Ambiguous => {
+                    let RecordOutcome::Unknown { entries } = &actual_disposition.outcome else {
+                        violations.push(format!(
+                            "ambiguous lifecycle #{} was not preserved Unknown",
+                            expected.ordinal
+                        ));
+                        continue;
+                    };
+                    let exact = entries.iter().any(|id| {
+                        parsed.entries.iter().any(|entry| {
+                            entry.id == *id
+                                && matches!(&entry.entry, crate::model::LogEntry::Unknown(value)
+                                    if value["payload"] == *expected.payload)
+                        })
+                    });
+                    if !exact {
+                        violations.push(format!(
+                            "ambiguous lifecycle #{} lost its exact native payload",
+                            expected.ordinal
+                        ));
+                    }
+                }
+                AuditLifecycleOwner::Paired(target_ordinal) => {
+                    let target = EntryId::deterministic(key, target_ordinal, 0);
+                    if actual_disposition.outcome != RecordOutcome::Mapped(vec![target.clone()]) {
+                        violations.push(format!(
+                            "paired lifecycle #{} did not map only to expected owner {target}",
+                            expected.ordinal
+                        ));
+                    }
+                    let Some(call_id) = expected.call_id else {
+                        unreachable!("paired lifecycle has call id")
+                    };
+                    if tool_calls(call_id) != vec![target.clone()] {
+                        violations.push(format!(
+                            "paired lifecycle #{} emitted a duplicate or wrong tool call",
+                            expected.ordinal
+                        ));
+                    }
+                    audit_lifecycle_observation(
+                        expected.family,
+                        expected.payload,
+                        actual_disposition,
+                        &target,
+                        call_id,
+                        parsed,
+                        &mut violations,
+                    );
+                }
+                AuditLifecycleOwner::EventOnly => {
+                    let Some(call_id) = expected.call_id else {
+                        unreachable!("event-only lifecycle has call id")
+                    };
+                    let call = EntryId::deterministic(key, expected.ordinal, 0);
+                    let mut expected_entries = vec![call.clone()];
+                    if matches!(
+                        expected.family,
+                        AuditLifecycleFamily::Exec | AuditLifecycleFamily::Patch
+                    ) {
+                        expected_entries.push(EntryId::deterministic(key, expected.ordinal, 1));
+                    }
+                    if actual_disposition.outcome != RecordOutcome::Mapped(expected_entries.clone())
+                    {
+                        violations.push(format!(
+                            "event-only lifecycle #{} mapped to {:?}, expected {:?}",
+                            expected.ordinal, actual_disposition.outcome, expected_entries
+                        ));
+                    }
+                    if tool_calls(call_id) != vec![call.clone()] {
+                        violations.push(format!(
+                            "event-only lifecycle #{} did not emit exactly one tool call",
+                            expected.ordinal
+                        ));
+                    }
+                    audit_lifecycle_observation(
+                        expected.family,
+                        expected.payload,
+                        actual_disposition,
+                        &call,
+                        call_id,
+                        parsed,
+                        &mut violations,
+                    );
+                    let expected_input = match expected.family {
+                        AuditLifecycleFamily::Exec => serde_json::json!({
+                            "command": expected.payload.get("command").cloned().unwrap_or(serde_json::Value::Null),
+                            "cwd": expected.payload.get("cwd").cloned().unwrap_or(serde_json::Value::Null),
+                            "parsed_cmd": expected.payload.get("parsed_cmd").cloned().unwrap_or(serde_json::Value::Null),
+                            "source": expected.payload.get("source").cloned().unwrap_or(serde_json::Value::Null),
+                        }),
+                        AuditLifecycleFamily::Patch => serde_json::json!({
+                            "changes": expected.payload.get("changes").cloned().unwrap_or(serde_json::Value::Null),
+                        }),
+                        AuditLifecycleFamily::Web => serde_json::json!({
+                            "query": expected.payload.get("query").cloned().unwrap_or(serde_json::Value::Null),
+                            "action": expected.payload.get("action").cloned().unwrap_or(serde_json::Value::Null),
+                        }),
+                    };
+                    let actual_input = parsed.entries.iter().find_map(|entry| {
+                        (entry.id == call).then(|| match &entry.entry {
+                            crate::model::LogEntry::Assistant(message) => message
+                                .message
+                                .tool_uses()
+                                .into_iter()
+                                .find(|tool| tool.id == call_id)
+                                .map(|tool| &tool.input),
+                            _ => None,
+                        })?
+                    });
+                    if actual_input != Some(&expected_input) {
+                        violations.push(format!(
+                            "event-only lifecycle #{} tool input does not preserve native evidence",
+                            expected.ordinal
+                        ));
+                    }
+                    if matches!(
+                        expected.family,
+                        AuditLifecycleFamily::Exec | AuditLifecycleFamily::Patch
+                    ) {
+                        let result_id = EntryId::deterministic(key, expected.ordinal, 1);
+                        let has_result = parsed.entries.iter().any(|entry| {
+                            entry.id == result_id
+                                && matches!(&entry.entry, crate::model::LogEntry::User(user)
+                                    if user.message.tool_results().iter().any(|result| {
+                                        let expected_error = expected.payload["success"].as_bool() == Some(false)
+                                            || expected.payload["exit_code"].as_i64().is_some_and(|code| code != 0)
+                                            || matches!(expected.payload["status"].as_str(), Some("failed" | "declined"));
+                                        result.tool_use_id == call_id
+                                            && result.is_error == Some(expected_error)
+                                    }))
+                        });
+                        if !has_result {
+                            violations.push(format!(
+                                "event-only lifecycle #{} is missing its correctly classified tool result",
+                                expected.ordinal
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        violations
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn audit_lifecycle_observation(
+        family: AuditLifecycleFamily,
+        payload: &serde_json::Value,
+        disposition: &crate::provider::RecordDisposition,
+        owner: &EntryId,
+        call_id: &str,
+        parsed: &crate::provider::ParsedSession,
+        violations: &mut Vec<String>,
+    ) {
+        let expected_kind = match family {
+            AuditLifecycleFamily::Exec => crate::provider::ToolLifecycleKind::Command,
+            AuditLifecycleFamily::Patch => crate::provider::ToolLifecycleKind::Patch,
+            AuditLifecycleFamily::Web => crate::provider::ToolLifecycleKind::Web,
+        };
+        let Some(tool) = parsed
+            .semantics
+            .get(owner)
+            .and_then(|semantics| semantics.tools.get(call_id))
+        else {
+            violations.push(format!(
+                "owner {owner} has no semantics for lifecycle call {call_id}"
+            ));
+            return;
+        };
+        let matching: Vec<_> = tool
+            .lifecycle
+            .iter()
+            .filter(|observation| observation.record == disposition.record)
+            .collect();
+        let [observation] = matching.as_slice() else {
+            violations.push(format!(
+                "owner {owner} has {} observations for lifecycle #{} (expected 1)",
+                matching.len(),
+                disposition.record.ordinal
+            ));
+            return;
+        };
+        let expected_status = payload["status"].as_str().map(|status| match status {
+            "completed" => crate::provider::ToolExecutionStatus::Completed,
+            "failed" => crate::provider::ToolExecutionStatus::Failed,
+            "declined" => crate::provider::ToolExecutionStatus::Declined,
+            other => crate::provider::ToolExecutionStatus::Other(other.to_string()),
+        });
+        let expected_duration = payload["duration"].as_object().and_then(|duration| {
+            let secs = duration.get("secs")?.as_u64()?;
+            let nanos = u32::try_from(duration.get("nanos")?.as_u64()?).ok()?;
+            (nanos < 1_000_000_000).then(|| std::time::Duration::new(secs, nanos))
+        });
+        if observation.kind != expected_kind
+            || observation.status != expected_status
+            || observation.success != payload["success"].as_bool()
+            || observation.exit_code
+                != payload["exit_code"]
+                    .as_i64()
+                    .and_then(|code| i32::try_from(code).ok())
+            || observation.duration != expected_duration
+            || observation.source.as_deref() != payload["source"].as_str()
+        {
+            violations.push(format!(
+                "lifecycle #{} observation does not match native fields",
+                disposition.record.ordinal
+            ));
+        }
+    }
+
+    fn lifecycle_fixture() -> (
+        tempfile::TempDir,
+        crate::provider::ParsedSession,
+        Vec<(u64, serde_json::Value)>,
+    ) {
+        let web_action = serde_json::json!({"type": "search", "query": "rust lifetimes"});
+        parse_and_raw(&[
+            envelope_line("session_meta", serde_json::json!({"id": THREAD_A})),
+            envelope_line(
+                "turn_context",
+                serde_json::json!({"turn_id": "turn-1", "model": "gpt-test"}),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "function_call", "name": "exec_command",
+                    "call_id": "call-exec", "arguments": "{\"cmd\":\"false\"}"}),
+            ),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "exec_command_end", "call_id": "call-exec",
+                    "turn_id": "turn-1", "command": ["false"], "cwd": "/tmp",
+                    "parsed_cmd": [], "source": "unified_exec_startup", "stdout": "",
+                    "stderr": "boom", "aggregated_output": "boom", "formatted_output": "",
+                    "exit_code": 7, "duration": {"secs": 1, "nanos": 250_000_000},
+                    "status": "failed"}),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "function_call_output", "call_id": "call-exec",
+                    "output": "boom"}),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "custom_tool_call", "name": "apply_patch",
+                    "call_id": "call-patch", "input": "*** Begin Patch"}),
+            ),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "patch_apply_end", "call_id": "call-patch",
+                    "turn_id": "turn-1", "stdout": "done", "stderr": "", "success": true,
+                    "changes": {"a.rs": {"type": "add", "content": "fn main() {}"}},
+                    "status": "completed"}),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "custom_tool_call_output", "call_id": "call-patch",
+                    "output": "Exit code: 0\nOutput:\ndone"}),
+            ),
+            // Native web end precedes its response-item twin in real files.
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "web_search_end", "call_id": "call-web",
+                    "query": "rust lifetimes", "action": web_action.clone()}),
+            ),
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "web_search_call", "id": "call-web",
+                    "status": "completed", "action": web_action}),
+            ),
+            // Event-only nested patch: one source record, two canonical entries.
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "patch_apply_end", "call_id": "nested-patch",
+                    "turn_id": "turn-1", "stdout": "updated", "stderr": "", "success": true,
+                    "changes": {"b.rs": {"type": "update", "unified_diff": "@@"}},
+                    "status": "completed"}),
+            ),
+            // Event-only web observation: no result/status may be fabricated.
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "web_search_end", "call_id": "event-web",
+                    "query": "provider docs", "action": {"type": "search", "query": "provider docs"}}),
+            ),
+            // Same id but contradictory action: ambiguous, preserve exactly.
+            envelope_line(
+                "response_item",
+                serde_json::json!({"type": "web_search_call", "id": "ambiguous-web",
+                    "status": "completed", "action": {"type": "search", "query": "one"}}),
+            ),
+            envelope_line(
+                "event_msg",
+                serde_json::json!({"type": "web_search_end", "call_id": "ambiguous-web",
+                    "query": "two", "action": {"type": "search", "query": "two"}}),
+            ),
+        ])
+    }
+
+    #[test]
+    fn lifecycle_records_pair_or_emit_without_double_counting_calls() {
+        let (_tmp, parsed, raw) = lifecycle_fixture();
+        assert!(parsed.validate_provenance().is_empty());
+        let audit = audit_tool_lifecycle(&key(THREAD_A), &raw, &parsed, None);
+        assert!(audit.is_empty(), "{audit:?}");
+
+        let id = |ordinal, subindex| EntryId::deterministic(&key(THREAD_A), ordinal, subindex);
+        for (event_ordinal, target_ordinal, call_id) in [
+            (3, 2, "call-exec"),
+            (6, 5, "call-patch"),
+            (8, 9, "call-web"),
+        ] {
+            let target = id(target_ordinal, 0);
+            let disposition = parsed
+                .record_dispositions
+                .iter()
+                .find(|d| d.record.ordinal == event_ordinal)
+                .unwrap();
+            assert_eq!(
+                disposition.outcome,
+                RecordOutcome::Mapped(vec![target.clone()])
+            );
+            assert_eq!(parsed.entry_origins[&target].len(), 2);
+            let lifecycle = &parsed.semantics[&target].tools[call_id].lifecycle;
+            assert_eq!(lifecycle.len(), 1);
+            assert_eq!(lifecycle[0].record.ordinal, event_ordinal);
+            assert!(
+                !parsed.entries.iter().any(|entry| {
+                    entry.id.ordinal == event_ordinal
+                        && matches!(entry.entry, crate::model::LogEntry::Assistant(_))
+                }),
+                "paired lifecycle record must not emit a duplicate call"
+            );
+        }
+
+        let nested_call = id(10, 0);
+        let nested_result = id(10, 1);
+        let nested_disposition = parsed
+            .record_dispositions
+            .iter()
+            .find(|d| d.record.ordinal == 10)
+            .unwrap();
+        assert_eq!(
+            nested_disposition.outcome,
+            RecordOutcome::Mapped(vec![nested_call.clone(), nested_result.clone()])
+        );
+        let crate::model::LogEntry::Assistant(nested) = &parsed
+            .entries
+            .iter()
+            .find(|entry| entry.id == nested_call)
+            .unwrap()
+            .entry
+        else {
+            panic!("event-only patch did not emit a tool call")
+        };
+        let tool = nested.message.tool_uses().pop().unwrap();
+        assert_eq!(tool.id, "nested-patch");
+        assert_eq!(tool.input["changes"]["b.rs"]["type"], "update");
+        assert!(matches!(
+            parsed
+                .entries
+                .iter()
+                .find(|entry| entry.id == nested_result)
+                .map(|entry| &entry.entry),
+            Some(crate::model::LogEntry::User(_))
+        ));
+
+        let web = id(11, 0);
+        assert_eq!(
+            parsed
+                .record_dispositions
+                .iter()
+                .find(|d| d.record.ordinal == 11)
+                .unwrap()
+                .outcome,
+            RecordOutcome::Mapped(vec![web])
+        );
+        assert!(matches!(
+            parsed
+                .record_dispositions
+                .iter()
+                .find(|d| d.record.ordinal == 13)
+                .unwrap()
+                .outcome,
+            RecordOutcome::Unknown { .. }
+        ));
+    }
+
+    #[test]
+    fn lifecycle_observations_preserve_typed_status_and_duration() {
+        let (_tmp, parsed, _raw) = lifecycle_fixture();
+        let exec = EntryId::deterministic(&key(THREAD_A), 2, 0);
+        let observation = &parsed.semantics[&exec].tools["call-exec"].lifecycle[0];
+        assert_eq!(
+            observation.kind,
+            crate::provider::ToolLifecycleKind::Command
+        );
+        assert_eq!(
+            observation.status,
+            Some(crate::provider::ToolExecutionStatus::Failed)
+        );
+        assert_eq!(observation.exit_code, Some(7));
+        assert_eq!(
+            observation.duration,
+            Some(std::time::Duration::from_millis(1_250))
+        );
+        assert_eq!(observation.source.as_deref(), Some("unified_exec_startup"));
+    }
+
+    #[test]
+    fn lifecycle_provenance_validator_rejects_wrong_and_duplicate_sources() {
+        let (_tmp, mut parsed, _raw) = lifecycle_fixture();
+        let exec = EntryId::deterministic(&key(THREAD_A), 2, 0);
+        let unrelated = parsed
+            .record_dispositions
+            .iter()
+            .find(|d| d.record.ordinal == 1)
+            .unwrap()
+            .record
+            .clone();
+        parsed
+            .semantics
+            .get_mut(&exec)
+            .unwrap()
+            .tools
+            .get_mut("call-exec")
+            .unwrap()
+            .lifecycle[0]
+            .record = unrelated;
+        let violations = parsed.validate_provenance();
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("not one of the entry's origins")),
+            "{violations:?}"
+        );
+
+        let (_tmp, mut parsed, _raw) = lifecycle_fixture();
+        let lifecycle = &mut parsed
+            .semantics
+            .get_mut(&exec)
+            .unwrap()
+            .tools
+            .get_mut("call-exec")
+            .unwrap()
+            .lifecycle;
+        lifecycle.push(lifecycle[0].clone());
+        let violations = parsed.validate_provenance();
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("repeats lifecycle record")),
+            "{violations:?}"
+        );
+    }
+
+    #[test]
+    fn nc_lifecycle_audit_rejects_wrong_owner_with_consistent_provenance() {
+        let (_tmp, mut parsed, raw) = lifecycle_fixture();
+        let exec = EntryId::deterministic(&key(THREAD_A), 2, 0);
+        let patch = EntryId::deterministic(&key(THREAD_A), 5, 0);
+        let observation = parsed
+            .semantics
+            .get_mut(&exec)
+            .unwrap()
+            .tools
+            .get_mut("call-exec")
+            .unwrap()
+            .lifecycle
+            .pop()
+            .unwrap();
+        parsed
+            .semantics
+            .get_mut(&patch)
+            .unwrap()
+            .tools
+            .get_mut("call-patch")
+            .unwrap()
+            .lifecycle
+            .push(observation.clone());
+        parsed
+            .entry_origins
+            .get_mut(&exec)
+            .unwrap()
+            .retain(|record| record != &observation.record);
+        parsed
+            .entry_origins
+            .get_mut(&patch)
+            .unwrap()
+            .push(observation.record.clone());
+        let disposition = parsed
+            .record_dispositions
+            .iter_mut()
+            .find(|d| d.record == observation.record)
+            .unwrap();
+        disposition.outcome = RecordOutcome::Mapped(vec![patch]);
+        assert!(
+            parsed.validate_provenance().is_empty(),
+            "mutation must evade generic integrity so the semantic audit earns its keep"
+        );
+        let violations = audit_tool_lifecycle(&key(THREAD_A), &raw, &parsed, None);
+        assert!(
+            violations.iter().any(|v| v.contains("expected owner")),
+            "{violations:?}"
+        );
+    }
+
+    #[test]
+    fn nc_lifecycle_audit_rejects_mutated_native_fields() {
+        let (_tmp, mut parsed, raw) = lifecycle_fixture();
+        let exec = EntryId::deterministic(&key(THREAD_A), 2, 0);
+        parsed
+            .semantics
+            .get_mut(&exec)
+            .unwrap()
+            .tools
+            .get_mut("call-exec")
+            .unwrap()
+            .lifecycle[0]
+            .exit_code = Some(0);
+        assert!(parsed.validate_provenance().is_empty());
+        let violations = audit_tool_lifecycle(&key(THREAD_A), &raw, &parsed, None);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("does not match native fields")),
+            "{violations:?}"
+        );
+    }
+
+    #[test]
+    fn nc_lifecycle_audit_rejects_missing_event_only_result() {
+        let (_tmp, mut parsed, raw) = lifecycle_fixture();
+        let result = EntryId::deterministic(&key(THREAD_A), 10, 1);
+        parsed.entries.retain(|entry| entry.id != result);
+        parsed.entry_origins.remove(&result);
+        parsed.semantics.remove(&result);
+        let disposition = parsed
+            .record_dispositions
+            .iter_mut()
+            .find(|d| d.record.ordinal == 10)
+            .unwrap();
+        let RecordOutcome::Mapped(entries) = &mut disposition.outcome else {
+            panic!("fixture lifecycle is not mapped")
+        };
+        entries.retain(|entry| entry != &result);
+        assert!(parsed.validate_provenance().is_empty());
+        let violations = audit_tool_lifecycle(&key(THREAD_A), &raw, &parsed, None);
+        assert!(
+            violations
+                .iter()
+                .any(|v| { v.contains("mapped to") || v.contains("missing its tool result") }),
+            "{violations:?}"
+        );
+    }
+
+    #[test]
+    fn nc_lifecycle_audit_rejects_mutated_event_only_evidence() {
+        let (_tmp, mut parsed, raw) = lifecycle_fixture();
+        let call = EntryId::deterministic(&key(THREAD_A), 10, 0);
+        let crate::model::LogEntry::Assistant(message) = &mut parsed
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == call)
+            .unwrap()
+            .entry
+        else {
+            panic!("fixture event-only call is not assistant")
+        };
+        let crate::model::ContentBlock::ToolUse(tool) = &mut message.message.content[0] else {
+            panic!("fixture event-only call has no tool use")
+        };
+        tool.input["changes"] = serde_json::json!({"wrong.rs": {"type": "delete"}});
+        assert!(parsed.validate_provenance().is_empty());
+        let violations = audit_tool_lifecycle(&key(THREAD_A), &raw, &parsed, None);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("does not preserve native evidence")),
+            "{violations:?}"
+        );
+
+        let (_tmp, mut parsed, raw) = lifecycle_fixture();
+        let result = EntryId::deterministic(&key(THREAD_A), 10, 1);
+        let crate::model::LogEntry::User(message) = &mut parsed
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == result)
+            .unwrap()
+            .entry
+        else {
+            panic!("fixture event-only result is not user")
+        };
+        let crate::model::UserContent::Blocks(blocks) = &mut message.message else {
+            panic!("fixture event-only result is not block content")
+        };
+        let crate::model::ContentBlock::ToolResult(tool_result) = &mut blocks.content[0] else {
+            panic!("fixture event-only result has no tool result")
+        };
+        tool_result.is_error = Some(true);
+        assert!(parsed.validate_provenance().is_empty());
+        let violations = audit_tool_lifecycle(&key(THREAD_A), &raw, &parsed, None);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("correctly classified tool result")),
+            "{violations:?}"
+        );
     }
 
     fn joined_content(payload: &serde_json::Value) -> String {

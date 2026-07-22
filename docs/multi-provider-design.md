@@ -93,14 +93,16 @@ offered "scope per-provider OR migrate storage"; the lighter scope-to-Claude
 path was taken, so cross-provider or Codex-scoped registries do not exist.
 Needs a storage-model decision.
 
-**Tier 4 — normalization depth.** A class of Codex event families stays
-preserved-`Unknown` (content-complete, and the conformance gate rejects any
-NEW unclassified family — nothing is silently lost) rather than normalized
-into model entries: `exec_command_end`, `patch_apply_end`, `web_search_end`,
-`turn_aborted`, review-mode, thread-settings, `task_started`/`task_complete`,
-and orphan token-counts; `world_state` is a typed checkpoint, not an
-emission. Mapping the analytically valuable ones (especially tool-lifecycle
-→ `get_tool_calls`) is a prerequisite for parts of Tier 2.
+**Tier 4 — normalization depth.** Structured tool lifecycle is now mapped:
+`exec_command_end`, `patch_apply_end`, and `web_search_end` either enrich one
+proven response-item call or become event-only canonical operations. A class
+of lower-value Codex event families still stays preserved-`Unknown`
+(content-complete, and the conformance gate rejects any NEW unclassified
+family — nothing is silently lost): `turn_aborted`, review-mode,
+thread-settings, `task_started`/`task_complete`, and orphan token-counts;
+`world_state` is a typed checkpoint, not an emission. These remaining families
+are scheduled by consumer need rather than by pressure to reduce an unknown
+counter.
 
 **Deliberate deferrals (not gaps — keep unless revisited):** pre-envelope
 legacy Codex files are inventory/native-export only; Codex sessions are
@@ -1012,7 +1014,10 @@ event-only; `turn_id` lives in `turn_context.payload` (newer era),
 `event_msg user_message` fires only for GENUINE human prompts while
 harness-injected context arrives as response_item user/developer messages.
 
-Mapping (each mapped record keeps its B1 id `(ordinal, 0)` — constraint 1):
+Mapping (the primary entry from a record keeps its B1 id `(ordinal, 0)`;
+records with a genuine 1:N projection use deterministic subindices `1..` for
+additional entries — the identity contract is preserved without pretending
+one native record can have only one canonical role):
 
 - response_item message role=assistant → `LogEntry::Assistant`
   (output_text → Text; unknown block types preserved as block-level
@@ -1031,6 +1036,22 @@ Mapping (each mapped record keeps its B1 id `(ordinal, 0)` — constraint 1):
 - response_item function_call_output / custom_tool_call_output →
   `LogEntry::User` with ToolResult{tool_use_id: call_id, output text};
   PromptSemantics Tool/MidTurn.
+- event_msg exec_command_end / patch_apply_end / web_search_end → a
+  window-scoped, family-qualified `call_id` plan. Exactly one compatible
+  response-item call is authoritative: the lifecycle record maps N:1 to that
+  call, becomes an additional full `RecordRef` origin, and adds a typed
+  `ToolLifecycleObservation` (native status/success, exit code, duration, and
+  source where present) without emitting a duplicate tool call. Web pairing
+  additionally requires exact structured-action equality; multiple or
+  contradictory candidates remain exact preserved Unknowns. When no
+  response-item call exists, the lifecycle record is a real nested operation:
+  command and patch records map 1:2 to ToolUse `(ordinal,0)` plus ToolResult
+  `(ordinal,1)`, while web maps only a ToolUse because its native end record
+  carries no status/result and success must not be fabricated. Synthesized
+  lifecycle calls are not model-response usage owners. Exact patch-change
+  payloads are preserved in event-only ToolUse input; a shared typed
+  file-change evidence layer for all paired/event-only records remains the
+  next parity slice rather than being smuggled into an untyped sidecar.
 - event_msg user_message / agent_message / agent_reasoning /
   agent_reasoning_raw_content → B3.1 (round-22): suppressed ONLY when a
   one-to-one twin is PROVEN — matching is scoped to a turn window
@@ -1947,6 +1968,48 @@ separate pre-existing contracts that the first pass did not settle:
   exists, and warns when another `snatch` shadows the installed path. Release
   artifacts are built with all features. MCP clients still require a reconnect
   after the on-disk stdio-server binary is replaced.
+
+#### Tool-lifecycle normalization audit (2026-07-22)
+
+The first parity burndown slice normalized the three source-backed lifecycle
+families needed by tool analysis. The design was empirical before it was
+implemented: across the then-current preferred-artifact corpus,
+`exec_command_end` was always paired with `function_call/exec_command`, while
+`patch_apply_end` changed shape by era (paired in June, predominantly nested
+event-only operations in July) and `web_search_end` mixed both forms. Paired
+web records repeated the exact structured action even when their separate
+display query differed. This disproved both a universal-dedup rule and a
+universal-new-entry rule.
+
+The type contract follows the producer rather than output text. Codex
+`rust-v0.144.6` defines explicit command and patch completion states, command
+exit code and `Duration`, a separate patch success flag, and structured patch
+changes in its
+[`protocol.rs`](https://github.com/openai/codex/blob/rust-v0.144.6/codex-rs/protocol/src/protocol.rs).
+Its [rollout persistence policy](https://github.com/openai/codex/blob/rust-v0.144.6/codex-rs/rollout/src/policy.rs)
+also confirms that lifecycle availability depends on history mode, so absence
+cannot be interpreted as non-execution. `ToolSemantics` therefore carries a
+vector of typed, full-`RecordRef` lifecycle observations; the generic
+provenance validator requires each observation to be an origin of exactly one
+annotated call and rejects sibling-artifact swaps or repeated sources.
+
+The source-derived lifecycle oracle independently walks native turn/fork
+windows, response-item families, call ids, and web actions. Mutation controls
+prove it rejects a fully provenance-consistent wrong owner, altered native
+status/exit/duration, missing event-only results, changed structured patch
+input, and incorrect result error state. The opt-in corpus run at this commit
+parsed 243/243 sessions with zero provenance or lifecycle-audit violations:
+242 lifecycle records enriched proven calls, 917 became event-only operations,
+and zero were ambiguous. None of the three families remains under the
+allowed-preserved-Unknown escape hatch. `get_tool_calls` now exposes the
+source-backed observations additively and uses native lifecycle failure as
+confirmed evidence; its chunk filter also uses semantic prompt boundaries for
+providers that advertise them instead of reusing Claude-shaped chunking.
+
+Explicit boundary: this slice exposes structured patch changes on event-only
+calls but does not yet claim one provider-neutral file-change projection over
+both paired and event-only forms. That evidence-bounded layer, including
+coverage strength and inherited-history exclusion, is the next roadmap item.
 
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".

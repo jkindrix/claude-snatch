@@ -39,6 +39,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Write;
+use std::time::Duration;
 
 use crate::model::LogEntry;
 
@@ -608,13 +609,97 @@ pub enum ToolKind {
 }
 
 /// Tool semantics: canonical kind plus the provider's own tool name,
-/// preserved verbatim.
+/// preserved verbatim, and any independently persisted lifecycle evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolSemantics {
     /// Canonical classification.
     pub kind: ToolKind,
     /// The native tool name, unmodified.
     pub native_name: String,
+    /// Native lifecycle observations that describe this call. Several are
+    /// allowed because a provider may persist retries or distinct execution
+    /// stages under one logical call. Each observation carries its exact
+    /// source record; consumers must not recover provenance positionally.
+    pub lifecycle: Vec<ToolLifecycleObservation>,
+}
+
+/// Provider-neutral family of a native tool lifecycle observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolLifecycleKind {
+    /// A command/process execution completed.
+    Command,
+    /// A structured file patch completed.
+    Patch,
+    /// A web operation completed or was observed.
+    Web,
+    /// Provider-described lifecycle family.
+    Other(String),
+}
+
+/// Native completion status, preserved without inferring success from the
+/// event name. Some event families (notably web search) carry no status and
+/// therefore leave this absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolExecutionStatus {
+    /// The provider reported completion.
+    Completed,
+    /// The provider reported failure.
+    Failed,
+    /// The operation was declined before execution.
+    Declined,
+    /// A forward-compatible provider status.
+    Other(String),
+}
+
+impl ToolExecutionStatus {
+    /// Stable provider-neutral label for display and wire adapters.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Declined => "declined",
+            Self::Other(value) => value,
+        }
+    }
+}
+
+impl ToolLifecycleKind {
+    /// Stable provider-neutral label for display and wire adapters.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Command => "command",
+            Self::Patch => "patch",
+            Self::Web => "web",
+            Self::Other(value) => value,
+        }
+    }
+}
+
+/// One source-backed lifecycle observation attached to a native tool call.
+///
+/// This deliberately retains only typed analytical facts. Exact native
+/// payloads remain at the provider source and are reachable through `record`;
+/// they are not copied into every normalized entry (the export/redaction
+/// boundary established during Phase A).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolLifecycleObservation {
+    /// The native record carrying the observation.
+    pub record: RecordRef,
+    /// Which kind of operation the record describes.
+    pub kind: ToolLifecycleKind,
+    /// Provider-reported completion state, when present.
+    pub status: Option<ToolExecutionStatus>,
+    /// Provider-reported success flag, when present and independent of status.
+    pub success: Option<bool>,
+    /// Process exit status, when the operation is process-backed.
+    pub exit_code: Option<i32>,
+    /// Measured execution duration, when persisted by the provider.
+    pub duration: Option<Duration>,
+    /// Native source classification (for example interactive vs startup
+    /// command execution), when present.
+    pub source: Option<String>,
 }
 
 /// What a usage observation covers (axis 1 of usage semantics).
@@ -1046,10 +1131,11 @@ impl ParsedSession {
             ));
         }
 
-        // Usage observations name a FULL source RecordRef (round-25): its
-        // artifact must belong to the descriptor, and the record must be one
-        // of the annotated entry's origins — so a same-ordinal artifact swap
-        // (a sibling artifact) cannot slip past provenance validation.
+        // Usage and tool-lifecycle observations name a FULL source RecordRef:
+        // the artifact must belong to the descriptor, and the record must be
+        // one of the annotated entry's origins — so a same-ordinal artifact
+        // swap (a sibling artifact) cannot slip past provenance validation.
+        let mut lifecycle_sources: BTreeMap<&RecordRef, (&EntryId, &str)> = BTreeMap::new();
         for (eid, sem) in &self.semantics {
             for obs in &sem.usage {
                 if !descriptor_artifacts.contains(&obs.record.artifact) {
@@ -1063,6 +1149,37 @@ impl ParsedSession {
                         "usage observation on entry {eid} names record #{} which is not one of the entry's origins",
                         obs.record.ordinal
                     )),
+                }
+            }
+            for (call_id, tool) in &sem.tools {
+                let mut call_sources = BTreeSet::new();
+                for observation in &tool.lifecycle {
+                    if !call_sources.insert(&observation.record) {
+                        violations.push(format!(
+                            "tool call {call_id} on entry {eid} repeats lifecycle record #{}",
+                            observation.record.ordinal
+                        ));
+                    }
+                    if let Some((other_entry, other_call)) =
+                        lifecycle_sources.insert(&observation.record, (eid, call_id.as_str()))
+                    {
+                        violations.push(format!(
+                            "tool lifecycle record #{} annotates both call {other_call} on entry {other_entry} and call {call_id} on entry {eid}",
+                            observation.record.ordinal
+                        ));
+                    }
+                    if !descriptor_artifacts.contains(&observation.record.artifact) {
+                        violations.push(format!(
+                            "tool lifecycle observation for call {call_id} on entry {eid} references an artifact outside the descriptor"
+                        ));
+                    }
+                    match self.entry_origins.get(eid) {
+                        Some(origins) if origins.contains(&observation.record) => {}
+                        _ => violations.push(format!(
+                            "tool lifecycle observation for call {call_id} on entry {eid} names record #{} which is not one of the entry's origins",
+                            observation.record.ordinal
+                        )),
+                    }
                 }
             }
         }

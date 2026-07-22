@@ -126,6 +126,8 @@ pub enum FailureBasis {
     NativeErrorFlag,
     /// Explicit nonzero process exit status.
     ProcessExit,
+    /// Provider-native lifecycle status or success flag.
+    NativeLifecycleStatus,
     /// Structured response with a non-null/non-false error field.
     StructuredError,
     /// Unstructured error-signature heuristic.
@@ -139,6 +141,7 @@ impl FailureBasis {
         match self {
             Self::NativeErrorFlag => "native error flag",
             Self::ProcessExit => "process exit",
+            Self::NativeLifecycleStatus => "native lifecycle status",
             Self::StructuredError => "structured error",
             Self::TextSignature => "text signature",
         }
@@ -403,6 +406,16 @@ fn semantic_tool_result_failure(
     content: &str,
     soft_error_re: Option<&regex::Regex>,
 ) -> Option<FailureClassification> {
+    match lifecycle_verdict(semantics, input) {
+        LifecycleVerdict::Failed(basis) => {
+            return Some(FailureClassification {
+                kind: FailureKind::Confirmed,
+                basis,
+            });
+        }
+        LifecycleVerdict::Succeeded => return None,
+        LifecycleVerdict::Inconclusive => {}
+    }
     match &semantics.kind {
         ToolKind::Shell => {
             let command = shell_command(input);
@@ -478,6 +491,68 @@ fn semantic_tool_result_failure(
         // soft regex. Only the provider's hard-error bit (handled by the
         // caller) is authoritative for those content-bearing tools.
         ToolKind::FileRead | ToolKind::Search | ToolKind::Subagent => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LifecycleVerdict {
+    Succeeded,
+    Failed(FailureBasis),
+    Inconclusive,
+}
+
+/// Reduce typed lifecycle observations without consulting output text. Any
+/// explicit failure wins; otherwise at least one positive completion signal
+/// establishes success. Web observations intentionally remain inconclusive
+/// because their native end record has no status/success field.
+fn lifecycle_verdict(semantics: &ToolSemantics, input: &serde_json::Value) -> LifecycleVerdict {
+    let mut completed = false;
+    for observation in &semantics.lifecycle {
+        if let Some(exit_code) = observation.exit_code {
+            completed = true;
+            if exit_code != 0 {
+                // rg/grep exit 1 is a normal no-match result, including when
+                // the provider labels the underlying process "failed".
+                let no_match = exit_code == 1
+                    && shell_command(input).as_deref().is_some_and(|command| {
+                        let command = command.trim_start();
+                        command.starts_with("rg ") || command.starts_with("grep ")
+                    });
+                if !no_match {
+                    return LifecycleVerdict::Failed(FailureBasis::ProcessExit);
+                }
+            }
+        }
+        if observation.success == Some(false)
+            || matches!(
+                observation.status,
+                Some(
+                    crate::provider::ToolExecutionStatus::Failed
+                        | crate::provider::ToolExecutionStatus::Declined
+                )
+            )
+        {
+            // A no-match process status is the one deliberate exception to
+            // the provider's generic failed label.
+            let no_match = observation.exit_code == Some(1)
+                && shell_command(input).as_deref().is_some_and(|command| {
+                    let command = command.trim_start();
+                    command.starts_with("rg ") || command.starts_with("grep ")
+                });
+            if !no_match {
+                return LifecycleVerdict::Failed(FailureBasis::NativeLifecycleStatus);
+            }
+        }
+        completed |= observation.success == Some(true)
+            || matches!(
+                observation.status,
+                Some(crate::provider::ToolExecutionStatus::Completed)
+            );
+    }
+    if completed {
+        LifecycleVerdict::Succeeded
+    } else {
+        LifecycleVerdict::Inconclusive
     }
 }
 
@@ -586,6 +661,15 @@ fn classify_tool_result_with(
     soft_error_re: Option<&regex::Regex>,
 ) -> Option<FailureClassification> {
     let content = result.content.as_ref().map(tool_result_text);
+
+    if let Some(semantics) = semantics {
+        if let LifecycleVerdict::Failed(basis) = lifecycle_verdict(semantics, input) {
+            return Some(FailureClassification {
+                kind: FailureKind::Confirmed,
+                basis,
+            });
+        }
+    }
 
     if result.is_error == Some(true) {
         if semantics.is_none()
@@ -1050,7 +1134,90 @@ mod tests {
         ToolSemantics {
             kind,
             native_name: native_name.to_string(),
+            lifecycle: Vec::new(),
         }
+    }
+
+    fn lifecycle_semantics(
+        kind: ToolKind,
+        status: crate::provider::ToolExecutionStatus,
+        success: Option<bool>,
+        exit_code: Option<i32>,
+    ) -> ToolSemantics {
+        ToolSemantics {
+            kind,
+            native_name: "native".into(),
+            lifecycle: vec![crate::provider::ToolLifecycleObservation {
+                record: crate::provider::RecordRef {
+                    artifact: crate::provider::ArtifactId {
+                        provider_instance: "test".into(),
+                        locator: "fixture".into(),
+                    },
+                    ordinal: 7,
+                },
+                kind: crate::provider::ToolLifecycleKind::Command,
+                status: Some(status),
+                success,
+                exit_code,
+                duration: Some(std::time::Duration::from_millis(25)),
+                source: Some("test".into()),
+            }],
+        }
+    }
+
+    #[test]
+    fn native_lifecycle_status_is_authoritative_over_result_text() {
+        let re = build_soft_error_regex().unwrap();
+        let failed = lifecycle_semantics(
+            ToolKind::FileWrite,
+            crate::provider::ToolExecutionStatus::Failed,
+            Some(false),
+            None,
+        );
+        let failure = semantic_tool_result_failure(
+            &failed,
+            &serde_json::Value::Null,
+            "looks harmless",
+            Some(&re),
+        )
+        .unwrap();
+        assert_eq!(failure.kind, FailureKind::Confirmed);
+        assert_eq!(failure.basis, FailureBasis::NativeLifecycleStatus);
+
+        let succeeded = lifecycle_semantics(
+            ToolKind::Shell,
+            crate::provider::ToolExecutionStatus::Completed,
+            None,
+            Some(0),
+        );
+        assert_eq!(
+            semantic_tool_result_failure(
+                &succeeded,
+                &serde_json::json!({"cmd": "cat failure-fixture.txt"}),
+                "panic: quoted source text",
+                Some(&re),
+            ),
+            None,
+            "confirmed success must suppress text-signature false positives"
+        );
+    }
+
+    #[test]
+    fn lifecycle_process_exit_preserves_no_match_exception() {
+        let failed = lifecycle_semantics(
+            ToolKind::Shell,
+            crate::provider::ToolExecutionStatus::Failed,
+            None,
+            Some(1),
+        );
+        assert_eq!(
+            lifecycle_verdict(&failed, &serde_json::json!({"cmd": "rg absent src"})),
+            LifecycleVerdict::Succeeded
+        );
+        assert_eq!(
+            lifecycle_verdict(&failed, &serde_json::json!({"cmd": "cargo test"})),
+            LifecycleVerdict::Failed(FailureBasis::ProcessExit)
+        );
     }
 
     #[test]

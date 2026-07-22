@@ -735,6 +735,26 @@ pub struct ToolCallEntry {
     /// Truncated preview of a successful tool result's output (absent on error).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result_preview: Option<String>,
+    /// Source-backed provider lifecycle observations, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<Vec<ToolLifecycleEntry>>,
+}
+
+/// Wire-safe view of one provider-native tool lifecycle observation.
+#[derive(Debug, Serialize)]
+pub struct ToolLifecycleEntry {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub success: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Exact duration converted to fractional milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// Tool call summary stats.

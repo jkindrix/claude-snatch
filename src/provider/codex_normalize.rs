@@ -6,7 +6,9 @@
 //! amended by B3.1) and rests on the 224-session corpus census plus the
 //! round-22 audit. Binding constraints (round-21):
 //!
-//! - Mapped records keep their B1 deterministic ids `(ordinal, 0)`.
+//! - A mapped record's primary entry keeps its B1 deterministic id
+//!   `(ordinal, 0)`; genuine 1:N mappings use deterministic subindices for
+//!   additional entries (for example an event-only lifecycle ToolResult).
 //! - `turn_id` rides the semantics sidecar (ambient `turn_context` /
 //!   `task_started` state, OVERRIDDEN by each item's own
 //!   `internal_chat_message_metadata_passthrough` / `metadata` carrier),
@@ -36,6 +38,7 @@
 //! provider-level metadata rather than an entry.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -51,8 +54,8 @@ use super::{
     ActivityKind, CompactionKind, CompactionSemantics, CompactionWindow, EntryId, EntrySemantics,
     IdentifiedEntry, IngestionDiagnostics, LogicalSessionKey, PromptAuthorship, PromptDelivery,
     PromptSemantics, RecordDisposition, RecordOutcome, RecordRef, StateCheckpointKind,
-    SuppressionReason, ToolKind, ToolSemantics, UsageAggregation, UsageObservation,
-    UsageObservationKind, UsageScope,
+    SuppressionReason, ToolExecutionStatus, ToolKind, ToolLifecycleKind, ToolLifecycleObservation,
+    ToolSemantics, UsageAggregation, UsageObservation, UsageObservationKind, UsageScope,
 };
 
 /// Output of normalizing the parsed record stream.
@@ -113,6 +116,151 @@ struct Candidate {
     ordinal: u64,
     text: String,
     claimed: bool,
+}
+
+/// Native lifecycle families whose end records can either enrich a persisted
+/// response-item call or be the only durable evidence of a nested operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum LifecycleFamily {
+    Exec,
+    Patch,
+    Web,
+}
+
+#[derive(Debug, Clone)]
+struct LifecyclePair {
+    target_ordinal: u64,
+    call_id: String,
+}
+
+#[derive(Default)]
+struct LifecyclePlan {
+    /// Lifecycle record ordinal -> authoritative response-item call.
+    paired: BTreeMap<u64, LifecyclePair>,
+    /// Duplicate or contradictory candidates are preserved Unknown rather
+    /// than guessed into a call.
+    ambiguous: BTreeSet<u64>,
+}
+
+fn lifecycle_event_key(payload_type: &str, payload: &Value) -> Option<(LifecycleFamily, String)> {
+    let family = match payload_type {
+        "exec_command_end" => LifecycleFamily::Exec,
+        "patch_apply_end" => LifecycleFamily::Patch,
+        "web_search_end" => LifecycleFamily::Web,
+        _ => return None,
+    };
+    let call_id = payload.get("call_id").and_then(Value::as_str)?;
+    (!call_id.is_empty()).then(|| (family, call_id.to_string()))
+}
+
+fn lifecycle_call_key(payload_type: &str, payload: &Value) -> Option<(LifecycleFamily, String)> {
+    let (family, id) = match payload_type {
+        "function_call" if payload.get("name").and_then(Value::as_str) == Some("exec_command") => (
+            LifecycleFamily::Exec,
+            payload.get("call_id").and_then(Value::as_str),
+        ),
+        "custom_tool_call"
+            if payload.get("name").and_then(Value::as_str) == Some("apply_patch") =>
+        {
+            (
+                LifecycleFamily::Patch,
+                payload.get("call_id").and_then(Value::as_str),
+            )
+        }
+        "web_search_call" => (
+            LifecycleFamily::Web,
+            payload
+                .get("id")
+                .or_else(|| payload.get("call_id"))
+                .and_then(Value::as_str),
+        ),
+        _ => return None,
+    };
+    let id = id?;
+    (!id.is_empty()).then(|| (family, id.to_string()))
+}
+
+fn plan_lifecycle(
+    records: &[(RecordRef, Value)],
+    first_new_after_fork: Option<u64>,
+) -> LifecyclePlan {
+    let mut plan = LifecyclePlan::default();
+    let mut window_start = 0usize;
+    let mut i = 0usize;
+    loop {
+        let at_boundary = i == records.len() || {
+            let (et, _, pt) = envelope_parts(&records[i].1);
+            is_window_boundary(et, pt) || first_new_after_fork == Some(records[i].0.ordinal)
+        };
+        if at_boundary && i > window_start {
+            plan_lifecycle_window(&records[window_start..i], &mut plan);
+            window_start = i;
+        }
+        if i == records.len() {
+            break;
+        }
+        i += 1;
+    }
+    plan
+}
+
+fn plan_lifecycle_window(window: &[(RecordRef, Value)], plan: &mut LifecyclePlan) {
+    let mut calls: BTreeMap<(LifecycleFamily, String), Vec<(u64, &Value)>> = BTreeMap::new();
+    let mut events: BTreeMap<(LifecycleFamily, String), Vec<(u64, &Value)>> = BTreeMap::new();
+    for (record, value) in window {
+        let (envelope_type, payload, payload_type) = envelope_parts(value);
+        if envelope_type == "response_item" {
+            if let Some(key) = lifecycle_call_key(payload_type, payload) {
+                calls
+                    .entry(key)
+                    .or_default()
+                    .push((record.ordinal, payload));
+            }
+        } else if envelope_type == "event_msg" {
+            if let Some(key) = lifecycle_event_key(payload_type, payload) {
+                events
+                    .entry(key)
+                    .or_default()
+                    .push((record.ordinal, payload));
+            }
+        }
+    }
+
+    for (key, lifecycle_records) in events {
+        let candidates = calls.get(&key).map(Vec::as_slice).unwrap_or_default();
+        if lifecycle_records.len() != 1 || candidates.len() > 1 {
+            plan.ambiguous
+                .extend(lifecycle_records.iter().map(|(ordinal, _)| *ordinal));
+            continue;
+        }
+        let [(event_ordinal, event_payload)] = lifecycle_records.as_slice() else {
+            continue;
+        };
+        let [] = candidates else {
+            let [(target_ordinal, target_payload)] = candidates else {
+                unreachable!("candidate cardinality checked above")
+            };
+            // Web end records repeat the exact structured action. The call id
+            // alone is insufficient if drift produces contradictory payloads;
+            // preserve that record Unknown rather than merging it silently.
+            if key.0 == LifecycleFamily::Web
+                && event_payload.get("action") != target_payload.get("action")
+            {
+                plan.ambiguous.insert(*event_ordinal);
+                continue;
+            }
+            plan.paired.insert(
+                *event_ordinal,
+                LifecyclePair {
+                    target_ordinal: *target_ordinal,
+                    call_id: key.1,
+                },
+            );
+            continue;
+        };
+        // No response-item candidate: this is an event-only nested operation,
+        // not an ambiguity. It will become its own canonical tool call.
+    }
 }
 
 fn claim(pool: &mut [Candidate], text: &str) -> Option<u64> {
@@ -369,6 +517,7 @@ pub(super) fn normalize(
     };
     let first_new_after_fork = inherited_range.map(|(_, last)| last.saturating_add(1));
     let plan = plan_matches(records, first_new_after_fork);
+    let lifecycle_plan = plan_lifecycle(records, first_new_after_fork);
 
     let mut state = WalkState {
         version: "unknown".into(),
@@ -426,6 +575,20 @@ pub(super) fn normalize(
             }
             "event_msg" if payload_type == "task_started" => {
                 if let Some(t) = payload.get("turn_id").and_then(Value::as_str) {
+                    state.turn_id = Some(t.to_string());
+                }
+            }
+            "event_msg"
+                if matches!(
+                    payload_type,
+                    "exec_command_end" | "patch_apply_end" | "web_search_end"
+                ) =>
+            {
+                if let Some(t) = payload
+                    .get("turn_id")
+                    .and_then(Value::as_str)
+                    .filter(|t| !t.is_empty())
+                {
                     state.turn_id = Some(t.to_string());
                 }
             }
@@ -525,6 +688,28 @@ pub(super) fn normalize(
             ("event_msg", "token_count") => {
                 handle_token_count(payload, value, record, &mut state, &mut out);
             }
+            ("event_msg", "exec_command_end")
+            | ("event_msg", "patch_apply_end")
+            | ("event_msg", "web_search_end") => {
+                if lifecycle_plan.paired.contains_key(&record.ordinal) {
+                    // Attached after the walk so web-search end records that
+                    // precede their authoritative response item work without
+                    // order-dependent guesses.
+                } else if lifecycle_plan.ambiguous.contains(&record.ordinal) {
+                    push_unknown(value.clone(), key, record, &mut out);
+                } else {
+                    normalize_lifecycle_event(
+                        payload_type,
+                        payload,
+                        value,
+                        timestamp,
+                        key,
+                        record,
+                        &mut state,
+                        &mut out,
+                    );
+                }
+            }
             // Everything else: preserved, honestly unmodeled — a later
             // slice's business.
             _ => {
@@ -539,10 +724,224 @@ pub(super) fn normalize(
     for pending in leftovers {
         push_unknown(pending.value, key, &pending.record, &mut out);
     }
+    attach_paired_lifecycle(records, &lifecycle_plan, key, &mut out);
     // Canonical entry order = record order (late-attached leftovers above
     // would otherwise trail out of place).
     out.entries.sort_by_key(|e| (e.id.ordinal, e.id.subindex));
     out
+}
+
+fn execution_status(payload: &Value) -> Option<ToolExecutionStatus> {
+    payload
+        .get("status")
+        .and_then(Value::as_str)
+        .map(|status| match status {
+            "completed" => ToolExecutionStatus::Completed,
+            "failed" => ToolExecutionStatus::Failed,
+            "declined" => ToolExecutionStatus::Declined,
+            other => ToolExecutionStatus::Other(other.to_string()),
+        })
+}
+
+fn native_duration(payload: &Value) -> Option<Duration> {
+    let duration = payload.get("duration")?;
+    let secs = duration.get("secs")?.as_u64()?;
+    let nanos = u32::try_from(duration.get("nanos")?.as_u64()?).ok()?;
+    (nanos < 1_000_000_000).then(|| Duration::new(secs, nanos))
+}
+
+fn lifecycle_observation(
+    payload_type: &str,
+    payload: &Value,
+    record: &RecordRef,
+) -> Option<ToolLifecycleObservation> {
+    let kind = match payload_type {
+        "exec_command_end" => ToolLifecycleKind::Command,
+        "patch_apply_end" => ToolLifecycleKind::Patch,
+        "web_search_end" => ToolLifecycleKind::Web,
+        _ => return None,
+    };
+    Some(ToolLifecycleObservation {
+        record: record.clone(),
+        kind,
+        status: execution_status(payload),
+        success: payload.get("success").and_then(Value::as_bool),
+        exit_code: payload
+            .get("exit_code")
+            .and_then(Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok()),
+        duration: native_duration(payload),
+        source: payload
+            .get("source")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+fn lifecycle_failed(observation: &ToolLifecycleObservation) -> bool {
+    matches!(
+        observation.status,
+        Some(ToolExecutionStatus::Failed | ToolExecutionStatus::Declined)
+    ) || observation.success == Some(false)
+        || observation.exit_code.is_some_and(|code| code != 0)
+}
+
+fn lifecycle_tool_name(payload_type: &str) -> &'static str {
+    match payload_type {
+        "exec_command_end" => "exec_command",
+        "patch_apply_end" => "apply_patch",
+        "web_search_end" => "web_search",
+        _ => "unknown",
+    }
+}
+
+fn lifecycle_tool_input(payload_type: &str, payload: &Value) -> Value {
+    match payload_type {
+        "exec_command_end" => serde_json::json!({
+            "command": payload.get("command").cloned().unwrap_or(Value::Null),
+            "cwd": payload.get("cwd").cloned().unwrap_or(Value::Null),
+            "parsed_cmd": payload.get("parsed_cmd").cloned().unwrap_or(Value::Null),
+            "source": payload.get("source").cloned().unwrap_or(Value::Null),
+        }),
+        "patch_apply_end" => serde_json::json!({
+            "changes": payload.get("changes").cloned().unwrap_or(Value::Null),
+        }),
+        "web_search_end" => serde_json::json!({
+            "query": payload.get("query").cloned().unwrap_or(Value::Null),
+            "action": payload.get("action").cloned().unwrap_or(Value::Null),
+        }),
+        _ => Value::Null,
+    }
+}
+
+fn lifecycle_result_text(payload_type: &str, payload: &Value) -> Option<String> {
+    match payload_type {
+        "exec_command_end" => {
+            for field in ["formatted_output", "aggregated_output"] {
+                if let Some(text) = payload
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                {
+                    return Some(text.to_string());
+                }
+            }
+            let stdout = payload.get("stdout").and_then(Value::as_str).unwrap_or("");
+            let stderr = payload.get("stderr").and_then(Value::as_str).unwrap_or("");
+            Some(format!("{stdout}{stderr}"))
+        }
+        "patch_apply_end" => {
+            let stdout = payload.get("stdout").and_then(Value::as_str).unwrap_or("");
+            let stderr = payload.get("stderr").and_then(Value::as_str).unwrap_or("");
+            Some(format!("{stdout}{stderr}"))
+        }
+        "web_search_end" => None,
+        _ => None,
+    }
+}
+
+/// Normalize a lifecycle record that has no authoritative response-item call.
+/// Command/patch records produce a ToolUse + ToolResult from one native
+/// record (true 1:N provenance); web records carry no result/status and
+/// therefore produce only a ToolUse without fabricating success.
+#[allow(clippy::too_many_arguments)]
+fn normalize_lifecycle_event(
+    payload_type: &str,
+    payload: &Value,
+    original: &Value,
+    timestamp: DateTime<Utc>,
+    key: &LogicalSessionKey,
+    record: &RecordRef,
+    state: &mut WalkState,
+    out: &mut NormalizeOutput,
+) {
+    let Some(call_id) = payload
+        .get("call_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+    else {
+        push_unknown(original.clone(), key, record, out);
+        return;
+    };
+    let Some(observation) = lifecycle_observation(payload_type, payload, record) else {
+        push_unknown(original.clone(), key, record, out);
+        return;
+    };
+    let name = lifecycle_tool_name(payload_type).to_string();
+    let idx = push_lifecycle_tool_use(
+        &call_id,
+        &name,
+        lifecycle_tool_input(payload_type, payload),
+        timestamp,
+        key,
+        record,
+        state,
+        out,
+    );
+    let id = out.entries[idx].id.clone();
+    out.semantics
+        .get_mut(&id)
+        .expect("mapped lifecycle tool call has semantics")
+        .tools
+        .insert(
+            call_id.clone(),
+            ToolSemantics {
+                kind: classify_tool(&name),
+                native_name: name,
+                lifecycle: vec![observation.clone()],
+            },
+        );
+
+    if let Some(output) = lifecycle_result_text(payload_type, payload) {
+        push_secondary_tool_result(
+            &call_id,
+            output,
+            lifecycle_failed(&observation),
+            timestamp,
+            key,
+            record,
+            state,
+            out,
+        );
+    }
+}
+
+fn attach_paired_lifecycle(
+    records: &[(RecordRef, Value)],
+    plan: &LifecyclePlan,
+    key: &LogicalSessionKey,
+    out: &mut NormalizeOutput,
+) {
+    for (record, value) in records {
+        let Some(pair) = plan.paired.get(&record.ordinal) else {
+            continue;
+        };
+        let (_, payload, payload_type) = envelope_parts(value);
+        let target = EntryId::deterministic(key, pair.target_ordinal, 0);
+        let Some(observation) = lifecycle_observation(payload_type, payload, record) else {
+            push_unknown(value.clone(), key, record, out);
+            continue;
+        };
+        let Some(tool) = out
+            .semantics
+            .get_mut(&target)
+            .and_then(|semantics| semantics.tools.get_mut(&pair.call_id))
+        else {
+            push_unknown(value.clone(), key, record, out);
+            continue;
+        };
+        tool.lifecycle.push(observation);
+        out.entry_origins
+            .get_mut(&target)
+            .expect("paired tool call has origins")
+            .push(record.clone());
+        out.diagnostics.mapped += 1;
+        out.record_dispositions.push(RecordDisposition {
+            record: record.clone(),
+            outcome: RecordOutcome::Mapped(vec![target]),
+        });
+    }
 }
 
 /// The per-item turn carrier: `internal_chat_message_metadata_passthrough`
@@ -786,6 +1185,7 @@ fn normalize_tool_call(
             ToolSemantics {
                 kind: classify_tool(&name),
                 native_name: name,
+                lifecycle: Vec::new(),
             },
         );
     }
@@ -833,6 +1233,7 @@ fn normalize_web_search(
             ToolSemantics {
                 kind: ToolKind::Web,
                 native_name: "web_search".into(),
+                lifecycle: Vec::new(),
             },
         );
     }
@@ -1193,6 +1594,136 @@ fn push_mapped(
 
 fn synthetic_uuid(key: &LogicalSessionKey, ordinal: u64) -> String {
     EntryId::deterministic(key, ordinal, 0).to_string()
+}
+
+fn synthetic_uuid_at(key: &LogicalSessionKey, ordinal: u64, subindex: u32) -> String {
+    EntryId::deterministic(key, ordinal, subindex).to_string()
+}
+
+/// An event-only lifecycle call is a tool emission, but not a model response
+/// and therefore must never become the owner of pending model-token usage.
+#[allow(clippy::too_many_arguments)]
+fn push_lifecycle_tool_use(
+    call_id: &str,
+    name: &str,
+    input: Value,
+    timestamp: DateTime<Utc>,
+    key: &LogicalSessionKey,
+    record: &RecordRef,
+    state: &mut WalkState,
+    out: &mut NormalizeOutput,
+) -> usize {
+    let parent = state.last_uuid.clone();
+    let entry = LogEntry::Assistant(AssistantMessage {
+        uuid: synthetic_uuid(key, record.ordinal),
+        parent_uuid: parent,
+        timestamp,
+        session_id: key.native_id.clone(),
+        version: state.version.clone(),
+        cwd: state.cwd.clone(),
+        git_branch: None,
+        user_type: None,
+        is_sidechain: false,
+        is_teammate: None,
+        agent_id: None,
+        slug: None,
+        request_id: None,
+        is_api_error_message: None,
+        message: AssistantContent {
+            id: synthetic_uuid(key, record.ordinal),
+            msg_type: "message".into(),
+            role: "assistant".into(),
+            model: state.model.clone(),
+            content: vec![ContentBlock::ToolUse(ToolUse {
+                id: call_id.to_string(),
+                name: name.to_string(),
+                input,
+                extra: indexmap::IndexMap::default(),
+            })],
+            stop_reason: None,
+            stop_sequence: None,
+            usage: None,
+            container: None,
+            context_management: None,
+            extra: indexmap::IndexMap::default(),
+        },
+        extra: indexmap::IndexMap::default(),
+    });
+    push_mapped(entry, key, record, state, out)
+}
+
+/// Add the ToolResult half of a one-record -> two-entry lifecycle mapping.
+/// The first ToolUse already created the record disposition and diagnostics;
+/// this helper extends that same mapping rather than double-counting it.
+#[allow(clippy::too_many_arguments)]
+fn push_secondary_tool_result(
+    call_id: &str,
+    output: String,
+    is_error: bool,
+    timestamp: DateTime<Utc>,
+    key: &LogicalSessionKey,
+    record: &RecordRef,
+    state: &mut WalkState,
+    out: &mut NormalizeOutput,
+) -> usize {
+    let id = EntryId::deterministic(key, record.ordinal, 1);
+    let parent = state.last_uuid.clone();
+    let entry = LogEntry::User(UserMessage {
+        uuid: synthetic_uuid_at(key, record.ordinal, 1),
+        parent_uuid: parent,
+        timestamp,
+        session_id: key.native_id.clone(),
+        version: state.version.clone(),
+        cwd: state.cwd.clone(),
+        git_branch: None,
+        user_type: None,
+        is_sidechain: false,
+        is_teammate: None,
+        agent_id: None,
+        slug: None,
+        is_meta: None,
+        is_compact_summary: None,
+        is_visible_in_transcript_only: None,
+        thinking_metadata: None,
+        todos: Vec::new(),
+        tool_use_result: None,
+        message: UserContent::Blocks(UserBlocksContent {
+            role: "user".into(),
+            content: vec![ContentBlock::ToolResult(ToolResult {
+                tool_use_id: call_id.to_string(),
+                content: Some(ToolResultContent::String(output)),
+                is_error: Some(is_error),
+                extra: indexmap::IndexMap::default(),
+            })],
+            extra: indexmap::IndexMap::default(),
+        }),
+        extra: indexmap::IndexMap::default(),
+    });
+    out.entry_origins.insert(id.clone(), vec![record.clone()]);
+    out.semantics.insert(
+        id.clone(),
+        EntrySemantics {
+            activity: ActivityKind::New,
+            prompt: Some(PromptSemantics {
+                authorship: PromptAuthorship::Tool,
+                delivery: PromptDelivery::MidTurn,
+            }),
+            turn_id: state.turn_id.clone(),
+            ..Default::default()
+        },
+    );
+    let disposition = out
+        .record_dispositions
+        .iter_mut()
+        .find(|disposition| disposition.record == *record)
+        .expect("primary lifecycle entry created a record disposition");
+    let RecordOutcome::Mapped(entries) = &mut disposition.outcome else {
+        unreachable!("primary lifecycle entry is mapped")
+    };
+    entries.push(id.clone());
+    state.last_uuid = Some(id.to_string());
+    out.entries.push(IdentifiedEntry { id, entry });
+    out.entries.len() - 1
 }
 
 fn push_assistant(

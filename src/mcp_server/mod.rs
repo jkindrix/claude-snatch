@@ -70,7 +70,8 @@ use types::{
     SessionLessonsResponse, SessionMessagesResponse, SessionSummary, SessionTimelineResponse,
     StatsResponse, SubagentSummary, SuggestPrioritiesRequest, SuggestPrioritiesResponse,
     ThreadExchangeEntry, ThreadTopicRequest, ThreadTopicResponse, TimelineTurn, ToolCallEntry,
-    ToolCallsResponse, ToolCallsSummary, ToolDetail, UnmatchedSubagent, UserCorrection,
+    ToolCallsResponse, ToolCallsSummary, ToolDetail, ToolLifecycleEntry, UnmatchedSubagent,
+    UserCorrection,
 };
 
 // ============================================================================
@@ -2388,9 +2389,14 @@ impl SnatchServer {
         // included via tree-based membership).
         let main_entries = if let Some(ref spec) = request.chunk {
             use crate::analysis::chunking::{
-                chunk_conversation, entries_for_chunk_range, parse_chunk_spec,
+                chunk_conversation, chunk_conversation_semantic, entries_for_chunk_range,
+                parse_chunk_spec,
             };
-            let chunking = chunk_conversation(&resolved.conversation);
+            let chunking = if resolved.semantic_annotations {
+                chunk_conversation_semantic(&resolved.conversation)
+            } else {
+                chunk_conversation(&resolved.conversation)
+            };
             let (start, end) = match parse_chunk_spec(spec, chunking.len()) {
                 Ok(range) => range,
                 Err(message) => return ToolOutput::error(format!("Invalid chunk: {message}")),
@@ -2408,6 +2414,7 @@ impl SnatchServer {
             failure: Option<crate::analysis::lessons::FailureClassification>,
             error_text: Option<String>,
             result_text: Option<String>,
+            lifecycle: Option<Vec<ToolLifecycleEntry>>,
         }
 
         let mut all_calls: Vec<ToolCallWithResult> = Vec::new();
@@ -2473,6 +2480,27 @@ impl SnatchServer {
                         .get(&tool_use.id)
                         .cloned()
                         .unwrap_or((None, None, None));
+                    let lifecycle = semantics
+                        .get(&tool_use.id)
+                        .map(|tool| {
+                            tool.lifecycle
+                                .iter()
+                                .map(|observation| ToolLifecycleEntry {
+                                    kind: observation.kind.as_str().to_string(),
+                                    status: observation
+                                        .status
+                                        .as_ref()
+                                        .map(|status| status.as_str().to_string()),
+                                    success: observation.success,
+                                    exit_code: observation.exit_code,
+                                    duration_ms: observation
+                                        .duration
+                                        .map(|duration| duration.as_secs_f64() * 1_000.0),
+                                    source: observation.source.clone(),
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .filter(|items| !items.is_empty());
 
                     all_calls.push(ToolCallWithResult {
                         timestamp: timestamp.clone(),
@@ -2481,6 +2509,7 @@ impl SnatchServer {
                         failure,
                         error_text,
                         result_text,
+                        lifecycle,
                     });
                 }
             }
@@ -2567,11 +2596,18 @@ impl SnatchServer {
                     failure_basis: call.failure.map(|failure| failure.basis),
                     error_preview: call.error_text,
                     result_preview: call.result_text,
+                    lifecycle: call.lifecycle,
                 }
             })
             .collect();
 
         let returned = paginated.len();
+        let entry_scope = match (resolved.semantic_annotations, request.chunk.is_some()) {
+            (true, true) => "semantic_chunk",
+            (true, false) => "semantic_main_thread",
+            (false, true) => "chunk",
+            (false, false) => "main_thread",
+        };
 
         let mut written: Vec<String> = files_written.into_iter().collect();
         written.sort();
@@ -2593,7 +2629,7 @@ impl SnatchServer {
                 confirmed_tool_failures,
                 inferred_failure_signals,
                 selected_failure_kind: failure_kind.to_string(),
-                entry_scope: "main_thread".to_string(),
+                entry_scope: entry_scope.to_string(),
             },
         };
 
@@ -4452,6 +4488,15 @@ mod tests {
                     "call_id": "call-1", "arguments": "{\"cmd\":\"cargo check\"}"}),
             ),
             line(
+                "event_msg",
+                serde_json::json!({"type": "exec_command_end", "call_id": "call-1",
+                    "turn_id": "turn-1", "command": ["cargo", "check"], "cwd": "/tmp",
+                    "parsed_cmd": [], "source": "unified_exec_startup", "stdout": "",
+                    "stderr": "compile failed", "aggregated_output": "compile failed",
+                    "formatted_output": "", "exit_code": 101,
+                    "duration": {"secs": 2, "nanos": 500_000_000}, "status": "failed"}),
+            ),
+            line(
                 "response_item",
                 serde_json::json!({"type": "function_call_output", "call_id": "call-1",
                     "output": "Process exited with code 101\nFinal output:\ncompile failed"}),
@@ -4898,6 +4943,44 @@ mod tests {
         assert_eq!(tool_calls["summary"]["inferred_failure_signals"], 0);
         assert_eq!(tool_calls["tool_calls"][0]["failure_kind"], "confirmed");
         assert_eq!(tool_calls["tool_calls"][0]["failure_basis"], "process_exit");
+        assert_eq!(
+            tool_calls["tool_calls"][0]["lifecycle"][0]["kind"],
+            "command"
+        );
+        assert_eq!(
+            tool_calls["tool_calls"][0]["lifecycle"][0]["status"],
+            "failed"
+        );
+        assert_eq!(
+            tool_calls["tool_calls"][0]["lifecycle"][0]["exit_code"],
+            101
+        );
+        assert_eq!(
+            tool_calls["tool_calls"][0]["lifecycle"][0]["duration_ms"],
+            2500.0
+        );
+
+        let scoped = unwrap_output(
+            server
+                .get_tool_calls(GetToolCallsRequest {
+                    session_id: qualified.clone(),
+                    provider: None,
+                    tool_filter: None,
+                    errors_only: None,
+                    failure_kind: None,
+                    chunk: Some("0".into()),
+                    limit: None,
+                    offset: None,
+                })
+                .await,
+        );
+        let scoped: serde_json::Value = serde_json::from_str(&scoped).unwrap();
+        assert_eq!(scoped["total_tool_calls"], 1);
+        assert_eq!(
+            scoped["summary"]["entry_scope"],
+            "semantic_chunk",
+            "tool-call chunking must use the provider's prompt semantics rather than treating harness context as a human boundary"
+        );
 
         let digest = unwrap_output(
             server
