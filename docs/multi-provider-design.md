@@ -47,24 +47,23 @@ Provider-qualified and explicitly selected routes now cover every
 provider-neutral CLI analysis/discovery candidate identified by the audit,
 including `digest`, `thread`, session-mode `stats`, prompts/code/context/diff,
 recent/summary/health/priorities/standup, and the interactive picker. MCP has
-the corresponding routed session/project analyses except search.
+the corresponding routed session/project analyses, including indexed search.
 The complete CLI audit is:
 
-- **Already routed (24):** `list`, `info`, `providers`, `doctor`, `lessons`,
+- **Already routed (29):** `list`, `info`, `providers`, `doctor`, `lessons`,
   `digest`, `thread`, `timeline`, `messages`, `chunks`, `file-history`,
   `file-evolution`, `stats`, `prompts`, `code`, `context`, `diff`, `recent`,
-  `summary`, `health`, `priorities`, `standup`, `pick`, and `export`.
+  `summary`, `health`, `priorities`, `standup`, `pick`, `export`, `search`,
+  `index`, `chain`, `validate`, and `tag`.
 - **Provider-neutral analysis/discovery candidates (0):** the audited set is
   routed. Remaining commands below require new capabilities, identity/storage
   migration, or are deliberately provider-scoped/independent.
-- **New provider capability or infrastructure required (8):** `search` and
-  `index` need a versioned cross-provider index; `recover` needs an
-  evidence-bounded recovery contract; `chain` needs typed lineage rather than Claude continuation-only
-  assumptions; `grab` needs provider-neutral session-graph bundling; `watch`
-  needs an active-artifact stream capability; and `validate`/`cleanup` need
-  provider-owned validation and destructive-artifact contracts.
-- **Metadata migration (1):** `tag` stores unqualified native IDs and must
-  migrate to structured logical keys before provider routing.
+- **New provider capability or infrastructure required (4):** `recover` needs
+  an evidence-bounded recovery contract; `grab` needs provider-neutral
+  session-graph bundling; `watch` needs an active-artifact stream capability;
+  and `cleanup` needs a provider-owned destructive-artifact contract.
+- **Metadata migration (complete):** `tag` persists structured logical keys,
+  routes qualified mutations, and joins exact-key metadata in its consumers.
 - **Provider-specific by design (1):** `extract` reads Claude configuration
   and project-memory structures. It remains explicitly Claude-specific unless
   a real provider-configuration abstraction is designed.
@@ -2244,8 +2243,9 @@ uses project inventory without requesting lineage at all and shows one row per
 logical provider session—not one row per physical artifact, since a provider
 session may have plain/compressed/archive twins. Sorting is latest source
 modification descending with qualified identity as the stable tie-breaker;
-the limit applies after continuation collapse. Qualified tag/name/bookmark
-metadata is intentionally absent until the tag store migration in P1.7.
+the limit applies after continuation collapse. Qualified name, tag, bookmark,
+and outcome metadata is joined to the logical root from the v2 tag store
+without parsing session contents.
 
 JSON provider output is wrapped with the pre-limit total, skipped providers,
 and project-context warnings; classic JSON remains its historical bare array.
@@ -2828,8 +2828,14 @@ refused until its project, tool, time, usage, and tag evidence has a typed
 cross-provider definition. Tests pin both refusals before persistence, equal
 native ids across providers, stale-source edits, qualified-selection mismatch,
 and the unchanged flagless Claude behavior. Qualified metadata in
-`info`/`list`/`recent` lands in the next slice, after each consumer stops
-swallowing store-load failures.
+`info`, `list`, and `recent` now join metadata by exact logical identity and
+propagate malformed or future-store errors instead of presenting them as an
+empty store. Provider `list` supports the established name, tag, bookmark, and
+outcome filters; filtering occurs before project totals and empty-project
+removal, so project/session counts describe the selected rows. Provider
+`recent` attaches root metadata after continuation grouping, and provider
+`info` exposes the complete metadata object. Same-native-id poison fixtures
+prove that none of these consumers falls back to a provider-blind lookup.
 
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".

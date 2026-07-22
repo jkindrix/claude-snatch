@@ -71,6 +71,13 @@ struct ProviderRecentRow {
     project: String,
     modified: Option<DateTime<Utc>>,
     size_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    bookmarked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -98,7 +105,7 @@ struct ProviderRecentOutput {
 /// This deliberately stays descriptor-only: recent-session discovery must not
 /// parse every transcript merely to obtain an entry count. Continuations are
 /// collapsed from typed lineage, while forks and spawned sessions remain
-/// independent rows. Tags are omitted until their store uses qualified keys.
+/// independent rows. Persistent metadata is joined by the logical root key.
 fn run_provider(cli: &Cli, args: &RecentArgs) -> Result<()> {
     let selection = ProviderSelection::from_flags(&args.provider).map_err(|reason| {
         crate::error::SnatchError::InvalidArgument {
@@ -107,6 +114,7 @@ fn run_provider(cli: &Cli, args: &RecentArgs) -> Result<()> {
         }
     })?;
     let registry = super::helpers::provider_registry(cli);
+    let tag_store = TagStore::load()?;
 
     // A flat descriptor view does not need lineage and therefore must not
     // fail merely because a provider's lineage capability is unavailable.
@@ -132,7 +140,7 @@ fn run_provider(cli: &Cli, args: &RecentArgs) -> Result<()> {
         projects.retain(|project| project.matches(filter));
     }
 
-    let mut rows = provider_recent_rows(&projects, &lineage, args.no_chain);
+    let mut rows = provider_recent_rows(&projects, &lineage, args.no_chain, &tag_store);
     rows.sort_by(|a, b| {
         b.modified
             .cmp(&a.modified)
@@ -168,11 +176,11 @@ fn run_provider(cli: &Cli, args: &RecentArgs) -> Result<()> {
         }
         OutputFormat::Tsv => {
             println!(
-                "qualified_id\tproject\tmodified\tsize\tcontinuation_members\tlatest_qualified_id"
+                "qualified_id\tproject\tmodified\tsize\tcontinuation_members\tlatest_qualified_id\tname\ttags\tbookmarked\toutcome"
             );
             for row in &rows {
                 println!(
-                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     row.qualified_id,
                     row.project,
                     row.modified
@@ -180,22 +188,32 @@ fn run_provider(cli: &Cli, args: &RecentArgs) -> Result<()> {
                     row.size_bytes,
                     row.continuation_member_count,
                     row.latest_qualified_id,
+                    row.name.as_deref().unwrap_or(""),
+                    row.tags.join(","),
+                    row.bookmarked,
+                    row.outcome.as_deref().unwrap_or(""),
                 );
             }
         }
         OutputFormat::Compact => {
             for row in &rows {
                 let project = truncate_path(&row.project, 40);
+                let marker = if row.bookmarked { "★ " } else { "" };
+                let name = row
+                    .name
+                    .as_deref()
+                    .map(|value| format!(" \"{value}\""))
+                    .unwrap_or_default();
                 if row.continuation_member_count > 1 {
                     println!(
-                        "{} {} (continuation: {}, latest {})",
+                        "{marker}{}{name} {} (continuation: {}, latest {})",
                         row.qualified_id,
                         project,
                         row.continuation_member_count,
                         row.latest_qualified_id,
                     );
                 } else {
-                    println!("{} {project}", row.qualified_id);
+                    println!("{marker}{}{name} {project}", row.qualified_id);
                 }
             }
         }
@@ -224,10 +242,20 @@ fn run_provider(cli: &Cli, args: &RecentArgs) -> Result<()> {
                     } else {
                         String::new()
                     };
+                    let marker = if row.bookmarked { "★ " } else { "" };
                     println!(
-                        "  {} │ {:45} │ {} │ {}",
+                        "  {marker}{} │ {:45} │ {} │ {}",
                         row.qualified_id, project, time, detail
                     );
+                    if let Some(name) = &row.name {
+                        println!("    Name: {name}");
+                    }
+                    if !row.tags.is_empty() {
+                        println!("    Tags: {}", row.tags.join(", "));
+                    }
+                    if let Some(outcome) = &row.outcome {
+                        println!("    Outcome: {outcome}");
+                    }
                 }
                 println!();
                 println!("Tip: Use 'snatch info <qualified-id>' for details.");
@@ -251,6 +279,7 @@ fn provider_recent_rows(
     projects: &[UnifiedProject],
     lineage: &[LineageEdge],
     no_chain: bool,
+    tag_store: &TagStore,
 ) -> Vec<ProviderRecentRow> {
     let mut rows = Vec::new();
     for project in projects {
@@ -282,7 +311,7 @@ fn provider_recent_rows(
                 members
                     .values()
                     .cloned()
-                    .map(|member| provider_recent_row(vec![member])),
+                    .map(|member| provider_recent_row(vec![member], tag_store)),
             );
             continue;
         }
@@ -325,6 +354,7 @@ fn provider_recent_rows(
             grouped.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.key.cmp(&b.1.key)));
             rows.push(provider_recent_row(
                 grouped.into_iter().map(|(_, member)| member).collect(),
+                tag_store,
             ));
         }
     }
@@ -363,12 +393,16 @@ fn continuation_root(
     }
 }
 
-fn provider_recent_row(members: Vec<ProviderRecentMember>) -> ProviderRecentRow {
+fn provider_recent_row(
+    members: Vec<ProviderRecentMember>,
+    tag_store: &TagStore,
+) -> ProviderRecentRow {
     let root = members.first().expect("recent group is non-empty");
     let latest = members
         .iter()
         .max_by(|a, b| a.modified.cmp(&b.modified).then_with(|| a.key.cmp(&b.key)))
         .expect("recent group is non-empty");
+    let metadata = tag_store.get_key(&root.key);
     ProviderRecentRow {
         provider: root.key.provider.to_string(),
         qualified_id: root.key.to_string(),
@@ -385,6 +419,12 @@ fn provider_recent_row(members: Vec<ProviderRecentMember>) -> ProviderRecentRow 
         size_bytes: members.iter().fold(0_u64, |total, member| {
             total.saturating_add(member.size_bytes)
         }),
+        name: metadata.and_then(|value| value.name.clone()),
+        tags: metadata.map(|value| value.tags.clone()).unwrap_or_default(),
+        bookmarked: metadata.is_some_and(|value| value.bookmarked),
+        outcome: metadata
+            .and_then(|value| value.outcome)
+            .map(|value| value.to_string()),
     }
 }
 
@@ -792,7 +832,8 @@ mod tests {
             },
         ];
 
-        let rows = provider_recent_rows(std::slice::from_ref(&project), &lineage, false);
+        let store = TagStore::default();
+        let rows = provider_recent_rows(std::slice::from_ref(&project), &lineage, false, &store);
         assert_eq!(rows.len(), 3);
         let root = rows
             .iter()
@@ -807,7 +848,7 @@ mod tests {
             .iter()
             .any(|row| { row.native_id == "spawn" && row.continuation_member_count == 1 }));
 
-        let flat = provider_recent_rows(&[project], &lineage, true);
+        let flat = provider_recent_rows(&[project], &lineage, true, &store);
         assert_eq!(flat.len(), 4);
         assert!(flat.iter().all(|row| row.continuation_member_count == 1));
     }

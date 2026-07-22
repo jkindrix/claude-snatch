@@ -9,7 +9,7 @@ use crate::discovery::{Project, Session, SessionFilter};
 use crate::error::Result;
 use crate::model::LogEntry;
 use crate::parser::JsonlParser;
-use crate::tags::TagStore;
+use crate::tags::{SessionMeta, TagStore};
 use crate::util::pager::PagerWriter;
 
 use super::{get_claude_dir, parse_size};
@@ -270,7 +270,7 @@ fn list_sessions_flat<W: Write>(
     }
 
     // Load TagStore for metadata-based filtering
-    let tag_store = TagStore::load().unwrap_or_default();
+    let tag_store = TagStore::load()?;
 
     // Apply tag filters
     let tag_filters: Vec<&str> = {
@@ -654,7 +654,7 @@ fn list_sessions_collapsed<W: Write>(
         None => None,
     };
 
-    let tag_store = TagStore::load().unwrap_or_default();
+    let tag_store = TagStore::load()?;
 
     // Active filter (any member).
     if args.active {
@@ -1311,6 +1311,51 @@ impl LogicalSessionInfo {
     }
 }
 
+fn provider_metadata_matches(
+    metadata: Option<&SessionMeta>,
+    tag_filters: &[&str],
+    bookmarked: bool,
+    outcome_filter: Option<&str>,
+    name_filter: Option<&str>,
+) -> bool {
+    if tag_filters.is_empty() && !bookmarked && outcome_filter.is_none() && name_filter.is_none() {
+        return true;
+    }
+    let Some(metadata) = metadata else {
+        return false;
+    };
+    if !tag_filters.is_empty()
+        && !tag_filters
+            .iter()
+            .any(|filter| metadata.tags.iter().any(|tag| tag.contains(filter)))
+    {
+        return false;
+    }
+    if bookmarked && !metadata.bookmarked {
+        return false;
+    }
+    if let Some(filter) = outcome_filter {
+        let filter = filter.to_lowercase();
+        if !metadata
+            .outcome
+            .is_some_and(|outcome| outcome.to_string().contains(&filter))
+        {
+            return false;
+        }
+    }
+    if let Some(filter) = name_filter {
+        let filter = filter.to_lowercase();
+        if !metadata
+            .name
+            .as_deref()
+            .is_some_and(|name| name.to_lowercase().contains(&filter))
+        {
+            return false;
+        }
+    }
+    true
+}
+
 /// Provider-neutral project/session listing. Phase D groups sessions by
 /// credential-free git identity, local git root, or cwd (in that order) and
 /// uses the same groups for project rows and session `--project` filtering.
@@ -1362,11 +1407,6 @@ fn list_provider_sessions(cli: &Cli, args: &ListArgs) -> Result<()> {
             ("--pager", *pager),
             ("--since", since.is_some()),
             ("--until", until.is_some()),
-            ("--tag", tag.is_some()),
-            ("--tags", tags.is_some()),
-            ("--bookmarked", *bookmarked),
-            ("--outcome", outcome.is_some()),
-            ("--by-name", by_name.is_some()),
             ("--min-size", min_size.is_some()),
             ("--max-size", max_size.is_some()),
             ("--context", *context),
@@ -1382,6 +1422,22 @@ fn list_provider_sessions(cli: &Cli, args: &ListArgs) -> Result<()> {
             reason,
         }
     })?;
+    let tag_filters: Vec<&str> = tag
+        .iter()
+        .map(String::as_str)
+        .chain(
+            tags.as_deref()
+                .into_iter()
+                .flat_map(|values| values.split(',').map(str::trim)),
+        )
+        .collect();
+    let metadata_filter_active =
+        !tag_filters.is_empty() || *bookmarked || outcome.is_some() || by_name.is_some();
+    let tag_store = if metadata_filter_active || *target != ListTarget::Projects {
+        TagStore::load()?
+    } else {
+        TagStore::default()
+    };
     let registry = super::helpers::provider_registry(cli);
     // Thin renderer: provider failures, project-evidence fallback, and
     // deterministic grouping are enforced centrally in the registry.
@@ -1391,6 +1447,28 @@ fn list_provider_sessions(cli: &Cli, args: &ListArgs) -> Result<()> {
     let mut projects = collected.projects;
     if let Some(filter) = project {
         projects.retain(|candidate| candidate.matches(filter));
+    }
+
+    if metadata_filter_active {
+        for project in &mut projects {
+            project.sessions.retain(|session| {
+                provider_metadata_matches(
+                    tag_store.get_key(&session.descriptor.key),
+                    &tag_filters,
+                    *bookmarked,
+                    outcome.as_deref(),
+                    by_name.as_deref(),
+                )
+            });
+            project.providers = project
+                .sessions
+                .iter()
+                .map(|session| session.descriptor.key.provider.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+        }
+        projects.retain(|project| !project.sessions.is_empty());
     }
 
     match sort {
@@ -1435,6 +1513,7 @@ fn list_provider_sessions(cli: &Cli, args: &ListArgs) -> Result<()> {
     for project in &projects {
         for session in &project.sessions {
             let descriptor = &session.descriptor;
+            let metadata = tag_store.get_key(&descriptor.key);
             let artifacts: Vec<serde_json::Value> = descriptor
                 .artifacts
                 .iter()
@@ -1462,6 +1541,14 @@ fn list_provider_sessions(cli: &Cli, args: &ListArgs) -> Result<()> {
                 "modified": session.context.modified_at.map(|value| value.to_rfc3339()),
                 "size": session.context.artifact_bytes,
                 "artifacts": artifacts,
+                "name": metadata.and_then(|value| value.name.as_deref()),
+                "tags": metadata.map(|value| value.tags.as_slice()).unwrap_or_default(),
+                "bookmarked": metadata.is_some_and(|value| value.bookmarked),
+                "outcome": metadata.and_then(|value| value.outcome).map(|value| value.to_string()),
+                "note_count": metadata.map_or(0, |value| value.notes.len()),
+                "linked_sessions": metadata
+                    .map(|value| value.linked_sessions.iter().map(ToString::to_string).collect::<Vec<_>>())
+                    .unwrap_or_default(),
             }));
         }
     }
@@ -1579,12 +1666,33 @@ fn list_provider_sessions(cli: &Cli, args: &ListArgs) -> Result<()> {
                     crate::discovery::format_size(row["size"].as_u64().unwrap_or(0))
                 ));
             }
+            let marker = if row["bookmarked"] == true {
+                "★ "
+            } else {
+                ""
+            };
+            let name = row["name"]
+                .as_str()
+                .map(|value| format!(" \"{value}\""))
+                .unwrap_or_default();
             println!(
-                "{}  [{}]\n  Project: {}",
+                "{marker}{}{name}  [{}]\n  Project: {}",
                 row["qualified_id"].as_str().unwrap(),
                 summary,
                 row["project_path"].as_str().unwrap_or("(unavailable)")
             );
+            if let Some(tags) = row["tags"].as_array().filter(|tags| !tags.is_empty()) {
+                println!(
+                    "  Tags: {}",
+                    tags.iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            if let Some(outcome) = row["outcome"].as_str() {
+                println!("  Outcome: {outcome}");
+            }
         }
         if session_rows.len() < session_total {
             println!(

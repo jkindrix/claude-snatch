@@ -180,7 +180,7 @@ fn show_session_info(
     let pr_links = collect_pr_links(session, cli.max_file_size);
 
     // Load tags/bookmarks for this session
-    let tag_store = TagStore::load().unwrap_or_default();
+    let tag_store = TagStore::load()?;
     let session_meta = tag_store.get(&summary.session_id);
 
     // Look up chain info
@@ -1186,6 +1186,8 @@ fn show_provider_session_info(
     let resolution = registry.resolve_with_default_policy(&args.provider, target)?;
     let provider = resolution.provider;
     let key = &resolution.key;
+    let tag_store = TagStore::load()?;
+    let session_metadata = tag_store.get_key(key);
 
     // The complete parsed bundle — provenance, semantics, and diagnostics
     // travel with the entries through cache and reconstruction alike.
@@ -1240,6 +1242,7 @@ fn show_provider_session_info(
         },
         "semantic_annotations": parsed.semantics.len(),
         "usage": usage,
+        "metadata": session_metadata,
         "capabilities": {
             "native_export": capabilities.native_export,
             "raw_jsonl": capabilities.raw_jsonl,
@@ -1274,6 +1277,26 @@ fn show_provider_session_info(
         disp["mapped"], disp["suppressed"], disp["unknown"], disp["recovered"], disp["unparseable"],
     );
     println!("Semantic annotations: {}", report["semantic_annotations"]);
+    if let Some(metadata) = session_metadata {
+        if let Some(name) = &metadata.name {
+            println!("Name: {name}");
+        }
+        if !metadata.tags.is_empty() {
+            println!("Tags: {}", metadata.tags.join(", "));
+        }
+        if metadata.bookmarked {
+            println!("Bookmarked: yes");
+        }
+        if let Some(outcome) = metadata.outcome {
+            println!("Outcome: {outcome}");
+        }
+        if !metadata.notes.is_empty() {
+            println!("Notes: {}", metadata.notes.len());
+        }
+        if !metadata.linked_sessions.is_empty() {
+            println!("Linked sessions: {}", metadata.linked_sessions.len());
+        }
+    }
     let usage = &report["usage"];
     let canonical = &usage["canonical"];
     println!(
