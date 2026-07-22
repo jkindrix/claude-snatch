@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockWriteGuard};
 use serde::{Deserialize, Serialize};
 use tantivy::collector::DocSetCollector;
 use tantivy::query::AllQuery;
@@ -127,6 +127,77 @@ pub struct ProviderIndexBuildManifest {
     pub removal_coverage_complete: bool,
     /// Provider/session failures preserved under a partial `all` build.
     pub skipped: Vec<IndexedSkip>,
+    /// Non-fatal coverage warnings retained for successfully indexed
+    /// sessions (for example, project identity falling back to session id).
+    #[serde(default)]
+    pub warnings: Vec<IndexedSkip>,
+}
+
+fn validate_indexed_records(
+    generation: &str,
+    label: &str,
+    records: &[IndexedSkip],
+    selected: &BTreeSet<String>,
+    complete: &BTreeSet<String>,
+    reject_complete_provider: bool,
+    violations: &mut Vec<String>,
+) {
+    if !records.windows(2).all(|pair| pair[0] < pair[1]) {
+        violations.push(format!(
+            "generation {generation} has duplicate or unsorted {label} records"
+        ));
+    }
+    for record in records {
+        if record.provider.is_none() && record.session_key.is_none() {
+            violations.push(format!(
+                "generation {generation} has a {label} without a provider or session"
+            ));
+        }
+        if record.reason.is_empty() {
+            violations.push(format!(
+                "generation {generation} has a {label} with an empty reason"
+            ));
+        }
+        let session_provider = record.session_key.as_deref().and_then(|session_key| {
+            match session_key.parse::<LogicalSessionKey>() {
+                Ok(key) if key.to_string() == session_key => Some(key.provider.to_string()),
+                Ok(_) => {
+                    violations.push(format!(
+                        "generation {generation} {label} session '{session_key}' is not canonical"
+                    ));
+                    None
+                }
+                Err(error) => {
+                    violations.push(format!(
+                        "generation {generation} {label} session '{session_key}' is invalid: {error}"
+                    ));
+                    None
+                }
+            }
+        });
+        let provider = record.provider.as_ref().or(session_provider.as_ref());
+        if let Some(provider) = provider {
+            if !selected.contains(provider) {
+                violations.push(format!(
+                    "generation {generation} {label} belongs to unselected provider {provider}"
+                ));
+            }
+            if reject_complete_provider && complete.contains(provider) {
+                violations.push(format!(
+                    "generation {generation} marks provider {provider} both complete and skipped"
+                ));
+            }
+        }
+        if let (Some(provider), Some(session_provider)) =
+            (record.provider.as_ref(), session_provider.as_ref())
+        {
+            if provider != session_provider {
+                violations.push(format!(
+                    "generation {generation} {label} provider {provider} disagrees with session provider {session_provider}"
+                ));
+            }
+        }
+    }
 }
 
 impl ProviderIndexBuildManifest {
@@ -175,70 +246,24 @@ impl ProviderIndexBuildManifest {
             ));
         }
 
-        if !self.skipped.windows(2).all(|pair| pair[0] < pair[1]) {
-            violations.push(format!(
-                "generation {} has duplicate or unsorted skipped records",
-                self.generation
-            ));
-        }
-        for skip in &self.skipped {
-            if skip.provider.is_none() && skip.session_key.is_none() {
-                violations.push(format!(
-                    "generation {} has a skip without a provider or session",
-                    self.generation
-                ));
-            }
-            if skip.reason.is_empty() {
-                violations.push(format!(
-                    "generation {} has a skip with an empty reason",
-                    self.generation
-                ));
-            }
-            let session_provider = skip.session_key.as_deref().and_then(|session_key| {
-                match session_key.parse::<LogicalSessionKey>() {
-                    Ok(key) if key.to_string() == session_key => Some(key.provider.to_string()),
-                    Ok(_) => {
-                        violations.push(format!(
-                            "generation {} skip session '{}' is not canonical",
-                            self.generation, session_key
-                        ));
-                        None
-                    }
-                    Err(error) => {
-                        violations.push(format!(
-                            "generation {} skip session '{}' is invalid: {error}",
-                            self.generation, session_key
-                        ));
-                        None
-                    }
-                }
-            });
-            let provider = skip.provider.as_ref().or(session_provider.as_ref());
-            if let Some(provider) = provider {
-                if !selected.contains(provider) {
-                    violations.push(format!(
-                        "generation {} skip belongs to unselected provider {}",
-                        self.generation, provider
-                    ));
-                }
-                if complete.contains(provider) {
-                    violations.push(format!(
-                        "generation {} marks provider {} both complete and skipped",
-                        self.generation, provider
-                    ));
-                }
-            }
-            if let (Some(provider), Some(session_provider)) =
-                (skip.provider.as_ref(), session_provider.as_ref())
-            {
-                if provider != session_provider {
-                    violations.push(format!(
-                        "generation {} skip provider {} disagrees with session provider {}",
-                        self.generation, provider, session_provider
-                    ));
-                }
-            }
-        }
+        validate_indexed_records(
+            &self.generation,
+            "skipped",
+            &self.skipped,
+            &selected,
+            &complete,
+            true,
+            &mut violations,
+        );
+        validate_indexed_records(
+            &self.generation,
+            "warning",
+            &self.warnings,
+            &selected,
+            &complete,
+            false,
+            &mut violations,
+        );
 
         if self.removal_coverage_complete && (selected != complete || !self.skipped.is_empty()) {
             violations.push(format!(
@@ -731,6 +756,185 @@ pub struct ProviderSearchIndex {
     path: PathBuf,
 }
 
+/// One bounded writer transaction for a provider-index generation.
+///
+/// Session batches are validated and staged one at a time, so callers do not
+/// retain a corpus of parsed transcripts merely to preserve generation-level
+/// atomicity. Dropping an uncommitted transaction rolls every staged change
+/// back.
+pub struct ProviderIndexTransaction<'a> {
+    index: &'a ProviderSearchIndex,
+    writer: Option<RwLockWriteGuard<'a, IndexWriter>>,
+    generation: String,
+    selected: BTreeSet<String>,
+    batch_keys: BTreeSet<String>,
+    removed_keys: BTreeSet<String>,
+}
+
+impl ProviderIndexTransaction<'_> {
+    fn writer(&mut self) -> Result<&mut IndexWriter> {
+        self.writer.as_deref_mut().ok_or_else(|| {
+            SnatchError::IndexError("provider index transaction is already closed".to_string())
+        })
+    }
+
+    /// Stage an exact replacement for one source-session partition.
+    pub fn replace(&mut self, batch: IndexedSessionBatch) -> Result<()> {
+        let violations = batch.validate();
+        if !violations.is_empty() {
+            return Err(SnatchError::IndexError(violations.join("; ")));
+        }
+        if batch.manifest.generation != self.generation {
+            return Err(SnatchError::IndexError(format!(
+                "session {} generation {} != transaction generation {}",
+                batch.manifest.session_key, batch.manifest.generation, self.generation
+            )));
+        }
+        if !self.selected.contains(&batch.manifest.provider) {
+            return Err(SnatchError::IndexError(format!(
+                "session {} belongs to unselected provider {}",
+                batch.manifest.session_key, batch.manifest.provider
+            )));
+        }
+        if self.removed_keys.contains(&batch.manifest.session_key) {
+            return Err(SnatchError::IndexError(format!(
+                "generation {} both replaces and removes session {}",
+                self.generation, batch.manifest.session_key
+            )));
+        }
+        if self.batch_keys.contains(&batch.manifest.session_key) {
+            return Err(SnatchError::IndexError(format!(
+                "generation {} repeats session {}",
+                self.generation, batch.manifest.session_key
+            )));
+        }
+
+        let session_key = batch.manifest.session_key.clone();
+        let provider = batch.manifest.provider.clone();
+        let session_document = self.index.session_document(&batch.manifest)?;
+        let entry_documents = batch
+            .entries
+            .iter()
+            .map(|entry| {
+                self.index
+                    .entry_document(entry, &provider)
+                    .map(|document| (entry.entry_id.clone(), document))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.batch_keys.insert(session_key.clone());
+        let session_field = self.index.fields.session_key;
+        self.writer()?
+            .delete_term(Term::from_field_text(session_field, &session_key));
+        self.writer()?
+            .add_document(session_document)
+            .map_err(|error| {
+                SnatchError::IndexError(format!(
+                    "failed to stage session manifest {session_key}: {error}"
+                ))
+            })?;
+        for (entry_id, document) in entry_documents {
+            self.writer()?.add_document(document).map_err(|error| {
+                SnatchError::IndexError(format!("failed to stage search entry {entry_id}: {error}"))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Stage removal of one session proven absent from a complete provider
+    /// inventory. Completeness is rechecked against the final build manifest
+    /// at commit time.
+    pub fn remove(&mut self, key: &LogicalSessionKey) -> Result<()> {
+        let provider = key.provider.to_string();
+        if !self.selected.contains(&provider) {
+            return Err(SnatchError::IndexError(format!(
+                "generation {} removes a session from unselected provider {}",
+                self.generation, key.provider
+            )));
+        }
+        let session_key = key.to_string();
+        if self.batch_keys.contains(&session_key) {
+            return Err(SnatchError::IndexError(format!(
+                "generation {} both replaces and removes session {session_key}",
+                self.generation
+            )));
+        }
+        if !self.removed_keys.insert(session_key.clone()) {
+            return Err(SnatchError::IndexError(format!(
+                "generation {} repeats removed session {session_key}",
+                self.generation
+            )));
+        }
+        let session_field = self.index.fields.session_key;
+        self.writer()?
+            .delete_term(Term::from_field_text(session_field, &session_key));
+        Ok(())
+    }
+
+    /// Commit the staged generation and publish it to this index's reader.
+    pub fn commit(mut self, build: &ProviderIndexBuildManifest) -> Result<()> {
+        let violations = build.validate();
+        if !violations.is_empty() {
+            return Err(SnatchError::IndexError(violations.join("; ")));
+        }
+        if build.generation != self.generation {
+            return Err(SnatchError::IndexError(format!(
+                "build generation {} != transaction generation {}",
+                build.generation, self.generation
+            )));
+        }
+        let build_selected: BTreeSet<_> = build.selected_providers.iter().cloned().collect();
+        if build_selected != self.selected {
+            return Err(SnatchError::IndexError(format!(
+                "generation {} changed its selected provider set during staging",
+                self.generation
+            )));
+        }
+        let complete: BTreeSet<_> = build.complete_providers.iter().cloned().collect();
+        for session_key in &self.removed_keys {
+            let key: LogicalSessionKey = session_key.parse().map_err(|error: String| {
+                SnatchError::IndexError(format!(
+                    "removed session key '{session_key}' became invalid: {error}"
+                ))
+            })?;
+            if !complete.contains(&key.provider.to_string()) {
+                return Err(SnatchError::IndexError(format!(
+                    "generation {} removes a session from incomplete provider {}",
+                    self.generation, key.provider
+                )));
+            }
+        }
+
+        let build_document = self.index.build_document(build)?;
+        let build_field = self.index.fields.doc_kind;
+        let writer = self.writer()?;
+        writer.delete_term(Term::from_field_text(build_field, KIND_BUILD));
+        writer.add_document(build_document).map_err(|error| {
+            SnatchError::IndexError(format!("failed to stage build manifest: {error}"))
+        })?;
+        writer.commit().map_err(|error| {
+            SnatchError::IndexError(format!("failed to commit provider index: {error}"))
+        })?;
+        let writer = self
+            .writer
+            .take()
+            .expect("writer remains open until commit");
+        drop(writer);
+        self.index.reader.reload().map_err(|error| {
+            SnatchError::IndexError(format!("failed to reload provider index: {error}"))
+        })?;
+        secure_index_storage(&self.index.path)?;
+        Ok(())
+    }
+}
+
+impl Drop for ProviderIndexTransaction<'_> {
+    fn drop(&mut self) {
+        if let Some(mut writer) = self.writer.take() {
+            let _ = writer.rollback();
+        }
+    }
+}
+
 impl ProviderSearchIndex {
     /// Open or create a provider index. Existing incompatible schemas are
     /// rejected without mutation and require an explicit rebuild.
@@ -860,6 +1064,39 @@ impl ProviderSearchIndex {
         let mut document = self.base_document(KIND_BUILD, "", "");
         document.add_text(self.fields.payload, serde_json::to_string(manifest)?);
         Ok(document)
+    }
+
+    /// Begin a bounded generation transaction. The provider selection is
+    /// fixed up front; completion/skips remain final-manifest facts decided
+    /// after the caller has streamed every changed session.
+    pub fn begin_generation(
+        &self,
+        generation: &str,
+        selected_providers: &[String],
+    ) -> Result<ProviderIndexTransaction<'_>> {
+        let selected: BTreeSet<_> = selected_providers.iter().cloned().collect();
+        if generation.is_empty() {
+            return Err(SnatchError::IndexError(
+                "provider index transaction generation cannot be empty".to_string(),
+            ));
+        }
+        if selected.is_empty()
+            || selected.len() != selected_providers.len()
+            || selected.contains("")
+            || !selected_providers.windows(2).all(|pair| pair[0] < pair[1])
+        {
+            return Err(SnatchError::IndexError(format!(
+                "generation {generation} has empty, duplicate, or unsorted selected providers"
+            )));
+        }
+        Ok(ProviderIndexTransaction {
+            index: self,
+            writer: Some(self.writer.write()),
+            generation: generation.to_string(),
+            selected,
+            batch_keys: BTreeSet::new(),
+            removed_keys: BTreeSet::new(),
+        })
     }
 
     /// Atomically apply staged source-session replacements/removals plus one
@@ -1076,6 +1313,7 @@ mod tests {
             complete_providers: vec!["fake".to_string()],
             removal_coverage_complete: true,
             skipped: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 

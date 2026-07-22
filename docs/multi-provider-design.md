@@ -2542,13 +2542,23 @@ partition, invalid replacements cannot erase the prior snapshot, partial
 builds remain representable without licensing stale-session deletion, and
 namespace-colliding native ids remain independent.
 
-The unit-2 exit is not yet claimed. Registry-driven inventory, revision and
-metadata comparison, unchanged-session skipping, disappearance calculation,
-partial-build stale preservation, and the explicit staged legacy-directory
-replacement still remain. The directory replacement must be described
-honestly as either a genuinely atomic platform operation or a recoverable
-two-phase swap; a portable pair of renames must not be called an atomic
-exchange merely because each individual rename is atomic.
+Registry-driven construction is also implemented: it obtains inventory,
+unified project identity, and provider-owned lineage through the registry;
+compares the provider parse-cache token plus a collision-free canonical
+metadata token; skips unchanged sessions without parsing; streams changed
+partitions one at a time through a bounded writer transaction; prunes
+disappeared sessions only after a complete unfiltered provider inventory; and
+preserves failed partitions under `all` while rolling explicit selections back
+in full. Non-fatal project-context fallbacks are distinct from stale/failed
+partitions in the build manifest. Adversarial tests independently mutate
+artifact revision, project metadata, spawn classification, inventory presence,
+and parse success.
+
+The unit-2 exit is not yet claimed. The explicit staged legacy-directory
+replacement still remains. It must be described honestly as either a
+genuinely atomic platform operation or a recoverable two-phase swap; a
+portable pair of renames must not be called an atomic exchange merely because
+each individual rename is atomic.
 
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".
