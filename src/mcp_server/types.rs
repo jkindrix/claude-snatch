@@ -328,9 +328,24 @@ pub struct SessionMessagesResponse {
     pub provider: String,
     pub qualified_id: String,
     pub project_path: String,
+    /// Canonical, detail-independent session size (human prompts + distinct
+    /// assistant turns), equal to `get_session_info.messages`. This is NOT the
+    /// pagination bound: at filtering detail levels (overview/conversation) it
+    /// exceeds the visible population, and at standard/full it is smaller than
+    /// the paginable entry count. Use `page_total`/`has_more` to drive paging.
     pub total_messages: usize,
+    /// Number of messages emitted on this page.
     pub returned: usize,
+    /// Zero-based offset this page started at.
     pub offset: usize,
+    /// Size of the population pagination ranges over at the requested detail
+    /// level (after message_type/detail filtering). This is the honest "of N"
+    /// for offset/limit; `total_messages` is a different, canonical count.
+    pub page_total: usize,
+    /// Whether entries remain after this page (`offset` + page entries
+    /// < `page_total`). Authoritative — read this instead of comparing
+    /// `returned` against `total_messages`, which measure different populations.
+    pub has_more: bool,
     pub messages: Vec<MessageEntry>,
     /// Subagents present on disk but not confidently joined to a spawning
     /// Agent/Task call (e.g. several key-less subagents in one turn). Surfaced
