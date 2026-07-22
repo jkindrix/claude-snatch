@@ -9,19 +9,26 @@ ingest and analyze session logs from agentic coding tools beyond Claude Code.
 First target: OpenAI Codex CLI. Remaining Codex↔Claude parity work is tracked
 as goal #19 — see "Parity status & remaining work" immediately below.
 
-## Parity status & remaining work (2026-07-21)
+## Parity status & remaining work
+
+**Goal #19 is the live per-tool tracker** (snatch registry, auto-injected at
+session start) — it is the mutable source of truth for exactly which
+commands/tools are routed today. This section is the DURABLE roadmap: the
+tier framework, the deliberate deferrals with their rationale, and the
+architectural gaps — content worth keeping in git so the plan survives even
+if the registry is lost (see "Registry Blast Radius" in CLAUDE.md). The
+per-tool lists below are a **dated snapshot (as of commit `2e338bf`,
+2026-07-21), not a live ledger** — consult goal #19 for current status
+rather than trusting these lists to stay in lock-step.
 
 Goal #18 (Codex ingest + normalization + core surfaces + Phase C/D) shipped
-through commit `9031610`; all gates green, 242/242 real Codex corpus clean.
-This section is the durable record of what is NOT yet at parity, so it is
-not left on the table. Tracked as **goal #19**.
-
-Two honest framings of "how close to Claude↔Codex parity":
+through commit `9031610`. Two honest framings of "how close to Claude↔Codex
+parity":
 - **By architectural effort** (ingest, normalize, core surfaces, the whole
   verification harness): ~70–75% — the hard, expensive part is done.
 - **By feature breadth** (how many snatch commands/MCP tools work
-  identically on Codex): still incomplete, but goal #19 is actively burning
-  down the analysis layer rather than treating parity as one binary claim.
+  identically on Codex): about half, with the analysis layer being burned
+  down under goal #19 rather than treated as one binary claim.
 
 **Tier 1 — at parity (deep).** Discovery, parse, normalization into the
 common model with full provenance, and the core surfaces: `list`, `info`,
