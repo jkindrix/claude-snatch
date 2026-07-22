@@ -1786,6 +1786,11 @@ pub struct CodeArgs {
     /// Session ID to extract code from (supports short prefixes like "780893e4").
     pub session: String,
 
+    /// Route through a session-log provider (repeatable; "all" searches all
+    /// available providers under the normal uniqueness contract).
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
+
     /// Filter by programming language (e.g., "rust", "python", "typescript").
     #[arg(short = 'l', long)]
     pub lang: Option<String>,
@@ -1878,6 +1883,12 @@ pub struct RecoverArgs {
 pub struct PromptsArgs {
     /// Session ID to extract prompts from (supports short prefixes).
     pub session: Option<String>,
+
+    /// Route a single-session request through a session-log provider.
+    /// Cross-session provider unions are handled in the project-analysis
+    /// phase and are refused here for now.
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
 
     /// Extract prompts from all matching sessions.
     #[arg(long)]

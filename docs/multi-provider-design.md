@@ -17,8 +17,8 @@ commands/tools are routed today. This section is the DURABLE roadmap: the
 tier framework, the deliberate deferrals with their rationale, and the
 architectural gaps — content worth keeping in git so the plan survives even
 if the registry is lost (see "Registry Blast Radius" in CLAUDE.md). The
-per-tool lists below are a **dated snapshot (audited through the session-stats
-routing slice on 2026-07-22), not a live ledger** — consult goal #19 for
+per-tool lists below are a **dated snapshot (audited through the single-session
+prompt/code routing slice on 2026-07-22), not a live ledger** — consult goal #19 for
 current status rather than trusting these lists to stay in lock-step.
 
 Goal #18 (Codex ingest + normalization + core surfaces + Phase C/D) shipped
@@ -26,8 +26,8 @@ through commit `9031610`. Two honest framings of "how close to Claude↔Codex
 parity":
 - **By architectural effort** (ingest, normalize, core surfaces, the whole
   verification harness): ~70–75% — the hard, expensive part is done.
-- **By user-facing surface count:** 14 of 42 CLI commands route session data
-  through providers, 23 session-data commands remain unrouted, three
+- **By user-facing surface count:** 16 of 42 CLI commands route session data
+  through providers, 21 session-data commands remain unrouted, three
   registries are deliberately Claude-storage-scoped, and five commands are
   provider-independent. MCP has 12 routed tools, 4 unrouted tools, and 3
   deliberately Claude-storage-scoped registry tools. Raw command counts do
@@ -44,15 +44,15 @@ usage oracle + 20 negative controls + real-corpus conformance).
 
 **Tier 2 — analysis / search / insight layer: PARTIAL parity (largest gap).**
 Provider-qualified and explicitly selected routes now cover CLI `digest`,
-`thread`, and session-mode `stats`, plus MCP `get_tool_calls`,
+`thread`, session-mode `stats`, and single-session `prompts`/`code`, plus MCP `get_tool_calls`,
 `get_session_digest`, `thread_topic`, and session-mode `get_stats`.
 The complete CLI audit is:
 
-- **Already routed (14):** `list`, `info`, `providers`, `doctor`, `lessons`,
+- **Already routed (16):** `list`, `info`, `providers`, `doctor`, `lessons`,
   `digest`, `thread`, `timeline`, `messages`, `chunks`, `file-history`,
-  `file-evolution`, `stats`, and `export`.
-- **Provider-neutral analysis/discovery candidates (10):** `recent`, `pick`,
-  `summary`, `standup`, `diff`, `context`, `code`, `prompts`,
+  `file-evolution`, `stats`, `prompts`, `code`, and `export`.
+- **Provider-neutral analysis/discovery candidates (8):** `recent`, `pick`,
+  `summary`, `standup`, `diff`, `context`,
   `health`, and `priorities`. These share canonical entries or descriptors,
   but project/union modes still need provider-qualified identity, lineage,
   partial-success, and missing-capability semantics; they are not all thin
@@ -88,8 +88,7 @@ the shared search index. Source-mutating and live-tail capabilities require
 their own contracts and must not be implied by read-only ingestion support.
 
 The session-local stage is deliberately split after its opening audit:
-single-session `stats` is a canonical-entry consumer and routes now;
-single-session `prompts`/`code` need a content-provenance re-audit;
+single-session `stats`, `prompts`, and `code` now route through providers;
 `context`/`get_event_context` need semantic windows rather than the current
 adjacent-entry approximation; and `diff` needs a two-target/native-artifact
 contract. Multi-session prompt aggregation belongs with project unions, not
@@ -2143,6 +2142,31 @@ The slice also tightened the shared qualification predicate: a reference is
 qualified only when it contains a delimiter and its first segment names a
 registered provider. A bare native prefix equal to a provider name can no
 longer be misrouted as a malformed qualified id.
+
+#### Single-session prompt and code routing (2026-07-22)
+
+CLI single-session `prompts` and `code` now resolve qualified ids and explicit
+provider selections through `ProviderRegistry`, reuse the provider-keyed
+complete `ParsedSession` cache, and retain additive provider/qualified identity
+in JSON output. Multi-session and project prompt unions remain in P1.4; every
+such flag is refused on the provider route rather than accepted inertly.
+
+For providers with semantic annotations, `PromptAuthorship::Human` is the
+classification boundary. Harness-injected user-role context and tool output do
+not become prompts or user-authored code, while both turn-boundary prompts and
+mid-turn steering remain visible. Provenance is deliberately not a content
+rewriter: once an entry is proven human-authored, its complete text survives,
+including quoted/relayed material and fenced code. Providers without semantic
+annotations keep the established Claude heuristics, with non-empty routed-
+Claude parity tests pinning classic prompt and code results.
+
+Code extraction retains assistant blocks and filters only the user side by
+native authorship. Provider-native session ids used by `code --files` are
+reduced to a bounded ASCII filename prefix so path separators and Unicode byte
+boundaries cannot escape the output directory or panic. Fixture tests cover
+harness, human, assistant, and mid-turn content; live probes found all fenced
+human prompts intact on a large session and returned mixed user/assistant code
+with qualified identity.
 
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".

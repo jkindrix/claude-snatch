@@ -11,7 +11,7 @@ use std::io::{self, BufWriter, Write};
 use regex::{Regex, RegexBuilder};
 use serde::Serialize;
 
-use crate::analysis::extraction::{is_human_prompt, is_noise_text};
+use crate::analysis::extraction::{extract_user_prompt_text, is_human_prompt, is_noise_text};
 use crate::cli::{Cli, OutputFormat, PromptsArgs};
 use crate::discovery::{Session, SessionFilter};
 use crate::error::{Result, SnatchError};
@@ -34,6 +34,12 @@ struct FrequencyOutput {
     entries: Vec<FrequencyEntry>,
     total_prompts: usize,
     unique_prompts: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PromptSource {
+    provider: String,
+    qualified_id: String,
 }
 
 /// Statistics about prompts.
@@ -80,6 +86,10 @@ struct ContainsOutput {
     percentage: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    qualified_id: Option<String>,
 }
 
 /// Compute frequency distribution of prompts.
@@ -250,6 +260,7 @@ fn write_frequency_json<W: Write>(
     entries: &[FrequencyEntry],
     total_prompts: usize,
     session_count: Option<usize>,
+    source: Option<&PromptSource>,
 ) -> Result<()> {
     let output = FrequencyOutput {
         entries: entries.to_vec(),
@@ -257,15 +268,21 @@ fn write_frequency_json<W: Write>(
         unique_prompts: entries.len(),
     };
     #[derive(Serialize)]
-    struct JsonOutput {
+    struct JsonOutput<'a> {
         #[serde(flatten)]
         frequency: FrequencyOutput,
         #[serde(skip_serializing_if = "Option::is_none")]
         session_count: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        qualified_id: Option<&'a str>,
     }
     let json_out = JsonOutput {
         frequency: output,
         session_count,
+        provider: source.map(|source| source.provider.as_str()),
+        qualified_id: source.map(|source| source.qualified_id.as_str()),
     };
     serde_json::to_writer_pretty(&mut *writer, &json_out)?;
     writeln!(writer)?;
@@ -308,6 +325,7 @@ fn write_stats_json<W: Write>(
     writer: &mut W,
     stats: &PromptsStats,
     session_count: Option<usize>,
+    source: Option<&PromptSource>,
 ) -> Result<()> {
     #[derive(Serialize)]
     struct JsonOutput<'a> {
@@ -315,10 +333,16 @@ fn write_stats_json<W: Write>(
         stats: &'a PromptsStats,
         #[serde(skip_serializing_if = "Option::is_none")]
         session_count: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        qualified_id: Option<&'a str>,
     }
     let json_out = JsonOutput {
         stats,
         session_count,
+        provider: source.map(|source| source.provider.as_str()),
+        qualified_id: source.map(|source| source.qualified_id.as_str()),
     };
     serde_json::to_writer_pretty(&mut *writer, &json_out)?;
     writeln!(writer)?;
@@ -509,6 +533,12 @@ fn filter_system_messages(prompts: Vec<Prompt>) -> Vec<Prompt> {
 
 /// Run the prompts command.
 pub fn run(cli: &Cli, args: &PromptsArgs) -> Result<()> {
+    if !args.provider.is_empty() && args.session.is_none() {
+        return Err(SnatchError::InvalidArgument {
+            name: "session".to_string(),
+            reason: "provider-routed prompts currently requires one session; cross-session prompt unions are a separate project-analysis slice".to_string(),
+        });
+    }
     // Validate arguments
     if args.session.is_none() && !args.all && args.project.is_none() {
         return Err(SnatchError::InvalidArgument {
@@ -528,16 +558,85 @@ pub fn run(cli: &Cli, args: &PromptsArgs) -> Result<()> {
 
 /// Extract prompts from a single session.
 fn extract_single_session(cli: &Cli, args: &PromptsArgs, session_id: &str) -> Result<()> {
-    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
-
-    let session =
-        claude_dir
-            .find_session(session_id)?
-            .ok_or_else(|| SnatchError::SessionNotFound {
-                session_id: session_id.to_string(),
-            })?;
-
-    let mut prompts = extract_prompts_from_session(&session, args, cli.max_file_size)?;
+    let registry = (!args.provider.is_empty() || session_id.contains(':'))
+        .then(|| super::helpers::provider_registry(cli));
+    let provider_route = !args.provider.is_empty()
+        || registry
+            .as_ref()
+            .is_some_and(|registry| registry.looks_qualified(session_id));
+    let (mut prompts, source) = if provider_route {
+        // Complete classification: a future PromptsArgs field must be
+        // consciously supported or refused on the provider route.
+        let PromptsArgs {
+            session: _,
+            provider: _,
+            all,
+            project,
+            since,
+            until,
+            min_length: _,
+            limit: _,
+            subagents,
+            output_file: _,
+            separators,
+            timestamps: _,
+            numbered: _,
+            grep: _,
+            ignore_case: _,
+            invert_match: _,
+            exclude_system: _,
+            frequency: _,
+            stats: _,
+            unique: _,
+            sort_by_length: _,
+            min_count: _,
+            no_truncate: _,
+            contains: _,
+        } = args;
+        super::helpers::refuse_unsupported_flags(
+            "provider-routed single-session prompts",
+            &[
+                ("--all", *all),
+                ("--project", project.is_some()),
+                ("--since", since.is_some()),
+                ("--until", until.is_some()),
+                ("--subagents", *subagents),
+                ("--separators", *separators),
+            ],
+        )?;
+        let registry =
+            registry.expect("provider flags or qualified reference constructed registry");
+        let resolution = registry.resolve_with_default_policy(&args.provider, session_id)?;
+        let parsed = crate::provider::registry::cached_parsed_session(
+            crate::cache::global_cache(),
+            resolution.provider,
+            &resolution.key,
+        )?;
+        let prompts = extract_prompts_from_parsed_session(
+            &parsed,
+            args,
+            resolution.provider.capabilities().semantic_annotations,
+        );
+        (
+            prompts,
+            Some(PromptSource {
+                provider: resolution.key.provider.to_string(),
+                qualified_id: resolution.key.to_string(),
+            }),
+        )
+    } else {
+        let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
+        let session =
+            claude_dir
+                .find_session(session_id)?
+                .ok_or_else(|| SnatchError::SessionNotFound {
+                    session_id: session_id.to_string(),
+                })?;
+        (
+            extract_prompts_from_session(&session, args, cli.max_file_size)?,
+            None,
+        )
+    };
 
     // Apply system message filter if requested
     if args.exclude_system {
@@ -572,14 +671,14 @@ fn extract_single_session(cli: &Cli, args: &PromptsArgs, session_id: &str) -> Re
     if args.stats {
         let stats = compute_stats(&prompts);
         if use_json {
-            write_stats_json(&mut writer, &stats, None)?;
+            write_stats_json(&mut writer, &stats, None, source.as_ref())?;
         } else {
             write_stats_text(&mut writer, &stats, None, args.no_truncate)?;
         }
     } else if args.frequency {
         let entries = compute_frequency(&prompts, args);
         if use_json {
-            write_frequency_json(&mut writer, &entries, total_prompts, None)?;
+            write_frequency_json(&mut writer, &entries, total_prompts, None, source.as_ref())?;
         } else {
             write_frequency_text(&mut writer, &entries, total_prompts, args.no_truncate)?;
         }
@@ -595,6 +694,8 @@ fn extract_single_session(cli: &Cli, args: &PromptsArgs, session_id: &str) -> Re
                 0.0
             },
             session_count: None,
+            provider: source.as_ref().map(|source| source.provider.clone()),
+            qualified_id: source.as_ref().map(|source| source.qualified_id.clone()),
         };
         if use_json {
             write_contains_json(&mut writer, &output)?;
@@ -614,7 +715,13 @@ fn extract_single_session(cli: &Cli, args: &PromptsArgs, session_id: &str) -> Re
         }
 
         if use_json {
-            write_prompts_json(&mut writer, &prompts, total_before_limit, None)?;
+            write_prompts_json(
+                &mut writer,
+                &prompts,
+                total_before_limit,
+                None,
+                source.as_ref(),
+            )?;
         } else {
             write_prompts(&mut writer, &prompts, args, None)?;
         }
@@ -770,14 +877,20 @@ fn extract_multiple_sessions(cli: &Cli, args: &PromptsArgs) -> Result<()> {
     if args.stats {
         let stats = compute_stats(&all_prompts);
         if use_json {
-            write_stats_json(&mut writer, &stats, Some(session_count))?;
+            write_stats_json(&mut writer, &stats, Some(session_count), None)?;
         } else {
             write_stats_text(&mut writer, &stats, Some(session_count), args.no_truncate)?;
         }
     } else if args.frequency {
         let entries = compute_frequency(&all_prompts, args);
         if use_json {
-            write_frequency_json(&mut writer, &entries, total_prompts, Some(session_count))?;
+            write_frequency_json(
+                &mut writer,
+                &entries,
+                total_prompts,
+                Some(session_count),
+                None,
+            )?;
         } else {
             write_frequency_text(&mut writer, &entries, total_prompts, args.no_truncate)?;
         }
@@ -793,6 +906,8 @@ fn extract_multiple_sessions(cli: &Cli, args: &PromptsArgs) -> Result<()> {
                 0.0
             },
             session_count: Some(session_count),
+            provider: None,
+            qualified_id: None,
         };
         if use_json {
             write_contains_json(&mut writer, &output)?;
@@ -817,6 +932,7 @@ fn extract_multiple_sessions(cli: &Cli, args: &PromptsArgs) -> Result<()> {
                 &all_prompts,
                 total_before_limit,
                 Some(session_count),
+                None,
             )?;
         } else {
             // Group prompts by session for text output if separators are enabled
@@ -909,6 +1025,10 @@ struct PromptsOutput {
     total_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    qualified_id: Option<String>,
 }
 
 /// Extract prompts from a session.
@@ -918,53 +1038,58 @@ fn extract_prompts_from_session(
     max_file_size: Option<u64>,
 ) -> Result<Vec<Prompt>> {
     let entries = session.parse_with_options(max_file_size)?;
-    let mut prompts = Vec::new();
+    Ok(entries
+        .iter()
+        .filter(|entry| is_human_prompt(entry))
+        .filter_map(|entry| prompt_from_entry(entry, args))
+        .collect())
+}
 
-    for entry in entries {
-        if !is_human_prompt(&entry) {
-            continue;
-        }
-        if let LogEntry::User(user) = entry {
-            // Get text content from user message
-            let text = match &user.message {
-                crate::model::message::UserContent::Simple(simple) => simple.content.clone(),
-                crate::model::message::UserContent::Blocks(blocks) => {
-                    // Extract text blocks only (skip tool results)
-                    blocks
-                        .content
-                        .iter()
-                        .filter_map(|block| {
-                            if let crate::model::ContentBlock::Text(t) = block {
-                                Some(t.text.as_str())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                }
-            };
-
-            // Apply minimum length filter
-            let trimmed = text.trim();
-            if trimmed.len() >= args.min_length {
-                let timestamp = if args.timestamps {
-                    Some(user.timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-                } else {
-                    None
-                };
-
-                prompts.push(Prompt {
-                    text: trimmed.to_string(),
-                    timestamp,
-                    session_id: None,   // Will be filled in by caller if needed
-                    project_path: None, // Will be filled in by caller if needed
-                });
+/// Extract prompts from a complete provider bundle. On providers that declare
+/// semantic coverage, native authorship is authoritative: harness context and
+/// tool output stay out while both turn-boundary and mid-turn human input are
+/// retained. The complete text of each proven human prompt is preserved,
+/// including quotes and fenced code; provenance is a classification signal,
+/// not permission to rewrite what the user supplied.
+fn extract_prompts_from_parsed_session(
+    parsed: &crate::provider::ParsedSession,
+    args: &PromptsArgs,
+    semantic_annotations: bool,
+) -> Vec<Prompt> {
+    parsed
+        .entries
+        .iter()
+        .filter(|identified| {
+            if !semantic_annotations {
+                return is_human_prompt(&identified.entry);
             }
-        }
-    }
+            parsed
+                .semantics
+                .get(&identified.id)
+                .and_then(|semantics| semantics.prompt)
+                .is_some_and(|prompt| prompt.authorship == crate::provider::PromptAuthorship::Human)
+        })
+        .filter_map(|identified| prompt_from_entry(&identified.entry, args))
+        .collect()
+}
 
-    Ok(prompts)
+fn prompt_from_entry(entry: &LogEntry, args: &PromptsArgs) -> Option<Prompt> {
+    let LogEntry::User(user) = entry else {
+        return None;
+    };
+    let text = extract_user_prompt_text(entry)?;
+    let trimmed = text.trim();
+    if trimmed.len() < args.min_length {
+        return None;
+    }
+    Some(Prompt {
+        text: trimmed.to_string(),
+        timestamp: args
+            .timestamps
+            .then(|| user.timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
+        session_id: None,
+        project_path: None,
+    })
 }
 
 /// Write prompts as JSON to output.
@@ -973,11 +1098,14 @@ fn write_prompts_json<W: Write>(
     prompts: &[Prompt],
     total_count: usize,
     session_count: Option<usize>,
+    source: Option<&PromptSource>,
 ) -> Result<()> {
     let output = PromptsOutput {
         prompts: prompts.to_vec(),
         total_count,
         session_count,
+        provider: source.map(|source| source.provider.clone()),
+        qualified_id: source.map(|source| source.qualified_id.clone()),
     };
     serde_json::to_writer_pretty(&mut *writer, &output)?;
     writeln!(writer)?;

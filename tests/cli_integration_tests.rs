@@ -45,6 +45,38 @@ fn setup_fixture_dir() -> TempDir {
     tmp
 }
 
+fn setup_code_fixture_dir() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let project_dir = tmp
+        .path()
+        .join("projects")
+        .join(encode_project_path(PROJECT_PATH));
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let lines = [
+        serde_json::json!({
+            "type": "user", "uuid": "code-user", "parentUuid": null,
+            "timestamp": "2025-01-15T10:00:00Z", "sessionId": SESSION_ID,
+            "version": "2.0.74", "message": {"role": "user",
+                "content": "Please inspect:\n```rust\nlet user_side = true;\n```"}
+        }),
+        serde_json::json!({
+            "type": "assistant", "uuid": "code-assistant", "parentUuid": "code-user",
+            "timestamp": "2025-01-15T10:00:01Z", "sessionId": SESSION_ID,
+            "version": "2.0.74", "message": {"id": "code-message", "type": "message", "role": "assistant",
+                "model": "claude-sonnet-4-20250514", "usage": {"input_tokens": 1, "output_tokens": 1},
+                "content": [{"type": "text", "text": "Result:\n```python\nprint('assistant')\n```"}]}
+        }),
+    ];
+    let content = lines
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(project_dir.join(format!("{SESSION_ID}.jsonl")), content).unwrap();
+    tmp
+}
+
 fn setup_file_snapshot_dir() -> TempDir {
     let tmp = TempDir::new().expect("failed to create temp dir");
     let project_dir = tmp
@@ -812,6 +844,64 @@ fn provider_routed_claude_stats_preserve_flagless_numeric_output() {
     object.remove("pricing_policy");
     object.remove("unpriced_models");
     assert_eq!(routed, classic);
+}
+
+#[test]
+fn provider_routed_claude_prompts_and_code_preserve_classic_results() {
+    let prompts_home = setup_fixture_dir();
+    let missing_codex = prompts_home.path().join("no-codex-home");
+    let run_prompts = |provider: bool| {
+        let mut cmd = snatch_cmd();
+        cmd.env("SNATCH_CLAUDE_DIR", prompts_home.path())
+            .env("CODEX_HOME", &missing_codex)
+            .args(["-o", "json", "prompts", SESSION_ID]);
+        if provider {
+            cmd.args(["--provider", "claude-code"]);
+        }
+        let output = cmd.assert().success().get_output().stdout.clone();
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+    };
+    let classic_prompts = run_prompts(false);
+    let mut routed_prompts = run_prompts(true);
+    assert_eq!(routed_prompts["provider"], "claude-code");
+    assert_eq!(
+        routed_prompts["qualified_id"],
+        format!("claude-code:{SESSION_ID}")
+    );
+    routed_prompts.as_object_mut().unwrap().remove("provider");
+    routed_prompts
+        .as_object_mut()
+        .unwrap()
+        .remove("qualified_id");
+    assert_eq!(routed_prompts, classic_prompts);
+
+    let code_home = setup_code_fixture_dir();
+    let missing_codex = code_home.path().join("no-codex-home");
+    let run_code = |provider: bool| {
+        let mut cmd = snatch_cmd();
+        cmd.env("SNATCH_CLAUDE_DIR", code_home.path())
+            .env("CODEX_HOME", &missing_codex)
+            .args(["-o", "json", "code", SESSION_ID]);
+        if provider {
+            cmd.args(["--provider", "claude-code"]);
+        }
+        let output = cmd.assert().success().get_output().stdout.clone();
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+    };
+    let classic_code = run_code(false);
+    assert_eq!(
+        classic_code.as_array().unwrap().len(),
+        2,
+        "{classic_code:#}"
+    );
+    let mut routed_code = run_code(true);
+    for block in routed_code.as_array_mut().unwrap() {
+        assert_eq!(block["provider"], "claude-code");
+        assert_eq!(block["qualified_id"], format!("claude-code:{SESSION_ID}"));
+        block.as_object_mut().unwrap().remove("provider");
+        block.as_object_mut().unwrap().remove("qualified_id");
+    }
+    assert_eq!(routed_code, classic_code);
 }
 
 /// Regression for #25: `--models` must emit a per-model breakdown for a single
@@ -2768,6 +2858,47 @@ mod codex_normalization_cli {
         tmp
     }
 
+    fn content_provenance_home() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        let day = tmp.path().join("sessions/2026/07/16");
+        std::fs::create_dir_all(&day).unwrap();
+        let human = "Please use this context:\n> relayed but still part of my prompt\n```rust\nlet human = true;\n```";
+        let lines = [
+            serde_json::json!({"timestamp": "2026-07-16T11:00:00Z", "type": "session_meta",
+                "payload": {"id": THREAD, "cwd": "/tmp/p", "cli_version": "0.9"}}),
+            serde_json::json!({"timestamp": "2026-07-16T11:00:01Z", "type": "turn_context",
+                "payload": {"turn_id": "content-turn", "model": "gpt-test"}}),
+            // User-role harness context: no user_message twin, therefore not human-authored.
+            serde_json::json!({"timestamp": "2026-07-16T11:00:02Z", "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text",
+                    "text": "harness context\n```rust\nlet harness = true;\n```"}]}}),
+            serde_json::json!({"timestamp": "2026-07-16T11:00:03Z", "type": "response_item",
+                "payload": {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": human}]}}),
+            serde_json::json!({"timestamp": "2026-07-16T11:00:03.100Z", "type": "event_msg",
+                "payload": {"type": "user_message", "message": human}}),
+            serde_json::json!({"timestamp": "2026-07-16T11:00:04Z", "type": "response_item",
+                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text",
+                    "text": "Assistant code:\n```python\nprint('assistant')\n```"}]}}),
+            // A unique user event is a human mid-turn steering prompt.
+            serde_json::json!({"timestamp": "2026-07-16T11:00:05Z", "type": "event_msg",
+                "payload": {"type": "user_message",
+                    "message": "Steer with:\n```go\npackage main\n```"}}),
+        ];
+        let content = lines
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(
+            day.join(format!("rollout-2026-07-16T11-00-00-{THREAD}.jsonl")),
+            content,
+        )
+        .unwrap();
+        tmp
+    }
+
     fn lessons_home() -> TempDir {
         let tmp = TempDir::new().unwrap();
         let day = tmp.path().join("sessions/2026/07/16");
@@ -3082,6 +3213,127 @@ mod codex_normalization_cli {
                 .env("SNATCH_CLAUDE_DIR", claude.path())
                 .env("CODEX_HOME", codex.path())
                 .args(["stats", &qualified, "--provider", "codex"])
+                .args(*extra)
+                .assert()
+                .failure()
+                .stderr(predicate::str::contains(*flag));
+        }
+    }
+
+    #[test]
+    fn prompts_use_native_authorship_but_preserve_the_complete_human_text() {
+        let claude = setup_fixture_dir();
+        let codex = content_provenance_home();
+        let qualified = format!("codex:{THREAD}");
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["-o", "json", "prompts", &qualified])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["provider"], "codex");
+        assert_eq!(value["qualified_id"], qualified);
+        assert_eq!(value["total_count"], 2);
+        let rendered = value["prompts"].to_string();
+        assert!(rendered.contains("let human = true"));
+        assert!(rendered.contains("relayed but still part of my prompt"));
+        assert!(rendered.contains("package main"));
+        assert!(!rendered.contains("let harness = true"));
+    }
+
+    #[test]
+    fn provider_prompt_analysis_modes_keep_source_identity() {
+        let claude = setup_fixture_dir();
+        let codex = content_provenance_home();
+        let qualified = format!("codex:{THREAD}");
+        let modes: &[&[&str]] = &[
+            &["--stats"],
+            &["--frequency", "--min-count", "1", "--sort-by-length"],
+            &["--contains", "human"],
+        ];
+        for mode in modes {
+            let output = snatch_cmd()
+                .env("SNATCH_CLAUDE_DIR", claude.path())
+                .env("CODEX_HOME", codex.path())
+                .args(["-o", "json", "prompts", &qualified])
+                .args(*mode)
+                .assert()
+                .success()
+                .get_output()
+                .stdout
+                .clone();
+            let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(value["provider"], "codex");
+            assert_eq!(value["qualified_id"], qualified);
+        }
+    }
+
+    #[test]
+    fn code_extraction_excludes_harness_user_code_and_keeps_human_and_assistant_code() {
+        let claude = setup_fixture_dir();
+        let codex = content_provenance_home();
+        let qualified = format!("codex:{THREAD}");
+        let run = |user_only: bool| {
+            let mut command = snatch_cmd();
+            command
+                .env("SNATCH_CLAUDE_DIR", claude.path())
+                .env("CODEX_HOME", codex.path())
+                .args(["-o", "json", "code", &qualified]);
+            if user_only {
+                command.arg("--user-only");
+            }
+            let output = command.assert().success().get_output().stdout.clone();
+            serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+        };
+
+        let all = run(false);
+        let blocks = all.as_array().unwrap();
+        assert_eq!(blocks.len(), 3);
+        assert!(blocks.iter().all(|block| block["provider"] == "codex"));
+        assert!(blocks
+            .iter()
+            .all(|block| block["qualified_id"] == qualified));
+        let rendered = all.to_string();
+        assert!(rendered.contains("let human = true"));
+        assert!(rendered.contains("print('assistant')"));
+        assert!(rendered.contains("package main"));
+        assert!(!rendered.contains("let harness = true"));
+
+        let user = run(true);
+        assert_eq!(user.as_array().unwrap().len(), 2);
+        assert!(!user.to_string().contains("print('assistant')"));
+    }
+
+    #[test]
+    fn provider_prompts_require_one_session_and_refuse_cross_session_flags() {
+        let claude = setup_fixture_dir();
+        let codex = content_provenance_home();
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["prompts", "--provider", "codex"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("requires one session"));
+
+        let qualified = format!("codex:{THREAD}");
+        let unsupported: &[(&str, &[&str])] = &[
+            ("--all", &["--all"]),
+            ("--project", &["--project", "some-project"]),
+            ("--since", &["--since", "2026-01-01"]),
+            ("--until", &["--until", "2026-12-31"]),
+            ("--subagents", &["--subagents"]),
+            ("--separators", &["--separators"]),
+        ];
+        for (flag, extra) in unsupported {
+            snatch_cmd()
+                .env("SNATCH_CLAUDE_DIR", claude.path())
+                .env("CODEX_HOME", codex.path())
+                .args(["prompts", &qualified, "--provider", "codex"])
                 .args(*extra)
                 .assert()
                 .failure()

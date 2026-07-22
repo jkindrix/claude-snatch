@@ -8,10 +8,10 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::cli::{Cli, CodeArgs, OutputFormat};
-use crate::discovery::Session;
 use crate::error::Result;
 use crate::export::extract_code_blocks;
 use crate::model::{ContentBlock, LogEntry, UserContent};
+use crate::provider::PromptAuthorship;
 use crate::reconstruction::Conversation;
 
 use super::get_claude_dir;
@@ -29,28 +29,86 @@ pub struct ExtractedCode {
     pub timestamp: Option<DateTime<Utc>>,
     /// Block index within the session.
     pub index: usize,
+    /// Source provider on explicitly routed calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Provider-qualified source session on explicitly routed calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qualified_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CodeSource {
+    provider: Option<String>,
+    qualified_id: Option<String>,
+    native_id: String,
+    semantic_annotations: bool,
 }
 
 /// Run the code extraction command.
 pub fn run(cli: &Cli, args: &CodeArgs) -> Result<()> {
-    let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
     let output_format = cli.effective_output();
-
-    // Find the session
-    let sessions = claude_dir.all_sessions()?;
-    let session = sessions
-        .iter()
-        .find(|s| s.session_id().starts_with(&args.session) || s.session_id() == args.session)
-        .ok_or_else(|| crate::error::SnatchError::SessionNotFound {
-            session_id: args.session.clone(),
-        })?;
-
-    // Parse the session
-    let entries = session.parse_with_options(cli.max_file_size)?;
-    let conversation = Conversation::from_entries(entries)?;
+    let registry = (!args.provider.is_empty() || args.session.contains(':'))
+        .then(|| super::helpers::provider_registry(cli));
+    let provider_route = !args.provider.is_empty()
+        || registry
+            .as_ref()
+            .is_some_and(|registry| registry.looks_qualified(&args.session));
+    let (conversation, source) = if provider_route {
+        // Complete classification: a future CodeArgs field must be
+        // consciously supported or refused on this route.
+        let CodeArgs {
+            session: _,
+            provider: _,
+            lang: _,
+            assistant_only: _,
+            user_only: _,
+            limit: _,
+            main_thread: _,
+            metadata: _,
+            concatenate: _,
+            files: _,
+            output_dir: _,
+            quiet: _,
+        } = args;
+        let registry =
+            registry.expect("provider flags or qualified reference constructed registry");
+        let resolution = registry.resolve_with_default_policy(&args.provider, &args.session)?;
+        let parsed = crate::provider::registry::cached_parsed_session(
+            crate::cache::global_cache(),
+            resolution.provider,
+            &resolution.key,
+        )?;
+        let source = CodeSource {
+            provider: Some(resolution.key.provider.to_string()),
+            qualified_id: Some(resolution.key.to_string()),
+            native_id: resolution.key.native_id.clone(),
+            semantic_annotations: resolution.provider.capabilities().semantic_annotations,
+        };
+        (Conversation::from_parsed_session(parsed)?, source)
+    } else {
+        let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
+        let sessions = claude_dir.all_sessions()?;
+        let session = sessions
+            .iter()
+            .find(|s| s.session_id().starts_with(&args.session) || s.session_id() == args.session)
+            .ok_or_else(|| crate::error::SnatchError::SessionNotFound {
+                session_id: args.session.clone(),
+            })?;
+        let entries = session.parse_with_options(cli.max_file_size)?;
+        (
+            Conversation::from_entries(entries)?,
+            CodeSource {
+                provider: None,
+                qualified_id: None,
+                native_id: session.session_id().to_string(),
+                semantic_annotations: false,
+            },
+        )
+    };
 
     // Extract code blocks
-    let mut extracted = extract_code_from_conversation(&conversation, args);
+    let mut extracted = extract_code_from_conversation(&conversation, args, &source);
 
     // Filter by language if specified
     if let Some(ref lang) = args.lang {
@@ -112,7 +170,7 @@ pub fn run(cli: &Cli, args: &CodeArgs) -> Result<()> {
                 }
             } else if args.files {
                 // Write to individual files
-                write_code_to_files(&extracted, args, session)?;
+                write_code_to_files(&extracted, args, &source.native_id)?;
             } else {
                 // Default: show summary and code
                 for e in &extracted {
@@ -153,6 +211,7 @@ pub fn run(cli: &Cli, args: &CodeArgs) -> Result<()> {
 fn extract_code_from_conversation(
     conversation: &Conversation,
     args: &CodeArgs,
+    source: &CodeSource,
 ) -> Vec<ExtractedCode> {
     let mut extracted = Vec::new();
     let mut index = 0;
@@ -166,7 +225,13 @@ fn extract_code_from_conversation(
     for entry in entries {
         match entry {
             LogEntry::User(user) => {
-                if !args.assistant_only {
+                let semantically_human = !source.semantic_annotations
+                    || entry
+                        .uuid()
+                        .and_then(|uuid| conversation.semantics_for_uuid(uuid))
+                        .and_then(|semantics| semantics.prompt)
+                        .is_some_and(|prompt| prompt.authorship == PromptAuthorship::Human);
+                if !args.assistant_only && semantically_human {
                     let content_text = match &user.message {
                         UserContent::Simple(simple) => simple.content.clone(),
                         UserContent::Blocks(blocks) => blocks
@@ -187,6 +252,8 @@ fn extract_code_from_conversation(
                             source: "user".to_string(),
                             timestamp: Some(user.timestamp),
                             index,
+                            provider: source.provider.clone(),
+                            qualified_id: source.qualified_id.clone(),
                         });
                         index += 1;
                     }
@@ -203,6 +270,8 @@ fn extract_code_from_conversation(
                                     source: "assistant".to_string(),
                                     timestamp: Some(assistant.timestamp),
                                     index,
+                                    provider: source.provider.clone(),
+                                    qualified_id: source.qualified_id.clone(),
                                 });
                                 index += 1;
                             }
@@ -221,7 +290,7 @@ fn extract_code_from_conversation(
 fn write_code_to_files(
     extracted: &[ExtractedCode],
     args: &CodeArgs,
-    session: &Session,
+    native_session_id: &str,
 ) -> Result<()> {
     use std::fs;
 
@@ -233,7 +302,7 @@ fn write_code_to_files(
     // Create output directory if it doesn't exist
     fs::create_dir_all(&output_dir)?;
 
-    let session_prefix = &session.session_id()[..8];
+    let session_prefix = safe_session_prefix(native_session_id);
 
     for e in extracted {
         let extension = language_to_extension(e.language.as_deref());
@@ -255,6 +324,22 @@ fn write_code_to_files(
     );
 
     Ok(())
+}
+
+/// A filesystem-safe, deterministic label for provider-native ids. Classic
+/// UUIDs retain their existing eight-character prefix; hostile or Unicode ids
+/// cannot inject path separators or panic at a byte boundary.
+fn safe_session_prefix(native_id: &str) -> String {
+    let prefix: String = native_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+        .take(8)
+        .collect();
+    if prefix.is_empty() {
+        "session".to_string()
+    } else {
+        prefix
+    }
 }
 
 /// Map language name to file extension.
@@ -331,5 +416,12 @@ mod tests {
         assert_eq!(language_to_extension(Some("typescript")), "ts");
         assert_eq!(language_to_extension(None), "txt");
         assert_eq!(language_to_extension(Some("unknown")), "txt");
+    }
+
+    #[test]
+    fn provider_native_ids_make_safe_file_prefixes() {
+        assert_eq!(safe_session_prefix("aaaaaaaa-bbbb"), "aaaaaaaa");
+        assert_eq!(safe_session_prefix("../evil/session"), "evilsess");
+        assert_eq!(safe_session_prefix("💥/../"), "session");
     }
 }
