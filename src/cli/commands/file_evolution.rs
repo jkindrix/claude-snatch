@@ -193,8 +193,8 @@ fn run_provider(cli: &Cli, args: &FileEvolutionArgs) -> Result<()> {
             let in_range = parsed_session_time_range(&parsed).map_or(
                 since.is_none() && until.is_none(),
                 |(start, end)| {
-                    since.map_or(true, |bound| end >= bound)
-                        && until.map_or(true, |bound| start <= bound)
+                    since.is_none_or(|bound| end >= bound)
+                        && until.is_none_or(|bound| start <= bound)
                 },
             );
             if in_range {

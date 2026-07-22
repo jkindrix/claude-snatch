@@ -108,7 +108,7 @@ impl SightingBuilder {
             self.example_session = Some(session_id.to_string());
         }
         if let Some(ts) = timestamp {
-            if self.last_seen.map_or(true, |prev| ts > prev) {
+            if self.last_seen.is_none_or(|prev| ts > prev) {
                 self.last_seen = Some(ts);
             }
         }

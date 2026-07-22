@@ -667,9 +667,8 @@ fn comparison_entries<'a>(
             semantics: id.and_then(|id| bundle.and_then(|bundle| bundle.semantics.get(id))),
         })
         .filter(|candidate| {
-            type_filter.map_or(true, |types| {
-                types.contains(&candidate.entry.message_type().to_lowercase())
-            })
+            type_filter
+                .is_none_or(|types| types.contains(&candidate.entry.message_type().to_lowercase()))
         })
         .filter(|candidate| {
             if !human_prompts_only || candidate.entry.message_type() != "user" {

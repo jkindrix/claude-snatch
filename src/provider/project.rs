@@ -557,9 +557,10 @@ pub fn new_activity_entries(parsed: &ParsedSession) -> Vec<crate::model::LogEntr
         .entries
         .iter()
         .filter(|entry| {
-            parsed.semantics.get(&entry.id).map_or(true, |semantics| {
-                semantics.activity == super::ActivityKind::New
-            })
+            parsed
+                .semantics
+                .get(&entry.id)
+                .is_none_or(|semantics| semantics.activity == super::ActivityKind::New)
         })
         .map(|entry| entry.entry.clone())
         .collect()

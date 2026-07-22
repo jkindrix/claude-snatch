@@ -196,7 +196,7 @@ pub fn detect_session_state(path: impl AsRef<Path>) -> Result<SessionState> {
 
     if age < Duration::from_secs(5) {
         Ok(SessionState::PossiblyActive)
-    } else if age < Duration::from_secs(60) {
+    } else if age < Duration::from_mins(1) {
         Ok(SessionState::RecentlyActive)
     } else {
         Ok(SessionState::Inactive)

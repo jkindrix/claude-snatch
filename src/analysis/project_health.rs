@@ -167,7 +167,7 @@ impl ProviderProjectHealthAccumulator {
                 parsed
                     .semantics
                     .get(&entry.id)
-                    .map_or(true, |semantics| semantics.activity == ActivityKind::New)
+                    .is_none_or(|semantics| semantics.activity == ActivityKind::New)
             })
             .collect();
         let tool_count = active_entries
@@ -190,7 +190,7 @@ impl ProviderProjectHealthAccumulator {
             if aggregate
                 .timestamp
                 .as_ref()
-                .map_or(true, |current| timestamp < *current)
+                .is_none_or(|current| timestamp < *current)
             {
                 aggregate.timestamp = Some(timestamp);
             }

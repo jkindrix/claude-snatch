@@ -196,9 +196,8 @@ fn provider_lineage_rows(
     edges
         .iter()
         .filter(|edge| {
-            project_members.map_or(true, |members| {
-                members.contains(&edge.from) || members.contains(&edge.to)
-            })
+            project_members
+                .is_none_or(|members| members.contains(&edge.from) || members.contains(&edge.to))
         })
         .map(|edge| {
             let (tool_use_id, agent_type, description) = match &edge.kind {
@@ -245,7 +244,7 @@ fn run_provider(cli: &Cli, args: &ChainArgs) -> Result<()> {
             .unwrap_or_else(|| unified.identity.to_string());
         let matches = project
             .as_deref()
-            .map_or(true, |filter| unified.matches(filter));
+            .is_none_or(|filter| unified.matches(filter));
         for session in &unified.sessions {
             project_by_session.insert(session.descriptor.key.clone(), label.clone());
             if matches {

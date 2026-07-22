@@ -85,7 +85,7 @@ impl TextExporter {
             } else {
                 60
             };
-            let sep: String = std::iter::repeat(self.separator_char).take(width).collect();
+            let sep: String = std::iter::repeat_n(self.separator_char, width).collect();
             writeln!(writer, "{sep}")?;
         }
         Ok(())

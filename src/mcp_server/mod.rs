@@ -161,7 +161,7 @@ impl SnatchServer {
         let mut rows: Vec<serde_json::Value> = collected
             .projects
             .iter()
-            .filter(|project| project_filter.map_or(true, |needle| project.matches(needle)))
+            .filter(|project| project_filter.is_none_or(|needle| project.matches(needle)))
             .flat_map(|project| {
                 project.sessions.iter().filter_map(|session| {
                     let descriptor = &session.descriptor;
@@ -367,7 +367,7 @@ impl SnatchServer {
             let (start, end) = timestamps.fold((first, first), |(start, end), timestamp| {
                 (start.min(timestamp), end.max(timestamp))
             });
-            since.map_or(true, |bound| end >= bound) && until.map_or(true, |bound| start <= bound)
+            since.is_none_or(|bound| end >= bound) && until.is_none_or(|bound| start <= bound)
         }
 
         let since = request
@@ -914,7 +914,7 @@ impl SnatchServer {
             !request.no_subagents.unwrap_or(true),
             &request.file_pattern,
             |project_path, parsed| {
-                let in_range = cutoff.map_or(true, |bound| {
+                let in_range = cutoff.is_none_or(|bound| {
                     parsed_session_time_range(&parsed).is_some_and(|(_, end)| end >= bound)
                 });
                 if in_range {

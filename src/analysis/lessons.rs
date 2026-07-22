@@ -1103,7 +1103,7 @@ pub fn extract_lessons_from_conversation(
             entry
                 .uuid()
                 .and_then(|uuid| conversation.semantics_for_uuid(uuid))
-                .map_or(true, |semantics| semantics.activity == ActivityKind::New)
+                .is_none_or(|semantics| semantics.activity == ActivityKind::New)
         })
         .collect();
     let mut semantic = SemanticLessonContext::default();

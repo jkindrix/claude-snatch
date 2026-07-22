@@ -163,9 +163,9 @@ fn collect_exchanges(
             if count > 0 {
                 match_count += count;
                 match_location = entry.message_type().to_string();
-                if match_provenance.map_or(true, |current| {
-                    segment.provenance.priority() < current.priority()
-                }) {
+                if match_provenance
+                    .is_none_or(|current| segment.provenance.priority() < current.priority())
+                {
                     match_provenance = Some(segment.provenance);
                 }
             }
@@ -179,9 +179,9 @@ fn collect_exchanges(
                     if match_location.is_empty() {
                         match_location = "thinking".to_string();
                     }
-                    if match_provenance.map_or(true, |current| {
-                        segment.provenance.priority() < current.priority()
-                    }) {
+                    if match_provenance
+                        .is_none_or(|current| segment.provenance.priority() < current.priority())
+                    {
                         match_provenance = Some(segment.provenance);
                     }
                 }

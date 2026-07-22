@@ -420,11 +420,11 @@ fn calculate_regex_score(line: &str, matched: &str, match_start: usize, match_en
     let at_word_start = line[..match_start]
         .chars()
         .next_back()
-        .map_or(true, |ch| !ch.is_alphanumeric());
+        .is_none_or(|ch| !ch.is_alphanumeric());
     let at_word_end = line[match_end..]
         .chars()
         .next()
-        .map_or(true, |ch| !ch.is_alphanumeric());
+        .is_none_or(|ch| !ch.is_alphanumeric());
     if at_word_start && at_word_end {
         score += 10.0;
     } else if at_word_start || at_word_end {

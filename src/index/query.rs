@@ -280,9 +280,7 @@ fn provider_of(session_key: &str) -> Result<String> {
 }
 
 fn contains_folded(value: &str, needle: Option<&str>) -> bool {
-    needle.map_or(true, |needle| {
-        value.to_lowercase().contains(&needle.to_lowercase())
-    })
+    needle.is_none_or(|needle| value.to_lowercase().contains(&needle.to_lowercase()))
 }
 
 fn any_value(values: &[String], actual: Option<&str>) -> bool {
@@ -307,15 +305,13 @@ fn entry_matches_filters(entry: &IndexedSearchEntry, filters: &IndexedSearchFilt
     {
         return false;
     }
-    if filters.min_processed_tokens.is_some_and(|minimum| {
-        entry
-            .processed_tokens
-            .map_or(true, |tokens| tokens < minimum)
-    }) || filters.max_processed_tokens.is_some_and(|maximum| {
-        entry
-            .processed_tokens
-            .map_or(true, |tokens| tokens > maximum)
-    }) {
+    if filters
+        .min_processed_tokens
+        .is_some_and(|minimum| entry.processed_tokens.is_none_or(|tokens| tokens < minimum))
+        || filters
+            .max_processed_tokens
+            .is_some_and(|maximum| entry.processed_tokens.is_none_or(|tokens| tokens > maximum))
+    {
         return false;
     }
     if !filters.tool_kinds.is_empty()

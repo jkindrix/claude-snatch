@@ -133,8 +133,8 @@ fn provider_thread_topic(
     ) -> bool {
         let start = context.started_at.or(context.modified_at);
         let end = context.ended_at.or(context.modified_at).or(start);
-        since.map_or(true, |bound| end.map_or(true, |end| end >= bound))
-            && until.map_or(true, |bound| start.map_or(true, |start| start <= bound))
+        since.is_none_or(|bound| end.is_none_or(|end| end >= bound))
+            && until.is_none_or(|bound| start.is_none_or(|start| start <= bound))
     }
 
     let since = args
