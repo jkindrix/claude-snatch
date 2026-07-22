@@ -1883,6 +1883,40 @@ digest duplication must be opt-in; and qualified Codex digest/thread routes
 must pass through the actual CLI and MCP entry points. These tests challenge
 the contracts rather than merely snapshotting a happy-path string.
 
+#### Retrieval follow-up: correction intent, filtered summaries, deployment (2026-07-22)
+
+A live re-evaluation confirmed the provenance, digest, failure-taxonomy, and
+provider-routing fixes through the rebuilt MCP server. It also exposed three
+separate pre-existing contracts that the first pass did not settle:
+
+- Correction detection used one broad vocabulary to admit messages and a
+  different narrow vocabulary to rank them. Standalone words such as `again`,
+  `already`, and `don't` admitted ordinary collaboration (including initial
+  subagent instructions) with a zero ranking score. One classifier now owns
+  both admission and ranking. A candidate must repair an actual preceding
+  assistant response and match one of four explicit dialogue acts: rejection,
+  behavioral redirect, intent clarification, or performance critique. The
+  basis is emitted with each result. Real-project census dropped from 154
+  candidates across 77 sessions to 30 across 9 after the final tightening;
+  corpus-shaped negative and positive controls pin the distinction. This is a
+  deliberately high-precision heuristic, not a claim that pragmatic intent is
+  perfectly recoverable from text.
+- `category=corrections` previously skipped error extraction and then emitted
+  zero error totals as though they described the session. Category is now a
+  projection over returned lists only; summary totals and tool rankings remain
+  session-wide. The symmetric `category=errors` case is pinned as well, and
+  cross-session aggregators must sum the unprojected summaries rather than
+  reconstructing totals from filtered arrays.
+- The installer named a nonexistent repository, expected asset names that did
+  not match the release workflow, installed release binaries into a directory
+  shadowed by the documented Cargo path, and could not deploy a local checkout.
+  `./install.sh` now detects and installs its checkout with all features and
+  `--force`; the piped form targets `jkindrix/claude-snatch`, uses the workflow's
+  Rust target asset names, falls back to a Cargo install while no release
+  exists, and warns when another `snatch` shadows the installed path. Release
+  artifacts are built with all features. MCP clients still require a reconnect
+  after the on-disk stdio-server binary is replaced.
+
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".
 - [x] Drift-coverage claims must state checked vs unchecked counts
