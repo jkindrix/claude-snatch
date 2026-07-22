@@ -43,25 +43,20 @@ common model with full provenance, and the core surfaces: `list`, `info`,
 usage oracle + 20 negative controls + real-corpus conformance).
 
 **Tier 2 — analysis / search / insight layer: PARTIAL parity (largest gap).**
-Provider-qualified and explicitly selected routes now cover CLI `digest`,
-`thread`, session-mode `stats`, single-session `prompts`/`code`, and `context`,
-plus MCP `get_tool_calls`, `get_session_digest`, `thread_topic`, session-mode
-  `get_stats`, and `get_event_context`; CLI `diff` also resolves both targets
-  independently through the provider seam; CLI `recent` now routes its
-  descriptor/lineage inventory without parsing transcripts, and CLI `summary`
-  streams only descriptor-matched activity into its aggregate.
+Provider-qualified and explicitly selected routes now cover every
+provider-neutral CLI analysis/discovery candidate identified by the audit,
+including `digest`, `thread`, session-mode `stats`, prompts/code/context/diff,
+recent/summary/health/priorities/standup, and the interactive picker. MCP has
+the corresponding routed session/project analyses except search.
 The complete CLI audit is:
 
-- **Already routed (20):** `list`, `info`, `providers`, `doctor`, `lessons`,
+- **Already routed (24):** `list`, `info`, `providers`, `doctor`, `lessons`,
   `digest`, `thread`, `timeline`, `messages`, `chunks`, `file-history`,
   `file-evolution`, `stats`, `prompts`, `code`, `context`, `diff`, `recent`,
-  `summary`, and `export`.
-- **Provider-neutral analysis/discovery candidates (4):** `pick`, `standup`,
-  `health`, and `priorities`. These share
-  canonical entries or descriptors,
-  but project/union modes still need provider-qualified identity, lineage,
-  partial-success, and missing-capability semantics; they are not all thin
-  flag wiring.
+  `summary`, `health`, `priorities`, `standup`, `pick`, and `export`.
+- **Provider-neutral analysis/discovery candidates (0):** the audited set is
+  routed. Remaining commands below require new capabilities, identity/storage
+  migration, or are deliberately provider-scoped/independent.
 - **New provider capability or infrastructure required (8):** `search` and
   `index` need a versioned cross-provider index; `recover` needs an
   evidence-bounded recovery contract; `chain` needs typed lineage rather than Claude continuation-only
@@ -78,10 +73,9 @@ The complete CLI audit is:
   `config`, `completions`, `quickstart`, and `serve-mcp` do not select session
   providers (the cache manager itself already includes provider bundles).
 
-The MCP server exposes 19 tools, not 20. Thirteen are provider-routed, three
-still directly use `ClaudeDirectory`/classic resolution (`search_sessions`,
-`get_project_health`, and `suggest_priorities`), and three registry tools are
-explicitly Claude-storage-scoped. In particular,
+The MCP server exposes 19 tools, not 20. Fifteen are provider-routed,
+`search_sessions` still requires the shared provider index, and three registry
+tools are explicitly Claude-storage-scoped. In particular,
 `get_event_context` now has an explicit provider input and uses the common
 registry/cache bridge; its classic chain-aware route remains separate.
 
@@ -2403,6 +2397,58 @@ conservative source-time fallbacks. Provider-only health classified 65
 failures, exactly matching the independently routed cross-session lessons
 result; after transport-header normalization, seven recurring patterns became
 eligible for ranking instead of fragmenting by chunk id.
+
+#### Standup routing (2026-07-22)
+
+CLI `standup --provider ...` is a separate provider route; the flagless report
+keeps its established wire and text shapes. The routed report selects whole
+source sessions by native time bounds with conservative source-time fallback,
+collapses typed continuations, excludes spawned transcripts, and projects out
+fork-inherited activity before aggregating. Explicit selections are atomic and
+`all` is partial-but-reported.
+
+Usage sums canonical normalized values and exposes work versus processed
+tokens, cache components, pricing coverage, unpriced providers/models, and an
+optional estimate. Tool rankings use canonical `ToolKind` labels where the
+provider supplies them. Accomplishments are deliberately evidence-bounded:
+applied typed file changes support created/modified/deleted summaries, typed
+shell inputs support test/commit heuristics, and typed read/search calls support
+the exploration label. File counts retain project identity so equal relative
+paths in different projects remain distinct. Reads are labeled as recognized
+reads rather than a complete I/O audit, and arbitrary shell writes are never
+inferred. Snapshot deduplication retains source-session identity while
+logical-session reporting uses continuation roots, matching the health route.
+
+The live one-day explicit union completed in about 2.4 seconds at roughly 335
+MiB peak RSS over 27 logical sessions/source descriptors and nine projects. It
+reported 26 conservative date fallbacks, partial pricing because one selected
+provider is intentionally unpriced, and explicit source-backed file/read
+coverage rather than presenting those observations as complete filesystem
+activity.
+
+#### Interactive picker routing (2026-07-22)
+
+CLI `pick --provider ...` inventories provider sessions without parsing their
+transcripts, applies project/spawn filters and one deterministic global limit,
+and displays the complete escaped qualified session key. Native-id prefixes
+alone are forbidden here because separate namespaces may intentionally contain
+the same native id. Explicit provider failures are atomic; `all` retains the
+successful inventory and reports skipped providers/context warnings.
+
+The picker remains a flat source-session selector rather than silently
+collapsing continuation members: its selected identity is passed directly to a
+single-session action. `export` prints the qualified id for piping, while
+`info` and `stats` dispatch through their provider routes with the provider
+selected explicitly. `open` is refused before discovery. The provider seam can
+stream native bytes but intentionally has no local-path capability, and a
+database-backed source may have no meaningful file to open; the classic
+flagless filesystem picker retains its existing path action.
+
+A live provider/project/limit-one terminal probe rendered one 49.8 MiB source
+descriptor, accepted the selection, and emitted the exact qualified id for
+piping. The test suite separately pins namespace-collision visibility,
+deterministic global limiting, Unicode-safe identity rendering, and preflight
+refusal of the unsupported path action.
 
 ### Standing constraints (all phases)
 - [x] The 8 acceptance invariants (above) gate "Codex supported".

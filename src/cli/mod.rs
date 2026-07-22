@@ -2048,6 +2048,11 @@ pub struct StandupArgs {
     /// Copy output to clipboard.
     #[arg(long)]
     pub clipboard: bool,
+
+    /// Source providers to analyze (repeatable; "all" = every installed
+    /// provider). Omit for the classic Claude-only report.
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
 }
 
 /// Output formats for standup reports.
@@ -2633,6 +2638,11 @@ pub struct PickArgs {
     /// Action to perform after selection.
     #[arg(short = 'a', long, default_value = "export")]
     pub action: PickAction,
+
+    /// Source providers to browse (repeatable; "all" = every installed
+    /// provider). Omit for the classic filesystem picker.
+    #[arg(long = "provider", value_name = "PROVIDER")]
+    pub provider: Vec<String>,
 }
 
 /// Actions available after picking a session.

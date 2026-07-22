@@ -76,6 +76,24 @@ fn flagless_health_and_priorities_keep_classic_json_shapes() {
     assert!(priorities.get("providers").is_none());
 }
 
+#[test]
+fn flagless_standup_keeps_the_classic_json_shape() {
+    let claude = setup_fixture_dir();
+    let output = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", claude.path())
+        .args(["-o", "json", "standup", "--period", "30d"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["total_sessions"], 1);
+    assert!(value.get("providers").is_none());
+    assert!(value.get("session_descriptors_analyzed").is_none());
+    assert!(value.get("period_basis").is_none());
+}
+
 fn setup_code_fixture_dir() -> TempDir {
     let tmp = TempDir::new().expect("failed to create temp dir");
     let project_dir = tmp
@@ -4111,6 +4129,102 @@ mod codex_normalization_cli {
             value["inferred_failure_signals"],
             lessons["summary"]["inferred_failure_signals"]
         );
+    }
+
+    #[test]
+    fn provider_standup_uses_logical_sessions_and_typed_activity() {
+        let claude = setup_fixture_dir();
+        let codex = file_changes_home();
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args([
+                "-o",
+                "json",
+                "standup",
+                "--period",
+                "30d",
+                "--provider",
+                "codex",
+                "--all",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["providers"], serde_json::json!(["codex"]));
+        assert_eq!(value["total_sessions"], 1);
+        assert_eq!(value["session_descriptors_analyzed"], 1);
+        assert_eq!(value["projects"][0]["sessions"], 1);
+        assert_eq!(value["files"]["files_created"], 0);
+        assert_eq!(value["files"]["files_modified"], 1);
+        assert_eq!(value["files"]["files_deleted"], 0);
+        assert_eq!(value["files"]["recognized_files_read"], 0);
+        assert_eq!(
+            value["files"]["unique_files"],
+            serde_json::json!(["new.rs"])
+        );
+        assert_eq!(value["tools"]["total_invocations"], 2);
+        assert_eq!(
+            value["tools"]["by_tool"][0],
+            serde_json::json!(["file-write", 2])
+        );
+        assert!(value.get("usage").is_none());
+        assert!(value["coverage_note"]
+            .as_str()
+            .unwrap()
+            .contains("shell writes"));
+    }
+
+    #[test]
+    fn provider_standup_all_is_partial_but_explicit_failure_is_atomic() {
+        let claude = setup_fixture_dir();
+        let missing_codex = claude.path().join("missing-codex-home");
+        let output = snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", &missing_codex)
+            .args([
+                "-o",
+                "json",
+                "standup",
+                "--period",
+                "30d",
+                "--provider",
+                "all",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["providers"], serde_json::json!(["claude-code"]));
+        assert_eq!(value["total_sessions"], 1);
+        assert_eq!(value["skipped_providers"][0]["provider"], "codex");
+
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", &missing_codex)
+            .args(["standup", "--period", "30d", "--provider", "codex"])
+            .assert()
+            .failure();
+    }
+
+    #[test]
+    fn provider_picker_refuses_open_without_a_path_capability() {
+        let claude = setup_fixture_dir();
+        let codex = file_changes_home();
+        snatch_cmd()
+            .env("SNATCH_CLAUDE_DIR", claude.path())
+            .env("CODEX_HOME", codex.path())
+            .args(["pick", "--provider", "codex", "--action", "open"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "do not promise a local source path",
+            ));
     }
 
     #[test]

@@ -344,7 +344,7 @@ fn decision_churn(store: &DecisionStore) -> DecisionChurn {
     }
 }
 
-fn is_provider_project_file(path: &str, project_roots: &BTreeSet<String>) -> bool {
+pub(crate) fn is_provider_project_file(path: &str, project_roots: &BTreeSet<String>) -> bool {
     let windows_drive = path.as_bytes().get(1) == Some(&b':');
     let windows_absolute =
         windows_drive && matches!(path.as_bytes().get(2), Some(b'/') | Some(b'\\'));
