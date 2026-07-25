@@ -461,6 +461,25 @@ impl ModelPricing {
         }
     }
 
+    /// Create pricing for Claude Opus 5.
+    ///
+    /// Rates match the Opus 4.6–4.8 tier: $5/M input, $25/M output.
+    #[must_use]
+    pub fn claude_opus_5() -> Self {
+        Self {
+            model: "claude-opus-5".to_string(),
+            input_per_million: 5.0,        // $5/M input
+            output_per_million: 25.0,      // $25/M output
+            cache_write_per_million: 6.25, // 1.25x input
+            cache_write_1h_per_million: 10.0,
+            cache_read_per_million: 0.5, // 0.1x input
+            rate_card: "anthropic-api-opus-5",
+            effective_period: "standard API list rate",
+            source_url: ANTHROPIC_PRICING_URL,
+            source_checked: PRICING_SOURCE_CHECKED,
+        }
+    }
+
     /// Create pricing for Claude Fable 5 (and Claude Mythos 5 — same rates).
     #[must_use]
     pub fn claude_fable_5() -> Self {
@@ -622,6 +641,7 @@ impl ModelPricing {
     pub fn for_model_at(model: &str, observed_at: DateTime<Utc>) -> Option<Self> {
         match normalize_model_id(model) {
             "claude-fable-5" | "claude-mythos-5" => Some(Self::claude_fable_5()),
+            "claude-opus-5" => Some(Self::claude_opus_5()),
             "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6" => {
                 Some(Self::claude_opus_4_8())
             }
@@ -649,6 +669,7 @@ impl ModelPricing {
     pub fn for_rate_card(rate_card: &str) -> Option<Self> {
         match rate_card {
             "anthropic-api-fable-mythos-5" => Some(Self::claude_fable_5()),
+            "anthropic-api-opus-5" => Some(Self::claude_opus_5()),
             "anthropic-api-opus-4.6-4.8" => Some(Self::claude_opus_4_8()),
             "anthropic-api-opus-4.5" => Some(Self::claude_opus_4_5()),
             "anthropic-api-sonnet-5-intro" => Some(Self::claude_sonnet_5_intro()),
@@ -741,6 +762,7 @@ impl AggregatedUsage {
             normalize_model_id(model),
             "claude-fable-5"
                 | "claude-mythos-5"
+                | "claude-opus-5"
                 | "claude-opus-4-8"
                 | "claude-opus-4-7"
                 | "claude-opus-4-6"
@@ -1158,6 +1180,21 @@ mod tests {
         let sonnet5_standard = ModelPricing::for_model_at("claude-sonnet-5", standard).unwrap();
         assert_eq!(sonnet5_standard.input_per_million, 3.0);
         assert_eq!(sonnet5_standard.output_per_million, 15.0);
+
+        // Opus 5 matches the Opus 4.6-4.8 rates under its own rate card.
+        let opus5 = ModelPricing::for_model("claude-opus-5").unwrap();
+        assert_eq!(opus5.rate_card, "anthropic-api-opus-5");
+        assert_eq!(opus5.input_per_million, 5.0);
+        assert_eq!(opus5.output_per_million, 25.0);
+        assert_eq!(opus5.cache_write_per_million, 6.25);
+        assert_eq!(opus5.cache_write_1h_per_million, 10.0);
+        assert_eq!(opus5.cache_read_per_million, 0.5);
+        assert_eq!(
+            ModelPricing::for_rate_card("anthropic-api-opus-5")
+                .unwrap()
+                .output_per_million,
+            25.0
+        );
 
         // Current Opus tier prices at its own rate, not the older 4.5 tier.
         let opus48 = ModelPricing::for_model("claude-opus-4-8").unwrap();
