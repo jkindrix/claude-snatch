@@ -55,6 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Opus 4.5 and Haiku 3.5 use their verified API list rates
 - Opus 5 has a rate card, so its usage is no longer silently dropped from cost
   estimates and no longer flagged as long-context above 200k input tokens
+- Session `stats` and `summary` report which models were excluded from a cost
+  estimate instead of printing a total with no coverage caveat
 - Five-hour billing blocks deduplicate streamed response chunks and use the
   shared model-aware estimator instead of a hard-coded model rate
 

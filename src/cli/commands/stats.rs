@@ -714,6 +714,16 @@ fn output_session_stats(
                         context.usage.pricing.unpriced_models.join(", ")
                     );
                 }
+            } else if !summary.unpriced_models.is_empty() {
+                let coverage = if summary.estimated_cost.is_some() {
+                    "partial; excluded models"
+                } else {
+                    "unavailable; no verified rate for models"
+                };
+                println!(
+                    "Cost Coverage: {coverage}: {}",
+                    summary.unpriced_models.join(", ")
+                );
             }
 
             // Errors

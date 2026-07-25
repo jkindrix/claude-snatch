@@ -330,6 +330,17 @@ pub fn run(cli: &Cli, args: &SummaryArgs) -> Result<()> {
             if let Some(cost) = combined.total_usage.estimated_cost {
                 println!("  Cost:      ${cost:.2}");
             }
+            if !combined.total_usage.unpriced_models.is_empty() {
+                let coverage = if combined.total_usage.estimated_cost.is_some() {
+                    "partial; excluded models"
+                } else {
+                    "unavailable; no verified rate for models"
+                };
+                println!(
+                    "  Coverage:  {coverage}: {}",
+                    combined.total_usage.unpriced_models.join(", ")
+                );
+            }
             println!();
 
             // Top projects
