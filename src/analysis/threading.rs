@@ -98,6 +98,10 @@ pub struct ThreadResult {
     pub session_count: usize,
     /// Total match count across all exchanges.
     pub total_matches: usize,
+    /// Exchanges that matched before the display limit was applied. Greater
+    /// than `exchanges.len()` when the limit truncated the result, so callers
+    /// can say so instead of presenting a partial view as complete coverage.
+    pub matched_exchanges: usize,
 }
 
 fn narrow_exchanges(exchanges: &mut Vec<ThreadedExchange>, limit: usize) {
@@ -105,6 +109,11 @@ fn narrow_exchanges(exchanges: &mut Vec<ThreadedExchange>, limit: usize) {
         a.match_provenance
             .priority()
             .cmp(&b.match_provenance.priority())
+            // Denser matches first within an evidence tier. Chronology alone
+            // discards by age, so broadening a pattern used to bury the
+            // session that discussed the topic most under one-off mentions
+            // that merely happened earlier.
+            .then_with(|| b.match_count.cmp(&a.match_count))
             .then_with(|| a.timestamp.cmp(&b.timestamp))
             .then_with(|| a.session_id.cmp(&b.session_id))
             .then_with(|| a.entry_uuid.cmp(&b.entry_uuid))
@@ -265,12 +274,14 @@ fn collect_exchanges(
 /// Apply evidence-priority narrowing and compute result totals.
 #[must_use]
 pub fn finish_thread_exchanges(mut exchanges: Vec<ThreadedExchange>, limit: usize) -> ThreadResult {
+    let matched_exchanges = exchanges.len();
     narrow_exchanges(&mut exchanges, limit);
     let session_ids: HashSet<&str> = exchanges.iter().map(|e| e.qualified_id.as_str()).collect();
     let total_matches = exchanges.iter().map(|e| e.match_count).sum();
     ThreadResult {
         session_count: session_ids.len(),
         total_matches,
+        matched_exchanges,
         exchanges,
     }
 }
@@ -396,6 +407,30 @@ mod tests {
         assert!(exchanges
             .iter()
             .all(|exchange| exchange.match_provenance != ContentProvenance::Injected));
+    }
+
+    /// Within one evidence tier the limit keeps the densest discussion, not
+    /// whichever mention happened first, and the drop is reported.
+    #[test]
+    fn limiting_keeps_denser_matches_and_reports_the_drop() {
+        let mut passing_mention = exchange(1, ContentProvenance::Primary);
+        passing_mention.match_count = 1;
+        let mut sustained_discussion = exchange(2, ContentProvenance::Primary);
+        sustained_discussion.match_count = 20;
+
+        let result = finish_thread_exchanges(vec![passing_mention, sustained_discussion], 1);
+        assert_eq!(result.exchanges.len(), 1);
+        assert_eq!(result.exchanges[0].match_count, 20);
+        assert_eq!(result.matched_exchanges, 2);
+
+        let untruncated = finish_thread_exchanges(
+            vec![
+                exchange(1, ContentProvenance::Primary),
+                exchange(2, ContentProvenance::Primary),
+            ],
+            5,
+        );
+        assert_eq!(untruncated.matched_exchanges, untruncated.exchanges.len());
     }
 
     #[test]

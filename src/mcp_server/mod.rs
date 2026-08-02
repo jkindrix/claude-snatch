@@ -561,6 +561,8 @@ impl SnatchServer {
         let response = ThreadTopicResponse {
             pattern: request.pattern.clone(),
             total_exchanges: exchanges.len(),
+            matched_exchanges: result.matched_exchanges,
+            truncated: result.matched_exchanges > exchanges.len(),
             session_count: result.session_count,
             total_matches: result.total_matches,
             exchanges,

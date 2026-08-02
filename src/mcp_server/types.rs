@@ -1340,6 +1340,11 @@ pub struct ThreadExchangeEntry {
 pub struct ThreadTopicResponse {
     pub pattern: String,
     pub total_exchanges: usize,
+    /// Exchanges that matched before the display limit was applied. Exceeds
+    /// `total_exchanges` when `truncated` is set.
+    pub matched_exchanges: usize,
+    /// Whether the limit dropped matching exchanges from this response.
+    pub truncated: bool,
     pub session_count: usize,
     pub total_matches: usize,
     pub exchanges: Vec<ThreadExchangeEntry>,

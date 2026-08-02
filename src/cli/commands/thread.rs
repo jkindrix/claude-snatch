@@ -100,9 +100,8 @@ pub fn run(cli: &Cli, args: &ThreadArgs) -> Result<()> {
                 &result.exchanges,
                 &args.pattern,
                 result.session_count,
-                params.max_user_context,
-                params.max_assistant_context,
-                params.max_thinking_context,
+                result.matched_exchanges,
+                &params,
             );
             if args.summary && !cli.quiet {
                 output_summary(&result.exchanges, result.session_count);
@@ -341,17 +340,27 @@ fn output_text(
     exchanges: &[ThreadedExchange],
     pattern: &str,
     session_count: usize,
-    max_user_context: usize,
-    max_assistant_context: usize,
-    max_thinking_context: usize,
+    matched_exchanges: usize,
+    params: &ThreadParams,
 ) {
     if !cli.quiet {
-        println!(
-            "Thread: \"{}\" - {} exchanges across {} sessions\n",
-            pattern,
-            exchanges.len(),
-            session_count,
-        );
+        if matched_exchanges > exchanges.len() {
+            println!(
+                "Thread: \"{}\" - showing {} of {} exchanges across {} sessions \
+                 (use --limit for more)\n",
+                pattern,
+                exchanges.len(),
+                matched_exchanges,
+                session_count,
+            );
+        } else {
+            println!(
+                "Thread: \"{}\" - {} exchanges across {} sessions\n",
+                pattern,
+                exchanges.len(),
+                session_count,
+            );
+        }
     }
 
     let mut last_session_id = String::new();
@@ -385,7 +394,7 @@ fn output_text(
         if let Some(ref text) = exchange.user_text {
             println!();
             println!("  USER:");
-            for line in truncate(text, max_user_context).lines() {
+            for line in truncate(text, params.max_user_context).lines() {
                 println!("    {}", line);
             }
         }
@@ -393,7 +402,7 @@ fn output_text(
         if let Some(ref text) = exchange.assistant_text {
             println!();
             println!("  ASSISTANT:");
-            for line in truncate(text, max_assistant_context).lines() {
+            for line in truncate(text, params.max_assistant_context).lines() {
                 println!("    {}", line);
             }
         }
@@ -401,7 +410,7 @@ fn output_text(
         if let Some(ref text) = exchange.thinking_text {
             println!();
             println!("  THINKING:");
-            for line in truncate(text, max_thinking_context).lines() {
+            for line in truncate(text, params.max_thinking_context).lines() {
                 println!("    {}", line);
             }
         }
