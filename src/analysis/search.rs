@@ -342,6 +342,23 @@ fn char_key(ch: char, ignore_case: bool) -> String {
     }
 }
 
+/// How far a fuzzy match may spread, as a multiple of the pattern length.
+const FUZZY_SPAN_FACTOR: usize = 2;
+
+/// Additive slack on the spread bound, so short patterns keep room for the
+/// separators and small insertions that fuzzy matching exists to tolerate.
+const FUZZY_SPAN_SLACK: usize = 8;
+
+/// Locate `pattern` in `text` as a bounded-spread subsequence.
+///
+/// Subsequence matching is a short-string algorithm. Applied to a whole line
+/// of prose it degenerates: over a few hundred characters almost any short
+/// pattern occurs in order by chance, which made this matcher report a large
+/// fraction of the corpus for a single word. The spread bound restores the
+/// property the caller assumes — that a hit means the characters appeared
+/// *near each other* — and every start position is tried, so a compact
+/// occurrence later in the line is still found when an early scattered one
+/// is rejected.
 fn fuzzy_match(pattern: &str, text: &str, ignore_case: bool, threshold: u8) -> Option<FuzzyMatch> {
     let pattern_chars: Vec<char> = pattern.chars().collect();
     let text_chars: Vec<char> = text.chars().collect();
@@ -352,25 +369,49 @@ fn fuzzy_match(pattern: &str, text: &str, ignore_case: bool, threshold: u8) -> O
         .iter()
         .map(|ch| char_key(*ch, ignore_case))
         .collect();
-    let mut pattern_index = 0;
-    let mut positions = Vec::new();
-    for (text_index, ch) in text_chars.iter().enumerate() {
-        if pattern_index < pattern_keys.len()
-            && char_key(*ch, ignore_case) == pattern_keys[pattern_index]
-        {
-            positions.push(text_index);
-            pattern_index += 1;
+    // Fold once per character rather than once per comparison; the scan below
+    // revisits characters and `char_key` allocates.
+    let text_keys: Vec<String> = text_chars
+        .iter()
+        .map(|ch| char_key(*ch, ignore_case))
+        .collect();
+    let max_span = pattern_chars
+        .len()
+        .saturating_mul(FUZZY_SPAN_FACTOR)
+        .saturating_add(FUZZY_SPAN_SLACK);
+
+    let mut positions = Vec::with_capacity(pattern_keys.len());
+    for start in 0..text_keys.len() {
+        if text_keys[start] != pattern_keys[0] {
+            continue;
+        }
+        positions.clear();
+        let mut pattern_index = 0;
+        for (offset, key) in text_keys[start..].iter().enumerate() {
+            if offset >= max_span {
+                break;
+            }
+            if *key == pattern_keys[pattern_index] {
+                positions.push(start + offset);
+                pattern_index += 1;
+                if pattern_index == pattern_keys.len() {
+                    break;
+                }
+            }
+        }
+        if pattern_index != pattern_keys.len() {
+            continue;
+        }
+        let score = calculate_fuzzy_score(&positions, &text_chars, &pattern_chars, ignore_case);
+        if score >= threshold {
+            return Some(FuzzyMatch {
+                score,
+                start: positions.first().copied().unwrap_or(0),
+                end: positions.last().copied().unwrap_or(0).saturating_add(1),
+            });
         }
     }
-    if pattern_index != pattern_keys.len() {
-        return None;
-    }
-    let score = calculate_fuzzy_score(&positions, &text_chars, &pattern_chars, ignore_case);
-    (score >= threshold).then(|| FuzzyMatch {
-        score,
-        start: positions.first().copied().unwrap_or(0),
-        end: positions.last().copied().unwrap_or(0).saturating_add(1),
-    })
+    None
 }
 
 fn calculate_fuzzy_score(
@@ -964,6 +1005,25 @@ mod tests {
             fuzzy_match("ab", "ab", false, 0).unwrap().score
                 > fuzzy_match("ab", "a_b", false, 0).unwrap().score
         );
+    }
+
+    #[test]
+    fn fuzzy_matcher_bounds_match_spread() {
+        // Characters in order but scattered across a line: a chance ordering,
+        // not an occurrence of the pattern.
+        let scattered = "t----------a----------n----------t----------i----------v----------y";
+        assert!(fuzzy_match("tantivy", scattered, false, 60).is_none());
+
+        // A leading stray character must not consume the real occurrence that
+        // appears later on the same line.
+        let mixed = format!("t{} tantivy", "-".repeat(200));
+        let found = fuzzy_match("tantivy", &mixed, false, 60).expect("compact occurrence");
+        assert_eq!(&mixed[found.start..found.end], "tantivy");
+
+        // Prose long enough that any short pattern occurs in order by chance.
+        let prose = "the quick brown fox jumps over the lazy dog while several \
+                     observers quietly verify every yielded value";
+        assert!(fuzzy_match("tantivy", prose, true, 60).is_none());
     }
 
     #[test]
