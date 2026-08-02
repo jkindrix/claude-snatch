@@ -491,6 +491,20 @@ fn provider_index_requires_explicit_rebuild_of_a_legacy_schema() {
     assert_eq!(replacement.stats().unwrap().session_count, 1);
 }
 
+/// Session ids from `--files-only` JSON rows, which also carry the project
+/// path and a subagent flag.
+fn files_only_ids(stdout: &[u8]) -> Vec<String> {
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(stdout).expect("JSON row array");
+    rows.iter()
+        .map(|row| {
+            row["session_id"]
+                .as_str()
+                .expect("session_id field")
+                .to_string()
+        })
+        .collect()
+}
+
 /// `--files-only` is grep-like: one very noisy session consumes one result,
 /// not the entire raw-match budget. The noisy session is written last so it is
 /// searched first under the newest-first discovery contract.
@@ -511,7 +525,7 @@ fn test_search_files_only_limits_distinct_sessions_not_matches() {
         .output()
         .expect("files-only search failed");
     assert!(out.status.success(), "search failed: {out:?}");
-    let ids: Vec<String> = serde_json::from_slice(&out.stdout).expect("JSON session-id array");
+    let ids = files_only_ids(&out.stdout);
     assert_eq!(ids, vec![noisy_id, quiet_id]);
 }
 
@@ -539,8 +553,7 @@ fn test_search_files_only_limit_and_order_contract() {
         .output()
         .expect("limited files-only search failed");
     assert!(limited.status.success(), "search failed: {limited:?}");
-    let limited_ids: Vec<String> =
-        serde_json::from_slice(&limited.stdout).expect("JSON session-id array");
+    let limited_ids = files_only_ids(&limited.stdout);
     assert_eq!(limited_ids.len(), 50);
     assert!(String::from_utf8_lossy(&limited.stderr).contains("use --no-limit for all"));
 
@@ -574,8 +587,7 @@ fn test_search_files_only_limit_and_order_contract() {
         .output()
         .expect("unbounded JSON search failed");
     assert!(json.status.success(), "search failed: {json:?}");
-    let json_ids: Vec<String> =
-        serde_json::from_slice(&json.stdout).expect("JSON session-id array");
+    let json_ids = files_only_ids(&json.stdout);
     assert_eq!(json_ids.len(), 51);
 
     let text = snatch_cmd()
@@ -587,7 +599,12 @@ fn test_search_files_only_limit_and_order_contract() {
     let text_ids: Vec<String> = String::from_utf8(text.stdout)
         .expect("UTF-8 text output")
         .lines()
-        .map(String::from)
+        .map(|line| {
+            line.split('\t')
+                .next()
+                .expect("session id field")
+                .to_string()
+        })
         .collect();
     assert_eq!(text_ids, json_ids);
 }
@@ -615,7 +632,7 @@ fn test_search_files_only_preserves_model_filter() {
         .output()
         .expect("model-filtered search failed");
     assert!(matching.status.success(), "search failed: {matching:?}");
-    let ids: Vec<String> = serde_json::from_slice(&matching.stdout).expect("JSON session-id array");
+    let ids = files_only_ids(&matching.stdout);
     assert_eq!(ids, vec![opus_id]);
 
     snatch_cmd()
@@ -632,6 +649,52 @@ fn test_search_files_only_preserves_model_filter() {
         .assert()
         .success()
         .stdout(predicate::eq("[]\n"));
+}
+
+/// Several patterns with `--files-only` list the union of matching sessions.
+/// Multi-pattern runs otherwise report a per-pattern count table, which cannot
+/// answer "which sessions matched" and previously discarded the flag silently.
+#[test]
+fn test_search_files_only_unions_multiple_patterns() {
+    let tmp = TempDir::new().expect("temp dir");
+    let alpha_id = "20000000-0000-0000-0000-000000000001";
+    let beta_id = "20000000-0000-0000-0000-000000000002";
+    write_search_session(&tmp, alpha_id, "alpha-token", None);
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    write_search_session(&tmp, beta_id, "beta-token", None);
+
+    let out = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "search",
+            "--files-only",
+            "alpha-token",
+            "beta-token",
+            "-o",
+            "json",
+        ])
+        .output()
+        .expect("multi-pattern files-only search failed");
+    assert!(out.status.success(), "search failed: {out:?}");
+    let mut ids = files_only_ids(&out.stdout);
+    ids.sort();
+    assert_eq!(ids, vec![alpha_id, beta_id]);
+
+    // A pattern matching nothing must not drop its partner's sessions.
+    let partial = snatch_cmd()
+        .env("SNATCH_CLAUDE_DIR", tmp.path())
+        .args([
+            "search",
+            "--files-only",
+            "alpha-token",
+            "no-such-token-anywhere",
+            "-o",
+            "json",
+        ])
+        .output()
+        .expect("partial multi-pattern files-only search failed");
+    assert!(partial.status.success(), "search failed: {partial:?}");
+    assert_eq!(files_only_ids(&partial.stdout), vec![alpha_id]);
 }
 
 /// Run a batch (`-o json`) search and return an exact pattern -> count map,

@@ -1096,7 +1096,12 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
     // ── Multi-pattern positional mode (single-pass batch) ───────────────
     // Multi-pattern positional: general-purpose single-pass batch search.
     // All patterns share the same scope flags from the CLI.
-    if args.pattern.len() > 1 {
+    //
+    // `--files-only` is exempt: batch output is a per-pattern count table,
+    // which cannot express "the sessions that matched". Those runs fall
+    // through to the single-pattern path over a combined alternation, which
+    // is the grep -l semantics the flag's help text promises.
+    if args.pattern.len() > 1 && !args.files_only {
         let scope = BatchScope::from_search_args(args);
         let mut patterns = Vec::new();
         for pat_str in &args.pattern {
@@ -1124,14 +1129,38 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
         });
     }
 
-    let pattern = &args.pattern[0];
-
-    if pattern.trim().is_empty() {
-        return Err(SnatchError::InvalidArgument {
-            name: "pattern".to_string(),
-            reason: "search pattern cannot be whitespace-only".to_string(),
-        });
+    for candidate in &args.pattern {
+        if candidate.trim().is_empty() {
+            return Err(SnatchError::InvalidArgument {
+                name: "pattern".to_string(),
+                reason: "search pattern cannot be whitespace-only".to_string(),
+            });
+        }
     }
+
+    // A single pattern is used verbatim. Several patterns only reach here in
+    // `--files-only` mode, where union membership is the answer: each pattern
+    // is wrapped so its own top-level alternation cannot absorb its
+    // neighbours.
+    let pattern = if args.pattern.len() > 1 {
+        for candidate in &args.pattern {
+            RegexBuilder::new(candidate)
+                .case_insensitive(args.ignore_case)
+                .build()
+                .map_err(|e| SnatchError::InvalidArgument {
+                    name: "pattern".to_string(),
+                    reason: format!("invalid regex '{}': {}", candidate, e),
+                })?;
+        }
+        args.pattern
+            .iter()
+            .map(|candidate| format!("(?:{candidate})"))
+            .collect::<Vec<_>>()
+            .join("|")
+    } else {
+        args.pattern[0].clone()
+    };
+    let pattern = &pattern;
 
     // Build regex
     let regex = RegexBuilder::new(pattern)
@@ -1248,7 +1277,11 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
                 if entry_matches {
                     let session_id = session.session_id().to_string();
                     if seen_session_ids.insert(session_id.clone()) {
-                        sessions_with_matches.push(session_id);
+                        sessions_with_matches.push(FilesOnlyRow {
+                            session_id,
+                            project_path: session.project_path().to_string(),
+                            is_subagent: session.is_subagent(),
+                        });
                     }
                     // grep -l semantics: after the first match, nothing else
                     // in this physical session can affect the result.
@@ -1396,15 +1429,32 @@ fn matches_message_type(entry: &LogEntry, type_filter: &str) -> bool {
     }
 }
 
-/// Output only session IDs with matches.
-fn output_files_only(cli: &Cli, sessions: &[String]) -> Result<()> {
+/// One `--files-only` row.
+///
+/// The session id alone is not actionable when the project is unknown, which
+/// is the case `--files-only` exists to serve, and subagent sidecars are
+/// indistinguishable from top-level sessions by id shape alone.
+#[derive(Debug, Clone, serde::Serialize)]
+struct FilesOnlyRow {
+    session_id: String,
+    project_path: String,
+    is_subagent: bool,
+}
+
+/// Output only sessions with matches.
+fn output_files_only(cli: &Cli, sessions: &[FilesOnlyRow]) -> Result<()> {
     match cli.effective_output() {
         OutputFormat::Json => {
             println!("{}", serde_json::to_string_pretty(sessions)?);
         }
         _ => {
-            for session_id in sessions {
-                println!("{}", session_id);
+            for row in sessions {
+                // Tab-separated so the id stays cut/awk-addressable as field 1.
+                print!("{}\t{}", row.session_id, row.project_path);
+                if row.is_subagent {
+                    print!("\tsubagent");
+                }
+                println!();
             }
         }
     }

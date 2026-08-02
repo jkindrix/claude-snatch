@@ -1034,7 +1034,9 @@ pub struct SearchArgs {
     #[arg(long)]
     pub no_limit: bool,
 
-    /// Only show session IDs containing matches (like grep -l).
+    /// Only show sessions containing matches (like grep -l). Prints
+    /// `id<TAB>project`, plus a `subagent` field for sidecar sessions. With
+    /// several patterns, lists the sessions matching any of them.
     #[arg(short = 'l', long)]
     pub files_only: bool,
 
