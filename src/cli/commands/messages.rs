@@ -13,7 +13,8 @@ use crate::analysis::extraction::{
 use crate::analysis::extraction::{
     extract_assistant_summary, extract_error_preview, extract_result_preview,
     extract_thinking_text, extract_tool_input_summary, extract_tool_names,
-    extract_user_prompt_text, get_model, has_thinking, is_human_prompt, truncate_text,
+    extract_user_prompt_text, get_model, has_thinking, is_human_prompt, main_thread_message_total,
+    truncate_text,
 };
 use crate::analysis::subagents::{match_subagents, SubagentMatch, SubagentMatches};
 use crate::cli::{Cli, MessagesArgs, OutputFormat};
@@ -40,6 +41,8 @@ struct MessagesOutput {
     total_messages: usize,
     returned: usize,
     offset: usize,
+    page_total: usize,
+    has_more: bool,
     messages: Vec<MessageOutput>,
     /// Subagents present on disk but not joinable to a specific spawn call.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -493,7 +496,12 @@ fn render(
         _ => {}
     }
 
-    let total_messages = main_entries.len();
+    // page_total is the population offset/limit range over at this detail level
+    // (main_entries is already filtered above); total_messages is the canonical,
+    // detail-independent count shared with `snatch info`, so the two never
+    // masquerade as a single pagination number.
+    let page_total = main_entries.len();
+    let total_messages = main_thread_message_total(&conversation);
 
     // Join tool results onto their calls at full detail (parity with the MCP
     // server): had_error plus error/result previews per tool_use id. Scans
@@ -527,6 +535,9 @@ fn render(
 
     // Paginate
     let paginated: Vec<(usize, &LogEntry)> = indexed.into_iter().skip(offset).take(limit).collect();
+    // From entries consumed by this page (not rendered rows, which can be fewer
+    // at some detail levels): do more entries remain beyond it?
+    let has_more = offset.saturating_add(paginated.len()) < page_total;
 
     match cli.effective_output() {
         OutputFormat::Json => {
@@ -557,6 +568,8 @@ fn render(
                 total_messages,
                 returned: messages.len(),
                 offset,
+                page_total,
+                has_more,
                 messages,
                 unmatched_subagents: subagent_matches
                     .unmatched
@@ -596,9 +609,9 @@ fn render(
             println!(
                 "Session {} ({} messages, showing {}-{}{skip_note})\n",
                 &ctx.display_id[..8.min(ctx.display_id.len())],
-                total_messages,
+                page_total,
                 offset + 1,
-                (offset + paginated.len()).min(total_messages),
+                (offset + paginated.len()).min(page_total),
             );
             if ctx.unparsed > 0 {
                 println!(
