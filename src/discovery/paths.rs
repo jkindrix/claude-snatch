@@ -5,6 +5,7 @@
 //! - Platform-specific paths (Linux, macOS, Windows, WSL)
 //! - Project path encoding/decoding (/ → -)
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Result, SnatchError};
@@ -198,7 +199,8 @@ pub fn decode_project_path(encoded: &str) -> String {
     let working = encoded.replace("%2D", "\x00HYPHEN\x00");
 
     // Try to find the best decode by checking filesystem
-    if let Some(best) = decode_with_filesystem_check(&working) {
+    let mut probes = Probes::new();
+    if let Some(best) = decode_with_filesystem_check(&working, &mut probes) {
         return best.replace("\x00HYPHEN\x00", "-");
     }
 
@@ -238,6 +240,91 @@ fn split_drive_prefix(encoded: &str) -> Option<(String, &str)> {
     Some((format!("{drive}:"), rest))
 }
 
+/// Filesystem probe cache and budget for one decode.
+///
+/// The guessing search below explores combinations of path separators, so the
+/// same candidate path is tested many times over and, without a bound, the
+/// number of candidates grows exponentially in the number of `-` in a name.
+/// Memoizing collapses the repeats; the budget stops the blow-up. Both are
+/// scoped to a single [`decode_project_path`] call, so a decode never observes
+/// filesystem state from an earlier one.
+struct Probes {
+    /// Whether a candidate path exists.
+    exists: HashMap<String, bool>,
+    /// Entry names of a directory, read at most once each.
+    listings: HashMap<PathBuf, Vec<String>>,
+    /// Remaining uncached filesystem operations.
+    budget: u32,
+}
+
+/// Filesystem operations one decode may perform.
+///
+/// Set well above what any plausible real path needs (the deepest name in a
+/// corpus of 297 projects required ~25), so the bound is reached only by the
+/// pathological blow-up it exists to stop.
+const PROBE_BUDGET: u32 = 20_000;
+
+impl Probes {
+    fn new() -> Self {
+        Self {
+            exists: HashMap::new(),
+            listings: HashMap::new(),
+            budget: PROBE_BUDGET,
+        }
+    }
+
+    /// Whether the search may still touch the filesystem.
+    fn exhausted(&self) -> bool {
+        self.budget == 0
+    }
+
+    /// Cached `Path::exists`.
+    fn exists(&mut self, path: &str) -> bool {
+        if let Some(&hit) = self.exists.get(path) {
+            return hit;
+        }
+        if self.exhausted() {
+            return false;
+        }
+        self.budget -= 1;
+        let hit = Path::new(path).exists();
+        self.exists.insert(path.to_string(), hit);
+        hit
+    }
+
+    /// Whether any entry of the path's parent starts with its file name.
+    ///
+    /// Used to keep a candidate alive when the full path does not exist but
+    /// something in its parent could still extend it.
+    fn has_matching_prefix(&mut self, path_str: &str) -> bool {
+        let path = Path::new(path_str);
+        let (Some(parent), Some(file_name)) = (path.parent(), path.file_name()) else {
+            return false;
+        };
+        let prefix = file_name.to_string_lossy();
+
+        if !self.listings.contains_key(parent) {
+            if self.exhausted() {
+                return false;
+            }
+            self.budget -= 1;
+            let names = std::fs::read_dir(parent)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.listings.insert(parent.to_path_buf(), names);
+        }
+
+        self.listings[parent]
+            .iter()
+            .any(|name| name.starts_with(prefix.as_ref()))
+    }
+}
+
 /// Try to decode by checking which paths exist on the filesystem.
 ///
 /// Claude Code's encoding converts multiple characters to `-`:
@@ -251,9 +338,7 @@ fn split_drive_prefix(encoded: &str) -> Option<(String, &str)> {
 /// - A single `-` in a path segment could be `-`, `.`, or `_`
 ///
 /// Uses a greedy approach with filesystem validation to find the correct path.
-fn decode_with_filesystem_check(encoded: &str) -> Option<String> {
-    use std::path::Path;
-
+fn decode_with_filesystem_check(encoded: &str, probes: &mut Probes) -> Option<String> {
     // Windows drive-letter encodings ("C--Users-...") rebuild from "C:/";
     // everything else keeps the Unix root "/"
     let (root, remainder) = match split_drive_prefix(encoded) {
@@ -273,9 +358,9 @@ fn decode_with_filesystem_check(encoded: &str) -> Option<String> {
     // directory; otherwise the filesystem-confirmed hyphen-preserving decode
     // below must be allowed to outrank it (e.g. a real `rust-mssql-driver` dir
     // that the speculative decode would render as `rust/mssql/driver`).
-    let special = decode_with_special_chars(content, &root);
+    let special = decode_with_special_chars(content, &root, probes);
     if let Some(ref path) = special {
-        if Path::new(path).exists() {
+        if probes.exists(path) {
             return Some(path.clone());
         }
     }
@@ -308,7 +393,7 @@ fn decode_with_filesystem_check(encoded: &str) -> Option<String> {
 
             let test_path = format!("{}{}", current_path, test_segment);
 
-            if Path::new(&test_path).exists() {
+            if probes.exists(&test_path) {
                 best_segment = test_segment;
                 best_j = j;
             }
@@ -325,7 +410,7 @@ fn decode_with_filesystem_check(encoded: &str) -> Option<String> {
     // Prefer a filesystem-confirmed hyphen-preserving decode; otherwise keep the
     // speculative special-char decode (preserves prior behavior for paths that
     // no longer exist on disk, e.g. deleted or moved project directories).
-    if Path::new(&current_path).exists() {
+    if probes.exists(&current_path) {
         Some(current_path)
     } else {
         special
@@ -341,9 +426,7 @@ fn decode_with_filesystem_check(encoded: &str) -> Option<String> {
 ///
 /// `root` is the reconstruction anchor: `/` for Unix paths, `C:/` (etc.) for
 /// Windows drive-letter paths.
-fn decode_with_special_chars(content: &str, root: &str) -> Option<String> {
-    use std::path::Path;
-
+fn decode_with_special_chars(content: &str, root: &str, probes: &mut Probes) -> Option<String> {
     // Split on single dash, but track where double-dashes occur
     // Double-dash indicates underscore or period after a slash
     let mut result = String::from(root);
@@ -399,9 +482,9 @@ fn decode_with_special_chars(content: &str, root: &str) -> Option<String> {
                 let underscore_path = format!("{}{}", test_with_underscore, lookahead);
                 let period_path = format!("{}{}", test_with_period, lookahead);
 
-                if Path::new(&underscore_path).exists() || path_prefix_exists(&underscore_path) {
+                if probes.exists(&underscore_path) || probes.has_matching_prefix(&underscore_path) {
                     result.push('_');
-                } else if Path::new(&period_path).exists() || path_prefix_exists(&period_path) {
+                } else if probes.exists(&period_path) || probes.has_matching_prefix(&period_path) {
                     result.push('.');
                 } else {
                     // Default to underscore as it's more common
@@ -432,43 +515,17 @@ fn decode_with_special_chars(content: &str, root: &str) -> Option<String> {
     }
 
     // Now we have a basic decode, try to improve it by checking for periods in segments
-    let improved = improve_path_with_periods(&result);
+    let improved = improve_path_with_periods(&result, probes);
 
-    if Path::new(&improved).exists() {
+    if probes.exists(&improved) {
         Some(improved)
-    } else if Path::new(&result).exists() {
+    } else if probes.exists(&result) {
         Some(result)
     } else {
         // Return the improved version even if it doesn't exist
         // (the path might have been deleted)
         Some(improved)
     }
-}
-
-/// Check if any path starting with this prefix exists.
-fn path_prefix_exists(prefix: &str) -> bool {
-    use std::path::Path;
-
-    let path = Path::new(prefix);
-
-    // Check if parent directory exists and might contain matching entries
-    if let Some(parent) = path.parent() {
-        if parent.exists() && parent.is_dir() {
-            if let Some(file_name) = path.file_name() {
-                let prefix_str = file_name.to_string_lossy();
-                if let Ok(entries) = std::fs::read_dir(parent) {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name();
-                        let name_str = name.to_string_lossy();
-                        if name_str.starts_with(prefix_str.as_ref()) {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    false
 }
 
 /// Try to improve a decoded path by combining adjacent segments.
@@ -481,9 +538,7 @@ fn path_prefix_exists(prefix: &str) -> bool {
 ///
 /// Example: `/mnt/c/_dev/CMA/Central` might actually be `/mnt/c/_dev/CMA.Central`
 /// Example: `C:/Users/foo/my/app` might actually be `C:/Users/foo/my-app`
-fn improve_path_with_periods(path: &str) -> String {
-    use std::path::Path;
-
+fn improve_path_with_periods(path: &str, probes: &mut Probes) -> String {
     let parts: Vec<&str> = path.split('/').collect();
     if parts.len() <= 1 {
         return path.to_string();
@@ -498,10 +553,10 @@ fn improve_path_with_periods(path: &str) -> String {
     };
 
     // Try to find the best path by combining adjacent segments
-    let result = try_combine_segments(&parts, start, seed);
+    let result = try_combine_segments(&parts, start, seed, probes);
 
     if let Some(best_path) = result {
-        if Path::new(&best_path).exists() {
+        if probes.exists(&best_path) {
             return best_path;
         }
     }
@@ -524,9 +579,12 @@ fn is_drive_root(component: &str) -> bool {
 /// Periods are tried before hyphens at each position (preserving the
 /// historical preference); mixed separators within one combined segment are
 /// not attempted.
-fn try_combine_segments(parts: &[&str], start: usize, prefix: String) -> Option<String> {
-    use std::path::Path;
-
+fn try_combine_segments(
+    parts: &[&str],
+    start: usize,
+    prefix: String,
+    probes: &mut Probes,
+) -> Option<String> {
     if start >= parts.len() {
         return Some(prefix);
     }
@@ -538,7 +596,7 @@ fn try_combine_segments(parts: &[&str], start: usize, prefix: String) -> Option<
         } else {
             format!("{}/", prefix)
         };
-        return try_combine_segments(parts, start + 1, new_prefix);
+        return try_combine_segments(parts, start + 1, new_prefix, probes);
     }
 
     let mut best_result: Option<String> = None;
@@ -567,14 +625,14 @@ fn try_combine_segments(parts: &[&str], start: usize, prefix: String) -> Option<
             };
 
             // Check if this path (or prefix) exists
-            let path_exists = Path::new(&test_path).exists();
-            let could_be_prefix = !path_exists && has_matching_prefix(&test_path);
+            let path_exists = probes.exists(&test_path);
+            let could_be_prefix = !path_exists && probes.has_matching_prefix(&test_path);
 
             if path_exists || could_be_prefix {
                 // Recursively try the rest
-                if let Some(result) = try_combine_segments(parts, end, test_path.clone()) {
+                if let Some(result) = try_combine_segments(parts, end, test_path.clone(), probes) {
                     // Verify the full result exists
-                    if Path::new(&result).exists() {
+                    if probes.exists(&result) {
                         return Some(result);
                     }
                     // Keep as potential best if no better found
@@ -596,37 +654,13 @@ fn try_combine_segments(parts: &[&str], start: usize, prefix: String) -> Option<
         format!("{}/{}", prefix, single)
     };
 
-    if let Some(result) = try_combine_segments(parts, start + 1, test_path) {
-        if best_result.is_none() || Path::new(&result).exists() {
+    if let Some(result) = try_combine_segments(parts, start + 1, test_path, probes) {
+        if best_result.is_none() || probes.exists(&result) {
             return Some(result);
         }
     }
 
     best_result
-}
-
-/// Check if any directory entry starts with this path's filename.
-fn has_matching_prefix(path_str: &str) -> bool {
-    use std::path::Path;
-
-    let path = Path::new(path_str);
-    if let (Some(parent), Some(file_name)) = (path.parent(), path.file_name()) {
-        if parent.exists() && parent.is_dir() {
-            let prefix = file_name.to_string_lossy();
-            if let Ok(entries) = std::fs::read_dir(parent) {
-                for entry in entries.flatten() {
-                    if entry
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with(prefix.as_ref())
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
 }
 
 /// Generate variants of a path segment by replacing hyphens with periods.
@@ -1158,7 +1192,7 @@ mod tests {
         // When no path exists, it should still not produce double slashes
 
         // Simulated encoding of /mnt/c/_dev
-        let result = decode_with_special_chars("mnt-c--dev", "/");
+        let result = decode_with_special_chars("mnt-c--dev", "/", &mut Probes::new());
         assert!(result.is_some());
         let path = result.unwrap();
         // Should decode to /mnt/c/_dev (with underscore), not /mnt/c//dev
@@ -1208,20 +1242,62 @@ mod tests {
     }
 
     #[test]
-    fn test_path_prefix_exists() {
-        // Test the path_prefix_exists helper
-        let temp_dir = std::env::temp_dir();
+    fn test_has_matching_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("alphabet")).unwrap();
 
-        // The temp directory itself should be found as a prefix
-        let parent = temp_dir.parent();
-        if let Some(p) = parent {
-            let partial_name = temp_dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if !partial_name.is_empty() && partial_name.len() > 2 {
-                let prefix_path = p.join(&partial_name[..2]);
-                // This might or might not find a match depending on directory contents
-                // Just ensure it doesn't panic
-                let _ = path_prefix_exists(&prefix_path.to_string_lossy());
-            }
+        let mut probes = Probes::new();
+        // A prefix of a real entry matches even though the path itself does not exist.
+        let partial = tmp.path().join("alpha");
+        assert!(!partial.exists());
+        assert!(probes.has_matching_prefix(&partial.to_string_lossy()));
+
+        // A prefix nothing starts with does not.
+        let absent = tmp.path().join("zeta");
+        assert!(!probes.has_matching_prefix(&absent.to_string_lossy()));
+    }
+
+    #[test]
+    fn test_probes_memoize_repeated_lookups() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().to_string_lossy().into_owned();
+
+        let mut probes = Probes::new();
+        assert!(probes.exists(&path));
+        let after_first = probes.budget;
+        // Repeats are served from the memo and cost no further budget.
+        for _ in 0..100 {
+            assert!(probes.exists(&path));
         }
+        assert_eq!(probes.budget, after_first);
+    }
+
+    #[test]
+    fn test_probes_stop_at_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut probes = Probes::new();
+        probes.budget = 1;
+
+        // The one affordable probe still answers truthfully.
+        assert!(probes.exists(&tmp.path().to_string_lossy()));
+        assert!(probes.exhausted());
+        // Past the budget the search is told nothing exists, so it unwinds
+        // instead of expanding further.
+        assert!(!probes.exists(&tmp.path().join("child").to_string_lossy()));
+    }
+
+    #[test]
+    fn test_decode_terminates_on_pathological_name() {
+        // A long all-hyphen name is the shape that made the guessing search
+        // blow up exponentially. It must still return, and quickly.
+        let name = format!("-{}", vec!["seg"; 24].join("-"));
+        let start = std::time::Instant::now();
+        let decoded = decode_project_path(&name);
+        assert!(decoded.starts_with('/'));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "decode took {:?}",
+            start.elapsed()
+        );
     }
 }
