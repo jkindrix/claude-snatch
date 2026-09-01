@@ -211,7 +211,7 @@ pub fn resolve_project(
 ) -> Result<ResolvedProject, ToolOutput> {
     let claude_dir = server.get_claude_dir().map_err(ToolOutput::error)?;
     let projects = claude_dir
-        .projects()
+        .projects_matching(project_filter)
         .map_err(|e| ToolOutput::error(format!("Failed to list projects: {e}")))?;
 
     let matches = crate::cli::helpers::filter_projects(projects, project_filter);

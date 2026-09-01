@@ -40,10 +40,12 @@ pub fn resolve_chain_entries(
     if chain_aware {
         let project_path = session.project_path().to_string();
         let file_id = session.session_id().to_string();
+        // `best_path` now resolves to the same value as `decoded_path`, which
+        // is also what `Session::project_path` was built from.
         if let Some(project) = claude_dir
             .projects()?
             .into_iter()
-            .find(|p| p.best_path() == project_path || p.decoded_path() == project_path)
+            .find(|p| p.decoded_path() == project_path)
         {
             for chain in project.session_chains()?.values() {
                 if chain.len() > 1 && chain.contains(&file_id) {
@@ -606,6 +608,12 @@ pub fn looks_like_decision(text: &str) -> bool {
 /// If the filter exactly matches a decoded path or its last segment,
 /// returns only that project. Otherwise falls back to substring matching
 /// across decoded paths and encoded names.
+///
+/// When several projects share a trailing segment — the same directory name
+/// used in two places, or reached before and after a move — the one whose
+/// working directory still exists wins, and only when exactly one does. A
+/// collision between two live projects stays an error rather than becoming a
+/// silent guess, and passing the full path always selects exactly that project.
 pub fn filter_projects(projects: Vec<Project>, filter: &str) -> Vec<Project> {
     // Exact full-path match
     let exact: Vec<_> = projects
@@ -632,6 +640,21 @@ pub fn filter_projects(projects: Vec<Project>, filter: &str) -> Vec<Project> {
         return vec![projects.into_iter().nth(idx).unwrap()];
     }
 
+    // Several projects carry this name. Prefer the one still on disk, which is
+    // what a bare name almost always means when the others are stale records of
+    // deleted or moved directories.
+    if trailing.len() > 1 {
+        let live: Vec<_> = trailing
+            .iter()
+            .copied()
+            .filter(|&i| std::path::Path::new(projects[i].decoded_path()).exists())
+            .collect();
+        if live.len() == 1 {
+            let idx = live[0];
+            return vec![projects.into_iter().nth(idx).unwrap()];
+        }
+    }
+
     // Fall back to substring match
     projects
         .into_iter()
@@ -645,7 +668,7 @@ pub fn filter_projects(projects: Vec<Project>, filter: &str) -> Vec<Project> {
 /// Returns an error if zero or multiple projects match.
 pub fn resolve_single_project(cli: &Cli, filter: &str) -> Result<crate::discovery::Project> {
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
-    let projects = claude_dir.projects()?;
+    let projects = claude_dir.projects_matching(filter)?;
     let mut matches = filter_projects(projects, filter);
 
     match matches.len() {
@@ -698,7 +721,7 @@ pub fn collect_sessions(cli: &Cli, params: &SessionCollectParams) -> Result<Vec<
                 })?;
         vec![session]
     } else if let Some(project_filter) = params.project {
-        let projects = claude_dir.projects()?;
+        let projects = claude_dir.projects_matching(project_filter)?;
         let matched = filter_projects(projects, project_filter);
         let mut sess = Vec::new();
         for project in matched {
@@ -830,6 +853,91 @@ pub fn refuse_unsupported_flags(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── filter_projects ────────────────────────────────────────────
+
+    /// Build a project directory whose sessions record `cwd`, so the project
+    /// resolves to exactly that path.
+    fn project_at(root: &std::path::Path, cwd: &str) -> Project {
+        let encoded = crate::discovery::claude_encode_project_path(cwd);
+        let dir = root.join(&encoded);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("11111111-1111-1111-1111-111111111111.jsonl"),
+            format!(r#"{{"type":"user","cwd":"{cwd}"}}"#),
+        )
+        .unwrap();
+        Project::from_path(&dir).unwrap()
+    }
+
+    #[test]
+    fn filter_projects_prefers_the_live_directory_on_a_name_tie() {
+        let store = tempfile::tempdir().unwrap();
+        let live_root = tempfile::tempdir().unwrap();
+
+        // Only this one still exists on disk.
+        let live_path = live_root.path().join("shared-name");
+        std::fs::create_dir_all(&live_path).unwrap();
+        let live = live_path.to_string_lossy().into_owned();
+        let gone = "/gone/elsewhere/shared-name".to_string();
+
+        let projects = vec![
+            project_at(store.path(), &gone),
+            project_at(store.path(), &live),
+        ];
+
+        let matched = filter_projects(projects, "shared-name");
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].decoded_path(), live);
+    }
+
+    #[test]
+    fn filter_projects_keeps_a_tie_between_two_live_projects_ambiguous() {
+        let store = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+
+        let mut paths = Vec::new();
+        for parent in ["a", "b"] {
+            let p = root.path().join(parent).join("shared-name");
+            std::fs::create_dir_all(&p).unwrap();
+            paths.push(p.to_string_lossy().into_owned());
+        }
+        let projects: Vec<_> = paths.iter().map(|p| project_at(store.path(), p)).collect();
+
+        // Both are live, so the caller must still see the ambiguity.
+        assert_eq!(filter_projects(projects, "shared-name").len(), 2);
+    }
+
+    #[test]
+    fn filter_projects_keeps_a_tie_between_two_dead_projects_ambiguous() {
+        let store = tempfile::tempdir().unwrap();
+        let projects = vec![
+            project_at(store.path(), "/gone/a/shared-name"),
+            project_at(store.path(), "/gone/b/shared-name"),
+        ];
+
+        assert_eq!(filter_projects(projects, "shared-name").len(), 2);
+    }
+
+    #[test]
+    fn filter_projects_full_path_outranks_the_liveness_tiebreak() {
+        let store = tempfile::tempdir().unwrap();
+        let live_root = tempfile::tempdir().unwrap();
+        let live_path = live_root.path().join("shared-name");
+        std::fs::create_dir_all(&live_path).unwrap();
+        let live = live_path.to_string_lossy().into_owned();
+        let gone = "/gone/elsewhere/shared-name".to_string();
+
+        let projects = vec![
+            project_at(store.path(), &gone),
+            project_at(store.path(), &live),
+        ];
+
+        // Naming the deleted project outright still selects it.
+        let matched = filter_projects(projects, &gone);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].decoded_path(), gone);
+    }
 
     // ─── is_interrogative ───────────────────────────────────────────
 
