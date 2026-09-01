@@ -42,6 +42,7 @@ pub mod chain;
 mod hierarchy;
 mod paths;
 mod project;
+mod resolve;
 mod session;
 mod session_index;
 pub mod streaming;
@@ -50,6 +51,7 @@ pub use chain::*;
 pub use hierarchy::*;
 pub use paths::*;
 pub use project::*;
+pub use resolve::resolve_project_path;
 pub use session::*;
 pub use session_index::*;
 pub use streaming::{detect_session_state, SessionState};
@@ -129,6 +131,39 @@ impl ClaudeDirectory {
 
     /// List all projects.
     pub fn projects(&self) -> Result<Vec<Project>> {
+        self.projects_inner(None)
+    }
+
+    /// List projects that could match a filter string, skipping the rest.
+    ///
+    /// Building a [`Project`] resolves its working directory, which reads
+    /// session logs (or, failing that, probes the filesystem). Callers that
+    /// only want one project should not pay that for every unrelated project on
+    /// the machine.
+    ///
+    /// The prefilter is exact rather than approximate. Claude Code derives a
+    /// project's directory name by mapping each of `/ \ : . _` to `-`, so for
+    /// any project path `p` and filter `f`:
+    ///
+    /// ```text
+    /// p.contains(f)  =>  encode(p).contains(encode(f))
+    /// ```
+    ///
+    /// because the map is per-character and length-preserving. A directory
+    /// whose name lacks `encode(f)` therefore cannot decode to a path
+    /// containing `f`, and dropping it discards nothing. Names holding a `%`
+    /// escape are exempted: those come from snatch's own lossless `%2D`
+    /// encoding, which is not the per-character map this argument relies on.
+    pub fn projects_matching(&self, filter: &str) -> Result<Vec<Project>> {
+        if filter.is_empty() {
+            return self.projects();
+        }
+        self.projects_inner(Some(&claude_encode_project_path(filter)))
+    }
+
+    /// Enumerate project directories, optionally skipping names that cannot
+    /// match an encoded filter.
+    fn projects_inner(&self, encoded_filter: Option<&str>) -> Result<Vec<Project>> {
         if !self.projects_dir.exists() {
             return Ok(Vec::new());
         }
@@ -146,12 +181,30 @@ impl ClaudeDirectory {
         })? {
             let entry = entry.map_err(|e| SnatchError::io("Failed to read directory entry", e))?;
 
-            let path = entry.path();
-            if path.is_dir() {
-                match Project::from_path(&path) {
-                    Ok(project) => projects.push(project),
-                    Err(_) => continue, // Skip invalid project directories
+            // `file_type` uses the directory entry's own type where the
+            // platform reports it, avoiding a stat per project. It does not
+            // follow symlinks, so a symlinked project still needs the stat.
+            let file_type = entry.file_type();
+            let is_dir = match &file_type {
+                Ok(t) if t.is_symlink() => entry.path().is_dir(),
+                Ok(t) => t.is_dir(),
+                Err(_) => entry.path().is_dir(),
+            };
+            if !is_dir {
+                continue;
+            }
+
+            if let Some(needle) = encoded_filter {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if !name.contains(needle) && !name.contains('%') {
+                    continue;
                 }
+            }
+
+            match Project::from_path(entry.path()) {
+                Ok(project) => projects.push(project),
+                Err(_) => continue, // Skip invalid project directories
             }
         }
 

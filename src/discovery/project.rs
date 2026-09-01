@@ -9,9 +9,11 @@ use std::time::SystemTime;
 use crate::error::{Result, SnatchError};
 
 use super::chain::{detect_chains, SessionChain};
-use super::paths::{decode_project_path, is_session_file};
+use super::paths::is_session_file;
+use super::resolve::resolve_project_path;
 use super::session::Session;
 use super::session_index::SessionIndex;
+use once_cell::sync::OnceCell;
 
 /// A Claude Code project directory.
 #[derive(Debug, Clone)]
@@ -20,10 +22,14 @@ pub struct Project {
     path: PathBuf,
     /// Encoded directory name.
     encoded_name: String,
-    /// Decoded project path (the actual working directory).
+    /// The working directory this project stands for.
+    ///
+    /// Resolved from the `cwd` recorded in the project's own session logs when
+    /// one re-encodes to `encoded_name`; otherwise guessed from the directory
+    /// name. See [`resolve_project_path`].
     decoded_path: String,
-    /// Session index loaded from sessions-index.json (empty if absent).
-    session_index: SessionIndex,
+    /// Session index from sessions-index.json, loaded on first access.
+    session_index: OnceCell<SessionIndex>,
 }
 
 impl Project {
@@ -52,14 +58,13 @@ impl Project {
             })?
             .to_string();
 
-        let decoded_path = decode_project_path(&encoded_name);
-        let session_index = SessionIndex::load(&path);
+        let decoded_path = resolve_project_path(&path, &encoded_name);
 
         Ok(Self {
             path,
             encoded_name,
             decoded_path,
-            session_index,
+            session_index: OnceCell::new(),
         })
     }
 
@@ -82,9 +87,14 @@ impl Project {
     }
 
     /// Get the session index for this project.
+    ///
+    /// `sessions-index.json` is read on first access rather than at
+    /// construction: enumerating projects builds one [`Project`] per directory,
+    /// and most callers never look at the index.
     #[must_use]
     pub fn session_index(&self) -> &SessionIndex {
-        &self.session_index
+        self.session_index
+            .get_or_init(|| SessionIndex::load(&self.path))
     }
 
     /// Get a display name for the project (last component of decoded path).
@@ -278,31 +288,15 @@ impl Project {
 
     /// Get the authoritative project path from session JSONL data.
     ///
-    /// This extracts the `cwd` field from the first main session that has it,
-    /// which is the actual working directory used when the session was created.
-    /// This is more reliable than decoding the encoded directory name.
+    /// This is the `cwd` recorded in the project's own session logs, which is
+    /// the working directory the sessions actually ran in, and falls back to a
+    /// guess decoded from the directory name when no session records one.
     ///
-    /// Falls back to `decoded_path()` if no session has a `cwd` field.
+    /// Resolution happens once, in [`Project::from_path`], so this is simply
+    /// [`Project::decoded_path`]. It previously re-derived the answer by
+    /// full-parsing session files — an unbounded cost on large logs — and is
+    /// kept as a distinct method for callers that want to name the intent.
     pub fn authoritative_path(&self) -> Result<String> {
-        // Try to get cwd from main sessions first (they're more likely to have it)
-        for session in self.main_sessions()? {
-            if let Ok(meta) = session.quick_metadata_cached() {
-                if let Some(cwd) = meta.extracted_cwd {
-                    return Ok(cwd);
-                }
-            }
-        }
-
-        // Fall back to subagent sessions
-        for session in self.subagent_sessions()? {
-            if let Ok(meta) = session.quick_metadata_cached() {
-                if let Some(cwd) = meta.extracted_cwd {
-                    return Ok(cwd);
-                }
-            }
-        }
-
-        // Final fallback to decoded path
         Ok(self.decoded_path.clone())
     }
 
