@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI help panel scroll support for long help text
 - `--redact-preview` flag to preview redactions without applying them
 
+### Performance
+- Listing projects no longer costs seconds. Resolving a project path reads one
+  session file instead of probing the filesystem, verified resolutions are
+  memoized, `sessions-index.json` is read only when asked for, and a filtered
+  lookup skips projects whose directory name cannot match. Measured on a
+  297-project corpus with 47 projects on a WSL2 Windows mount:
+  `snatch goals --project <name>` 10,106 ms to 3 ms; `snatch list projects`
+  10,650 ms to 42 ms
+
 ### Changed
 - Standardized `--subagents` flag across all commands (was `--include-agents` in some)
 - `--main-thread` now defaults to false (exports all entries by default)
@@ -39,6 +48,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   define work versus processed totals, and cite the effective API rate cards
 
 ### Fixed
+- Project paths are now read from the `cwd` recorded in session logs instead of
+  being guessed from the storage directory name. Guessing worked only while the
+  project directory still existed, so it silently mis-reported every deleted or
+  moved project — 141 of 294 on a real 297-project corpus, e.g.
+  `/home/u/cma_central_db_design` shown as `/home/u/cma/central/db/design`.
+  Filtering with `--project` inherits the fix: the true name now matches, and
+  the fabricated hyphen-split path no longer does
+- Project name collisions resolve to the project whose directory still exists
+  when exactly one does; a tie between two live projects stays an explicit
+  ambiguity error, and an exact full path always selects that project
+- Path guessing, still used when no session records a `cwd`, is now memoized
+  and bounded. Its search was exponential in the number of `-` in a name and
+  could take seconds on a single directory
 - HTML export missing closing `>` on meta generator tag
 - Shell completions panic on broken pipe when output is truncated
 - Budget warnings now route to stderr instead of stdout
