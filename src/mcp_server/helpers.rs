@@ -214,7 +214,10 @@ pub fn resolve_project(
         .projects_matching(project_filter)
         .map_err(|e| ToolOutput::error(format!("Failed to list projects: {e}")))?;
 
-    let matches = crate::cli::helpers::filter_projects(projects, project_filter);
+    let matches = crate::cli::helpers::disambiguate_by_liveness(
+        crate::cli::helpers::filter_projects(projects, project_filter),
+        project_filter,
+    );
 
     match matches.len() {
         0 => Err(ToolOutput::error(format!(

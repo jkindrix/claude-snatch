@@ -4742,10 +4742,19 @@ fn mcp_project_registry(
     Option<String>,
 ) {
     let project = server.get_claude_dir().ok().and_then(|directory| {
-        directory.projects().ok().and_then(|projects| {
-            let mut matches = crate::cli::helpers::filter_projects(projects, project_filter);
-            (matches.len() == 1).then(|| matches.remove(0))
-        })
+        directory
+            .projects_matching(project_filter)
+            .ok()
+            .and_then(|projects| {
+                // This registry lookup needs exactly one project, so a bare name
+                // shared with a deleted project must resolve rather than silently
+                // yield no registry at all.
+                let mut matches = crate::cli::helpers::disambiguate_by_liveness(
+                    crate::cli::helpers::filter_projects(projects, project_filter),
+                    project_filter,
+                );
+                (matches.len() == 1).then(|| matches.remove(0))
+            })
     });
     let decisions = project
         .as_ref()

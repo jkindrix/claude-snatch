@@ -609,11 +609,10 @@ pub fn looks_like_decision(text: &str) -> bool {
 /// returns only that project. Otherwise falls back to substring matching
 /// across decoded paths and encoded names.
 ///
-/// When several projects share a trailing segment — the same directory name
-/// used in two places, or reached before and after a move — the one whose
-/// working directory still exists wins, and only when exactly one does. A
-/// collision between two live projects stays an error rather than becoming a
-/// silent guess, and passing the full path always selects exactly that project.
+/// Every match is returned. Narrowing a name collision down to one project is
+/// [`disambiguate_by_liveness`]'s job, and only callers that must end with
+/// exactly one project may apply it — omitting a matching project from a
+/// listing or a count is a wrong answer, not a convenience.
 pub fn filter_projects(projects: Vec<Project>, filter: &str) -> Vec<Project> {
     // Exact full-path match
     let exact: Vec<_> = projects
@@ -640,26 +639,49 @@ pub fn filter_projects(projects: Vec<Project>, filter: &str) -> Vec<Project> {
         return vec![projects.into_iter().nth(idx).unwrap()];
     }
 
-    // Several projects carry this name. Prefer the one still on disk, which is
-    // what a bare name almost always means when the others are stale records of
-    // deleted or moved directories.
-    if trailing.len() > 1 {
-        let live: Vec<_> = trailing
-            .iter()
-            .copied()
-            .filter(|&i| std::path::Path::new(projects[i].decoded_path()).exists())
-            .collect();
-        if live.len() == 1 {
-            let idx = live[0];
-            return vec![projects.into_iter().nth(idx).unwrap()];
-        }
-    }
-
     // Fall back to substring match
     projects
         .into_iter()
         .filter(|p| p.decoded_path().contains(filter) || p.encoded_name().contains(filter))
         .collect()
+}
+
+/// Narrow a name collision to the project that still exists on disk.
+///
+/// Two projects can end in the same directory name — the same name used in two
+/// places, or one project recorded before and after a move — and a bare name
+/// then matches both. When the candidates differ only by where that name sits,
+/// the live one is what a bare name almost always meant; the others are stale
+/// records of directories that are gone.
+///
+/// Applied only by callers that must end with exactly one project. It fires
+/// only on a pure name tie, so a substring filter spanning genuinely different
+/// projects stays ambiguous, and only when exactly one candidate is live, so a
+/// tie between two live projects stays an error rather than a silent guess.
+/// Naming the full path selects that project outright and never reaches here.
+pub fn disambiguate_by_liveness(matches: Vec<Project>, filter: &str) -> Vec<Project> {
+    if matches.len() < 2 {
+        return matches;
+    }
+
+    let suffix = format!("/{filter}");
+    if !matches.iter().all(|p| p.decoded_path().ends_with(&suffix)) {
+        return matches;
+    }
+
+    let live: Vec<usize> = matches
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| std::path::Path::new(p.decoded_path()).exists())
+        .map(|(i, _)| i)
+        .collect();
+
+    if live.len() == 1 {
+        let idx = live[0];
+        return vec![matches.into_iter().nth(idx).unwrap()];
+    }
+
+    matches
 }
 
 /// Resolve a single project from a filter string.
@@ -669,7 +691,7 @@ pub fn filter_projects(projects: Vec<Project>, filter: &str) -> Vec<Project> {
 pub fn resolve_single_project(cli: &Cli, filter: &str) -> Result<crate::discovery::Project> {
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
     let projects = claude_dir.projects_matching(filter)?;
-    let mut matches = filter_projects(projects, filter);
+    let mut matches = disambiguate_by_liveness(filter_projects(projects, filter), filter);
 
     match matches.len() {
         0 => Err(SnatchError::ProjectNotFound {
@@ -886,7 +908,8 @@ mod tests {
             project_at(store.path(), &live),
         ];
 
-        let matched = filter_projects(projects, "shared-name");
+        let matched =
+            disambiguate_by_liveness(filter_projects(projects, "shared-name"), "shared-name");
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].decoded_path(), live);
     }
@@ -905,7 +928,9 @@ mod tests {
         let projects: Vec<_> = paths.iter().map(|p| project_at(store.path(), p)).collect();
 
         // Both are live, so the caller must still see the ambiguity.
-        assert_eq!(filter_projects(projects, "shared-name").len(), 2);
+        let matched =
+            disambiguate_by_liveness(filter_projects(projects, "shared-name"), "shared-name");
+        assert_eq!(matched.len(), 2);
     }
 
     #[test]
@@ -916,6 +941,27 @@ mod tests {
             project_at(store.path(), "/gone/b/shared-name"),
         ];
 
+        let matched =
+            disambiguate_by_liveness(filter_projects(projects, "shared-name"), "shared-name");
+        assert_eq!(matched.len(), 2);
+    }
+
+    #[test]
+    fn filter_projects_keeps_every_match_for_listing_callers() {
+        let store = tempfile::tempdir().unwrap();
+        let live_root = tempfile::tempdir().unwrap();
+        let live_path = live_root.path().join("shared-name");
+        std::fs::create_dir_all(&live_path).unwrap();
+        let live = live_path.to_string_lossy().into_owned();
+
+        let projects = vec![
+            project_at(store.path(), "/gone/elsewhere/shared-name"),
+            project_at(store.path(), &live),
+        ];
+
+        // Listing and counting callers use filter_projects alone. Dropping the
+        // deleted project here would silently omit its sessions from a list and
+        // undercount it in stats, so both must survive.
         assert_eq!(filter_projects(projects, "shared-name").len(), 2);
     }
 
@@ -934,7 +980,7 @@ mod tests {
         ];
 
         // Naming the deleted project outright still selects it.
-        let matched = filter_projects(projects, &gone);
+        let matched = disambiguate_by_liveness(filter_projects(projects, &gone), &gone);
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].decoded_path(), gone);
     }
