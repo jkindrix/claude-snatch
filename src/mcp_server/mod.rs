@@ -1367,6 +1367,60 @@ fn claude_registry_scope(provider: Option<&str>) -> Result<bool, String> {
 /// exists only on the committed-index route. The complete destructure is a
 /// compile-time guard: adding a request field requires an explicit routing
 /// decision instead of being silently ignored on one path.
+/// Why the direct scan cannot stand in for an indexed search, or `None` when
+/// it can.
+///
+/// The direct scan covers Claude Code sessions only and supports none of the
+/// index-only options, so substituting it is safe exactly when the caller asked
+/// for nothing outside that. Answering a Codex query from Claude Code data, or
+/// quietly dropping `context_lines`, would be a wrong answer wearing the shape
+/// of a right one -- worse than the failure it replaces.
+fn direct_scan_cannot_substitute(
+    server: &SnatchServer,
+    request: &SearchSessionsRequest,
+    provider_flags: &[String],
+    qualified_session: bool,
+) -> Option<String> {
+    if qualified_session {
+        return Some("a qualified session_id names one provider's copy of a session".to_string());
+    }
+    if classic_search_uses_index_only_options(request) {
+        return Some(
+            "offset, context_lines, fuzzy, fuzzy_threshold, exclude and sort are index-only"
+                .to_string(),
+        );
+    }
+
+    let claude_code = crate::provider::ProviderId::claude_code();
+    for flag in provider_flags {
+        let flag = flag.trim().to_ascii_lowercase();
+        if flag == claude_code.0 {
+            continue;
+        }
+        if flag == "all" {
+            // "all" is only equivalent when Claude Code is the sole provider
+            // with data to contribute.
+            if let Some(other) = server
+                .provider_registry()
+                .available()
+                .map(|provider| provider.id())
+                .find(|id| *id != claude_code)
+            {
+                return Some(format!(
+                    "provider \"all\" includes {}, which the direct scan does not cover",
+                    other.0
+                ));
+            }
+            continue;
+        }
+        return Some(format!(
+            "provider \"{flag}\" is not covered by the direct scan"
+        ));
+    }
+
+    None
+}
+
 fn classic_search_uses_index_only_options(request: &SearchSessionsRequest) -> bool {
     let SearchSessionsRequest {
         pattern: _,
@@ -2673,13 +2727,45 @@ impl SnatchServer {
         description = "Search session text with progressive narrowing. Omit provider for the classic direct Claude route; set provider=['claude-code'|'codex'|'all'] or use a qualified session_id to query the committed provider index with deterministic offset/limit pagination, qualified entry provenance, and snapshot coverage. Supports regex or fuzzy matching and scopes text/tools/thinking/all. Indexed reasoning availability varies by provider/version; encrypted payloads are never searched."
     )]
     async fn search_sessions(&self, request: SearchSessionsRequest) -> ToolOutput {
-        let provider_flags = request.provider.as_deref().unwrap_or(&[]);
+        let mut request = request;
+        let provider_flags: Vec<String> = request.provider.clone().unwrap_or_default();
         let qualified_session = request
             .session_id
             .as_deref()
             .is_some_and(|reference| self.provider_registry().looks_qualified(reference));
+
+        // Set when an unusable index sent this request to the direct scan, so
+        // the response can say the coverage is not what was asked for.
+        let mut degraded_note: Option<String> = None;
+
         if !provider_flags.is_empty() || qualified_session {
-            return self.provider_search_sessions(&request);
+            match crate::index::provider::ProviderSearchIndex::open_read_only(
+                self.provider_index_path(),
+            ) {
+                Ok(_) => return self.provider_search_sessions(&request),
+                Err(error) => {
+                    // A missing or stale index is a reason to lose the index's
+                    // extras, not a reason to answer nothing.
+                    match direct_scan_cannot_substitute(
+                        self,
+                        &request,
+                        &provider_flags,
+                        qualified_session,
+                    ) {
+                        Some(blocker) => {
+                            return ToolOutput::error(format!(
+                                "{error}. The direct scan cannot answer this instead because {blocker}."
+                            ));
+                        }
+                        None => {
+                            degraded_note = Some(format!(
+                                "indexed search unavailable ({error}) - these results come from a direct scan of Claude Code sessions; run 'snatch index rebuild' to restore indexed search"
+                            ));
+                            request.provider = None;
+                        }
+                    }
+                }
+            }
         }
         if classic_search_uses_index_only_options(&request) {
             return ToolOutput::error(
@@ -2834,12 +2920,19 @@ impl SnatchServer {
         let total = results.len();
         results.truncate(limit);
         let returned = results.len();
-        let note = (track_thinking && thinking_blocks_seen > 0 && nonempty_thinking_seen == 0)
+        let thinking_note = (track_thinking
+            && thinking_blocks_seen > 0
+            && nonempty_thinking_seen == 0)
             .then(|| {
                 format!(
                     "searched {thinking_blocks_seen} thinking block(s) but all are empty — recent Claude Code versions do not persist thinking text, so scope=\"thinking\" cannot match in these sessions"
                 )
             });
+        let note = match (degraded_note, thinking_note) {
+            (Some(degraded), Some(thinking)) => Some(format!("{degraded}; {thinking}")),
+            (Some(only), None) | (None, Some(only)) => Some(only),
+            (None, None) => None,
+        };
         let response = SearchSessionsResponse {
             pattern: request.pattern,
             total_matches: total,
@@ -6653,6 +6746,58 @@ mod tests {
                 .await,
         );
         assert!(!text.contains(sid));
+    }
+
+    #[tokio::test]
+    async fn unusable_index_falls_back_to_the_direct_scan_and_says_so() {
+        let sid = "31313131-aaaa-bbbb-cccc-dddddddddddd";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let missing_index = tempfile::tempdir().unwrap();
+        let server = make_server(&tmp).with_index_dir(missing_index.path().join("absent"));
+
+        let mut request = search_request("Hello");
+        request.provider = Some(vec!["claude-code".to_string()]);
+
+        // The index cannot answer, but the question is one the direct scan
+        // covers, so it is answered rather than refused.
+        let text = unwrap_output(server.search_sessions(request).await);
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(
+            value["total_matches"].as_u64().unwrap() > 0,
+            "expected the direct scan to answer: {text}"
+        );
+
+        // ...and the response admits the coverage is not what was requested.
+        let note = value["note"].as_str().unwrap_or_default();
+        assert!(
+            note.contains("indexed search unavailable") && note.contains("direct scan"),
+            "expected a degraded-coverage note, got: {note:?}"
+        );
+        assert!(
+            note.contains("snatch index rebuild"),
+            "note should say how to restore indexed search, got: {note:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unusable_index_still_refuses_when_the_direct_scan_would_change_the_question() {
+        let sid = "32323232-aaaa-bbbb-cccc-dddddddddddd";
+        let tmp = setup_claude_dir(sid, PROJECT_PATH, &minimal_session_jsonl(sid));
+        let missing_index = tempfile::tempdir().unwrap();
+        let server = make_server(&tmp).with_index_dir(missing_index.path().join("absent"));
+
+        // context_lines is index-only: silently dropping it would answer a
+        // different question than the one asked.
+        let mut request = search_request("Hello");
+        request.provider = Some(vec!["claude-code".to_string()]);
+        request.context_lines = Some(3);
+        assert_error(server.search_sessions(request).await);
+
+        // A provider the direct scan does not cover must not be answered from
+        // Claude Code data.
+        let mut request = search_request("Hello");
+        request.provider = Some(vec!["codex".to_string()]);
+        assert_error(server.search_sessions(request).await);
     }
 
     #[tokio::test]
