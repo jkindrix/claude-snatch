@@ -5453,7 +5453,12 @@ mod codex_normalization_cli {
                 "json",
                 "standup",
                 "--period",
-                "30d",
+                // The fixture's session is pinned to a fixed date, so any
+                // window measured back from "now" eventually stops covering it.
+                // This test is about logical-session grouping and typed
+                // activity, not date filtering, so the window is deliberately
+                // wide enough that it never expires.
+                "36500d",
                 "--provider",
                 "codex",
                 "--all",
