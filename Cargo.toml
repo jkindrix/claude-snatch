@@ -37,7 +37,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # File system utilities
 walkdir = "2.5"
-dirs = "6.0"
+dirs = "7.0"
 directories = "6.0"
 tempfile = "3.27"
 
@@ -56,14 +56,14 @@ tantivy = "0.26"
 similar = "3.1"
 
 # JSON Schema
-jsonschema = { version = "0.47", default-features = false }
+jsonschema = { version = "0.55", default-features = false }
 
 # Codex provider: streaming zstd decode of cold rollout files (compiled only
 # with the `codex` feature; default features off per review round 11).
-zstd = { version = "0.13.3", default-features = false, optional = true }
+zstd = { version = "0.14.0", default-features = false, optional = true }
 
 # MCP Server (Model Context Protocol)
-mcpkit = { version = "0.6", optional = true }
+mcpkit = { version = "0.7", optional = true }
 
 # Terminal utilities
 console = "0.16"
@@ -82,7 +82,7 @@ once_cell = "1.21"
 parking_lot = "0.12"
 rayon = "1.10"
 bytes = "1.11"
-base64 = "0.22"
+base64 = "0.23"
 
 # Database
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -93,12 +93,12 @@ memmap2 = { version = "0.9", optional = true }
 [dev-dependencies]
 # Testing
 pretty_assertions = "1.4"
-rust-expect = "0.5"
+rust-expect = "0.6"
 insta = { version = "1.46", features = ["json", "yaml", "filters"] }
 proptest = "1.10"
 criterion = { version = "0.8", features = ["async_tokio"] }
 tempfile = "3.27"
-rstest = "0.26"
+rstest = "0.27"
 tokio-test = "0.4"
 assert_cmd = "2"
 predicates = "3"
