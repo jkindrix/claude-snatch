@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::model::content::ContentBlock;
 use crate::model::message::{LogEntry, SystemSubtype, UserContent};
+use crate::reconstruction::Conversation;
 
 /// Provenance of a visible text segment within a conversation entry.
 ///
@@ -323,6 +324,34 @@ pub fn failed_tool_use_ids(entries: &[&LogEntry]) -> std::collections::HashSet<S
         }
     }
     ids
+}
+
+/// Canonical session message total: human user prompts plus distinct assistant
+/// turns (deduped by `message.id`), counted over the main thread.
+///
+/// Detail-independent and the single shared definition behind
+/// `get_session_messages`/`snatch messages` (`total_messages`) and
+/// `get_session_info` (`messages`), so those surfaces always agree. This is
+/// deliberately NOT the pagination bound: callers page over the
+/// detail-filtered population (the `page_total` field), which can be larger
+/// (e.g. tool turns at `standard` detail) or smaller (e.g. `conversation`
+/// detail) than this count.
+#[must_use]
+pub fn main_thread_message_total(conversation: &Conversation) -> usize {
+    let mut assistant_turns: HashSet<&str> = HashSet::new();
+    let mut user_prompts = 0usize;
+    for entry in conversation.main_thread_entries() {
+        match entry {
+            LogEntry::Assistant(assistant) => {
+                assistant_turns.insert(assistant.message.id.as_str());
+            }
+            LogEntry::User(_) if is_human_prompt(entry) => {
+                user_prompts += 1;
+            }
+            _ => {}
+        }
+    }
+    user_prompts + assistant_turns.len()
 }
 
 /// Check whether an entry opens a prompt-boundary chunk.
