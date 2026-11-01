@@ -374,10 +374,12 @@ pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
             vec![session]
         } else if let Some(project_filters) = &args.project {
             // Blocks for specific project(s)
-            let projects = claude_dir.projects()?;
             let mut matching_projects = Vec::new();
             for filter in project_filters {
-                matching_projects.extend(super::helpers::filter_projects(projects.clone(), filter));
+                matching_projects.extend(super::helpers::filter_projects(
+                    claude_dir.projects_matching(filter)?,
+                    filter,
+                ));
             }
 
             if matching_projects.is_empty() {
@@ -415,10 +417,12 @@ pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
         output_session_stats(cli, args, &analytics, None)?;
     } else if let Some(project_filters) = &args.project {
         // Stats for specific project(s)
-        let projects = claude_dir.projects()?;
         let mut matching_projects = Vec::new();
         for filter in project_filters {
-            matching_projects.extend(super::helpers::filter_projects(projects.clone(), filter));
+            matching_projects.extend(super::helpers::filter_projects(
+                claude_dir.projects_matching(filter)?,
+                filter,
+            ));
         }
 
         if matching_projects.is_empty() {

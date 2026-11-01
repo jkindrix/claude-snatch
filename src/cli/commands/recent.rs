@@ -440,13 +440,18 @@ pub fn run(cli: &Cli, args: &RecentArgs) -> Result<()> {
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
     let tag_store = TagStore::load()?;
 
-    // Get all sessions
-    let mut sessions = claude_dir.all_sessions()?;
+    // Get sessions, filtered by project if specified. Every project a session
+    // can match below has a directory name containing the encoded filter, so
+    // `projects_matching` loses nothing that `all_sessions` would have kept.
+    let mut sessions = if let Some(project_filter) = &args.project {
+        let candidates = claude_dir.projects_matching(project_filter)?;
+        let mut sessions = Vec::new();
+        for project in &candidates {
+            sessions.extend(project.sessions()?);
+        }
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.modified_time()));
 
-    // Filter by project if specified
-    if let Some(project_filter) = &args.project {
-        let projects = claude_dir.projects()?;
-        let matched = super::helpers::filter_projects(projects, project_filter);
+        let matched = super::helpers::filter_projects(candidates, project_filter);
         let matched_paths: Vec<String> = matched
             .iter()
             .map(|p| p.decoded_path().to_string())
@@ -456,7 +461,10 @@ pub fn run(cli: &Cli, args: &RecentArgs) -> Result<()> {
                 .iter()
                 .any(|mp| s.project_path().contains(mp.as_str()))
         });
-    }
+        sessions
+    } else {
+        claude_dir.all_sessions()?
+    };
 
     if !args.no_chain {
         return run_collapsed(cli, args, sessions, &tag_store);

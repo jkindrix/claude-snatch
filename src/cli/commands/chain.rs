@@ -40,14 +40,14 @@ fn run_classic(cli: &Cli, args: &ChainArgs) -> Result<()> {
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
     let mut writer = PagerWriter::new(false);
 
-    let projects = claude_dir.projects()?;
     let filtered: Vec<_> = if let Some(ref filter) = args.project {
-        projects
+        claude_dir
+            .projects_matching(filter)?
             .into_iter()
             .filter(|p| p.best_path().contains(filter))
             .collect()
     } else {
-        projects
+        claude_dir.projects()?
     };
 
     let mut total_chains = 0;

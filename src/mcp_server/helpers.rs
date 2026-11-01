@@ -133,7 +133,7 @@ pub fn resolve_session_with_chain(
 
     // Find the project so we can detect chains
     let projects = claude_dir
-        .projects()
+        .projects_matching(&project_path)
         .map_err(|e| ToolOutput::error(format!("Failed to list projects: {e}")))?;
 
     let project = projects

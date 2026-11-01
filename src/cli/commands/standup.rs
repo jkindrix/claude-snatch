@@ -592,13 +592,10 @@ pub fn run(cli: &Cli, args: &StandupArgs) -> Result<()> {
     let cutoff = SystemTime::from(period_start);
 
     // Get all projects (filtered if specified)
-    let projects = {
-        let all = claude_dir.projects()?;
-        if let Some(ref filter) = args.project {
-            super::helpers::filter_projects(all, filter)
-        } else {
-            all
-        }
+    let projects = if let Some(ref filter) = args.project {
+        super::helpers::filter_projects(claude_dir.projects_matching(filter)?, filter)
+    } else {
+        claude_dir.projects()?
     };
 
     // Filter and aggregate data

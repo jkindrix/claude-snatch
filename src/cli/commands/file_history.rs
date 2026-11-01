@@ -41,7 +41,10 @@ pub fn run(cli: &Cli, args: &FileHistoryArgs) -> Result<()> {
     let mut writer = PagerWriter::new(false);
 
     // Collect sessions to index
-    let projects = claude_dir.projects()?;
+    let projects = match args.project {
+        Some(ref filter) => claude_dir.projects_matching(filter)?,
+        None => claude_dir.projects()?,
+    };
     let mut sessions = Vec::new();
     for project in &projects {
         if let Some(ref filter) = args.project {

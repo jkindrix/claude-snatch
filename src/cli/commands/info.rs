@@ -45,7 +45,7 @@ pub fn run(cli: &Cli, args: &InfoArgs) -> Result<()> {
         }
 
         // Search projects by substring
-        let projects = claude_dir.projects()?;
+        let projects = claude_dir.projects_matching(target)?;
         let matched = super::helpers::filter_projects(projects, target);
         if let Some(project) = matched.into_iter().next() {
             return show_project_info(cli, args, &project);

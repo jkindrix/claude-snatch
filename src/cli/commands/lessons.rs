@@ -530,7 +530,7 @@ fn run_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
 
     let sessions = if let Some(ref project_filter) = args.project {
-        let projects = claude_dir.projects()?;
+        let projects = claude_dir.projects_matching(project_filter)?;
         let matched = super::helpers::filter_projects(projects, project_filter);
         let mut sess = Vec::new();
         for project in matched {

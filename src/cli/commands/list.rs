@@ -195,7 +195,7 @@ fn list_sessions_flat<W: Write>(
     let show_sizes = args.sizes || matches!(args.sort, SortOrder::Size);
 
     let mut sessions: Vec<Session> = if let Some(project_filter) = &args.project {
-        let projects = claude_dir.projects()?;
+        let projects = claude_dir.projects_matching(project_filter)?;
         let matched = super::helpers::filter_projects(projects, project_filter);
         let mut matched_sessions = Vec::new();
         for project in matched {
@@ -611,7 +611,7 @@ fn list_sessions_collapsed<W: Write>(
 
     // Collect the session pool.
     let mut sessions: Vec<Session> = if let Some(project_filter) = &args.project {
-        let projects = claude_dir.projects()?;
+        let projects = claude_dir.projects_matching(project_filter)?;
         let matched = super::helpers::filter_projects(projects, project_filter);
         let mut matched_sessions = Vec::new();
         for project in matched {

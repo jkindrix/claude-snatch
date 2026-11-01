@@ -340,7 +340,7 @@ fn collect_sessions(cli: &Cli, args: &SearchArgs) -> Result<Vec<Session>> {
                 })?;
         vec![session]
     } else if let Some(project_filter) = &args.project {
-        let projects = claude_dir.projects()?;
+        let projects = claude_dir.projects_matching(project_filter)?;
         let matched = super::helpers::filter_projects(projects, project_filter);
         let mut sess = Vec::new();
         for project in matched {

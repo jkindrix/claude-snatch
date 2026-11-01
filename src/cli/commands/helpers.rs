@@ -43,7 +43,7 @@ pub fn resolve_chain_entries(
         // `best_path` now resolves to the same value as `decoded_path`, which
         // is also what `Session::project_path` was built from.
         if let Some(project) = claude_dir
-            .projects()?
+            .projects_matching(&project_path)?
             .into_iter()
             .find(|p| p.decoded_path() == project_path)
         {

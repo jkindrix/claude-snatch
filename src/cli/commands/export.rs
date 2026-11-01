@@ -576,7 +576,7 @@ fn export_combined_agents(cli: &Cli, args: &ExportArgs, session: &Session) -> Re
 
     // Get the project for this session
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
-    let projects = claude_dir.projects()?;
+    let projects = claude_dir.projects_matching(session.project_path())?;
 
     // Find the project containing this session
     let project = projects
@@ -1506,7 +1506,7 @@ fn export_raw_combined_agents(
 
     // Subagent source files: every descendant in the agent hierarchy, pre-order.
     let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
-    let projects = claude_dir.projects()?;
+    let projects = claude_dir.projects_matching(session.project_path())?;
     let project = projects
         .iter()
         .find(|p| p.decoded_path() == session.project_path())
@@ -1549,9 +1549,14 @@ fn raw_chain_source_paths(
 ) -> Result<RawChainSources> {
     if chain_aware {
         let claude_dir = get_claude_dir(cli.claude_dir.as_ref())?;
-        if let Some(project) = claude_dir.projects()?.into_iter().find(|p| {
-            p.best_path() == session.project_path() || p.decoded_path() == session.project_path()
-        }) {
+        if let Some(project) = claude_dir
+            .projects_matching(session.project_path())?
+            .into_iter()
+            .find(|p| {
+                p.best_path() == session.project_path()
+                    || p.decoded_path() == session.project_path()
+            })
+        {
             let chains = project.session_chains()?;
             if let Some(chain) = chains
                 .values()
