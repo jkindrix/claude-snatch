@@ -5,8 +5,10 @@
 //! - Platform-specific paths (Linux, macOS, Windows, WSL)
 //! - Project path encoding/decoding (/ → -)
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use crate::error::{Result, SnatchError};
 use crate::CLAUDE_DIR_NAME;
@@ -240,6 +242,49 @@ fn split_drive_prefix(encoded: &str) -> Option<(String, &str)> {
     Some((format!("{drive}:"), rest))
 }
 
+thread_local! {
+    /// Directory listings shared by every decode inside one [`ListingScope`].
+    static SHARED_LISTINGS: RefCell<Option<HashMap<PathBuf, Rc<Vec<String>>>>> =
+        const { RefCell::new(None) };
+}
+
+/// Shares directory listings across the decodes of one project enumeration.
+///
+/// Decodes of projects whose directories are gone all list the same parents.
+/// Measured 2026-11-01: 1,386 dead `/tmp/...` projects each re-read a 86,289-entry
+/// `/tmp`, so enumerating projects took ~32s, and every lookup that enumerates
+/// (`find_session`, `all_sessions`) paid it. Shared, `/tmp` is read once.
+///
+/// The scope ends when the guard drops, so a long-running process (the MCP
+/// server) never serves a listing from an earlier enumeration. Nested scopes
+/// reuse the outermost one.
+pub(super) struct ListingScope {
+    owner: bool,
+}
+
+impl ListingScope {
+    /// Start sharing listings on this thread until the guard drops.
+    pub(super) fn enter() -> Self {
+        SHARED_LISTINGS.with(|s| {
+            let mut s = s.borrow_mut();
+            if s.is_some() {
+                Self { owner: false }
+            } else {
+                *s = Some(HashMap::new());
+                Self { owner: true }
+            }
+        })
+    }
+}
+
+impl Drop for ListingScope {
+    fn drop(&mut self) {
+        if self.owner {
+            SHARED_LISTINGS.with(|s| *s.borrow_mut() = None);
+        }
+    }
+}
+
 /// Filesystem probe cache and budget for one decode.
 ///
 /// The guessing search below explores combinations of path separators, so the
@@ -247,12 +292,13 @@ fn split_drive_prefix(encoded: &str) -> Option<(String, &str)> {
 /// number of candidates grows exponentially in the number of `-` in a name.
 /// Memoizing collapses the repeats; the budget stops the blow-up. Both are
 /// scoped to a single [`decode_project_path`] call, so a decode never observes
-/// filesystem state from an earlier one.
+/// filesystem state from an earlier one — except directory listings inside a
+/// [`ListingScope`], which every decode in that scope shares.
 struct Probes {
     /// Whether a candidate path exists.
     exists: HashMap<String, bool>,
     /// Entry names of a directory, read at most once each.
-    listings: HashMap<PathBuf, Vec<String>>,
+    listings: HashMap<PathBuf, Rc<Vec<String>>>,
     /// Remaining uncached filesystem operations.
     budget: u32,
 }
@@ -304,24 +350,47 @@ impl Probes {
         let prefix = file_name.to_string_lossy();
 
         if !self.listings.contains_key(parent) {
-            if self.exhausted() {
-                return false;
-            }
-            self.budget -= 1;
-            let names = std::fs::read_dir(parent)
-                .map(|entries| {
-                    entries
-                        .flatten()
-                        .map(|e| e.file_name().to_string_lossy().into_owned())
-                        .collect()
-                })
-                .unwrap_or_default();
+            let shared = SHARED_LISTINGS.with(|s| {
+                s.borrow()
+                    .as_ref()
+                    .and_then(|cache| cache.get(parent).cloned())
+            });
+            let names = if let Some(names) = shared {
+                names
+            } else {
+                if self.exhausted() {
+                    return false;
+                }
+                self.budget -= 1;
+                // Sorted so the prefix test below is a binary search: /tmp can
+                // hold ~86k entries and one decode tests many prefixes.
+                let mut sorted: Vec<String> = std::fs::read_dir(parent)
+                    .map(|entries| {
+                        entries
+                            .flatten()
+                            .map(|e| e.file_name().to_string_lossy().into_owned())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                sorted.sort_unstable();
+                let names = Rc::new(sorted);
+                SHARED_LISTINGS.with(|s| {
+                    if let Some(cache) = s.borrow_mut().as_mut() {
+                        cache.insert(parent.to_path_buf(), Rc::clone(&names));
+                    }
+                });
+                names
+            };
             self.listings.insert(parent.to_path_buf(), names);
         }
 
-        self.listings[parent]
-            .iter()
-            .any(|name| name.starts_with(prefix.as_ref()))
+        // Names starting with `prefix` sort contiguously at or after it, so the
+        // first name not below `prefix` decides.
+        let names = &self.listings[parent];
+        let first = names.partition_point(|name| name.as_str() < prefix.as_ref());
+        names
+            .get(first)
+            .is_some_and(|name| name.starts_with(prefix.as_ref()))
     }
 }
 
@@ -1284,6 +1353,35 @@ mod tests {
         // Past the budget the search is told nothing exists, so it unwinds
         // instead of expanding further.
         assert!(!probes.exists(&tmp.path().join("child").to_string_lossy()));
+    }
+
+    #[test]
+    fn test_listing_scope_shares_directory_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("alpha-dir")).unwrap();
+        let candidate = tmp.path().join("alpha").to_string_lossy().into_owned();
+
+        // Outside a scope, every decode reads the directory itself.
+        for _ in 0..2 {
+            let mut probes = Probes::new();
+            assert!(probes.has_matching_prefix(&candidate));
+            assert_eq!(probes.budget, PROBE_BUDGET - 1);
+        }
+
+        let scope = ListingScope::enter();
+        let mut first = Probes::new();
+        assert!(first.has_matching_prefix(&candidate));
+        assert_eq!(first.budget, PROBE_BUDGET - 1);
+        // A later decode in the same scope reuses that read.
+        let mut second = Probes::new();
+        assert!(second.has_matching_prefix(&candidate));
+        assert_eq!(second.budget, PROBE_BUDGET);
+        drop(scope);
+
+        // Once the scope ends, the shared listing is gone.
+        let mut after = Probes::new();
+        assert!(after.has_matching_prefix(&candidate));
+        assert_eq!(after.budget, PROBE_BUDGET - 1);
     }
 
     #[test]

@@ -169,6 +169,7 @@ impl ClaudeDirectory {
         }
 
         let mut projects = Vec::new();
+        let _listings = paths::ListingScope::enter();
 
         for entry in std::fs::read_dir(&self.projects_dir).map_err(|e| {
             SnatchError::io(
