@@ -38,6 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   297-project corpus with 47 projects on a WSL2 Windows mount:
   `snatch goals --project <name>` 10,106 ms to 3 ms; `snatch list projects`
   10,650 ms to 42 ms
+- Projects whose directory is gone no longer make every lookup slow. Guessing
+  their paths re-read the same parent directory once per project; directory
+  listings are now shared across one enumeration and prefix-searched, and every
+  `--project` filter and exact-path lookup skips projects that cannot match.
+  Measured on a 2,004-project corpus with 1,386 log-less `/tmp` projects and an
+  86,289-entry `/tmp`: `snatch list projects` 32.3 s to 0.6 s; `snatch standup
+  --project <name>` 32.6 s to 0.01 s, which had pushed the SessionStart hook
+  past its 30 s cap
 
 ### Changed
 - Standardized `--subagents` flag across all commands (was `--include-agents` in some)
