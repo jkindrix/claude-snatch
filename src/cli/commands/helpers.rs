@@ -886,7 +886,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("11111111-1111-1111-1111-111111111111.jsonl"),
-            format!(r#"{{"type":"user","cwd":"{cwd}"}}"#),
+            // Serialized, not formatted: a Windows `cwd` has backslashes that
+            // would be invalid JSON escapes, leaving the session unreadable.
+            serde_json::json!({"type": "user", "cwd": cwd}).to_string(),
         )
         .unwrap();
         Project::from_path(&dir).unwrap()
