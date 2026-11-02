@@ -144,8 +144,11 @@ doc-check:
 
 # Fail when local stable lags the floating stable CI uses — a stale local
 # clippy passes lints that CI's newer clippy rejects (6-day red streak, 2026-07).
+# Capture before matching: rustup check exits 100 when any update is available,
+# so piping it under pipefail makes the condition false exactly when it matters.
 toolchain-check:
-    @if rustup check | grep -q '^stable.*update available'; then \
+    @status="$(rustup check || true)"; \
+    if grep -q '^stable.*update available' <<<"$status"; then \
         echo "error: local stable is behind CI (CI floats on latest stable). Run: rustup update stable"; \
         exit 1; \
     fi
