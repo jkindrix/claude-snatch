@@ -599,14 +599,15 @@ fn decode_with_special_chars(content: &str, root: &str, probes: &mut Probes) -> 
 
 /// Try to improve a decoded path by combining adjacent segments.
 ///
-/// Claude Code encodes periods and hyphens as dashes, which means a directory
-/// name like `CMA.Central` becomes `CMA-Central` and gets decoded as
-/// `CMA/Central`, and `my-app` gets decoded as `my/app`. This function tries
-/// to combine adjacent segments with periods or hyphens to find the correct
-/// path.
+/// Claude Code encodes periods, hyphens and underscores as dashes, which means
+/// a directory name like `CMA.Central` becomes `CMA-Central` and gets decoded
+/// as `CMA/Central`, and `my-app` gets decoded as `my/app`. This function tries
+/// to combine adjacent segments with each of those characters to find the
+/// correct path.
 ///
 /// Example: `/mnt/c/_dev/CMA/Central` might actually be `/mnt/c/_dev/CMA.Central`
 /// Example: `C:/Users/foo/my/app` might actually be `C:/Users/foo/my-app`
+/// Example: `/home/foo/my/app` might actually be `/home/foo/my_app`
 fn improve_path_with_periods(path: &str, probes: &mut Probes) -> String {
     let parts: Vec<&str> = path.split('/').collect();
     if parts.len() <= 1 {
@@ -643,11 +644,11 @@ fn is_drive_root(component: &str) -> bool {
     )
 }
 
-/// Recursively try combining segments with periods or hyphens to find valid paths.
+/// Recursively try combining segments with separators to find valid paths.
 ///
-/// Periods are tried before hyphens at each position (preserving the
-/// historical preference); mixed separators within one combined segment are
-/// not attempted.
+/// Periods, then hyphens, then underscores are tried at each position (the
+/// first two preserve the historical preference); mixed separators within one
+/// combined segment are not attempted.
 fn try_combine_segments(
     parts: &[&str],
     start: usize,
@@ -677,7 +678,7 @@ fn try_combine_segments(
         let separators: &[&str] = if end - start == 1 {
             &["."]
         } else {
-            &[".", "-"]
+            &[".", "-", "_"]
         };
 
         for separator in separators {
@@ -1118,6 +1119,29 @@ mod tests {
             decode_project_path("Q---dev-snatchnope-app"),
             "Q:/_dev/snatchnope/app"
         );
+    }
+
+    #[test]
+    fn test_decode_reconstructs_underscore_inside_a_name() {
+        // `_` encodes to `-` like `/` does, so `my_proj` reads as `my/proj`
+        // unless the filesystem says otherwise. macOS runners hit this through
+        // %TMPDIR% itself (`/var/folders/xx/abc_def/T`).
+        use std::fs;
+
+        let base = std::env::temp_dir().join("snatchdecodeunderscore");
+        let target = base.join("my_proj");
+        fs::create_dir_all(&target).unwrap();
+
+        let encoded = claude_encode(&target.to_string_lossy());
+        let decoded = decode_project_path(&encoded);
+
+        assert_eq!(
+            fs::canonicalize(&decoded).ok(),
+            fs::canonicalize(&target).ok(),
+            "decoded {decoded:?} should resolve to the real underscore dir {target:?}"
+        );
+
+        fs::remove_dir_all(&base).ok();
     }
 
     #[test]
