@@ -56,6 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   define work versus processed totals, and cite the effective API rate cards
 
 ### Fixed
+- Project names on Windows: `--project <name>`, display names and `standup` headings recognise a recorded path with backslashes
 - Project path guessing recovers an underscore inside a directory name (`my_proj` from `my-proj`) when no session log records the path
 - Project paths are now read from the `cwd` recorded in session logs instead of
   being guessed from the storage directory name. Guessing worked only while the

@@ -603,6 +603,13 @@ pub fn looks_like_decision(text: &str) -> bool {
     false
 }
 
+/// Whether `name` is the last segment of `path`. A session's recorded `cwd`
+/// keeps the separators of the OS it ran on, so both `/` and `\\` count.
+fn ends_with_segment(path: &str, name: &str) -> bool {
+    path.strip_suffix(name)
+        .is_some_and(|head| head.ends_with(['/', '\\']))
+}
+
 /// Filter projects by a filter string with smart matching.
 ///
 /// If the filter exactly matches a decoded path or its last segment,
@@ -626,12 +633,11 @@ pub fn filter_projects(projects: Vec<Project>, filter: &str) -> Vec<Project> {
         return vec![projects.into_iter().nth(idx).unwrap()];
     }
 
-    // Exact trailing segment match: path ends with "/<filter>"
-    let suffix = format!("/{filter}");
+    // Exact trailing segment match: the path's last segment is the filter
     let trailing: Vec<_> = projects
         .iter()
         .enumerate()
-        .filter(|(_, p)| p.decoded_path().ends_with(&suffix))
+        .filter(|(_, p)| ends_with_segment(p.decoded_path(), filter))
         .map(|(i, _)| i)
         .collect();
     if trailing.len() == 1 {
@@ -664,8 +670,10 @@ pub fn disambiguate_by_liveness(matches: Vec<Project>, filter: &str) -> Vec<Proj
         return matches;
     }
 
-    let suffix = format!("/{filter}");
-    if !matches.iter().all(|p| p.decoded_path().ends_with(&suffix)) {
+    if !matches
+        .iter()
+        .all(|p| ends_with_segment(p.decoded_path(), filter))
+    {
         return matches;
     }
 
@@ -914,6 +922,20 @@ mod tests {
             disambiguate_by_liveness(filter_projects(projects, "shared-name"), "shared-name");
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].decoded_path(), live);
+    }
+
+    #[test]
+    fn filter_projects_matches_a_backslash_path_by_its_last_segment() {
+        let store = tempfile::tempdir().unwrap();
+        let projects = vec![
+            project_at(store.path(), r"C:\work\shared-name"),
+            project_at(store.path(), r"C:\work\shared-name-extra"),
+        ];
+
+        let matched = filter_projects(projects, "shared-name");
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].decoded_path(), r"C:\work\shared-name");
+        assert_eq!(matched[0].display_name(), "shared-name");
     }
 
     #[test]

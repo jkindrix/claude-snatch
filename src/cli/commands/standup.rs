@@ -1114,7 +1114,11 @@ fn format_provider_text(report: &ProviderStandupReport) -> Result<String> {
     writeln!(output, "Projects Worked On:").ok();
     writeln!(output, "-------------------").ok();
     for project in &report.projects {
-        let name = project.path.split('/').next_back().unwrap_or(&project.path);
+        let name = project
+            .path
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(&project.path);
         writeln!(output, "  {} ({} sessions)", name, project.sessions).ok();
         for accomplishment in &project.accomplishments {
             writeln!(output, "    - {accomplishment}").ok();
@@ -1214,7 +1218,11 @@ fn format_provider_markdown(report: &ProviderStandupReport) -> Result<String> {
     }
     writeln!(output, "### What I worked on\n").ok();
     for project in &report.projects {
-        let name = project.path.split('/').next_back().unwrap_or(&project.path);
+        let name = project
+            .path
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(&project.path);
         writeln!(output, "- **{}** ({} sessions)", name, project.sessions).ok();
         for accomplishment in &project.accomplishments {
             writeln!(output, "  - {accomplishment}").ok();
@@ -1281,7 +1289,11 @@ fn format_text(report: &StandupReport) -> Result<String> {
     writeln!(output, "Projects Worked On:").ok();
     writeln!(output, "-------------------").ok();
     for project in &report.projects {
-        let name = project.path.split('/').next_back().unwrap_or(&project.path);
+        let name = project
+            .path
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(&project.path);
         writeln!(output, "  {} ({} sessions)", name, project.sessions).ok();
         for accomplishment in &project.accomplishments {
             writeln!(output, "    - {accomplishment}").ok();
@@ -1370,7 +1382,11 @@ fn format_markdown(report: &StandupReport) -> Result<String> {
     // Projects
     writeln!(output, "### What I worked on\n").ok();
     for project in &report.projects {
-        let name = project.path.split('/').next_back().unwrap_or(&project.path);
+        let name = project
+            .path
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(&project.path);
         writeln!(output, "- **{}** ({} sessions)", name, project.sessions).ok();
         for accomplishment in &project.accomplishments {
             writeln!(output, "  - {accomplishment}").ok();

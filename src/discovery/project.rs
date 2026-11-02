@@ -101,7 +101,7 @@ impl Project {
     #[must_use]
     pub fn display_name(&self) -> &str {
         self.decoded_path
-            .rsplit('/')
+            .rsplit(['/', '\\'])
             .next()
             .unwrap_or(&self.decoded_path)
     }

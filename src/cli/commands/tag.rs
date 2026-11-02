@@ -1103,8 +1103,8 @@ fn calculate_similarity(
         100.0
     } else {
         // Check for partial match (shared path components)
-        let source_parts: Vec<&str> = source.project_path.split('/').collect();
-        let target_parts: Vec<&str> = target.project_path.split('/').collect();
+        let source_parts: Vec<&str> = source.project_path.split(['/', '\\']).collect();
+        let target_parts: Vec<&str> = target.project_path.split(['/', '\\']).collect();
         let common = source_parts
             .iter()
             .zip(target_parts.iter())
