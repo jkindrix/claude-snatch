@@ -168,6 +168,7 @@ cast_lossless = "allow"           # Type is clearer than auto-widening
 trivially_copy_pass_by_ref = "allow"  # Consistency with other methods
 unnecessary_wraps = "allow"       # API consistency sometimes requires wrapping
 uninlined_format_args = "allow"   # Format style preference
+assert_is_empty = "allow"         # assert_eq!(x, [] as [T; 0]) reads worse than is_empty()
 significant_drop_tightening = "allow"  # Explicit scoping is clearer
 return_self_not_must_use = "allow"  # Builder pattern doesn't need must_use
 self_named_constructors = "allow" # new() is idiomatic

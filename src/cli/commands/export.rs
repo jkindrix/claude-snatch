@@ -358,11 +358,11 @@ fn export_single_session(cli: &Cli, args: &ExportArgs, session_id: &str) -> Resu
     // omission isn't silent (a plain export reconstructs the full chain).
     if (args.combine_agents || args.gist || args.template.is_some()) && !args.no_chain && !cli.quiet
     {
-        let in_chain = claude_dir.projects().ok().is_some_and(|projects| {
+        let in_chain = claude_dir.projects().is_ok_and(|projects| {
             projects.into_iter().any(|p| {
                 (p.best_path() == session.project_path()
                     || p.decoded_path() == session.project_path())
-                    && p.session_chains().ok().is_some_and(|chains| {
+                    && p.session_chains().is_ok_and(|chains| {
                         chains
                             .values()
                             .any(|c| c.len() > 1 && c.contains(session.session_id()))

@@ -1213,15 +1213,12 @@ fn tag_provider_filter(cli: &Cli, flags: &[String], store: &TagStore) -> Result<
 }
 
 fn stored_reference_is_qualified(store: &TagStore, reference: &str) -> bool {
-    reference
-        .parse::<LogicalSessionKey>()
-        .ok()
-        .is_some_and(|parsed| {
-            store
-                .sessions
-                .keys()
-                .any(|key| key.provider == parsed.provider)
-        })
+    reference.parse::<LogicalSessionKey>().is_ok_and(|parsed| {
+        store
+            .sessions
+            .keys()
+            .any(|key| key.provider == parsed.provider)
+    })
 }
 
 fn provider_route_for_reference(

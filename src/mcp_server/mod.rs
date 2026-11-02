@@ -26,8 +26,8 @@
 
 #![cfg(feature = "mcp")]
 // The #[tool] handlers must be `async fn` to satisfy the mcpkit tool signature,
-// even when a handler does no awaiting; the resulting unused_async is expected.
-#![allow(clippy::unused_async)]
+// even when a handler does no awaiting; the resulting unused_async lints are expected.
+#![allow(clippy::unused_async, clippy::unused_async_trait_impl)]
 
 pub mod helpers;
 pub mod types;

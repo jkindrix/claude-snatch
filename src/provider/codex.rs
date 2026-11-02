@@ -7287,13 +7287,7 @@ mod tests {
     fn nc_attribution_to_wrong_assistant_same_window_is_rejected() {
         let (_t, mut parsed, raw) = parse_and_raw(&allocation_fixture());
         // Move token 3's observations from owner 2 to owner 4 (same window).
-        let moved: Vec<_> = parsed
-            .semantics
-            .get_mut(&eid(2))
-            .unwrap()
-            .usage
-            .drain(..)
-            .collect();
+        let moved = std::mem::take(&mut parsed.semantics.get_mut(&eid(2)).unwrap().usage);
         parsed
             .semantics
             .entry(eid(4))
@@ -7307,13 +7301,7 @@ mod tests {
     fn nc_attribution_across_window_boundary_is_rejected() {
         let (_t, mut parsed, raw) = parse_and_raw(&allocation_fixture());
         // Move token 3's observations to owner 6 — a DIFFERENT window.
-        let moved: Vec<_> = parsed
-            .semantics
-            .get_mut(&eid(2))
-            .unwrap()
-            .usage
-            .drain(..)
-            .collect();
+        let moved = std::mem::take(&mut parsed.semantics.get_mut(&eid(2)).unwrap().usage);
         parsed
             .semantics
             .entry(eid(6))
