@@ -52,6 +52,66 @@ pub struct AttachmentSighting {
     pub sighting: DriftSighting,
 }
 
+/// One parse problem, grouped by its normalized error message.
+#[derive(Debug, Clone, Serialize)]
+pub struct ParseIssueSighting {
+    /// Total occurrences.
+    pub count: usize,
+    /// Distinct sessions it appeared in.
+    pub session_count: usize,
+    /// One `<session id>:<line>` it appears at, for follow-up digging.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub example: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct IssueBuilder {
+    count: usize,
+    sessions: HashSet<String>,
+    example: Option<String>,
+}
+
+impl IssueBuilder {
+    fn record(&mut self, session_id: &str, line: usize) {
+        self.count += 1;
+        self.sessions.insert(session_id.to_string());
+        if self.example.is_none() {
+            self.example = Some(format!("{session_id}:{line}"));
+        }
+    }
+
+    fn finish(self) -> ParseIssueSighting {
+        ParseIssueSighting {
+            count: self.count,
+            session_count: self.sessions.len(),
+            example: self.example,
+        }
+    }
+}
+
+/// Reduce a parse error to its cause so identical failures group together:
+/// drops the "Failed to parse JSONL at line N: " wrapper, serde's
+/// " at line N column M" position, and the torn-line salvage note.
+fn normalize_parse_error(message: &str) -> String {
+    let mut msg = message;
+    if let Some(rest) = msg.strip_prefix("Failed to parse JSONL at line ") {
+        msg = rest.split_once(": ").map_or(rest, |(_, cause)| cause);
+    }
+    if let Some((cause, _)) = msg.split_once(" (salvaged ") {
+        msg = cause;
+    }
+    if let Some(pos) = msg.rfind(" at line ") {
+        let tail = &msg[pos + " at line ".len()..];
+        if tail
+            .split_once(" column ")
+            .is_some_and(|(l, c)| l.parse::<u64>().is_ok() && c.parse::<u64>().is_ok())
+        {
+            msg = &msg[..pos];
+        }
+    }
+    msg.trim().to_string()
+}
+
 /// Aggregated drift report.
 #[derive(Debug, Clone, Serialize)]
 pub struct DoctorReport {
@@ -80,6 +140,12 @@ pub struct DoctorReport {
     pub sessions_with_unparsed: usize,
     /// Entries recovered from torn lines.
     pub entries_salvaged: usize,
+    /// Unparsed lines grouped by normalized error message.
+    pub parse_errors: IndexMap<String, ParseIssueSighting>,
+    /// Records kept by dropping malformed optional fields.
+    pub entries_degraded: usize,
+    /// Degraded records grouped by `<dropped fields>: <error>`.
+    pub degraded_fields: IndexMap<String, ParseIssueSighting>,
 }
 
 impl DoctorReport {
@@ -140,6 +206,9 @@ pub struct Diagnoser {
     lines_unparsed: usize,
     sessions_with_unparsed: usize,
     entries_salvaged: usize,
+    parse_errors: IndexMap<String, IssueBuilder>,
+    entries_degraded: usize,
+    degraded_fields: IndexMap<String, IssueBuilder>,
 }
 
 impl Diagnoser {
@@ -158,6 +227,24 @@ impl Diagnoser {
             self.sessions_with_unparsed += 1;
         }
         self.entries_salvaged += stats.entries_salvaged;
+        for error in &stats.errors {
+            self.parse_errors
+                .entry(normalize_parse_error(&error.message))
+                .or_default()
+                .record(session_id, error.line);
+        }
+        self.entries_degraded += stats.degraded.len();
+        for degraded in &stats.degraded {
+            let key = format!(
+                "{}: {}",
+                degraded.degradation.dropped_fields.join(", "),
+                normalize_parse_error(&degraded.degradation.error)
+            );
+            self.degraded_fields
+                .entry(key)
+                .or_default()
+                .record(session_id, degraded.line);
+        }
 
         for entry in entries {
             let ts = entry.timestamp();
@@ -260,6 +347,14 @@ impl Diagnoser {
             out.sort_by_key(|(_, s)| std::cmp::Reverse(s.count));
             out.into_iter().collect()
         }
+        fn finalize_issues(
+            map: IndexMap<String, IssueBuilder>,
+        ) -> IndexMap<String, ParseIssueSighting> {
+            let mut out: Vec<(String, ParseIssueSighting)> =
+                map.into_iter().map(|(k, v)| (k, v.finish())).collect();
+            out.sort_by_key(|(_, s)| std::cmp::Reverse(s.count));
+            out.into_iter().collect()
+        }
 
         let rendered_counts = self.attachment_rendered_counts;
         let attachment_kinds = finalize(self.attachment_kinds)
@@ -289,6 +384,9 @@ impl Diagnoser {
             lines_unparsed: self.lines_unparsed,
             sessions_with_unparsed: self.sessions_with_unparsed,
             entries_salvaged: self.entries_salvaged,
+            parse_errors: finalize_issues(self.parse_errors),
+            entries_degraded: self.entries_degraded,
+            degraded_fields: finalize_issues(self.degraded_fields),
         }
     }
 }
@@ -366,5 +464,46 @@ mod tests {
         assert_eq!(report.sessions_with_unparsed, 1);
         assert_eq!(report.entries_salvaged, 1);
         assert_eq!(report.entries_scanned, 1);
+    }
+
+    #[test]
+    fn test_normalize_parse_error_groups_by_cause() {
+        assert_eq!(
+            normalize_parse_error("Failed to parse JSONL at line 992: missing field `exitCode`"),
+            "missing field `exitCode`"
+        );
+        assert_eq!(
+            normalize_parse_error(
+                "Failed to parse JSONL at line 7: expected `,` or `}` at line 1 column 5013 (salvaged 1 complete trailing entry from torn line)"
+            ),
+            "expected `,` or `}`"
+        );
+        // Text that merely contains " at line " is left alone.
+        assert_eq!(
+            normalize_parse_error("unknown variant `stopped at line two`"),
+            "unknown variant `stopped at line two`"
+        );
+    }
+
+    #[test]
+    fn test_diagnose_groups_parse_errors_and_degraded_fields() {
+        let good = r#"{"uuid":"1","parentUuid":null,"type":"user","timestamp":"2026-11-02T00:00:00Z","sessionId":"s","version":"2.1.316","isSidechain":false,"message":{"role":"user","content":"ok"}}"#;
+        let degraded = r#"{"uuid":"2","parentUuid":"1","type":"system","subtype":"stop_hook_summary","timestamp":"2026-11-02T00:00:01Z","sessionId":"s","isSidechain":false,"hookInfos":[{"command":"x","durationMs":"59ms"}]}"#;
+        let (entries, stats) = parse(&format!("{good}\n{degraded}\n{{\"type\":\n{{\"type\":\n"));
+        let mut diagnoser = Diagnoser::new();
+        diagnoser.diagnose("s1", &entries, &stats);
+        let report = diagnoser.finish();
+
+        assert_eq!(report.lines_unparsed, 2);
+        assert_eq!(report.parse_errors.len(), 1, "{:?}", report.parse_errors);
+        let (cause, sighting) = report.parse_errors.first().unwrap();
+        assert!(cause.starts_with("EOF while parsing"), "{cause}");
+        assert_eq!(sighting.count, 2);
+        assert_eq!(sighting.example.as_deref(), Some("s1:3"));
+
+        assert_eq!(report.entries_degraded, 1);
+        let (cause, sighting) = report.degraded_fields.first().unwrap();
+        assert!(cause.starts_with("hookInfos: invalid type"), "{cause}");
+        assert_eq!(sighting.example.as_deref(), Some("s1:2"));
     }
 }

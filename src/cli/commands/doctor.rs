@@ -6,7 +6,7 @@
 //! counts and last-seen dates so fossils are distinguishable from live
 //! features — plus the known degradation signals.
 
-use crate::analysis::doctor::{Diagnoser, DoctorReport, DriftSighting};
+use crate::analysis::doctor::{Diagnoser, DoctorReport, DriftSighting, ParseIssueSighting};
 use crate::cli::{Cli, DoctorArgs, OutputFormat};
 use crate::error::Result;
 use crate::parser::JsonlParser;
@@ -72,6 +72,18 @@ fn fmt_sighting(name: &str, s: &DriftSighting) -> String {
     )
 }
 
+fn fmt_issue(cause: &str, s: &ParseIssueSighting) -> String {
+    let example = s
+        .example
+        .as_deref()
+        .map(|e| format!("  e.g. {e}"))
+        .unwrap_or_default();
+    format!(
+        "    {:>6}x in {:>3} session(s)  {cause}{example}",
+        s.count, s.session_count
+    )
+}
+
 fn print_human(report: &DoctorReport, failed: usize, since: Option<&str>) {
     let scope = since.map_or_else(|| "entire corpus".to_string(), |s| format!("since {s}"));
     println!("Doctor Report ({scope})");
@@ -90,7 +102,17 @@ fn print_human(report: &DoctorReport, failed: usize, since: Option<&str>) {
         "  Unparsed lines: {} (in {} session(s))",
         report.lines_unparsed, report.sessions_with_unparsed
     );
+    for (cause, s) in &report.parse_errors {
+        println!("{}", fmt_issue(cause, s));
+    }
     println!("  Salvaged entries: {}", report.entries_salvaged);
+    println!(
+        "  Degraded entries (kept without malformed optional fields): {}",
+        report.entries_degraded
+    );
+    for (cause, s) in &report.degraded_fields {
+        println!("{}", fmt_issue(cause, s));
+    }
     println!();
 
     println!("Thinking:");
