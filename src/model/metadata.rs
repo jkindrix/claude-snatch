@@ -23,9 +23,11 @@ pub struct ThinkingMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled: Option<bool>,
 
-    /// Array of trigger conditions (typically empty).
+    /// Trigger conditions, kept as raw JSON: Claude Code 2.0.75–2.1.6 wrote
+    /// objects (`{"start":0,"end":10,"text":"ultrathink"}`), and a `String`
+    /// element type dropped those typed prompts entirely.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub triggers: Vec<String>,
+    pub triggers: Vec<Value>,
 
     /// Unknown fields for forward compatibility.
     #[serde(flatten)]
@@ -125,8 +127,11 @@ pub struct HookInfo {
     /// Shell command that was executed.
     pub command: String,
 
-    /// Command exit code (0 = success).
-    pub exit_code: i32,
+    /// Command exit code (0 = success). Optional: Claude Code stopped writing
+    /// it in `stop_hook_summary` records (2.1.31x), and a required field made
+    /// every such line unparseable — which also broke the parent chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
 
     /// Combined stdout/stderr output.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -142,16 +147,18 @@ pub struct HookInfo {
 }
 
 impl HookInfo {
-    /// Check if the hook execution succeeded (exit code 0).
+    /// Check if the hook execution succeeded (exit code 0). `false` when the
+    /// exit code was not recorded.
     #[must_use]
     pub fn succeeded(&self) -> bool {
-        self.exit_code == 0
+        self.exit_code == Some(0)
     }
 
-    /// Check if the hook execution failed (non-zero exit code).
+    /// Check if the hook execution failed (non-zero exit code). `false` when
+    /// the exit code was not recorded.
     #[must_use]
     pub fn failed(&self) -> bool {
-        self.exit_code != 0
+        self.exit_code.is_some_and(|code| code != 0)
     }
 }
 
@@ -383,6 +390,15 @@ mod tests {
     }
 
     #[test]
+    fn test_thinking_metadata_object_triggers() {
+        // Shape from a real 2.1.6 log: an "ultrathink" keyword trigger.
+        let json = r#"{"level":"high","disabled":false,"triggers":[{"start":0,"end":10,"text":"ultrathink"}]}"#;
+        let metadata: ThinkingMetadata = serde_json::from_str(json).unwrap();
+        assert_eq!(metadata.triggers.len(), 1);
+        assert_eq!(metadata.triggers[0]["text"], "ultrathink");
+    }
+
+    #[test]
     fn test_todo_status() {
         let todo = Todo {
             content: "Test task".to_string(),
@@ -413,7 +429,7 @@ mod tests {
         let hook = HookInfo {
             hook_name: Some("lint-check".to_string()),
             command: "npm run lint".to_string(),
-            exit_code: 0,
+            exit_code: Some(0),
             output: Some("All checks passed".to_string()),
             duration_ms: Some(1523),
             extra: IndexMap::new(),

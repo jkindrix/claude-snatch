@@ -1496,6 +1496,26 @@ mod tests {
     }
 
     #[test]
+    fn test_stop_hook_summary_without_exit_code() {
+        // Claude Code 2.1.31x writes hookInfos without exitCode. A required
+        // field dropped every such line, orphaning later prompts from the
+        // parent chain. Shape copied from a real log.
+        let json = r#"{"parentUuid":"p1","isSidechain":false,"type":"system","subtype":"stop_hook_summary","hookCount":2,"hookInfos":[{"command":"/h/verify-on-stop.sh","durationMs":59},{"command":"/h/other.sh"}],"hookErrors":[],"hookAdditionalContext":[],"preventedContinuation":false,"stopReason":"","hasOutput":false,"level":"suggestion","timestamp":"2026-11-02T17:09:18.614Z","uuid":"sy1","toolUseID":"t1","sessionId":"s","session_id":"s","userType":"external","entrypoint":"cli","cwd":"/x","version":"2.1.316","gitBranch":"main"}"#;
+        let entry: LogEntry = serde_json::from_str(json).unwrap();
+        let LogEntry::System(system) = &entry else {
+            panic!("expected system entry, got {}", entry.message_type());
+        };
+        assert_eq!(system.hook_infos.len(), 2);
+        for hook in &system.hook_infos {
+            assert_eq!(hook.exit_code, None);
+            assert!(!hook.succeeded() && !hook.failed(), "unknown exit code");
+        }
+        assert_eq!(system.hook_infos[0].duration_ms, Some(59));
+        // An absent exit code must not be invented on re-serialization.
+        assert!(!serde_json::to_string(&entry).unwrap().contains("exitCode"));
+    }
+
+    #[test]
     fn test_known_entry_no_duplicate_top_level_type_key() {
         // The discriminator must be stripped before deserializing into a struct
         // with a flattened `extra` map, else it is re-captured and emitted twice
