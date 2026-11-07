@@ -134,8 +134,10 @@ pub fn is_noise_text(text: &str) -> bool {
             "<bash-stdout>",
             "<bash-stderr>",
             // Background shell / agent completions, harness-injected like
-            // <task-notification>. These four tags were 37 false prompts in a
-            // 1.35M-record corpus scan (2026-11-07).
+            // <task-notification>. A scan of 776,007 user records (2026-11-07)
+            // found 37 false prompts: 20 <bash-stdout>, 10 <bash-notification>,
+            // 7 <agent-notification>. <bash-stderr> is listed because it pairs
+            // with <bash-stdout>, not because one was seen first.
             "<bash-notification>",
             "<agent-notification>",
         ];
