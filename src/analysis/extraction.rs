@@ -129,6 +129,15 @@ pub fn is_noise_text(text: &str) -> bool {
             "<command-name>",
             "<system-reminder>",
             "<task-notification>",
+            // Output of a `!` shell command the user ran: the input is the
+            // `<bash-input>` record before it, this is what the shell printed.
+            "<bash-stdout>",
+            "<bash-stderr>",
+            // Background shell / agent completions, harness-injected like
+            // <task-notification>. These four tags were 37 false prompts in a
+            // 1.35M-record corpus scan (2026-11-07).
+            "<bash-notification>",
+            "<agent-notification>",
         ];
         if noise_tags.iter().any(|tag| trimmed.starts_with(tag)) {
             return true;
@@ -1031,6 +1040,32 @@ mod tests {
         assert!(is_noise_text(
             "<system-reminder>Some reminder</system-reminder>"
         ));
+    }
+
+    #[test]
+    fn test_shell_output_and_notifications_are_not_human_prompts() {
+        // Shapes copied from real logs, which carry no isMeta and no origin.
+        for content in [
+            "<bash-stdout>(Bash completed with no output)</bash-stdout><bash-stderr></bash-stderr>",
+            "<bash-stdout></bash-stdout><bash-stderr>/bin/bash: eval: line 1: unexpected EOF</bash-stderr>",
+            "<bash-stderr>permission denied</bash-stderr>",
+            "<bash-notification>\n<shell-id>b7ca4c5</shell-id>\n<status>completed</status>\n</bash-notification>",
+            "<agent-notification>\n<agent-id>adef7a8</agent-id>\n<status>completed</status>\n</agent-notification>",
+        ] {
+            let line = serde_json::json!({
+                "uuid": "1", "parentUuid": null, "type": "user",
+                "timestamp": "2026-01-01T00:00:00Z", "sessionId": "s",
+                "version": "2.1.0", "isSidechain": false,
+                "message": {"role": "user", "content": content}
+            })
+            .to_string();
+            let entry: LogEntry = serde_json::from_str(&line).unwrap();
+            assert!(!is_human_prompt(&entry), "counted as a prompt: {content}");
+        }
+        // The command the user typed stays a prompt boundary.
+        let input = r#"{"uuid":"2","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","version":"2.1.0","isSidechain":false,"message":{"role":"user","content":"<bash-input>git status</bash-input>"}}"#;
+        let entry: LogEntry = serde_json::from_str(input).unwrap();
+        assert!(is_human_prompt(&entry));
     }
 
     #[test]
