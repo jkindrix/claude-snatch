@@ -294,11 +294,17 @@ impl JsonlParser {
                         // complete tail instead of dropping it with the line.
                         let salvaged = salvage_torn_line(trimmed);
                         let salvaged_count = salvaged.len();
-                        for entry in salvaged {
+                        for (entry, degradation) in salvaged {
                             // Counted in entries_salvaged only — the line still
                             // counts as skipped, keeping the line-accounting
                             // invariant (processed == parsed + skipped + empty).
                             self.stats.entries_salvaged += 1;
+                            if let Some(degradation) = degradation {
+                                self.stats.degraded.push(DegradedLine {
+                                    line: line_num,
+                                    degradation,
+                                });
+                            }
                             entries.push(entry);
                         }
                         self.stats.lines_skipped += 1;
@@ -465,7 +471,11 @@ pub fn parse_entry_tolerant(
 /// embedded entry-shaped object start; accept a candidate only when the whole
 /// rest of the line parses as a clean sequence of entries, so a partial or
 /// garbage parse is never admitted.
-pub(crate) fn salvage_torn_line(line: &str) -> Vec<LogEntry> {
+///
+/// Each salvaged entry is parsed with [`parse_entry_tolerant`], so a fused
+/// record with one malformed optional field is kept (and its degradation
+/// returned) rather than failing the whole tail.
+pub(crate) fn salvage_torn_line(line: &str) -> Vec<(LogEntry, Option<Degradation>)> {
     // Entry objects start with one of these keys. Inside a JSON string these
     // bytes can't occur unescaped (quotes would be `\"`), so a raw match is
     // either the fused entry we want or part of the already-lost prefix.
@@ -485,13 +495,16 @@ pub(crate) fn salvage_torn_line(line: &str) -> Vec<LogEntry> {
 
     for offset in candidates {
         let tail = &line[offset..];
-        let mut stream = serde_json::Deserializer::from_str(tail).into_iter::<LogEntry>();
+        let mut stream = serde_json::Deserializer::from_str(tail).into_iter::<serde_json::Value>();
         let mut parsed = Vec::new();
         let mut clean = true;
         for item in &mut stream {
-            match item {
-                Ok(entry) => parsed.push(entry),
-                Err(_) => {
+            let entry = item
+                .ok()
+                .and_then(|value| parse_entry_tolerant(&value.to_string()).ok());
+            match entry {
+                Some(entry) => parsed.push(entry),
+                None => {
                     clean = false;
                     break;
                 }
@@ -712,6 +725,26 @@ mod tests {
         let entries = parser.parse_str(&torn).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(parser.stats().entries_salvaged, 2);
+    }
+
+    #[test]
+    fn test_salvage_keeps_fused_entry_with_malformed_optional_field() {
+        // The fused tail is the stop_hook_summary shape that drifted: one bad
+        // optional field must not cost the salvage.
+        let torn = format!(r#"{{"type":"attachment","uuid":"lost-1234{BAD_HOOK}"#);
+        let mut parser = JsonlParser::new();
+        let entries = parser.parse_str(&torn).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].uuid(), Some("h"));
+        let stats = parser.stats();
+        assert_eq!(stats.entries_salvaged, 1);
+        assert_eq!(stats.lines_skipped, 1);
+        assert_eq!(stats.degraded.len(), 1);
+        assert_eq!(stats.degraded[0].line, 1);
+        assert_eq!(
+            stats.degraded[0].degradation.dropped_fields,
+            vec!["hookInfos".to_string()]
+        );
     }
 
     #[test]

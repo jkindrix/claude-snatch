@@ -326,7 +326,11 @@ fn parse_claude_records(
                 } else {
                     diagnostics.recovered += 1;
                     let mut ids = Vec::new();
-                    for (sub, entry) in salvaged.into_iter().enumerate() {
+                    let mut dropped: Vec<String> = Vec::new();
+                    for (sub, (entry, degradation)) in salvaged.into_iter().enumerate() {
+                        if let Some(degradation) = degradation {
+                            dropped.extend(degradation.dropped_fields);
+                        }
                         let id = EntryId::deterministic(key, ordinal, sub as u32);
                         record_snapshot_changes(
                             &entry,
@@ -347,7 +351,16 @@ fn parse_claude_records(
                         outcome: RecordOutcome::Recovered {
                             entries: ids,
                             error: ParseDiagnostic {
-                                message: e.to_string(),
+                                message: if dropped.is_empty() {
+                                    e.to_string()
+                                } else {
+                                    dropped.sort();
+                                    dropped.dedup();
+                                    format!(
+                                        "{e} (salvaged entries kept without field(s): {})",
+                                        dropped.join(", ")
+                                    )
+                                },
                             },
                         },
                     });
