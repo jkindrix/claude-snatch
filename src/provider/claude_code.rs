@@ -123,7 +123,7 @@ fn read_snapshot_candidate<R: BufRead>(
         }
     }
 }
-use crate::parser::salvage_torn_line;
+use crate::parser::{parse_entry_tolerant, salvage_torn_line};
 
 /// Provider-qualified logical identity of any discovered Claude Code session.
 ///
@@ -253,8 +253,39 @@ fn parse_claude_records(
             });
             continue;
         }
-        match serde_json::from_str::<LogEntry>(&line) {
-            Ok(entry) => {
+        match parse_entry_tolerant(&line) {
+            Ok((entry, Some(degradation))) => {
+                // Kept by dropping malformed optional fields: the record is
+                // damaged (a field is gone) but its entry survives.
+                let id = EntryId::deterministic(key, ordinal, 0);
+                record_snapshot_changes(
+                    &entry,
+                    &id,
+                    &record,
+                    &mut file_changes,
+                    &mut file_change_diagnostics,
+                );
+                entries.push(IdentifiedEntry {
+                    id: id.clone(),
+                    entry,
+                });
+                entry_origins.insert(id.clone(), vec![record.clone()]);
+                diagnostics.recovered += 1;
+                record_dispositions.push(RecordDisposition {
+                    record,
+                    outcome: RecordOutcome::Recovered {
+                        entries: vec![id],
+                        error: ParseDiagnostic {
+                            message: format!(
+                                "{} (kept the record without field(s): {})",
+                                degradation.error,
+                                degradation.dropped_fields.join(", ")
+                            ),
+                        },
+                    },
+                });
+            }
+            Ok((entry, None)) => {
                 let id = EntryId::deterministic(key, ordinal, 0);
                 let unmodeled = matches!(entry, LogEntry::Unknown(_));
                 record_snapshot_changes(
@@ -1235,6 +1266,41 @@ mod tests {
             })
             .expect("torn line recovered");
         assert_eq!(recovered, 1, "the clean tail entry is salvaged");
+    }
+
+    #[test]
+    fn degraded_record_is_recovered_not_unparseable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("projects/-tmp-degraded");
+        std::fs::create_dir_all(&project).unwrap();
+        let native = concat!(
+            r#"{"uuid":"a","parentUuid":null,"type":"user","timestamp":"2026-11-02T00:00:00Z","sessionId":"s","version":"2.1.316","isSidechain":false,"message":{"role":"user","content":"first"}}"#,
+            "\n",
+            r#"{"uuid":"h","parentUuid":"a","type":"system","subtype":"stop_hook_summary","timestamp":"2026-11-02T00:00:01Z","sessionId":"s","isSidechain":false,"hookInfos":[{"command":"x","durationMs":"59ms"}]}"#,
+            "\n",
+        );
+        std::fs::write(project.join(format!("{SESSION_A}.jsonl")), native).unwrap();
+        let provider = ClaudeCodeProvider::new(ClaudeDirectory::from_path(tmp.path()).unwrap());
+        let parsed = provider.parse(&key(SESSION_A)).unwrap();
+
+        assert!(
+            parsed.validate_provenance().is_empty(),
+            "{:?}",
+            parsed.validate_provenance()
+        );
+        assert_eq!(parsed.entries.len(), 2);
+        assert_eq!(parsed.diagnostics.mapped, 1);
+        assert_eq!(parsed.diagnostics.recovered, 1);
+        assert_eq!(parsed.diagnostics.unparseable, 0);
+        let message = parsed
+            .record_dispositions
+            .iter()
+            .find_map(|d| match &d.outcome {
+                RecordOutcome::Recovered { error, .. } => Some(error.message.clone()),
+                _ => None,
+            })
+            .expect("degraded record is Recovered");
+        assert!(message.contains("without field(s): hookInfos"), "{message}");
     }
 
     #[test]

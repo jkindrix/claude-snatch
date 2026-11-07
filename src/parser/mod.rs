@@ -94,6 +94,18 @@ pub struct ParseStats {
     pub schema_version: Option<SchemaVersion>,
     /// Parsing errors encountered.
     pub errors: Vec<ParseError>,
+    /// Lines kept by dropping malformed optional fields. These count in
+    /// `entries_parsed` (the record was emitted), not in `lines_skipped`.
+    pub degraded: Vec<DegradedLine>,
+}
+
+/// A line whose record was kept by [`parse_entry_tolerant`] dropping fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DegradedLine {
+    /// Line number (1-indexed).
+    pub line: usize,
+    /// What was dropped and why.
+    pub degradation: Degradation,
 }
 
 impl ParseStats {
@@ -256,7 +268,13 @@ impl JsonlParser {
 
             // Parse the JSON line
             match self.parse_line(trimmed, line_num) {
-                Ok(entry) => {
+                Ok((entry, degradation)) => {
+                    if let Some(degradation) = degradation {
+                        self.stats.degraded.push(DegradedLine {
+                            line: line_num,
+                            degradation,
+                        });
+                    }
                     // Detect schema version from first entry with version field
                     if self.schema_version.is_none() {
                         if let Some(version) = entry.version() {
@@ -315,8 +333,8 @@ impl JsonlParser {
     }
 
     /// Parse a single JSON line.
-    fn parse_line(&self, line: &str, line_num: usize) -> Result<LogEntry> {
-        serde_json::from_str(line)
+    fn parse_line(&self, line: &str, line_num: usize) -> Result<(LogEntry, Option<Degradation>)> {
+        parse_entry_tolerant(line)
             .map_err(|e| SnatchError::parse_with_source(line_num, e.to_string(), e))
     }
 
@@ -329,6 +347,115 @@ impl JsonlParser {
     pub fn parse_entry(json: &str) -> Result<LogEntry> {
         serde_json::from_str(json).map_err(|e| SnatchError::parse_with_source(0, e.to_string(), e))
     }
+}
+
+/// Top-level keys a tolerant parse never drops: identity and tree position,
+/// discriminators, payload, and flags that change how a record is classified
+/// (dropping `isMeta` would turn harness text into a human prompt). A failure
+/// in one of these still skips the line.
+const PROTECTED_KEYS: [&str; 15] = [
+    "type",
+    "subtype",
+    "uuid",
+    "parentUuid",
+    "logicalParentUuid",
+    "sessionId",
+    "timestamp",
+    "message",
+    "content",
+    "attachment",
+    "isMeta",
+    "isCompactSummary",
+    "isSidechain",
+    "isApiErrorMessage",
+    "isVisibleInTranscriptOnly",
+];
+
+/// A record kept by dropping optional fields that failed to deserialize.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Degradation {
+    /// Top-level keys removed so the rest of the record could parse.
+    pub dropped_fields: Vec<String>,
+    /// The strict parse error that triggered the fallback.
+    pub error: String,
+}
+
+/// Parse one JSONL line, keeping the record when only optional metadata is
+/// malformed.
+///
+/// A strict parse is tried first. If it fails on a well-formed JSON object,
+/// every non-protected top-level key is removed (restoring any the model
+/// reports as a missing required field), then each is re-added in turn so only
+/// the keys that must go are dropped. One
+/// strict metadata field (a required `exitCode`, a `String` where Claude Code
+/// now writes objects) otherwise discards the whole record — and with it the
+/// parent link that later prompts hang from. Returns the strict error when the
+/// line is not a JSON object or no droppable set rescues it.
+pub fn parse_entry_tolerant(
+    line: &str,
+) -> std::result::Result<(LogEntry, Option<Degradation>), serde_json::Error> {
+    let strict_err = match serde_json::from_str::<LogEntry>(line) {
+        Ok(entry) => return Ok((entry, None)),
+        Err(e) => e,
+    };
+    let Ok(serde_json::Value::Object(obj)) = serde_json::from_str::<serde_json::Value>(line) else {
+        return Err(strict_err);
+    };
+    let try_parse = |dropped: &[String]| {
+        let mut kept = obj.clone();
+        for key in dropped {
+            kept.remove(key);
+        }
+        serde_json::from_value::<LogEntry>(serde_json::Value::Object(kept))
+    };
+    let mut dropped: Vec<String> = obj
+        .keys()
+        .filter(|k| !PROTECTED_KEYS.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    // Dropping everything can remove a field the model requires (e.g. the
+    // envelope's `version`); serde names it, so restore it and retry. Each
+    // pass restores one key, so this ends within `dropped.len()` passes.
+    let mut entry = loop {
+        if dropped.is_empty() {
+            return Err(strict_err);
+        }
+        match try_parse(&dropped) {
+            Ok(entry) => break entry,
+            Err(e) => {
+                let msg = e.to_string();
+                let required = msg
+                    .strip_prefix("missing field `")
+                    .and_then(|rest| rest.split_once('`'))
+                    .map(|(name, _)| name);
+                match required.and_then(|name| dropped.iter().position(|k| k == name)) {
+                    Some(pos) => {
+                        dropped.remove(pos);
+                    }
+                    None => return Err(strict_err),
+                }
+            }
+        }
+    };
+    // Shrink: restore every key the record still parses with.
+    let mut i = 0;
+    while i < dropped.len() {
+        let mut trial = dropped.clone();
+        trial.remove(i);
+        if let Ok(parsed) = try_parse(&trial) {
+            entry = parsed;
+            dropped = trial;
+        } else {
+            i += 1;
+        }
+    }
+    Ok((
+        entry,
+        Some(Degradation {
+            dropped_fields: dropped,
+            error: strict_err.to_string(),
+        }),
+    ))
 }
 
 /// Salvage complete entries from a torn JSONL line.
@@ -430,6 +557,7 @@ pub struct LogEntryIterator<R: BufRead> {
     line_num: usize,
     lenient: bool,
     errors: Vec<ParseError>,
+    degraded: Vec<DegradedLine>,
 }
 
 impl<R: BufRead> LogEntryIterator<R> {
@@ -440,6 +568,7 @@ impl<R: BufRead> LogEntryIterator<R> {
             line_num: 0,
             lenient,
             errors: Vec::new(),
+            degraded: Vec::new(),
         }
     }
 
@@ -447,6 +576,12 @@ impl<R: BufRead> LogEntryIterator<R> {
     #[must_use]
     pub fn errors(&self) -> &[ParseError] {
         &self.errors
+    }
+
+    /// Lines kept so far by dropping malformed optional fields.
+    #[must_use]
+    pub fn degraded(&self) -> &[DegradedLine] {
+        &self.degraded
     }
 
     /// Get current line number.
@@ -487,8 +622,16 @@ impl<R: BufRead> Iterator for LogEntryIterator<R> {
                 continue;
             }
 
-            match serde_json::from_str::<LogEntry>(trimmed) {
-                Ok(entry) => return Some(Ok(entry)),
+            match parse_entry_tolerant(trimmed) {
+                Ok((entry, degradation)) => {
+                    if let Some(degradation) = degradation {
+                        self.degraded.push(DegradedLine {
+                            line: self.line_num,
+                            degradation,
+                        });
+                    }
+                    return Some(Ok(entry));
+                }
                 Err(e) => {
                     if self.lenient {
                         self.errors.push(ParseError {
@@ -641,5 +784,83 @@ bad
         assert_eq!(parser.stats().empty_lines, 1);
         assert_eq!(parser.stats().lines_skipped, 1);
         assert_eq!(parser.stats().entries_parsed, 2);
+    }
+
+    // A stop_hook_summary whose hookInfos no longer match the model (here a
+    // string durationMs), between two prompts chained through it.
+    const PROMPT_A: &str = r#"{"uuid":"a","parentUuid":null,"type":"user","timestamp":"2026-11-02T00:00:00Z","sessionId":"s","version":"2.1.316","isSidechain":false,"message":{"role":"user","content":"first"}}"#;
+    const BAD_HOOK: &str = r#"{"uuid":"h","parentUuid":"a","type":"system","subtype":"stop_hook_summary","timestamp":"2026-11-02T00:00:01Z","sessionId":"s","version":"2.1.316","isSidechain":false,"gitBranch":"main","hookInfos":[{"command":"x","durationMs":"59ms"}]}"#;
+    const PROMPT_B: &str = r#"{"uuid":"b","parentUuid":"h","type":"user","timestamp":"2026-11-02T00:00:02Z","sessionId":"s","version":"2.1.316","isSidechain":false,"message":{"role":"user","content":"second"}}"#;
+
+    #[test]
+    fn test_tolerant_parse_drops_only_the_malformed_field() {
+        assert!(serde_json::from_str::<LogEntry>(BAD_HOOK).is_err());
+        let (entry, degradation) = parse_entry_tolerant(BAD_HOOK).unwrap();
+        let degradation = degradation.expect("record should be degraded");
+        assert_eq!(degradation.dropped_fields, vec!["hookInfos".to_string()]);
+        assert!(degradation.error.contains("59ms"), "{}", degradation.error);
+        assert_eq!(entry.uuid(), Some("h"));
+        assert_eq!(entry.parent_uuid(), Some("a"));
+        // The shrink step restores fields that parse fine.
+        let LogEntry::System(system) = &entry else {
+            panic!("expected system entry");
+        };
+        assert_eq!(system.git_branch.as_deref(), Some("main"));
+        assert!(system.hook_infos.is_empty());
+    }
+
+    #[test]
+    fn test_tolerant_parse_rescues_a_typed_prompt() {
+        // User records require `version`: the fallback must restore it rather
+        // than give up, or a prompt with one bad optional field is lost.
+        let prompt = PROMPT_A.replace(
+            r#""isSidechain":false,"#,
+            r#""isSidechain":false,"todos":[{"bad":1}],"#,
+        );
+        assert!(serde_json::from_str::<LogEntry>(&prompt).is_err());
+        let (entry, degradation) = parse_entry_tolerant(&prompt).unwrap();
+        assert_eq!(
+            degradation.unwrap().dropped_fields,
+            vec!["todos".to_string()]
+        );
+        assert_eq!(entry.version(), Some("2.1.316"));
+        assert!(crate::analysis::extraction::is_human_prompt(&entry));
+    }
+
+    #[test]
+    fn test_tolerant_parse_clean_line_is_not_degraded() {
+        let (_, degradation) = parse_entry_tolerant(PROMPT_A).unwrap();
+        assert_eq!(degradation, None);
+    }
+
+    #[test]
+    fn test_tolerant_parse_never_drops_protected_fields() {
+        // A malformed classification flag must fail the line, not be
+        // dropped: losing isSidechain/isMeta would reclassify the record.
+        let bad_flag = PROMPT_A.replace(r#""isSidechain":false"#, r#""isSidechain":"no""#);
+        assert!(parse_entry_tolerant(&bad_flag).is_err());
+        assert!(parse_entry_tolerant("not json").is_err());
+        assert!(parse_entry_tolerant("[1,2]").is_err());
+    }
+
+    #[test]
+    fn test_degraded_record_keeps_the_parent_chain() {
+        let content = format!("{PROMPT_A}\n{BAD_HOOK}\n{PROMPT_B}\n");
+        let mut parser = JsonlParser::new().with_lenient(true);
+        let entries = parser.parse_str(&content).unwrap();
+        assert_eq!(entries.len(), 3, "the hook record must not be dropped");
+        let stats = parser.stats();
+        assert_eq!(stats.lines_skipped, 0);
+        assert_eq!(stats.entries_parsed, 3);
+        assert_eq!(stats.degraded.len(), 1);
+        assert_eq!(stats.degraded[0].line, 2);
+        assert_eq!(
+            stats.lines_processed,
+            stats.entries_parsed + stats.lines_skipped + stats.empty_lines
+        );
+
+        let mut iter = LogEntryIterator::new(content.as_bytes(), true);
+        assert_eq!(iter.by_ref().flatten().count(), 3);
+        assert_eq!(iter.degraded().len(), 1);
     }
 }

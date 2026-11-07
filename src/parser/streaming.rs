@@ -22,6 +22,7 @@ pub struct StreamingParser<R> {
     bytes_read: u64,
     lenient: bool,
     lines_skipped: usize,
+    lines_degraded: usize,
     buffer: String,
 }
 
@@ -34,6 +35,7 @@ impl<R: BufRead> StreamingParser<R> {
             bytes_read: 0,
             lenient: true,
             lines_skipped: 0,
+            lines_degraded: 0,
             buffer: String::with_capacity(4096),
         }
     }
@@ -42,6 +44,12 @@ impl<R: BufRead> StreamingParser<R> {
     #[must_use]
     pub const fn lines_skipped(&self) -> usize {
         self.lines_skipped
+    }
+
+    /// Number of records kept so far by dropping malformed optional fields.
+    #[must_use]
+    pub const fn lines_degraded(&self) -> usize {
+        self.lines_degraded
     }
 
     /// Set lenient mode.
@@ -79,8 +87,13 @@ impl<R: BufRead> StreamingParser<R> {
                         continue;
                     }
 
-                    match serde_json::from_str::<LogEntry>(trimmed) {
-                        Ok(entry) => return Some(Ok(entry)),
+                    match crate::parser::parse_entry_tolerant(trimmed) {
+                        Ok((entry, degradation)) => {
+                            if degradation.is_some() {
+                                self.lines_degraded += 1;
+                            }
+                            return Some(Ok(entry));
+                        }
                         Err(e) => {
                             if self.lenient {
                                 self.lines_skipped += 1;
@@ -400,6 +413,8 @@ pub struct MmapParser {
     lenient: bool,
     /// Parsing errors encountered.
     errors: Vec<crate::parser::ParseError>,
+    /// Lines kept by dropping malformed optional fields.
+    degraded: Vec<crate::parser::DegradedLine>,
 }
 
 #[cfg(feature = "mmap")]
@@ -420,6 +435,7 @@ impl MmapParser {
             line_num: 0,
             lenient: true,
             errors: Vec::new(),
+            degraded: Vec::new(),
         })
     }
 
@@ -456,6 +472,12 @@ impl MmapParser {
     #[must_use]
     pub fn errors(&self) -> &[crate::parser::ParseError] {
         &self.errors
+    }
+
+    /// Lines kept by dropping malformed optional fields.
+    #[must_use]
+    pub fn degraded(&self) -> &[crate::parser::DegradedLine] {
+        &self.degraded
     }
 
     /// Get remaining bytes to parse.
@@ -528,8 +550,16 @@ impl MmapParser {
             }
 
             // Parse JSON (zero-copy: line_str borrows from mmap)
-            match serde_json::from_str::<crate::model::LogEntry>(line_str) {
-                Ok(entry) => return Some(Ok(entry)),
+            match crate::parser::parse_entry_tolerant(line_str) {
+                Ok((entry, degradation)) => {
+                    if let Some(degradation) = degradation {
+                        self.degraded.push(crate::parser::DegradedLine {
+                            line: self.line_num,
+                            degradation,
+                        });
+                    }
+                    return Some(Ok(entry));
+                }
                 Err(e) => {
                     if self.lenient {
                         self.errors.push(crate::parser::ParseError {
@@ -603,7 +633,9 @@ impl<'a> ZeroCopyLine<'a> {
         std::str::from_utf8(self.bytes)
     }
 
-    /// Parse into a LogEntry.
+    /// Parse into a LogEntry, keeping the record when only optional fields
+    /// are malformed (see [`crate::parser::parse_entry_tolerant`], which also
+    /// reports what was dropped).
     pub fn parse(&self) -> crate::error::Result<crate::model::LogEntry> {
         let s = self
             .as_str()
@@ -611,9 +643,11 @@ impl<'a> ZeroCopyLine<'a> {
                 message: format!("Invalid UTF-8 at line {}: {e}", self.line_num),
             })?;
 
-        serde_json::from_str(s.trim()).map_err(|e| {
-            crate::error::SnatchError::parse_with_source(self.line_num, e.to_string(), e)
-        })
+        crate::parser::parse_entry_tolerant(s.trim())
+            .map(|(entry, _)| entry)
+            .map_err(|e| {
+                crate::error::SnatchError::parse_with_source(self.line_num, e.to_string(), e)
+            })
     }
 
     /// Get raw bytes length.
