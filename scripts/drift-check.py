@@ -6,14 +6,15 @@ Runs `snatch doctor --since 8d -o json` and records a finding when:
   - lines failed to parse with a schema error (wrong type, missing field), as
     opposed to JSON corruption from torn writes, or
   - a record type, system subtype, content block, attachment kind or unpriced
-    model appears that no earlier run has seen. The first run records the
-    current set as the baseline instead of reporting all of it.
+    model appears that no earlier run has seen. The first run records every
+    kind in the whole log history as the baseline instead of reporting it, so
+    a kind that is merely rare is not reported as new when it next appears.
 
 Findings are appended to $STATE/alert.md, which the SessionStart hook
 (loadout hooks/snatch-recall.sh) shows until it is deleted. Every run writes
 $STATE/last-run.json, so the hook can also say when the check stopped running.
 
-Usage: drift-check.py [--state DIR] [--snatch PATH] [--since 8d]
+Usage: drift-check.py [--state DIR] [--snatch PATH] [--since 8d] [--baseline-since 3650d]
 """
 import argparse
 import datetime
@@ -51,8 +52,12 @@ def run_doctor(snatch, since):
         return None, f'`snatch doctor` printed invalid JSON: {e}'
 
 
+def kinds_in(report):
+    return {section: sorted(report.get(section) or {}) for section in KIND_SECTIONS}
+
+
 def findings_for(report, known):
-    """Return (findings, updated known kinds, whether this was the baseline run)."""
+    """Return (findings, updated known kinds)."""
     out = []
     for cause, s in (report.get('degraded_fields') or {}).items():
         out.append(f"{s['count']} record(s) kept without a malformed field — {cause} "
@@ -61,19 +66,17 @@ def findings_for(report, known):
         if cause.startswith(SCHEMA_PREFIXES):
             out.append(f"{s['count']} line(s) dropped by a schema error — {cause} "
                        f"(e.g. {s.get('example', '?')})")
-    baseline = known is None
-    known = dict(known or {})
+    known = dict(known)
     for section, label in KIND_SECTIONS.items():
         seen = set(known.get(section, []))
         current = report.get(section) or {}
-        if not baseline:
-            for name in sorted(set(current) - seen):
-                s = current[name]
-                example = s.get('example_session')
-                out.append(f"new {label} `{name}`: {s.get('count')}x"
-                           + (f" (e.g. session {example})" if example else ''))
+        for name in sorted(set(current) - seen):
+            s = current[name]
+            example = s.get('example_session')
+            out.append(f"new {label} `{name}`: {s.get('count')}x"
+                       + (f" (e.g. session {example})" if example else ''))
         known[section] = sorted(seen | set(current))
-    return out, known, baseline
+    return out, known
 
 
 def main():
@@ -81,21 +84,28 @@ def main():
     ap.add_argument('--state', default=os.path.expanduser('~/.local/state/snatch-drift'))
     ap.add_argument('--snatch', default=os.path.expanduser('~/.cargo/bin/snatch'))
     ap.add_argument('--since', default='8d', help='doctor window (default 8d: a week plus overlap)')
+    ap.add_argument('--baseline-since', default='3650d',
+                    help='doctor window for the first run, which only records what exists (default: all history)')
     a = ap.parse_args()
     os.makedirs(a.state, exist_ok=True)
     known_path = os.path.join(a.state, 'known-kinds.json')
     now = datetime.datetime.now().astimezone()
 
+    try:
+        with open(known_path) as fh:
+            known = json.load(fh)
+    except (OSError, ValueError):
+        known = None
+    baseline = known is None
     report, error = run_doctor(a.snatch, a.since)
+    if not error and baseline:
+        history, error = run_doctor(a.snatch, a.baseline_since)
+        if not error:
+            known = kinds_in(history)
     if error:
-        findings, baseline = [error], False
+        findings = [error]
     else:
-        try:
-            with open(known_path) as fh:
-                known = json.load(fh)
-        except (OSError, ValueError):
-            known = None
-        findings, known, baseline = findings_for(report, known)
+        findings, known = findings_for(report, known)
         tmp = known_path + '.tmp'
         with open(tmp, 'w') as fh:
             json.dump(known, fh, indent=1)
