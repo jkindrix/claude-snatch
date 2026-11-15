@@ -125,6 +125,60 @@ pub(crate) fn extract_continued_in(path: &Path) -> Option<String> {
         })
 }
 
+/// Which sessions in a set begin with a copy of another session in the same
+/// set (hand-off successors), so totals over the set can count the shared
+/// history once.
+#[derive(Debug, Default)]
+pub struct HandoffIndex {
+    /// successor file id -> path of the file it copies
+    predecessor: HashMap<String, std::path::PathBuf>,
+}
+
+impl HandoffIndex {
+    /// Index the hand-offs among `sessions`. A hand-off to or from a session
+    /// outside the set is ignored: nothing in the set repeats it.
+    pub fn for_sessions(sessions: &[super::Session]) -> Self {
+        let main: Vec<&super::Session> = sessions.iter().filter(|s| !s.is_subagent()).collect();
+        let ids: std::collections::HashSet<&str> = main.iter().map(|s| s.session_id()).collect();
+        let mut predecessor = HashMap::new();
+        for session in &main {
+            if let Some(successor) = extract_continued_in(session.path()) {
+                if successor != session.session_id() && ids.contains(successor.as_str()) {
+                    predecessor.insert(successor, session.path().to_path_buf());
+                }
+            }
+        }
+        Self { predecessor }
+    }
+
+    /// Remove from `entries` (parsed from `session_id`) the entries copied
+    /// from its predecessor, matched by UUID. Sessions that are not hand-off
+    /// successors are returned untouched. If the predecessor cannot be parsed
+    /// under `max_file_size`, nothing is removed: the totals this feeds skip
+    /// an unparseable file, so the copy is then the only one counted.
+    pub fn drop_inherited(
+        &self,
+        session_id: &str,
+        mut entries: Vec<LogEntry>,
+        max_file_size: Option<u64>,
+    ) -> Vec<LogEntry> {
+        let Some(path) = self.predecessor.get(session_id) else {
+            return entries;
+        };
+        let mut parser = JsonlParser::new().with_lenient(true);
+        if let Some(max) = max_file_size {
+            parser = parser.with_max_file_size(max);
+        }
+        let Ok(inherited) = parser.parse_file(path) else {
+            return entries;
+        };
+        let inherited: std::collections::HashSet<&str> =
+            inherited.iter().filter_map(LogEntry::uuid).collect();
+        entries.retain(|entry| entry.uuid().is_none_or(|uuid| !inherited.contains(uuid)));
+        entries
+    }
+}
+
 /// Build session chains from a list of file UUIDs and their paths.
 ///
 /// Takes an iterator of `(file_uuid, path)` pairs for main sessions (not subagents)
@@ -610,6 +664,37 @@ mod tests {
             .unwrap();
         let uuids: Vec<_> = entries.iter().filter_map(|e| e.uuid()).collect();
         assert_eq!(uuids, vec!["u1", "u2", "u3"]);
+    }
+
+    fn session_at(dir: &Path, id: &str) -> crate::discovery::Session {
+        crate::discovery::Session::from_path(dir.join(format!("{id}.jsonl")), "-proj").unwrap()
+    }
+
+    #[test]
+    fn test_handoff_index_drops_only_the_copied_entries() {
+        // Session discovery only accepts UUID file names.
+        const OLD: &str = "11111111-1111-4111-8111-111111111111";
+        const NEW: &str = "22222222-2222-4222-8222-222222222222";
+        let dir = TempDir::new().unwrap();
+        write_handoff_file(dir.path(), OLD, &["u1", "u2"], Some(NEW));
+        write_handoff_file(dir.path(), NEW, &["u1", "u2", "u3"], None);
+        let (old, new) = (session_at(dir.path(), OLD), session_at(dir.path(), NEW));
+        let uuids = |index: &HandoffIndex, s: &crate::discovery::Session| -> Vec<String> {
+            index
+                .drop_inherited(s.session_id(), s.parse().unwrap(), None)
+                .iter()
+                .filter_map(|e| e.uuid().map(String::from))
+                .collect()
+        };
+
+        let both = HandoffIndex::for_sessions(&[new.clone(), old.clone()]);
+        assert_eq!(uuids(&both, &old), vec!["u1", "u2"]);
+        assert_eq!(uuids(&both, &new), vec!["u3"]);
+
+        // Without the predecessor in the set, the successor's copy is the
+        // only one, so it is kept.
+        let alone = HandoffIndex::for_sessions(std::slice::from_ref(&new));
+        assert_eq!(uuids(&alone, &new), vec!["u1", "u2", "u3"]);
     }
 
     #[test]

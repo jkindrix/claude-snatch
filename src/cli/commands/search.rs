@@ -430,12 +430,15 @@ fn run_batch(cli: &Cli, args: &SearchArgs, patterns: Vec<BatchPattern>) -> Resul
         None
     };
 
+    // A handed-off session's successor repeats its history; report each
+    // match once, under the first file.
+    let handoffs = crate::discovery::chain::HandoffIndex::for_sessions(&sessions);
     for session in &sessions {
         if let Some(ref pb) = progress {
             pb.inc(1);
         }
         let entries = match session.parse_with_options(cli.max_file_size) {
-            Ok(e) => e,
+            Ok(e) => handoffs.drop_inherited(session.session_id(), e, cli.max_file_size),
             Err(_) => continue,
         };
 
@@ -1237,13 +1240,17 @@ pub fn run(cli: &Cli, args: &SearchArgs) -> Result<()> {
         None
     };
 
+    // A handed-off session's successor repeats its history; report each
+    // match once, under the first file.
+    let handoffs = crate::discovery::chain::HandoffIndex::for_sessions(&sessions);
+
     // Search each session
     for session in &sessions {
         if let Some(ref pb) = progress {
             pb.inc(1);
         }
         let entries = match session.parse_with_options(cli.max_file_size) {
-            Ok(e) => e,
+            Ok(e) => handoffs.drop_inherited(session.session_id(), e, cli.max_file_size),
             Err(_) => continue, // Skip unparseable sessions
         };
 

@@ -11,6 +11,7 @@ use crate::analytics::history::{CostDataPoint, CostHistory};
 use crate::analytics::{ProjectAnalytics, SessionAnalytics};
 use crate::cli::{Cli, OutputFormat, StatsArgs};
 use crate::config::Config;
+use crate::discovery::chain::HandoffIndex;
 use crate::discovery::{format_count, format_number, Session};
 use crate::error::{Result, SnatchError};
 use crate::model::usage::{AggregatedUsage, Usage};
@@ -139,10 +140,11 @@ fn aggregate_billing_blocks(sessions: &[Session], max_file_size: Option<u64>) ->
     // it to a time block; summing physical chunks would multiply both tokens
     // and cost.
     let mut turns: BTreeMap<(String, String, String), BilledTurn> = BTreeMap::new();
+    let handoffs = HandoffIndex::for_sessions(sessions);
 
     for session in sessions {
         let entries = match session.parse_with_options(max_file_size) {
-            Ok(e) => e,
+            Ok(e) => handoffs.drop_inherited(session.session_id(), e, max_file_size),
             Err(_) => continue,
         };
 
@@ -246,6 +248,10 @@ fn format_model_name(model: &str) -> String {
 
 /// Compute statistics in parallel across multiple sessions.
 fn compute_stats_parallel(sessions: &[Session], max_file_size: Option<u64>) -> ProjectAnalytics {
+    // A handed-off session's successor starts with a copy of its history;
+    // count that history in the first file only.
+    let handoffs = HandoffIndex::for_sessions(sessions);
+
     // Process sessions in parallel and collect individual analytics
     let session_analytics: Vec<SessionAnalytics> = sessions
         .par_iter()
@@ -253,6 +259,9 @@ fn compute_stats_parallel(sessions: &[Session], max_file_size: Option<u64>) -> P
             session
                 .parse_with_options(max_file_size)
                 .ok()
+                .map(|entries| {
+                    handoffs.drop_inherited(session.session_id(), entries, max_file_size)
+                })
                 .and_then(|entries| {
                     Conversation::from_entries(entries)
                         .ok()
@@ -1981,10 +1990,11 @@ fn collect_timeline_entries(
     use std::collections::BTreeMap;
 
     let mut buckets: BTreeMap<String, TimelineEntry> = BTreeMap::new();
+    let handoffs = HandoffIndex::for_sessions(sessions);
 
     for session in sessions {
         let entries = match session.parse_with_options(max_file_size) {
-            Ok(e) => e,
+            Ok(e) => handoffs.drop_inherited(session.session_id(), e, max_file_size),
             Err(_) => continue,
         };
 
@@ -2201,10 +2211,11 @@ fn collect_token_breakdown(
     use std::collections::BTreeMap;
 
     let mut buckets: BTreeMap<String, TokenBreakdown> = BTreeMap::new();
+    let handoffs = HandoffIndex::for_sessions(sessions);
 
     for session in sessions {
         let entries = match session.parse_with_options(max_file_size) {
-            Ok(e) => e,
+            Ok(e) => handoffs.drop_inherited(session.session_id(), e, max_file_size),
             Err(_) => continue,
         };
 

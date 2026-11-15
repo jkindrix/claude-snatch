@@ -617,6 +617,8 @@ pub fn run(cli: &Cli, args: &StandupArgs) -> Result<()> {
 
     for project in projects {
         let sessions = project.sessions()?;
+        // A handed-off session's successor repeats its history; count it once.
+        let handoffs = crate::discovery::chain::HandoffIndex::for_sessions(&sessions);
         let mut project_sessions = 0;
         let mut project_tool_uses: Vec<ToolUse> = Vec::new();
 
@@ -632,6 +634,8 @@ pub fn run(cli: &Cli, args: &StandupArgs) -> Result<()> {
 
             // Parse session for detailed analytics
             if let Ok(entries) = session.parse_with_options(cli.max_file_size) {
+                let entries =
+                    handoffs.drop_inherited(session.session_id(), entries, cli.max_file_size);
                 if let Ok(conversation) = Conversation::from_entries(entries.clone()) {
                     let analytics = SessionAnalytics::from_conversation(&conversation);
                     let summary = analytics.summary_report();
