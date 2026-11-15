@@ -1744,10 +1744,13 @@ impl SnatchServer {
             ("global".to_string(), sessions.iter().collect())
         };
 
+        let handoffs = crate::discovery::chain::HandoffIndex::for_sessions(&sessions);
         let summaries: Vec<_> = target_sessions
             .iter()
             .filter_map(|session| {
                 let entries = session.parse_with_options(self.max_file_size).ok()?;
+                let entries =
+                    handoffs.drop_inherited(session.session_id(), entries, self.max_file_size);
                 let conversation = Conversation::from_entries(entries).ok()?;
                 let analytics = SessionAnalytics::from_conversation(&conversation);
                 Some(analytics.summary_report())
@@ -2868,9 +2871,10 @@ impl SnatchServer {
         let mut thinking_blocks_seen = 0usize;
         let mut nonempty_thinking_seen = 0usize;
 
+        let handoffs = crate::discovery::chain::HandoffIndex::for_sessions(&sessions);
         for session in &sessions {
             let entries = match session.parse_with_options(self.max_file_size) {
-                Ok(e) => e,
+                Ok(e) => handoffs.drop_inherited(session.session_id(), e, self.max_file_size),
                 Err(_) => continue,
             };
 

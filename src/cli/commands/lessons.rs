@@ -581,12 +581,13 @@ fn run_cross_session(cli: &Cli, args: &LessonsArgs) -> Result<()> {
 
     use std::io::IsTerminal;
 
+    let handoffs = crate::discovery::chain::HandoffIndex::for_sessions(&sessions);
     for session in &sessions {
         if let Some(ref pb) = progress {
             pb.inc(1);
         }
         let entries = match session.parse_with_options(cli.max_file_size) {
-            Ok(e) => e,
+            Ok(e) => handoffs.drop_inherited(session.session_id(), e, cli.max_file_size),
             Err(_) => continue,
         };
         let conversation = match Conversation::from_entries(entries) {

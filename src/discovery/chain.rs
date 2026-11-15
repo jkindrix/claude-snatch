@@ -137,8 +137,9 @@ pub struct HandoffIndex {
 impl HandoffIndex {
     /// Index the hand-offs among `sessions`. A hand-off to or from a session
     /// outside the set is ignored: nothing in the set repeats it.
-    pub fn for_sessions(sessions: &[super::Session]) -> Self {
-        let main: Vec<&super::Session> = sessions.iter().filter(|s| !s.is_subagent()).collect();
+    pub fn for_sessions<'a>(sessions: impl IntoIterator<Item = &'a super::Session>) -> Self {
+        let main: Vec<&super::Session> =
+            sessions.into_iter().filter(|s| !s.is_subagent()).collect();
         let ids: std::collections::HashSet<&str> = main.iter().map(|s| s.session_id()).collect();
         let mut predecessor = HashMap::new();
         for session in &main {

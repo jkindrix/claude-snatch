@@ -225,12 +225,16 @@ pub fn run(cli: &Cli, args: &SummaryArgs) -> Result<()> {
         .collect();
 
     // Compute aggregate analytics
+    let handoffs = crate::discovery::chain::HandoffIndex::for_sessions(&recent_sessions);
     let session_analytics: Vec<SessionAnalytics> = recent_sessions
         .par_iter()
         .filter_map(|session| {
             session
                 .parse_with_options(cli.max_file_size)
                 .ok()
+                .map(|entries| {
+                    handoffs.drop_inherited(session.session_id(), entries, cli.max_file_size)
+                })
                 .and_then(|entries| {
                     Conversation::from_entries(entries)
                         .ok()

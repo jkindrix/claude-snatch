@@ -138,9 +138,10 @@ pub fn aggregate_project_lessons(
 
     let mut all_errors: Vec<(ErrorFixPair, String)> = Vec::new(); // (pair, session_id)
 
+    let handoffs = crate::discovery::chain::HandoffIndex::for_sessions(sessions);
     for session in sessions {
         let entries = match session.parse_with_options(max_file_size) {
-            Ok(e) => e,
+            Ok(e) => handoffs.drop_inherited(session.session_id(), e, max_file_size),
             Err(_) => continue,
         };
 

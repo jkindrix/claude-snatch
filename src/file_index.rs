@@ -367,9 +367,10 @@ impl FileIndex {
     pub fn from_sessions(sessions: &[Session], max_file_size: Option<u64>) -> Self {
         let mut index = FileIndex::default();
 
+        let handoffs = crate::discovery::chain::HandoffIndex::for_sessions(sessions);
         for session in sessions {
             let entries = match session.parse_with_options(max_file_size) {
-                Ok(e) => e,
+                Ok(e) => handoffs.drop_inherited(session.session_id(), e, max_file_size),
                 Err(_) => continue,
             };
 

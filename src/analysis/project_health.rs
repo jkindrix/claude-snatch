@@ -481,9 +481,10 @@ pub fn analyze_project_health(
     let mut total_errors = 0usize;
     let mut total_tool_calls = 0usize;
 
+    let handoffs = crate::discovery::chain::HandoffIndex::for_sessions(sessions);
     for session in sessions {
         let entries = match session.parse_with_options(max_file_size) {
-            Ok(e) => e,
+            Ok(e) => handoffs.drop_inherited(session.session_id(), e, max_file_size),
             Err(_) => continue,
         };
 

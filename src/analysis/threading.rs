@@ -340,9 +340,10 @@ pub fn thread_topic(
 ) -> ThreadResult {
     let mut exchanges: Vec<ThreadedExchange> = Vec::new();
 
+    let handoffs = crate::discovery::chain::HandoffIndex::for_sessions(sessions);
     for session in sessions {
         let entries = match session.parse_with_options(max_file_size) {
-            Ok(e) => e,
+            Ok(e) => handoffs.drop_inherited(session.session_id(), e, max_file_size),
             Err(_) => continue,
         };
 
