@@ -441,6 +441,7 @@ impl Exporter for CsvExporter {
                 LogEntry::Mode(_) => "mode",
                 LogEntry::PermissionMode(_) => "permission_mode",
                 LogEntry::AiTitle(_) => "ai_title",
+                LogEntry::ContinuedIn(_) => "continued_in",
             };
 
             self.write_row(writer, &[uuid, parent_uuid, entry_type, &timestamp, ""])?;

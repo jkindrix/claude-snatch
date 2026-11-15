@@ -35,7 +35,7 @@ use super::{
     ProviderError, ProviderId, RecordDisposition, RecordOutcome, RecordRef, SessionArtifact,
     SessionDescriptor, SessionNamespace, SourceProvider, SuppressionReason,
 };
-use crate::discovery::chain::extract_session_link;
+use crate::discovery::chain::{extract_continued_in, extract_session_link};
 use crate::discovery::{ClaudeDirectory, Session};
 use crate::model::LogEntry;
 
@@ -822,6 +822,18 @@ impl SourceProvider for ClaudeCodeProvider {
                     edges.push(LineageEdge {
                         from: self.key_for_main(&internal_sid),
                         to: self.key_for_main(session.session_id()),
+                        kind: LineageEdgeKind::Continuation,
+                    });
+                }
+            }
+
+            // Continuation by hand-off: the old file names its successor,
+            // which is stamped with its own id and so has no link above.
+            if let Some(successor) = extract_continued_in(session.path()) {
+                if successor != session.session_id() {
+                    edges.push(LineageEdge {
+                        from: self.key_for_main(session.session_id()),
+                        to: self.key_for_main(&successor),
                         kind: LineageEdgeKind::Continuation,
                     });
                 }

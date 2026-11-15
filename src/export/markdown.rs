@@ -1060,7 +1060,8 @@ impl MarkdownExporter {
             LogEntry::LastPrompt(_)
             | LogEntry::Mode(_)
             | LogEntry::PermissionMode(_)
-            | LogEntry::AiTitle(_) => {
+            | LogEntry::AiTitle(_)
+            | LogEntry::ContinuedIn(_) => {
                 // Skip sidecar metadata entries in Markdown export
             }
         }

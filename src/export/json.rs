@@ -191,6 +191,7 @@ fn should_include_entry(entry: &LogEntry, options: &ExportOptions) -> bool {
         | LogEntry::Mode(_)
         | LogEntry::PermissionMode(_)
         | LogEntry::AiTitle(_)
+        | LogEntry::ContinuedIn(_)
         | LogEntry::Unknown(_) => true,
     }
 }

@@ -12,6 +12,13 @@
 //!
 //! This module detects these chains by reading the first few lines of each JSONL
 //! file and comparing the internal `sessionId` to the filename UUID.
+//!
+//! Since Claude Code 2.1.319 there is a second kind of link. When a session is
+//! handed off to a new session file, the old file gets a `continued-in` record
+//! naming its successor, and the successor begins with a copy of the old
+//! file's entries (same UUIDs, re-stamped with the successor's own id). The
+//! successor carries no pointer back, so that link is read from the old
+//! file's tail. Parsing a chain keeps the first copy of each UUID.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
@@ -40,7 +47,8 @@ pub struct SessionChain {
 pub struct ChainMember {
     /// This file's UUID (from the filename).
     pub file_id: String,
-    /// The sessionId field from the JSONL (points to parent file).
+    /// The file this one continues: the sessionId field from the JSONL, or
+    /// the file whose `continued-in` record names this one.
     /// Equal to file_id for root sessions.
     pub internal_session_id: String,
     /// Slug from the first entry.
@@ -82,6 +90,41 @@ pub(crate) fn extract_session_link(
     None
 }
 
+/// How much of a file's tail is searched for a `continued-in` record. The
+/// record is written at hand-off, followed only by a few small sidecar
+/// records; a session resumed at length afterwards can push it out of reach.
+const CONTINUED_IN_TAIL_BYTES: u64 = 64 * 1024;
+
+/// Find the session a file was handed off to: the `continuedInSessionId` of
+/// the last `continued-in` record in the file's tail.
+pub(crate) fn extract_continued_in(path: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(CONTINUED_IN_TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    let tail = String::from_utf8_lossy(&tail);
+
+    // A window that starts mid-file begins with a partial line; it fails to
+    // parse and is skipped like any other non-matching line.
+    tail.lines()
+        .rev()
+        .filter(|line| line.contains("continued-in"))
+        .find_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+            if value.get("type").and_then(|v| v.as_str()) != Some("continued-in") {
+                return None;
+            }
+            value
+                .get("continuedInSessionId")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+}
+
 /// Build session chains from a list of file UUIDs and their paths.
 ///
 /// Takes an iterator of `(file_uuid, path)` pairs for main sessions (not subagents)
@@ -91,8 +134,15 @@ pub fn detect_chains<'a>(
 ) -> HashMap<String, SessionChain> {
     // Phase 1: Extract link info from each file
     let mut members: Vec<ChainMember> = Vec::new();
+    // successor file id -> the file whose `continued-in` record names it
+    let mut handed_off_from: HashMap<String, String> = HashMap::new();
 
     for (file_id, path) in sessions {
+        if let Some(successor) = extract_continued_in(path) {
+            if successor != file_id {
+                handed_off_from.insert(successor, file_id.to_string());
+            }
+        }
         match extract_session_link(path, 10) {
             Some((internal_sid, slug, started)) => {
                 trace!(
@@ -116,6 +166,17 @@ pub fn detect_chains<'a>(
                     slug: None,
                     started: None,
                 });
+            }
+        }
+    }
+
+    // A handed-off successor is stamped with its own id, so it looks like a
+    // root; its parent is the file that names it. A successor that was never
+    // scanned leaves its predecessor standalone.
+    for member in &mut members {
+        if member.file_id == member.internal_session_id {
+            if let Some(parent) = handed_off_from.get(&member.file_id) {
+                member.internal_session_id = parent.clone();
             }
         }
     }
@@ -162,6 +223,12 @@ pub fn detect_chains<'a>(
             loop {
                 if let Some(root) = root_for.get(&current) {
                     resolved_root = root.clone();
+                    break;
+                }
+                if visited.contains(&current) {
+                    // Link cycle (two files naming each other): no file is a
+                    // real root, so pick one deterministically.
+                    resolved_root = visited.iter().min().cloned().unwrap_or(current);
                     break;
                 }
                 visited.push(current.clone());
@@ -299,6 +366,9 @@ impl SessionChain {
     ) -> Result<(Vec<LogEntry>, usize)> {
         let mut all_entries = Vec::new();
         let mut unparsed = 0usize;
+        // A handed-off successor repeats its predecessor's entries; keep the
+        // first copy of each UUID so the shared history is read once.
+        let mut seen_uuids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         for member in &self.members {
             let path = resolve_path(&member.file_id).ok_or_else(|| {
@@ -317,7 +387,11 @@ impl SessionChain {
                 entries = entries.len(),
                 "Parsed chain member"
             );
-            all_entries.extend(entries);
+            all_entries.extend(entries.into_iter().filter(|entry| {
+                entry
+                    .uuid()
+                    .is_none_or(|uuid| seen_uuids.insert(uuid.to_string()))
+            }));
         }
 
         debug!(
@@ -483,6 +557,106 @@ mod tests {
         // Each file has 1 user entry, so chain should have 2
         assert_eq!(entries.len(), 2);
         assert!(entries.iter().all(|e| e.message_type() == "user"));
+    }
+
+    /// Write a session file stamped with its own id: one entry per uuid, then
+    /// an optional `continued-in` record and the sidecar records Claude Code
+    /// appends after a hand-off.
+    fn write_handoff_file(dir: &Path, id: &str, uuids: &[&str], continued_in: Option<&str>) {
+        let mut file = std::fs::File::create(dir.join(format!("{id}.jsonl"))).unwrap();
+        for uuid in uuids {
+            writeln!(
+                file,
+                r#"{{"type": "user", "uuid": "{uuid}", "sessionId": "{id}", "timestamp": "2026-11-08T00:00:00Z", "version": "2.1.319", "isSidechain": false, "message": {{"role": "user", "content": "hello"}}}}"#
+            )
+            .unwrap();
+        }
+        if let Some(next) = continued_in {
+            writeln!(
+                file,
+                r#"{{"type":"continued-in","timestamp":"2026-11-08T20:55:01.599Z","sessionId":"{id}","continuedInSessionId":"{next}"}}"#
+            )
+            .unwrap();
+            writeln!(
+                file,
+                r#"{{"type":"mode","mode":"normal","sessionId":"{id}"}}"#
+            )
+            .unwrap();
+        }
+    }
+
+    fn chains_in(dir: &Path, ids: &[&str]) -> HashMap<String, SessionChain> {
+        let paths: Vec<_> = ids
+            .iter()
+            .map(|id| dir.join(format!("{id}.jsonl")))
+            .collect();
+        detect_chains(ids.iter().copied().zip(paths.iter().map(|p| p.as_path())))
+    }
+
+    #[test]
+    fn test_handoff_links_files_and_reads_shared_history_once() {
+        let dir = TempDir::new().unwrap();
+        // "new" is stamped with its own id and repeats "old"'s two entries.
+        write_handoff_file(dir.path(), "old", &["u1", "u2"], Some("new"));
+        write_handoff_file(dir.path(), "new", &["u1", "u2", "u3"], None);
+
+        let chains = chains_in(dir.path(), &["new", "old"]);
+        assert_eq!(chains.len(), 1);
+        let chain = chains.get("old").expect("the handed-off file is the root");
+        assert_eq!(chain.file_ids(), vec!["old", "new"]);
+
+        let entries = chain
+            .parse_entries(|id| Some(dir.path().join(format!("{id}.jsonl"))))
+            .unwrap();
+        let uuids: Vec<_> = entries.iter().filter_map(|e| e.uuid()).collect();
+        assert_eq!(uuids, vec!["u1", "u2", "u3"]);
+    }
+
+    #[test]
+    fn test_handoff_to_a_missing_file_is_not_a_chain() {
+        let dir = TempDir::new().unwrap();
+        write_handoff_file(dir.path(), "old", &["u1"], Some("gone"));
+        assert!(chains_in(dir.path(), &["old"]).is_empty());
+    }
+
+    #[test]
+    fn test_handoff_extends_a_resume_chain() {
+        let dir = TempDir::new().unwrap();
+        // root -> cont by resume (cont carries root's id), cont -> next by hand-off.
+        write_jsonl(dir.path(), "root", "root", None);
+        let mut cont = std::fs::File::create(dir.path().join("cont.jsonl")).unwrap();
+        writeln!(cont, r#"{{"type": "user", "uuid": "c1", "sessionId": "root", "timestamp": "2026-11-08T00:00:00Z", "version": "2.1.319", "isSidechain": false, "message": {{"role": "user", "content": "hi"}}}}"#).unwrap();
+        writeln!(
+            cont,
+            r#"{{"type":"continued-in","sessionId":"cont","continuedInSessionId":"next"}}"#
+        )
+        .unwrap();
+        drop(cont);
+        write_handoff_file(dir.path(), "next", &["c1", "n1"], None);
+
+        let chains = chains_in(dir.path(), &["next", "cont", "root"]);
+        assert_eq!(chains.len(), 1);
+        assert_eq!(chains["root"].file_ids(), vec!["root", "cont", "next"]);
+    }
+
+    #[test]
+    fn test_handoff_cycle_terminates() {
+        let dir = TempDir::new().unwrap();
+        write_handoff_file(dir.path(), "a", &["u1"], Some("b"));
+        write_handoff_file(dir.path(), "b", &["u1"], Some("a"));
+        // Must return; which file is called the root is not asserted.
+        let chains = chains_in(dir.path(), &["a", "b"]);
+        assert!(chains.len() <= 1);
+    }
+
+    #[test]
+    fn test_extract_continued_in_ignores_mentions_in_content() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, r#"{{"type": "user", "uuid": "u1", "sessionId": "s", "message": {{"role": "user", "content": "{{\"type\":\"continued-in\",\"continuedInSessionId\":\"x\"}}"}}}}"#).unwrap();
+        drop(file);
+        assert_eq!(extract_continued_in(&path), None);
     }
 
     #[test]

@@ -1371,6 +1371,7 @@ fn entry_type_name(entry: &LogEntry) -> &'static str {
         LogEntry::Mode(_) => "mode",
         LogEntry::PermissionMode(_) => "permission-mode",
         LogEntry::AiTitle(_) => "ai-title",
+        LogEntry::ContinuedIn(_) => "continued-in",
         LogEntry::Unknown(_) => "unknown",
     }
 }

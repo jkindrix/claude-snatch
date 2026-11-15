@@ -242,7 +242,8 @@ impl SessionAnalytics {
             | LogEntry::LastPrompt(_)
             | LogEntry::Mode(_)
             | LogEntry::PermissionMode(_)
-            | LogEntry::AiTitle(_) => {
+            | LogEntry::AiTitle(_)
+            | LogEntry::ContinuedIn(_) => {
                 // Attachment and sidecar metadata entries carry no analytics.
             }
         }

@@ -68,6 +68,10 @@ pub enum LogEntry {
     /// AI-generated session title metadata.
     AiTitle(AiTitleMessage),
 
+    /// Hand-off pointer: this session was continued in another session file,
+    /// which begins with a copy of this one's history.
+    ContinuedIn(ContinuedInMessage),
+
     /// Any entry type not modeled above. The full raw JSON object is retained so
     /// the payload — and any `uuid`/`parentUuid`/`timestamp`/etc. — survives
     /// instead of being dropped, and re-serializes byte-for-content identically.
@@ -100,6 +104,8 @@ enum LogEntryRef<'a> {
     PermissionMode(&'a PermissionModeMessage),
     #[serde(rename = "ai-title")]
     AiTitle(&'a AiTitleMessage),
+    #[serde(rename = "continued-in")]
+    ContinuedIn(&'a ContinuedInMessage),
 }
 
 impl Serialize for LogEntry {
@@ -123,6 +129,7 @@ impl Serialize for LogEntry {
             Self::Mode(m) => LogEntryRef::Mode(m).serialize(serializer),
             Self::PermissionMode(m) => LogEntryRef::PermissionMode(m).serialize(serializer),
             Self::AiTitle(m) => LogEntryRef::AiTitle(m).serialize(serializer),
+            Self::ContinuedIn(m) => LogEntryRef::ContinuedIn(m).serialize(serializer),
             Self::Unknown(raw) => raw.serialize(serializer),
         }
     }
@@ -166,6 +173,9 @@ impl<'de> Deserialize<'de> for LogEntry {
                 Self::PermissionMode(from_value(known(value)).map_err(D::Error::custom)?)
             }
             Some("ai-title") => Self::AiTitle(from_value(known(value)).map_err(D::Error::custom)?),
+            Some("continued-in") => {
+                Self::ContinuedIn(from_value(known(value)).map_err(D::Error::custom)?)
+            }
             // Unknown or absent `type`: retain the whole object verbatim, but
             // only if it is a JSON object — a bare scalar/array is not a valid
             // log entry and must still be rejected (strict) / skipped (lenient).
@@ -195,9 +205,11 @@ impl LogEntry {
             Self::QueueOperation(_) => None,
             Self::TurnEnd(_) => None,
             // Sidecar metadata entries carry no UUID.
-            Self::LastPrompt(_) | Self::Mode(_) | Self::PermissionMode(_) | Self::AiTitle(_) => {
-                None
-            }
+            Self::LastPrompt(_)
+            | Self::Mode(_)
+            | Self::PermissionMode(_)
+            | Self::AiTitle(_)
+            | Self::ContinuedIn(_) => None,
             Self::Unknown(raw) => unknown_field(raw, "uuid"),
         }
     }
@@ -239,6 +251,7 @@ impl LogEntry {
             Self::Mode(m) => Some(&m.session_id),
             Self::PermissionMode(m) => Some(&m.session_id),
             Self::AiTitle(m) => Some(&m.session_id),
+            Self::ContinuedIn(m) => Some(&m.session_id),
             Self::FileHistorySnapshot(_) => None,
             Self::QueueOperation(m) => Some(&m.session_id),
             Self::TurnEnd(_) => None,
@@ -260,6 +273,7 @@ impl LogEntry {
             Self::QueueOperation(m) => Some(m.timestamp),
             Self::TurnEnd(m) => Some(m.timestamp),
             Self::Summary(_) => None,
+            Self::ContinuedIn(m) => m.timestamp,
             // Sidecar metadata entries carry no timestamp.
             Self::LastPrompt(_) | Self::Mode(_) | Self::PermissionMode(_) | Self::AiTitle(_) => {
                 None
@@ -341,6 +355,7 @@ impl LogEntry {
             Self::Mode(_) => "mode",
             Self::PermissionMode(_) => "permission-mode",
             Self::AiTitle(_) => "ai-title",
+            Self::ContinuedIn(_) => "continued-in",
             Self::Unknown(raw) => unknown_field(raw, "type").unwrap_or("unknown"),
         }
     }
@@ -1236,9 +1251,48 @@ pub struct AiTitleMessage {
     pub extra: IndexMap<String, Value>,
 }
 
+/// Hand-off pointer to the session file that continues this one.
+///
+/// Written by Claude Code since 2.1.319. The successor file starts with a copy
+/// of this session's entries, same UUIDs, re-stamped with its own session id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContinuedInMessage {
+    /// The session that continues this one.
+    pub continued_in_session_id: String,
+
+    /// Conversation session identifier (the session being continued).
+    #[serde(default)]
+    pub session_id: String,
+
+    /// When the hand-off happened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<DateTime<Utc>>,
+
+    /// Unknown fields for forward compatibility.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_continued_in_parses_and_roundtrips() {
+        // Real shape from Claude Code 2.1.319.
+        let json = r#"{"type":"continued-in","timestamp":"2026-11-08T20:55:01.599Z","sessionId":"old","continuedInSessionId":"new"}"#;
+        let entry: LogEntry = serde_json::from_str(json).unwrap();
+        let LogEntry::ContinuedIn(ref m) = entry else {
+            panic!("expected ContinuedIn, got {entry:?}");
+        };
+        assert_eq!(m.continued_in_session_id, "new");
+        assert_eq!(entry.session_id(), Some("old"));
+        assert_eq!(entry.message_type(), "continued-in");
+        assert!(entry.timestamp().is_some());
+        let original: Value = serde_json::from_str(json).unwrap();
+        assert_eq!(serde_json::to_value(&entry).unwrap(), original);
+    }
 
     #[test]
     fn test_log_entry_message_type() {
