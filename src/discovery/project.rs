@@ -436,11 +436,7 @@ impl ProjectFilter {
         }
 
         // Check active status
-        if self.active_only && !project.has_active_sessions()? {
-            return Ok(false);
-        }
-
-        Ok(true)
+        Ok(!self.active_only || project.has_active_sessions()?)
     }
 }
 

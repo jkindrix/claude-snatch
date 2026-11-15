@@ -853,11 +853,7 @@ impl SessionFilter {
         }
 
         // Check active status
-        if self.active_only && !session.is_active()? {
-            return Ok(false);
-        }
-
-        Ok(true)
+        Ok(!self.active_only || session.is_active()?)
     }
 }
 

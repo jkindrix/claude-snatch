@@ -727,14 +727,12 @@ fn show_files_touched(
     let mut files_read: HashSet<String> = HashSet::new();
     let mut files_written: HashSet<String> = HashSet::new();
     let mut files_created: HashSet<String> = HashSet::new();
-    let mut _tool_counts: HashMap<String, usize> = HashMap::new();
 
     for entry in &entries {
         if let LogEntry::Assistant(asst_msg) = entry {
             for block in &asst_msg.message.content {
                 if let ContentBlock::ToolUse(tool_use) = block {
                     let tool_name = tool_use.name.as_str();
-                    *_tool_counts.entry(tool_name.to_string()).or_insert(0) += 1;
 
                     // Extract file paths from tool inputs
                     let input = &tool_use.input;

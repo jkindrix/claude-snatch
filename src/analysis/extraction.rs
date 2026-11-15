@@ -147,11 +147,7 @@ pub fn is_noise_text(text: &str) -> bool {
     }
 
     // Interrupt markers
-    if trimmed.starts_with("[Request interrupted") {
-        return true;
-    }
-
-    false
+    trimmed.starts_with("[Request interrupted")
 }
 
 /// Extract visible user prompt text from a [`LogEntry`].

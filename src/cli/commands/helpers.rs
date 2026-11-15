@@ -487,11 +487,7 @@ pub fn has_options_pattern(text: &str) -> bool {
     // Bullet lists: 3 items + deliberation, or 4+ items on their own
     static BULLETS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^\s*[-*]\s+").unwrap());
     let bullet_count = BULLETS.find_iter(text).count();
-    if (bullet_count >= 4) || (bullet_count >= 3 && has_deliberation) {
-        return true;
-    }
-
-    false
+    (bullet_count >= 4) || (bullet_count >= 3 && has_deliberation)
 }
 
 /// Check if user response is a short affirmative (decision confirmation).
@@ -596,11 +592,7 @@ pub fn looks_like_decision(text: &str) -> bool {
     // Check "decided to" with subject (tighter pattern)
     static DECIDED_TO_RE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"(?i)(?:we|they|team) decided to").unwrap());
-    if DECIDED_TO_RE.is_match(text) {
-        return true;
-    }
-
-    false
+    DECIDED_TO_RE.is_match(text)
 }
 
 /// Whether `name` is the last segment of `path`. A session's recorded `cwd`
