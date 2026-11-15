@@ -359,22 +359,10 @@ pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
         return output_cost_history(cli, args);
     }
 
-    // Handle timeline visualization
-    if args.timeline {
-        let sessions = claude_dir.all_sessions()?;
-        return output_timeline(cli, args, &sessions);
-    }
-
-    // Handle token usage graph
-    if args.graph {
-        let sessions = claude_dir.all_sessions()?;
-        return output_token_graph(cli, args, &sessions);
-    }
-
-    // Handle billing blocks mode
-    if args.blocks {
+    // Timeline, token graph and billing blocks share one session selection:
+    // a named session, the named project(s), or everything.
+    if args.timeline || args.graph || args.blocks {
         let sessions: Vec<Session> = if let Some(session_id) = &args.session {
-            // Blocks for specific session
             let session = claude_dir.find_session(session_id)?.ok_or_else(|| {
                 SnatchError::SessionNotFound {
                     session_id: session_id.clone(),
@@ -382,7 +370,6 @@ pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
             })?;
             vec![session]
         } else if let Some(project_filters) = &args.project {
-            // Blocks for specific project(s)
             let mut matching_projects = Vec::new();
             for filter in project_filters {
                 matching_projects.extend(super::helpers::filter_projects(
@@ -403,10 +390,15 @@ pub fn run(cli: &Cli, args: &StatsArgs) -> Result<()> {
             }
             all_sessions
         } else {
-            // Global blocks across all sessions
             claude_dir.all_sessions()?
         };
 
+        if args.timeline {
+            return output_timeline(cli, args, &sessions);
+        }
+        if args.graph {
+            return output_token_graph(cli, args, &sessions);
+        }
         return output_blocks_stats(cli, args, &sessions);
     }
 
