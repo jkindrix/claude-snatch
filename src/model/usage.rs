@@ -551,6 +551,23 @@ impl ModelPricing {
         }
     }
 
+    /// Create pricing for Claude Sonnet 5.5.
+    #[must_use]
+    pub fn claude_sonnet_5_5() -> Self {
+        Self {
+            model: "claude-sonnet-5-5".to_string(),
+            input_per_million: 2.0,       // $2/M input
+            output_per_million: 10.0,     // $10/M output
+            cache_write_per_million: 2.5, // 1.25x input
+            cache_write_1h_per_million: 4.0,
+            cache_read_per_million: 0.1, // 0.05x input
+            rate_card: "anthropic-api-sonnet-5.5",
+            effective_period: "standard API list rate",
+            source_url: ANTHROPIC_PRICING_URL,
+            source_checked: PRICING_SOURCE_CHECKED,
+        }
+    }
+
     /// Create standard pricing for Claude Sonnet 5, effective 2026-09-01.
     #[must_use]
     pub fn claude_sonnet_5() -> Self {
@@ -564,7 +581,9 @@ impl ModelPricing {
             rate_card: "anthropic-api-sonnet-5-standard",
             effective_period: "starting 2026-09-01",
             source_url: ANTHROPIC_PRICING_URL,
-            source_checked: PRICING_SOURCE_CHECKED,
+            // Not re-verified on 2026-11-15: the page now lists $2/$10 as the
+            // standard rate and says the 2026-09-01 increase was cancelled.
+            source_checked: "2026-07-22",
         }
     }
 
@@ -581,7 +600,9 @@ impl ModelPricing {
             rate_card: "anthropic-api-sonnet-5-intro",
             effective_period: "through 2026-08-31",
             source_url: ANTHROPIC_PRICING_URL,
-            source_checked: PRICING_SOURCE_CHECKED,
+            // Not re-verified on 2026-11-15: the page now lists $2/$10 as the
+            // standard rate and says the 2026-09-01 increase was cancelled.
+            source_checked: "2026-07-22",
         }
     }
 
@@ -703,6 +724,7 @@ impl ModelPricing {
                 Some(Self::claude_opus_4_8())
             }
             "claude-opus-4-5" => Some(Self::claude_opus_4_5()),
+            "claude-sonnet-5-5" => Some(Self::claude_sonnet_5_5()),
             "claude-sonnet-5" => {
                 let intro_end =
                     NaiveDate::from_ymd_opt(2026, 8, 31).expect("hard-coded pricing date is valid");
@@ -732,6 +754,7 @@ impl ModelPricing {
             "anthropic-api-opus-5" => Some(Self::claude_opus_5()),
             "anthropic-api-opus-4.6-4.8" => Some(Self::claude_opus_4_8()),
             "anthropic-api-opus-4.5" => Some(Self::claude_opus_4_5()),
+            "anthropic-api-sonnet-5.5" => Some(Self::claude_sonnet_5_5()),
             "anthropic-api-sonnet-5-intro" => Some(Self::claude_sonnet_5_intro()),
             "anthropic-api-sonnet-5-standard" => Some(Self::claude_sonnet_5()),
             "anthropic-api-sonnet-4" => Some(Self::claude_sonnet_4()),
@@ -831,6 +854,7 @@ impl AggregatedUsage {
                 | "claude-opus-4-8"
                 | "claude-opus-4-7"
                 | "claude-opus-4-6"
+                | "claude-sonnet-5-5"
                 | "claude-sonnet-5"
                 | "claude-sonnet-4-6"
         );
@@ -1268,7 +1292,18 @@ mod tests {
             ),
             (4.0, 5.0, 8.0, 0.2, 20.0)
         );
-        for card in [&fable52, &fable51, &opus55] {
+        let sonnet55 = ModelPricing::for_model("claude-sonnet-5-5").unwrap();
+        assert_eq!(
+            (
+                sonnet55.input_per_million,
+                sonnet55.cache_write_per_million,
+                sonnet55.cache_write_1h_per_million,
+                sonnet55.cache_read_per_million,
+                sonnet55.output_per_million
+            ),
+            (2.0, 2.5, 4.0, 0.1, 10.0)
+        );
+        for card in [&fable52, &fable51, &opus55, &sonnet55] {
             assert_eq!(
                 ModelPricing::for_rate_card(card.rate_card)
                     .unwrap()

@@ -20,7 +20,7 @@ expression: markdown
 - **Primary Model:** claude-sonnet-4-20250514
 - **Estimated API List Cost:** $0.0015
 - **Cost Rate Cards:** anthropic-api-sonnet-4 (standard API list rate)
-- **Cost Source:** Anthropic API list rates, checked 2026-07-22; https://platform.claude.com/docs/en/about-claude/pricing
+- **Cost Source:** Anthropic API list rates, checked 2026-11-15; https://platform.claude.com/docs/en/about-claude/pricing
 
 ---
 
