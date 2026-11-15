@@ -375,7 +375,7 @@ pub struct CostBucketKey {
 }
 
 const ANTHROPIC_PRICING_URL: &str = "https://platform.claude.com/docs/en/about-claude/pricing";
-const PRICING_SOURCE_CHECKED: &str = "2026-07-22";
+const PRICING_SOURCE_CHECKED: &str = "2026-11-15";
 
 /// Strip an optional trailing `-YYYYMMDD` snapshot suffix from a model ID so a
 /// dated snapshot (e.g. `claude-opus-4-5-20251101`) maps to the same rate as
@@ -438,7 +438,8 @@ impl ModelPricing {
             rate_card: "anthropic-api-haiku-3.5",
             effective_period: "standard API list rate",
             source_url: ANTHROPIC_PRICING_URL,
-            source_checked: PRICING_SOURCE_CHECKED,
+            // No longer listed on the pricing page; last verified date kept.
+            source_checked: "2026-07-22",
         }
     }
 
@@ -491,6 +492,59 @@ impl ModelPricing {
             cache_write_1h_per_million: 20.0,
             cache_read_per_million: 1.0, // 0.1x input
             rate_card: "anthropic-api-fable-mythos-5",
+            effective_period: "standard API list rate",
+            source_url: ANTHROPIC_PRICING_URL,
+            source_checked: PRICING_SOURCE_CHECKED,
+        }
+    }
+
+    /// Create pricing for Claude Fable 5.1 (and Claude Mythos 5.1 — same rates).
+    ///
+    /// Same base rates as Fable 5, with cache reads at 0.025x input.
+    #[must_use]
+    pub fn claude_fable_5_1() -> Self {
+        Self {
+            model: "claude-fable-5-1".to_string(),
+            input_per_million: 10.0,       // $10/M input
+            output_per_million: 50.0,      // $50/M output
+            cache_write_per_million: 12.5, // 1.25x input
+            cache_write_1h_per_million: 20.0,
+            cache_read_per_million: 0.25, // 0.025x input
+            rate_card: "anthropic-api-fable-mythos-5.1",
+            effective_period: "standard API list rate",
+            source_url: ANTHROPIC_PRICING_URL,
+            source_checked: PRICING_SOURCE_CHECKED,
+        }
+    }
+
+    /// Create pricing for Claude Fable 5.2 (and Claude Mythos 5.2 — same rates).
+    #[must_use]
+    pub fn claude_fable_5_2() -> Self {
+        Self {
+            model: "claude-fable-5-2".to_string(),
+            input_per_million: 8.0,        // $8/M input
+            output_per_million: 40.0,      // $40/M output
+            cache_write_per_million: 10.0, // 1.25x input
+            cache_write_1h_per_million: 16.0,
+            cache_read_per_million: 0.2, // 0.025x input
+            rate_card: "anthropic-api-fable-mythos-5.2",
+            effective_period: "standard API list rate",
+            source_url: ANTHROPIC_PRICING_URL,
+            source_checked: PRICING_SOURCE_CHECKED,
+        }
+    }
+
+    /// Create pricing for Claude Opus 5.5.
+    #[must_use]
+    pub fn claude_opus_5_5() -> Self {
+        Self {
+            model: "claude-opus-5-5".to_string(),
+            input_per_million: 4.0,       // $4/M input
+            output_per_million: 20.0,     // $20/M output
+            cache_write_per_million: 5.0, // 1.25x input
+            cache_write_1h_per_million: 8.0,
+            cache_read_per_million: 0.2, // 0.05x input
+            rate_card: "anthropic-api-opus-5.5",
             effective_period: "standard API list rate",
             source_url: ANTHROPIC_PRICING_URL,
             source_checked: PRICING_SOURCE_CHECKED,
@@ -640,7 +694,10 @@ impl ModelPricing {
     #[must_use]
     pub fn for_model_at(model: &str, observed_at: DateTime<Utc>) -> Option<Self> {
         match normalize_model_id(model) {
+            "claude-fable-5-2" | "claude-mythos-5-2" => Some(Self::claude_fable_5_2()),
+            "claude-fable-5-1" | "claude-mythos-5-1" => Some(Self::claude_fable_5_1()),
             "claude-fable-5" | "claude-mythos-5" => Some(Self::claude_fable_5()),
+            "claude-opus-5-5" => Some(Self::claude_opus_5_5()),
             "claude-opus-5" => Some(Self::claude_opus_5()),
             "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6" => {
                 Some(Self::claude_opus_4_8())
@@ -668,7 +725,10 @@ impl ModelPricing {
     #[must_use]
     pub fn for_rate_card(rate_card: &str) -> Option<Self> {
         match rate_card {
+            "anthropic-api-fable-mythos-5.2" => Some(Self::claude_fable_5_2()),
+            "anthropic-api-fable-mythos-5.1" => Some(Self::claude_fable_5_1()),
             "anthropic-api-fable-mythos-5" => Some(Self::claude_fable_5()),
+            "anthropic-api-opus-5.5" => Some(Self::claude_opus_5_5()),
             "anthropic-api-opus-5" => Some(Self::claude_opus_5()),
             "anthropic-api-opus-4.6-4.8" => Some(Self::claude_opus_4_8()),
             "anthropic-api-opus-4.5" => Some(Self::claude_opus_4_5()),
@@ -684,7 +744,7 @@ impl ModelPricing {
     /// Primary-source citation shared by human-readable cost reports.
     #[must_use]
     pub fn source_summary() -> &'static str {
-        "Anthropic API list rates, checked 2026-07-22; https://platform.claude.com/docs/en/about-claude/pricing"
+        "Anthropic API list rates, checked 2026-11-15; https://platform.claude.com/docs/en/about-claude/pricing"
     }
 }
 
@@ -760,8 +820,13 @@ impl AggregatedUsage {
         }
         let standard_long_context = matches!(
             normalize_model_id(model),
-            "claude-fable-5"
+            "claude-fable-5-2"
+                | "claude-mythos-5-2"
+                | "claude-fable-5-1"
+                | "claude-mythos-5-1"
+                | "claude-fable-5"
                 | "claude-mythos-5"
+                | "claude-opus-5-5"
                 | "claude-opus-5"
                 | "claude-opus-4-8"
                 | "claude-opus-4-7"
@@ -1166,6 +1231,54 @@ mod tests {
                 .input_per_million,
             10.0
         );
+
+        // The 5.1 and 5.2 releases have their own cards; Mythos shares each.
+        let fable52 = ModelPricing::for_model("claude-fable-5-2").unwrap();
+        assert_eq!(fable52.rate_card, "anthropic-api-fable-mythos-5.2");
+        assert_eq!(
+            (
+                fable52.input_per_million,
+                fable52.cache_write_per_million,
+                fable52.cache_write_1h_per_million,
+                fable52.cache_read_per_million,
+                fable52.output_per_million
+            ),
+            (8.0, 10.0, 16.0, 0.2, 40.0)
+        );
+        let fable51 = ModelPricing::for_model("claude-mythos-5-1").unwrap();
+        assert_eq!(fable51.rate_card, "anthropic-api-fable-mythos-5.1");
+        assert_eq!(
+            (
+                fable51.input_per_million,
+                fable51.cache_write_per_million,
+                fable51.cache_write_1h_per_million,
+                fable51.cache_read_per_million,
+                fable51.output_per_million
+            ),
+            (10.0, 12.5, 20.0, 0.25, 50.0)
+        );
+        let opus55 = ModelPricing::for_model("claude-opus-5-5").unwrap();
+        assert_eq!(
+            (
+                opus55.input_per_million,
+                opus55.cache_write_per_million,
+                opus55.cache_write_1h_per_million,
+                opus55.cache_read_per_million,
+                opus55.output_per_million
+            ),
+            (4.0, 5.0, 8.0, 0.2, 20.0)
+        );
+        for card in [&fable52, &fable51, &opus55] {
+            assert_eq!(
+                ModelPricing::for_rate_card(card.rate_card)
+                    .unwrap()
+                    .output_per_million,
+                card.output_per_million
+            );
+        }
+        // Haiku 5.5 is priced in two tiers by prompt length, which a single
+        // rate card cannot express, so it stays unpriced rather than guessed.
+        assert!(ModelPricing::for_model("claude-haiku-5-5").is_none());
 
         // Sonnet 5 selects its temporary rate by observation date.
         let intro = DateTime::parse_from_rfc3339("2026-07-22T00:00:00Z")
